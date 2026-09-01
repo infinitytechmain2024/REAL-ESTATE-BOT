@@ -103,7 +103,7 @@ async def _download(message: Message, settings: Settings) -> AudioFile:
 
     try:
         buffer = await message.bot.download(source)
-    except Exception as exc:  # noqa: BLE001 - Telegram file API can fail in many ways
+    except Exception as exc:
         raise STTError(f"could not download audio: {exc}") from exc
 
     if buffer is None:

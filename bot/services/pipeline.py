@@ -29,7 +29,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from bot.config import Settings
-from bot.exceptions import LLMError, SearchError
+from bot.exceptions import LLMError
 from bot.logging_conf import get_logger
 from bot.models.enums import Mode
 from bot.models.query import ParsedQuery, SearchQuery

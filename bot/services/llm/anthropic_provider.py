@@ -14,10 +14,10 @@ from typing import Any, ClassVar
 
 import httpx
 from anthropic import (
+    AnthropicError,
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
-    AnthropicError,
     AsyncAnthropic,
     RateLimitError,
 )

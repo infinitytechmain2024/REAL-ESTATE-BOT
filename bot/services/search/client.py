@@ -105,10 +105,10 @@ class SearXNGClient:
                     return []
 
         batches = await asyncio.gather(*(one(q) for q in queries))
-        if all(not batch for batch in batches):
-            # Distinguish "nothing matched" from "the service is broken".
-            if not await self.health():
-                raise SearchError(f"SearXNG at {self.settings.url} is not responding")
+        # Distinguish "nothing matched" from "the service is broken": an empty
+        # result set is a valid answer, an unreachable instance is not.
+        if all(not batch for batch in batches) and not await self.health():
+            raise SearchError(f"SearXNG at {self.settings.url} is not responding")
 
         weights = {q.query: q.weight for q in queries}
         return self.merge(

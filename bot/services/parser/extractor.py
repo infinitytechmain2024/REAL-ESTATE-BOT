@@ -10,7 +10,8 @@ LLM is looking for prices and addresses rather than prose.
 from __future__ import annotations
 
 import trafilatura
-from lxml import etree, html as lxml_html
+from lxml import etree
+from lxml import html as lxml_html
 from lxml.html import HtmlElement
 
 from bot.logging_conf import get_logger

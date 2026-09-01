@@ -67,7 +67,7 @@ class Services:
         ):
             try:
                 await closer()
-            except Exception:  # noqa: BLE001 - shutdown must complete
+            except Exception:
                 log.warning("shutdown.close_failed", service=name, exc_info=True)
 
 
@@ -165,8 +165,8 @@ async def run_polling(bot: Bot, dispatcher: Dispatcher, settings: Settings, serv
 
 async def run_webhook(bot: Bot, dispatcher: Dispatcher, settings: Settings, services: Services) -> None:
     """Webhook mode: an aiohttp server Telegram posts updates to."""
-    from aiohttp import web
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+    from aiohttp import web
 
     telegram = settings.telegram
     assert telegram.webhook_url  # guaranteed by the settings validator
