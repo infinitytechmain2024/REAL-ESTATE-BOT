@@ -1,0 +1,18 @@
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# The vendored snapshot ships its sources, but not its development tooling.
+searxng/client/
+searxng/docs/
+searxng/tests/
+searxng/node_modules/
+searxng/.git/

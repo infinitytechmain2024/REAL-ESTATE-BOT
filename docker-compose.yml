@@ -1,0 +1,59 @@
+# Local development.
+#
+# The default `bot` service mirrors production: one container running both
+# SearXNG and the bot, exactly as Render will run it.
+#
+#   docker compose up --build
+#
+# The `searxng` profile instead runs SearXNG on its own, for when you want to
+# iterate on the bot with a plain `python -m bot.main` on the host:
+#
+#   docker compose --profile searxng-only up searxng
+#   SEARXNG_URL=http://127.0.0.1:8888 python -m bot.main
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      ENVIRONMENT: docker
+      SEARXNG_URL: http://127.0.0.1:8888
+      SEARXNG_BIND_ADDRESS: 127.0.0.1
+      # Uncomment to let the cache service below be used.
+      # SEARXNG_VALKEY_URL: valkey://valkey:6379/0
+    ports:
+      # Exposed only so you can curl the API while developing. Drop this
+      # mapping and SearXNG is unreachable from outside the container.
+      - "127.0.0.1:8888:8888"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8888/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # Standalone SearXNG for host-side bot development.
+  searxng:
+    profiles: ["searxng-only"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SEARXNG_BIND_ADDRESS: 0.0.0.0
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-dev-secret-change-me}
+    entrypoint: ["granian", "--interface", "wsgi", "--host", "0.0.0.0", "--port", "8888",
+                 "searxng.api_only:application"]
+    ports:
+      - "127.0.0.1:8888:8888"
+    restart: unless-stopped
+
+  # Optional result cache. SearXNG works without it; enable by setting
+  # SEARXNG_VALKEY_URL on the bot service above.
+  valkey:
+    profiles: ["cache"]
+    image: valkey/valkey:8-alpine
+    command: valkey-server --save "" --appendonly no
+    restart: unless-stopped

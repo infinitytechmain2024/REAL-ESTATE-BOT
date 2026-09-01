@@ -1,0 +1,106 @@
+# Render blueprint: https://render.com/docs/blueprint-spec
+#
+# One Docker service runs both SearXNG and the bot (see docker/entrypoint.sh).
+# The default is a background worker in polling mode, which needs no public
+# URL and keeps the SearXNG API on loopback where nothing outside can reach it.
+#
+# For webhook mode instead, comment this service out and uncomment the web
+# service below.
+
+services:
+  - type: worker
+    name: real-estate-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter          # background workers are not available on the free plan
+    region: frankfurt      # pick the region closest to your users
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: render
+      - key: LOG_FORMAT
+        value: json        # Render's log search parses JSON lines
+      - key: LOG_LEVEL
+        value: INFO
+      - key: TELEGRAM_MODE
+        value: polling
+
+      # SearXNG runs inside this same container.
+      - key: SEARXNG_URL
+        value: http://127.0.0.1:8888
+      - key: SEARXNG_BIND_ADDRESS
+        value: 127.0.0.1
+      - key: SEARXNG_SECRET
+        generateValue: true
+
+      # --- secrets: set these in the Render dashboard, never in this file ---
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: LLM_PROVIDER
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: STT_PROVIDER
+        sync: false
+      - key: STT_MODEL
+        sync: false
+      - key: STT_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+
+  # ---------------------------------------------------------------------
+  # Webhook alternative. A web service gets a public URL and a health check,
+  # and can run on the free plan, but you must set TELEGRAM_WEBHOOK_URL to the
+  # service's own URL after the first deploy.
+  #
+  # Note that SEARXNG_BIND_ADDRESS stays 127.0.0.1: the port Render exposes is
+  # the bot's webhook server, not SearXNG.
+  # ---------------------------------------------------------------------
+  # - type: web
+  #   name: real-estate-bot
+  #   runtime: docker
+  #   dockerfilePath: ./Dockerfile
+  #   plan: starter
+  #   region: frankfurt
+  #   healthCheckPath: /healthz
+  #   envVars:
+  #     - key: ENVIRONMENT
+  #       value: render
+  #     - key: LOG_FORMAT
+  #       value: json
+  #     - key: TELEGRAM_MODE
+  #       value: webhook
+  #     - key: TELEGRAM_WEBHOOK_PORT
+  #       fromService:
+  #         type: web
+  #         name: real-estate-bot
+  #         envVarKey: PORT
+  #     - key: TELEGRAM_WEBHOOK_URL
+  #       sync: false
+  #     - key: TELEGRAM_WEBHOOK_SECRET
+  #       generateValue: true
+  #     - key: SEARXNG_URL
+  #       value: http://127.0.0.1:8888
+  #     - key: SEARXNG_BIND_ADDRESS
+  #       value: 127.0.0.1
+  #     - key: SEARXNG_SECRET
+  #       generateValue: true
+  #     - key: TELEGRAM_TOKEN
+  #       sync: false
+  #     - key: LLM_PROVIDER
+  #       sync: false
+  #     - key: LLM_MODEL
+  #       sync: false
+  #     - key: LLM_API_KEY
+  #       sync: false
+  #     - key: SUPABASE_URL
+  #       sync: false
+  #     - key: SUPABASE_KEY
+  #       sync: false

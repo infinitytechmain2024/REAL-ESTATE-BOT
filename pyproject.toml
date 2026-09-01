@@ -1,0 +1,27 @@
+[project]
+name = "real-estate-bot"
+version = "0.1.0"
+description = "Telegram bot that researches property listings and investors via SearXNG and an LLM"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# The vendored SearXNG snapshot is upstream code and is linted upstream.
+extend-exclude = ["searxng"]
+
+[tool.ruff.lint]
+# BLE001 is enabled so that every broad `except Exception` has to be
+# justified with a noqa comment saying why swallowing is correct there.
+select = ["E", "F", "B", "BLE", "SIM", "UP", "I", "RUF"]
+ignore = [
+    "E501",    # long lines are caught by the formatter, not worth failing on
+    # The user-facing strings are Russian, so Cyrillic characters in string
+    # literals are correct, not a homoglyph attack.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+# Package __init__ files re-export and import providers for their registration
+# side effects; those lines carry their own `# noqa: F401`.
