@@ -83,8 +83,26 @@ class ParsedQuery(BaseModel):
     def _upper_currency(cls, value: str | None) -> str | None:
         return value.upper() if value else None
 
+    def human_summary(self) -> str:
+        """Short description shown to the user in progress messages.
+
+        Unlike :meth:`summary` this omits the internal mode token and reads as
+        a phrase rather than a debug line.
+        """
+        bits: list[str] = []
+        if self.object_type:
+            bits.append(self.object_type)
+        if not self.location.is_empty():
+            bits.append(self.location.as_text())
+        if self.budget_max:
+            currency = f" {self.currency}" if self.currency else ""
+            bits.append(f"до {self.budget_max:,.0f}".replace(",", " ") + currency)
+        if self.area_max:
+            bits.append(f"до {self.area_max:,.0f} m²".replace(",", " "))
+        return ", ".join(bits)
+
     def summary(self) -> str:
-        """One-line description used in log lines and progress messages."""
+        """One-line description used in log lines."""
         bits: list[str] = [self.mode.value]
         if not self.location.is_empty():
             bits.append(self.location.as_text())

@@ -43,7 +43,7 @@ from bot.prompts import (
     build_rank_prompt,
 )
 from bot.services.llm import ChatMessage
-from bot.utils.text import truncate
+from bot.utils.text import plural_ru, truncate
 
 if TYPE_CHECKING:
     from bot.services.db import SupabaseRepository
@@ -130,7 +130,11 @@ class ResearchPipeline:
             queries=queries,
         )
 
-        await report(f"🔎 Ищу: {parsed.summary()}\nЗапросов: {len(queries)}")
+        described = parsed.human_summary() or text
+        await report(
+            f"🔎 Ищу: {described}\n"
+            f"Поисковых запросов: {len(queries)}"
+        )
         hits = await self.search.search_many(queries)
         log.info("pipeline.hits", user_id=user_id, hits=len(hits), queries=len(queries))
 
@@ -147,7 +151,8 @@ class ResearchPipeline:
                 duplicates_skipped=duplicates,
             )
 
-        await report(f"📄 Найдено {len(fresh_hits)} ссылок, изучаю содержимое…")
+        noun = plural_ru(len(fresh_hits), "ссылка", "ссылки", "ссылок")
+        await report(f"📄 Найдено {len(fresh_hits)} {noun}, изучаю содержимое…")
         candidates = await self._collect_content(fresh_hits)
 
         degraded = False

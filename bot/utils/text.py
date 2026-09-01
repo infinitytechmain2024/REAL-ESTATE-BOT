@@ -66,3 +66,21 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
+
+
+def plural_ru(count: int, one: str, few: str, many: str) -> str:
+    """Pick the Russian plural form for *count*.
+
+    "1 ссылка", "2 ссылки", "5 ссылок" -- getting this wrong is the most
+    visible sign of a machine-written message.
+    """
+    tens = abs(count) % 100
+    if 11 <= tens <= 14:
+        return many
+    match abs(count) % 10:
+        case 1:
+            return one
+        case 2 | 3 | 4:
+            return few
+        case _:
+            return many
