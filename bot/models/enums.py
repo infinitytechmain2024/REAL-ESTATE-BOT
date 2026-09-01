@@ -34,6 +34,32 @@ class ResultStatus(StrEnum):
     SAVED = "saved"
 
 
+class BudgetFit(StrEnum):
+    """Where a result's price sits relative to the budget the user asked for.
+
+    Computed in code from a numeric price, never asked of the LLM: models are
+    unreliable at arithmetic and at deciding what "slightly over" means, and
+    the answer has to be exact because it is quoted back to the user.
+    """
+
+    EXACT = "exact"
+    """Inside the requested range, or no budget was given."""
+
+    OVER = "over"
+    """Above the upper bound."""
+
+    UNDER = "under"
+    """Below the lower bound -- usually a different segment, not a bargain."""
+
+    UNKNOWN = "unknown"
+    """No price on the page, or a currency we cannot compare against."""
+
+    @property
+    def is_alternative(self) -> bool:
+        """Whether this result should be offered as a near miss rather than a match."""
+        return self in (BudgetFit.OVER, BudgetFit.UNDER)
+
+
 class Feedback(StrEnum):
     """What the user pressed under a result."""
 

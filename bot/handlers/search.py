@@ -16,7 +16,11 @@ from aiogram.types import Message
 
 from bot.config import Settings
 from bot.exceptions import BotError
-from bot.handlers.formatting import format_result, format_summary
+from bot.handlers.formatting import (
+    format_alternatives_notice,
+    format_result,
+    format_summary,
+)
 from bot.keyboards.main_menu import main_menu_keyboard, mode_switch_keyboard
 from bot.keyboards.result import result_keyboard
 from bot.logging_conf import get_logger
@@ -151,8 +155,18 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
         )
         return
 
-    noun = plural_ru(total, "подходящий результат", "подходящих результата", "подходящих результатов")
-    await _safe_edit(status, f"✅ Нашёл {total} {noun}, отправляю…")
+    if outcome.only_alternatives:
+        # Nothing matched the budget. Say so explicitly and name the gap before
+        # the results arrive, so they are not mistaken for matches.
+        await _safe_edit(status, format_alternatives_notice(outcome.parsed, outcome.alternatives))
+    else:
+        noun = plural_ru(
+            outcome.exact_count,
+            "подходящий результат",
+            "подходящих результата",
+            "подходящих результатов",
+        )
+        await _safe_edit(status, f"✅ Нашёл {outcome.exact_count} {noun}, отправляю…")
 
     sent = 0
     for index, result in enumerate(outcome.results, start=1):
@@ -186,6 +200,7 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
             hits=outcome.hits_found,
             duplicates=outcome.duplicates_skipped,
             degraded=outcome.degraded,
+            alternatives=len(outcome.alternatives),
         ),
         reply_markup=mode_switch_keyboard(mode),
     )

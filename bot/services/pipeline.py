@@ -42,6 +42,7 @@ from bot.prompts import (
     build_extract_prompt,
     build_rank_prompt,
 )
+from bot.services.budget import BudgetMatch, split_by_fit
 from bot.services.llm import ChatMessage
 from bot.utils.text import plural_ru, truncate
 
@@ -72,6 +73,9 @@ class PipelineOutcome(BaseModel):
     queries: list[SearchQuery] = Field(default_factory=list)
     hits_found: int = 0
     results: list[StoredResult] = Field(default_factory=list)
+    """Matches first, then near misses. Ordering is what the handler sends."""
+    exact_count: int = 0
+    """How many of `results` are in budget. The rest are alternatives."""
     duplicates_skipped: int = 0
     degraded: bool = False
     """True when ranking fell back to raw search hits."""
@@ -79,6 +83,21 @@ class PipelineOutcome(BaseModel):
     @property
     def is_empty(self) -> bool:
         return not self.results
+
+    @property
+    def alternatives(self) -> list[StoredResult]:
+        """Results offered as near misses because their price was out of range."""
+        return self.results[self.exact_count :]
+
+    @property
+    def only_alternatives(self) -> bool:
+        """Nothing was in budget, but something close was found.
+
+        This is the case the user is told about explicitly -- an empty answer
+        and "nothing in your range, but here is one 45 000 more" are very
+        different outcomes.
+        """
+        return self.exact_count == 0 and bool(self.results)
 
 
 class ResearchPipeline:
@@ -168,23 +187,32 @@ class ResearchPipeline:
         # In the degraded path the scores are placeholders, not judgements, so
         # applying the relevance threshold to them would discard everything for
         # anyone who raised PIPELINE_MIN_SCORE.
-        keep = (
+        relevant = (
             structured
             if degraded
             else [r for r in structured if r.score >= self.settings.pipeline.min_score]
         )
-        keep = keep[: self.settings.pipeline.max_results_to_user]
+        keep, verdicts, exact_count = self._select(relevant, parsed)
         log.info(
             "pipeline.ranked",
             user_id=user_id,
             ranked=len(structured),
-            kept=len(keep),
+            matches=exact_count,
+            alternatives=len(keep) - exact_count,
             degraded=degraded,
         )
 
         stored = await self._persist(
-            keep, candidates=candidates, user_id=user_id, mode=mode, search_id=search_id
+            keep,
+            verdicts=verdicts,
+            candidates=candidates,
+            user_id=user_id,
+            mode=mode,
+            search_id=search_id,
         )
+        # Persistence drops rows this user already has, which can shift the
+        # boundary; recount rather than trusting the pre-save split.
+        exact_count = sum(1 for row in stored if not row.is_alternative)
 
         if search_id is not None:
             await self.repo.finish_search(
@@ -203,6 +231,7 @@ class ResearchPipeline:
             queries=queries,
             hits_found=len(hits),
             results=stored,
+            exact_count=exact_count,
             duplicates_skipped=duplicates,
             degraded=degraded,
         )
@@ -286,6 +315,34 @@ class ResearchPipeline:
 
     # -- helpers -----------------------------------------------------------
 
+    def _select(
+        self, results: list[StructuredResult], query: ParsedQuery
+    ) -> tuple[list[StructuredResult], dict[str, BudgetMatch], int]:
+        """Choose what to send: matches first, then the closest near misses.
+
+        Returns the chosen results, their budget verdicts keyed by URL, and how
+        many of the chosen ones are actually in budget.
+
+        Alternatives fill whatever room the matches leave, so a request with
+        plenty of in-budget results is unaffected, while one with none still
+        comes back with something useful instead of a shrug.
+        """
+        limit = self.settings.pipeline.max_results_to_user
+        matches, alternatives = split_by_fit(results, query)
+        verdicts = {result.url: match for result, match in (*matches, *alternatives)}
+
+        chosen = [result for result, _ in matches][:limit]
+
+        if self.settings.pipeline.include_alternatives:
+            room = min(
+                limit - len(chosen),
+                self.settings.pipeline.max_alternatives,
+            )
+            if room > 0:
+                chosen += [result for result, _ in alternatives[:room]]
+
+        return chosen, verdicts, min(len(matches), limit)
+
     async def _drop_seen(self, user_id: int, hits: list[SearchHit]) -> tuple[list[SearchHit], int]:
         """Remove hits this user was already shown, if we can tell."""
         if not self.settings.pipeline.skip_seen_results:
@@ -317,29 +374,41 @@ class ResearchPipeline:
         self,
         results: list[StructuredResult],
         *,
+        verdicts: dict[str, BudgetMatch],
         candidates: list[tuple[SearchHit, PageContent | None]],
         user_id: int,
         mode: Mode,
         search_id: UUID | None,
     ) -> list[StoredResult]:
-        """Store the kept results, carrying their page text along."""
+        """Store the kept results, carrying their page text and budget verdict."""
         if not results:
             return []
 
         content_by_url = {
             hit.url: page.text for hit, page in candidates if page is not None and page.ok
         }
-        rows = [
-            StoredResult.from_structured(
-                result,
-                user_id=user_id,
-                mode=mode,
-                search_id=search_id,
-                content=content_by_url.get(result.url),
+        rows = []
+        for result in results:
+            verdict = verdicts.get(result.url) or BudgetMatch()
+            rows.append(
+                StoredResult.from_structured(
+                    result,
+                    user_id=user_id,
+                    mode=mode,
+                    search_id=search_id,
+                    content=content_by_url.get(result.url),
+                    budget_fit=verdict.fit,
+                    budget_delta=verdict.delta,
+                    budget_currency=verdict.currency,
+                )
             )
-            for result in results
-        ]
-        return await self.repo.save_results(rows)
+
+        stored = await self.repo.save_results(rows)
+        # save_results returns only the rows it accepted, and in its own order;
+        # restore the ranking order so matches still precede alternatives.
+        position = {row.url: index for index, row in enumerate(rows)}
+        stored.sort(key=lambda row: position.get(row.url, len(position)))
+        return stored
 
 
 def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredResult]:
