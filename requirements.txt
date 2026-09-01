@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# Bot runtime. SearXNG has its own pinned dependency set in
+# searxng/requirements.txt; both are installed into the same image.
+# ---------------------------------------------------------------------------
+
+aiogram==3.23.0
+aiohttp==3.13.2
+
+pydantic==2.12.4
+pydantic-settings==2.13.1
+
+httpx[http2]==0.28.1
+
+# HTML -> clean text extraction for the pages we fetch from search results.
+# trafilatura brings its own lxml-based fallbacks; SearXNG already pins lxml.
+trafilatura==2.0.0
+
+# Supabase (PostgREST) client.
+supabase==2.31.0
+
+# LLM providers. OpenAI-compatible endpoints (OpenRouter, Groq, Together,
+# Fireworks, NVIDIA NIM, ...) are driven through the openai SDK; Anthropic has
+# its own.
+openai==2.11.0
+anthropic==0.75.0
+
+tenacity==9.1.2
+structlog==26.1.0
+python-dotenv==1.2.1
