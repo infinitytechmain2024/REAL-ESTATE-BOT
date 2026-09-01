@@ -15,6 +15,7 @@ import functools
 import json
 from typing import Annotated, Literal
 
+from dotenv import load_dotenv
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -50,9 +51,17 @@ LogFormat = Literal["console", "json"]
 
 
 class _Base(BaseSettings):
+    """Common config for every settings group.
+
+    Deliberately no ``env_file``: pydantic-settings applies it per model, and a
+    nested model built through ``default_factory`` would read its own copy,
+    ignoring whatever file the root was given. Instead :func:`get_settings`
+    loads the dotenv file into the process environment once, so every group --
+    nested or not -- sees the same values, and a real environment variable
+    always wins over the file, which is what containers need.
+    """
+
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
     )
@@ -302,11 +311,17 @@ class Settings(_Base):
 
 
 @functools.lru_cache(maxsize=1)
-def get_settings() -> Settings:
+def get_settings(env_file: str | None = ".env") -> Settings:
     """Load and cache the settings.
 
-    Cached because building it parses ``.env`` and validates every subsystem;
-    call :meth:`get_settings.cache_clear` in tests to pick up a changed
-    environment.
+    *env_file* is loaded into ``os.environ`` if it exists, without overriding
+    variables that are already set -- so a container's real environment always
+    beats a stray ``.env`` baked into an image. Pass ``None`` to skip the file
+    entirely.
+
+    Cached because building this validates every subsystem; call
+    :meth:`get_settings.cache_clear` in tests to pick up a changed environment.
     """
+    if env_file:
+        load_dotenv(env_file, override=False)
     return Settings()
