@@ -1,6 +1,9 @@
 # Development helpers. Everything works without them -- see README.md.
 
-PYTHON       ?= python3.11
+# The venv wants 3.11+, but `setup` only needs whatever python3 is on PATH:
+# scripts/setup_env.py has no dependencies and runs on the system interpreter.
+# macOS in particular has no bare `python`, so never assume one.
+PYTHON       ?= $(shell command -v python3.11 2>/dev/null || command -v python3 2>/dev/null || echo python3)
 VENV         ?= .venv
 BIN          := $(VENV)/bin
 SEARXNG_PORT ?= 8888
@@ -8,7 +11,7 @@ SEARXNG_PORT ?= 8888
 export PYTHONPATH := $(CURDIR):$(CURDIR)/searxng
 
 .DEFAULT_GOAL := help
-.PHONY: help setup install run searxng check check-imports check-config check-sql check-api docker-up docker-down clean
+.PHONY: help setup env-manual install run searxng check check-imports check-config check-sql check-api docker-up docker-down clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -16,6 +19,16 @@ help: ## Show this help
 
 setup: ## Ask for your keys and write .env (nothing is sent anywhere)
 	@$(PYTHON) scripts/setup_env.py
+
+env-manual: ## Print a minimal .env template to fill in by hand
+	@printf '%s\n' \
+		'TELEGRAM_TOKEN=' \
+		'LLM_PROVIDER=openrouter' \
+		'LLM_MODEL=openai/gpt-4o-mini' \
+		'OPENROUTER_API_KEY=' \
+		'STT_ENABLED=false'
+	@echo ''
+	@echo '# Скопируйте в файл .env в корне проекта и заполните два пустых значения.' 
 
 install: ## Create the venv and install bot + SearXNG dependencies
 	$(PYTHON) -m venv $(VENV)

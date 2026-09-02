@@ -4,7 +4,7 @@
 Answers the question "where do I put the bot token?" without anyone having to
 know the file format. Run it, answer the prompts, get a working .env::
 
-    python scripts/setup_env.py
+    python3 scripts/setup_env.py
 
 Secrets are read with getpass, so they are never echoed to the terminal and
 never land in shell history. The finished file is written with owner-only
