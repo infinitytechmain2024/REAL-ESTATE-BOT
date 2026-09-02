@@ -184,9 +184,18 @@ def build_probe(chars: int) -> list[dict[str, str]]:
     ]
 
 
-def probe(base_url: str, key: str, model: str, *, chars: int, max_tokens: int, timeout: float) -> None:
+def probe(
+    base_url: str,
+    key: str,
+    model: str,
+    *,
+    chars: int,
+    max_tokens: int,
+    timeout: float,
+    extra: dict[str, object],
+) -> None:
     """Run one candidate and print a verdict line."""
-    payload = {
+    payload: dict[str, object] = {
         "model": model,
         "messages": build_probe(chars),
         "temperature": 0.2,
@@ -194,6 +203,10 @@ def probe(base_url: str, key: str, model: str, *, chars: int, max_tokens: int, t
         # Exactly what bot/services/llm/openai_compatible.py sends.
         "response_format": {"type": "json_object"},
     }
+    # LLM_EXTRA_BODY changes latency dramatically on reasoning models, so the
+    # probe has to carry it too -- otherwise it measures a request the bot
+    # never makes.
+    payload.update(extra)
 
     print(f"  {model}")
     started = time.monotonic()
@@ -267,12 +280,28 @@ def main(argv: list[str]) -> int:
     max_tokens = int(resolve(env, "LLM_MAX_TOKENS", "2500"))
     timeout = float(resolve(env, "LLM_TIMEOUT_SECONDS", "180"))
 
+    raw_extra = resolve(env, "LLM_EXTRA_BODY")
+    try:
+        extra = json.loads(raw_extra) if raw_extra else {}
+    except json.JSONDecodeError as exc:
+        print(f"LLM_EXTRA_BODY не разобрать как JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(extra, dict):
+        print("LLM_EXTRA_BODY должен быть JSON-объектом.", file=sys.stderr)
+        return 2
+
     print(f"Провайдер: {provider}  |  {base_url}")
     print(f"Нагрузка как при ранжировании: 5 страниц по {chars} символов, "
-          f"потолок ответа {max_tokens} токенов, лимит {timeout:g}с\n")
+          f"потолок ответа {max_tokens} токенов, лимит {timeout:g}с")
+    if extra:
+        print(f"Доп. параметры запроса: {json.dumps(extra, ensure_ascii=False)}")
+    print()
 
     for model in models:
-        probe(base_url, key, model, chars=chars, max_tokens=max_tokens, timeout=timeout)
+        probe(
+            base_url, key, model,
+            chars=chars, max_tokens=max_tokens, timeout=timeout, extra=extra,
+        )
 
     print()
     print(f"{VERDICT_OK}     — ставьте её в LLM_MODEL (или в LLM_MODEL_RANK).")

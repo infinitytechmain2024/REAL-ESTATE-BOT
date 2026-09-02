@@ -102,6 +102,11 @@ class OpenAICompatibleProvider(LLMProvider):
         if timeout is not None:
             payload["timeout"] = timeout
 
+        # Merged last so an operator can also override a default we set --
+        # switching off JSON mode for a backend that mishandles it, say.
+        if self.settings.extra_body:
+            payload.update(self.settings.extra_body)
+
         try:
             completion = await self._client.chat.completions.create(**payload)
         except APITimeoutError as exc:

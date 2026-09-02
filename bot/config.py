@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import functools
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -24,6 +24,14 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # the raw string to our `mode="before"` validators instead, so both
 # `FOO=a,b` and `FOO=["a","b"]` are accepted.
 CsvList = Annotated[list[str], NoDecode]
+
+JsonObject = Annotated[dict[str, Any], NoDecode]
+"""A dict from the environment, validated by us so the error is readable.
+
+Without NoDecode, pydantic-settings decodes the JSON itself and a typo raises
+SettingsError("error parsing value for field ...") before any validator runs,
+which tells the operator nothing about what to fix.
+"""
 
 
 def _parse_str_list(value: object) -> object:
@@ -137,6 +145,15 @@ class LLMSettings(_Base):
 
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, ge=64, le=200_000)
+
+    extra_body: JsonObject = Field(
+        default_factory=dict,
+        description="Extra JSON merged into every chat request, for parameters only "
+        "one provider understands. The reason this exists: reasoning models bill time "
+        "for thinking, and the knob that turns it down is named differently everywhere "
+        '-- e.g. LLM_EXTRA_BODY={"reasoning_effort": "low"}. Merged last, so it can '
+        "also override what the client sends by default.",
+    )
     timeout_seconds: float = Field(default=90.0, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10)
 
@@ -144,6 +161,26 @@ class LLMSettings(_Base):
     @classmethod
     def _parse_fallbacks(cls, value: object) -> object:
         return _parse_str_list(value)
+
+    @field_validator("extra_body", mode="before")
+    @classmethod
+    def _parse_extra_body(cls, value: object) -> object:
+        """Accept a JSON object, or nothing at all."""
+        if value is None or value == "":
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"LLM_EXTRA_BODY must be a JSON object, got {value!r}: {exc}"
+                ) from exc
+            if not isinstance(decoded, dict):
+                raise ValueError("LLM_EXTRA_BODY must be a JSON object, not a list or scalar")
+            return decoded
+        raise ValueError("LLM_EXTRA_BODY must be a JSON object")
 
     @property
     def extract_model(self) -> str:
