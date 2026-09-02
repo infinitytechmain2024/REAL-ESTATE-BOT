@@ -9,7 +9,7 @@ venv/
 # Environment
 .env
 .env.local
-*.env
+.env.*
 !.env.example
 
 # Tooling
@@ -20,5 +20,13 @@ venv/
 htmlcov/
 
 # Runtime
+#
+# Paths here are ANCHORED with a leading slash on purpose. An unanchored
+# `data/` matches every directory called "data" at any depth, which silently
+# swallowed the whole of searxng/searx/data/ -- 16 files of engine
+# descriptions, currencies and bang definitions that SearXNG imports at
+# start-up. The container built fine and then died on `from searx import data`.
+# Anything added below must stay anchored, or it will reach into the vendored
+# tree the same way.
 *.log
-data/
+/data/
