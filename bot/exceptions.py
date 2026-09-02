@@ -34,6 +34,16 @@ class LLMResponseError(LLMError):
     """The provider answered, but not in the shape we asked for."""
 
 
+class LLMTimeoutError(LLMError):
+    """The provider did not answer in time.
+
+    Worth its own class because retrying is far more expensive here than for
+    other failures: each attempt burns the whole timeout before failing. A
+    request that was too big or a model that is too slow will time out again,
+    so the manager retries this at most once before moving on.
+    """
+
+
 class STTError(BotError):
     """Transcription failed."""
 

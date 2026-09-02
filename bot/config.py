@@ -237,7 +237,11 @@ class ParserSettings(_Base):
     timeout_seconds: float = Field(default=15.0, gt=0)
     max_bytes: int = Field(default=1_500_000, gt=0, description="Abort downloads larger than this")
     max_chars: int = Field(
-        default=6_000, gt=0, description="Characters of page text handed to the LLM"
+        default=3_000,
+        gt=0,
+        description="Characters of page text handed to the LLM per candidate. Prices, "
+        "areas and contacts sit near the top of a listing, so more than this mostly "
+        "buys boilerplate -- and it is the single biggest driver of ranking latency.",
     )
     user_agent: str = Field(
         default=(
@@ -276,6 +280,14 @@ class PipelineSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PIPELINE_"})
 
     max_results_to_user: int = Field(default=8, ge=1, le=30)
+    max_rank_candidates: int = Field(
+        default=12,
+        ge=1,
+        le=60,
+        description="Candidates sent to the ranking model. SEARXNG_MAX_HITS controls how "
+        "many are found; this controls how many are read closely. Sending all of them "
+        "makes the prompt large enough to time out.",
+    )
     min_score: int = Field(default=45, ge=0, le=100, description="Drop results the LLM scored lower")
     send_delay_seconds: float = Field(
         default=0.4, ge=0.0, description="Pause between result messages to stay under Telegram limits"

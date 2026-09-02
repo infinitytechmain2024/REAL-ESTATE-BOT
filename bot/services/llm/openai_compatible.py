@@ -25,7 +25,7 @@ from openai import (
 )
 
 from bot.config import LLMSettings
-from bot.exceptions import ConfigurationError, LLMError
+from bot.exceptions import ConfigurationError, LLMError, LLMTimeoutError
 from bot.logging_conf import get_logger
 from bot.services.llm.base import ChatMessage, LLMProvider, LLMResponse, Usage
 from bot.services.llm.registry import register_llm
@@ -105,7 +105,9 @@ class OpenAICompatibleProvider(LLMProvider):
         try:
             completion = await self._client.chat.completions.create(**payload)
         except APITimeoutError as exc:
-            raise LLMError(f"{self.name}: request timed out after {timeout or self.settings.timeout_seconds}s") from exc
+            raise LLMTimeoutError(
+                f"{self.name}: request timed out after {timeout or self.settings.timeout_seconds}s"
+            ) from exc
         except RateLimitError as exc:
             raise LLMError(f"{self.name}: rate limited ({exc})") from exc
         except APIConnectionError as exc:

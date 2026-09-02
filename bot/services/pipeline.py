@@ -45,6 +45,7 @@ from bot.prompts import (
 from bot.services.budget import BudgetMatch, split_by_fit
 from bot.services.llm import ChatMessage
 from bot.utils.text import plural_ru, truncate
+from bot.utils.urls import looks_like_index
 
 if TYPE_CHECKING:
     from bot.services.db import SupabaseRepository
@@ -358,17 +359,26 @@ class ResearchPipeline:
     async def _collect_content(
         self, hits: list[SearchHit]
     ) -> list[tuple[SearchHit, PageContent | None]]:
-        """Fetch the top hits and pair every hit with its page, if any.
+        """Fetch the most promising hits and pair each with its page, if any.
 
-        Only ``PARSER_MAX_PAGES`` hits are fetched -- the rest still reach the
-        ranker with their snippets, which is often enough to score them.
+        Two separate caps apply, and the difference matters:
+
+        * ``PARSER_MAX_PAGES`` -- how many pages are actually downloaded.
+        * ``PIPELINE_MAX_RANK_CANDIDATES`` -- how many reach the ranking model.
+
+        Everything past the second cap is dropped here rather than passed on
+        with a snippet. Handing the model forty candidates, eight of them with
+        full page text, builds a prompt large enough to time out, and a
+        candidate the search engines ranked fortieth was never going to win.
         """
-        if not self.settings.parser.enabled:
-            return [(hit, None) for hit in hits]
+        shortlist = hits[: self.settings.pipeline.max_rank_candidates]
 
-        to_fetch = hits[: self.settings.parser.max_pages]
+        if not self.settings.parser.enabled:
+            return [(hit, None) for hit in shortlist]
+
+        to_fetch = shortlist[: self.settings.parser.max_pages]
         pages = await self.fetcher.fetch_many([hit.url for hit in to_fetch])
-        return [(hit, pages.get(hit.url)) for hit in hits]
+        return [(hit, pages.get(hit.url)) for hit in shortlist]
 
     async def _persist(
         self,
@@ -417,7 +427,13 @@ def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredRe
     The score is a placeholder: nothing has judged these. The caller skips the
     relevance threshold in this path, and the summary is the engine's own
     snippet -- honest, if unpolished.
+
+    The one judgement made here is structural: catalogue and search pages sink
+    below individual listings. Without the ranker this is the only defence
+    against an answer made entirely of portal front pages, which is exactly
+    what search engines like to return.
     """
+    ordered = sorted(hits, key=lambda hit: looks_like_index(hit.url))
     return [
         StructuredResult(
             url=hit.url,
@@ -426,5 +442,5 @@ def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredRe
             score=50,
             language=None,
         )
-        for hit in hits[:limit]
+        for hit in ordered[:limit]
     ]

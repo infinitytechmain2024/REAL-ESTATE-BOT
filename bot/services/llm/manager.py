@@ -16,7 +16,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from bot.config import LLMSettings
-from bot.exceptions import ConfigurationError, LLMError
+from bot.exceptions import ConfigurationError, LLMError, LLMTimeoutError
 from bot.logging_conf import get_logger
 from bot.services.llm.base import ChatMessage, LLMProvider, LLMResponse
 from bot.services.llm.registry import create_provider
@@ -26,6 +26,15 @@ log = get_logger(__name__)
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 _BACKOFF_BASE_SECONDS = 1.5
+
+_MAX_TIMEOUT_ATTEMPTS = 1
+"""Timeouts are retried at most once, whatever LLM_MAX_RETRIES says.
+
+Every other failure fails fast; a timeout burns the full LLM_TIMEOUT_SECONDS
+first. Three attempts at a 90s timeout is four and a half minutes of the user
+staring at a progress message before the fallback even starts -- and a prompt
+that was too large, or a model that is too slow, will simply time out again.
+"""
 
 
 class LLMManager:
@@ -127,13 +136,19 @@ class LLMManager:
                     result = await call(provider)
                 except LLMError as exc:
                     errors.append(f"{provider_name}: {exc}")
-                    is_last_attempt = attempt == self.settings.max_retries
+                    budget = (
+                        min(self.settings.max_retries, _MAX_TIMEOUT_ATTEMPTS)
+                        if isinstance(exc, LLMTimeoutError)
+                        else self.settings.max_retries
+                    )
+                    is_last_attempt = attempt >= budget
                     log.warning(
                         "llm.call.failed",
                         provider=provider_name,
                         purpose=purpose,
                         attempt=attempt + 1,
                         will_retry=not is_last_attempt,
+                        timed_out=isinstance(exc, LLMTimeoutError),
                         error=str(exc),
                     )
                     if is_last_attempt:

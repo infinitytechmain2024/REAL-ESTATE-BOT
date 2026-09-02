@@ -10,6 +10,7 @@ that carries the ``UNIQUE (user_id, url_hash)`` constraint.
 from __future__ import annotations
 
 import hashlib
+import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 # Query parameters that never change which document is served.
@@ -103,3 +104,94 @@ def domain_of(url: str) -> str:
     except ValueError:
         return ""
     return host[4:] if host.startswith("www.") else host
+
+
+# ---------------------------------------------------------------------------
+# Telling a listing apart from the catalogue page it lives on.
+#
+# A search engine happily returns "Land for sale in Madrid -- 548 listings" for
+# a query about a plot in Madrid. It is topically perfect and useless as a
+# lead: there is no address, no price, nothing to act on. Individual listings,
+# by contrast, almost always carry an id in the path.
+#
+# This is a signal, never a filter. Some sites do publish slug-only listing
+# URLs, so a false positive must not delete a real result -- it only pushes it
+# down the order and warns the ranking model.
+# ---------------------------------------------------------------------------
+
+_ID_IN_PATH = re.compile(r"\d{5,}")
+"""A run of five or more digits: an listing id, an MLS number, a reference."""
+
+# Query parameters that only ever appear on a results page.
+_INDEX_QUERY_KEYS: frozenset[str] = frozenset(
+    {
+        "page", "pagina", "pageno", "p", "offset", "start",
+        "sort", "sortby", "orden", "ordenado-por", "order", "sortierung",
+        "filter", "filters", "search", "q", "query", "keyword",
+        "min_price", "max_price", "precio-min", "precio-max",
+    }
+)
+
+# Path segments that name a category rather than an object. Deliberately
+# multilingual: these bots search in the local language of the target country.
+_CATALOGUE_SEGMENTS: frozenset[str] = frozenset(
+    {
+        # english
+        "for-sale", "sale", "buy", "rent", "search", "results", "listings",
+        "properties", "property", "plots", "land", "real-estate", "catalog",
+        "catalogue", "find", "browse", "all",
+        # spanish / portuguese
+        "venta", "ventas", "comprar", "alquiler", "terrenos", "parcelas",
+        "inmuebles", "buscar", "imoveis", "venda",
+        # russian / ukrainian
+        "prodazha", "kupit", "poisk", "katalog", "nedvizhimost", "uchastki",
+        "obyavleniya", "prodazh", "kupiti", "dilyanki",
+        # italian / french / german / greek / turkish
+        "vendita", "immobili", "terreni", "vente", "terrain", "immobilier",
+        "kaufen", "grundstueck", "immobilien", "poliseis", "satilik", "arsa",
+    }
+)
+
+
+def looks_like_index(url: str) -> bool:
+    """Whether *url* looks like a catalogue or search page, not a single item.
+
+    Returns ``False`` whenever the path carries something id-shaped, since that
+    is the strongest available evidence of an individual listing and should
+    outweigh every category word around it.
+    """
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return False
+
+    path = (parts.path or "/").strip("/")
+
+    # An id in the path settles it: this is one object.
+    if _ID_IN_PATH.search(path):
+        return False
+
+    # Bare domain.
+    if not path:
+        return True
+
+    # Sorting, paging and filtering only exist on a results page.
+    query_keys = {key.lower() for key, _ in parse_qsl(parts.query, keep_blank_values=True)}
+    if query_keys & _INDEX_QUERY_KEYS:
+        return True
+
+    segments = [segment.lower() for segment in path.split("/") if segment]
+
+    # A whole segment that is nothing but a category word.
+    if any(segment in _CATALOGUE_SEGMENTS for segment in segments):
+        return True
+
+    # Hyphenated category slugs: "venta-terrenos", "plots-land-and-ruins",
+    # "venta-urbano-de-particular". Individual listings do use slugs too, but
+    # theirs describe one object and are rarely built purely from these words.
+    for segment in segments:
+        words = [word for word in segment.split("-") if word]
+        if len(words) > 1 and sum(word in _CATALOGUE_SEGMENTS for word in words) >= 2:
+            return True
+
+    return False

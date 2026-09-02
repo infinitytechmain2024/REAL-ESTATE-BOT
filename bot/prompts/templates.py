@@ -7,6 +7,7 @@ import json
 from bot.models.enums import Mode
 from bot.models.query import ParsedQuery
 from bot.models.result import PageContent, SearchHit
+from bot.utils.urls import looks_like_index
 
 _MODE_HINTS: dict[Mode, str] = {
     Mode.LAND: (
@@ -55,8 +56,14 @@ Scoring (0-100) -- judge everything EXCEPT price:
   60-84   plausible match with one characteristic unverified or slightly off
   40-59   relevant context (an agency covering the area, a directory page)
           but not itself the thing requested
-  0-39    listing aggregator front pages, unrelated regions, news, spam,
+  0-39    catalogue and search pages, unrelated regions, news, spam,
           expired or empty pages
+
+A CATALOGUE PAGE IS NOT A LEAD. "Land for sale in Madrid -- 548 listings" is
+topically perfect and completely useless: there is no address, no price and
+nothing to act on. Candidates flagged `catalogue page: yes` below score 39 or
+less no matter how well they match the request. The user wants individual
+objects they can call about.
 
 PRICE IS NOT PART OF THE SCORE. A plot in exactly the right place, of exactly
 the right kind, that costs twice the stated budget is still an 85+. The caller
@@ -134,6 +141,7 @@ def build_rank_prompt(
             f"### Candidate {index}\n"
             f"URL: {hit.url}\n"
             f"Title: {hit.title or '(none)'}\n"
+            f"Catalogue page: {'yes' if looks_like_index(hit.url) else 'no'}\n"
             f"Search snippet: {hit.snippet or '(none)'}\n"
             f"Found by: {', '.join(hit.engines) or 'unknown'}\n"
             f"Extracted text:\n{body}\n"
