@@ -11,7 +11,7 @@ SEARXNG_PORT ?= 8888
 export PYTHONPATH := $(CURDIR):$(CURDIR)/searxng
 
 .DEFAULT_GOAL := help
-.PHONY: help setup env-manual install run searxng check check-imports check-config check-sql check-api docker-up docker-down clean
+.PHONY: help setup env-manual models install run searxng check check-imports check-config check-sql check-api docker-up docker-down clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -29,6 +29,9 @@ env-manual: ## Print a minimal .env template to fill in by hand
 		'STT_ENABLED=false'
 	@echo ''
 	@echo '# Скопируйте в файл .env в корне проекта и заполните два пустых значения.' 
+
+models: ## Measure which models can handle the ranking call (see scripts/check_model.py)
+	@$(PYTHON) scripts/check_model.py $(ARGS)
 
 install: ## Create the venv and install bot + SearXNG dependencies
 	$(PYTHON) -m venv $(VENV)
