@@ -27,8 +27,10 @@ from bot.exceptions import ConfigurationError
 from bot.handlers import build_router, errors
 from bot.logging_conf import configure_logging, get_logger
 from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, UserMiddleware
-from bot.middlewares.throttling import SearchSlots
+from bot.middlewares.throttling import Cooldown, SearchSlots
+from bot.services.costs import CostGuard
 from bot.services.db import SupabaseRepository
+from bot.services.limits import QuotaService
 from bot.services.llm import LLMManager
 from bot.services.parser import PageFetcher
 from bot.services.pipeline import ResearchPipeline
@@ -55,6 +57,9 @@ class Services:
     repo: SupabaseRepository
     pipeline: ResearchPipeline
     slots: SearchSlots
+    details_cooldown: Cooldown
+    quota: QuotaService
+    costs: CostGuard
 
     async def aclose(self) -> None:
         """Close every service, letting each failure be logged not raised."""
@@ -67,7 +72,7 @@ class Services:
         ):
             try:
                 await closer()
-            except Exception:
+            except Exception:  # noqa: BLE001 - one bad close must not stop the rest
                 log.warning("shutdown.close_failed", service=name, exc_info=True)
 
 
@@ -97,7 +102,13 @@ async def build_services(settings: Settings) -> Services:
         fetcher=fetcher,
         repo=repo,
         pipeline=pipeline,
-        slots=SearchSlots(settings.telegram.max_concurrent_searches),
+        slots=SearchSlots(
+            settings.telegram.max_concurrent_searches,
+            per_user_limit=settings.telegram.max_searches_per_user,
+        ),
+        details_cooldown=Cooldown(settings.telegram.details_cooldown_seconds),
+        quota=QuotaService(settings.limits, repo),
+        costs=CostGuard(limits=settings.limits, llm=settings.llm, repo=repo),
     )
 
 
@@ -112,6 +123,9 @@ def build_dispatcher(settings: Settings, services: Services) -> Dispatcher:
         stt=services.stt,
         llm=services.llm,
         slots=services.slots,
+        details_cooldown=services.details_cooldown,
+        quota=services.quota,
+        costs=services.costs,
     )
 
     for observer in (dispatcher.message, dispatcher.callback_query):
@@ -127,9 +141,39 @@ def build_dispatcher(settings: Settings, services: Services) -> Dispatcher:
     return dispatcher
 
 
+def _admin_notifier(bot: Bot, settings: Settings):  # type: ignore[no-untyped-def]
+    """Build the callback the cost guard uses to raise the alarm.
+
+    Every admin is messaged independently: one of them having blocked the bot
+    must not stop the others from hearing that the budget is gone.
+    """
+
+    async def notify(text: str) -> None:
+        for admin_id in settings.telegram.admin_ids:
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception:  # noqa: BLE001 - a blocked admin is not our problem
+                log.warning("admin.notify_failed", admin_id=admin_id, exc_info=True)
+
+    return notify
+
+
 async def _on_startup(bot: Bot, settings: Settings, services: Services) -> None:
     """Announce the bot's commands and warn about anything degraded."""
     await bot.set_my_commands(COMMANDS)
+
+    # The guard needs the Bot to reach the admins, so it is completed here
+    # rather than in `build_services`.
+    services.costs.notifier = _admin_notifier(bot, settings)
+    services.llm.attach_cost_guard(services.costs)
+    await services.costs.prime()
+
+    if settings.limits.cost_limit_enabled and not settings.telegram.admin_ids:
+        log.warning(
+            "startup.no_admins",
+            detail="LIMITS_DAILY_COST_USD is set but TELEGRAM_ADMIN_IDS is empty; "
+            "nobody will be told when the budget runs out",
+        )
 
     if not await services.search.health():
         log.warning(
@@ -151,6 +195,10 @@ async def _on_startup(bot: Bot, settings: Settings, services: Services) -> None:
         llm_provider=settings.llm.provider,
         llm_model=settings.llm.model,
         stt_provider=settings.stt.provider if settings.stt.enabled else "disabled",
+        daily_searches_per_user=settings.limits.daily_searches,
+        daily_details_per_user=settings.limits.daily_details,
+        daily_cost_limit_usd=settings.limits.daily_cost_usd or None,
+        pipeline_timeout_seconds=settings.pipeline.timeout_seconds,
     )
 
 
@@ -214,6 +262,10 @@ async def main() -> None:
     )
 
     services = await build_services(settings)
+    # Build the primary LLM provider now: a missing key should stop the
+    # deployment here, with the variable named, rather than at the first user
+    # message with a generic failure.
+    await services.llm.validate()
     dispatcher = build_dispatcher(settings, services)
 
     runner = run_webhook if settings.telegram.mode == "webhook" else run_polling
@@ -231,9 +283,12 @@ def run() -> None:
     try:
         asyncio.run(main())
     except ConfigurationError as exc:
-        # A missing key is a deployment problem, not a crash to debug.
-        print(f"Configuration error: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
+        # A missing variable is a deployment problem, not a crash to debug:
+        # print what has to be fixed and stop, with no traceback in between.
+        print("\n❌ Бот не запущен: ошибка конфигурации.\n", file=sys.stderr)
+        print(str(exc), file=sys.stderr)
+        print("", file=sys.stderr)
+        raise SystemExit(2) from None
     except (KeyboardInterrupt, SystemExit):
         pass
 

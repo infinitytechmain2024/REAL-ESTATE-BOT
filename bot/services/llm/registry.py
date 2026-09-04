@@ -49,6 +49,7 @@ def create_provider(name: str, settings: LLMSettings) -> LLMProvider:
     factory = _REGISTRY.get(key)
     if factory is None:
         raise ConfigurationError(
-            f"unknown LLM provider {name!r}; available: {', '.join(available_providers())}"
+            f"Неизвестный LLM-провайдер в LLM_PROVIDER: '{name}'.\n"
+            f"  Доступные значения: {', '.join(available_providers())}"
         )
     return factory(settings)

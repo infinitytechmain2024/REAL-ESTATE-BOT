@@ -58,8 +58,9 @@ class AnthropicProvider(LLMProvider):
             if value:
                 return value
         raise ConfigurationError(
-            f"no API key for LLM provider {self.name!r}: set LLM_API_KEY or "
-            f"{' / '.join(self.api_key_env_vars)}"
+            f"Не задан API-ключ для LLM-провайдера '{self.name}'.\n"
+            f"  Задайте одну из переменных: LLM_API_KEY, "
+            f"{', '.join(self.api_key_env_vars)}"
         )
 
     async def chat(

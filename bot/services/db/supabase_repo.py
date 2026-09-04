@@ -310,6 +310,72 @@ class SupabaseRepository:
         )
         return [_row_to_result(row) for row in rows or []]
 
+    # -- quotas and cost accounting ----------------------------------------
+
+    async def bump_daily_usage(self, user_id: int, kind: str, amount: int = 1) -> int | None:
+        """Increment today's counter for *user_id* and return the new value.
+
+        *kind* is ``"searches"`` or ``"details"``. Delegates to the
+        ``bump_daily_usage`` SQL function so the read and the write are one
+        statement -- two requests arriving together must not both see the old
+        count and both be let through.
+
+        Returns ``None`` when Supabase is unavailable, which the caller treats
+        as "cannot count, fall back to the in-process counter".
+        """
+        if self._client is None:
+            return None
+        rows = await self._execute(
+            "bump_daily_usage",
+            lambda: self._client.rpc(  # type: ignore[union-attr]
+                "bump_daily_usage",
+                {"p_user_id": user_id, "p_kind": kind, "p_amount": amount},
+            ),
+        )
+        return _as_int(rows)
+
+    async def record_llm_usage(
+        self,
+        *,
+        user_id: int | None,
+        provider: str,
+        model: str,
+        purpose: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: float,
+    ) -> None:
+        """Append one call to the ``llm_usage`` ledger."""
+        if self._client is None:
+            return
+        payload = {
+            "user_id": user_id,
+            "provider": provider,
+            "model": model,
+            "purpose": purpose,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            # PostgREST wants a JSON number for a numeric column; round to the
+            # column's own scale so the value round-trips unchanged.
+            "cost_usd": round(cost_usd, 6),
+        }
+        await self._execute("record_llm_usage", lambda: self._table("llm_usage").insert(payload))
+
+    async def llm_cost_today(self) -> float | None:
+        """Total estimated LLM spend for the current UTC day, across all users.
+
+        ``None`` means the figure could not be read; the caller keeps using its
+        own in-process running total rather than assuming zero.
+        """
+        if self._client is None:
+            return None
+        rows = await self._execute(
+            "llm_cost_today",
+            lambda: self._client.rpc("llm_cost_today", {}),  # type: ignore[union-attr]
+        )
+        value = _as_float(rows)
+        return value
+
     # -- internals ---------------------------------------------------------
 
     def _table(self, name: str):  # type: ignore[no-untyped-def]
@@ -344,6 +410,40 @@ class SupabaseRepository:
             )
             return None
         return response.data or []
+
+
+def _scalar(rows: object) -> object:
+    """Unwrap whatever PostgREST returned for a scalar-returning function.
+
+    Depending on the function and the client version this arrives as a bare
+    value, a one-element list, or a list holding a single-key dict.
+    """
+    if rows is None:
+        return None
+    if isinstance(rows, list):
+        if not rows:
+            return None
+        rows = rows[0]
+    if isinstance(rows, dict):
+        values = list(rows.values())
+        return values[0] if len(values) == 1 else None
+    return rows
+
+
+def _as_int(rows: object) -> int | None:
+    value = _scalar(rows)
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(rows: object) -> float | None:
+    value = _scalar(rows)
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _chunked(items: list[str], size: int) -> list[list[str]]:

@@ -8,7 +8,7 @@ SEARXNG_PORT ?= 8888
 export PYTHONPATH := $(CURDIR):$(CURDIR)/searxng
 
 .DEFAULT_GOAL := help
-.PHONY: help install run searxng check check-imports check-config check-sql check-api docker-up docker-down clean
+.PHONY: help install install-dev run searxng check check-imports check-config check-sql check-api test lint docker-up docker-down clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -21,6 +21,9 @@ install: ## Create the venv and install bot + SearXNG dependencies
 		-r searxng/requirements.txt \
 		-r searxng/requirements-server.txt
 
+install-dev: ## Install the test and lint tooling on top of `install`
+	$(BIN)/pip install -r requirements-dev.txt
+
 run: ## Run the bot (expects SearXNG to be up, or `make searxng` in another shell)
 	$(BIN)/python -m bot.main
 
@@ -30,7 +33,13 @@ searxng: ## Run the SearXNG JSON API on 127.0.0.1:$(SEARXNG_PORT)
 	$(BIN)/granian --interface wsgi --host 127.0.0.1 --port $(SEARXNG_PORT) \
 		searxng.api_only:application
 
-check: check-imports check-config check-sql ## Run every static check
+check: lint check-imports check-config check-sql test ## Run every check
+
+lint: ## Lint the bot package
+	$(BIN)/ruff check bot tests
+
+test: ## Run the unit tests
+	$(BIN)/pytest
 
 check-imports: ## Byte-compile the bot package and import every module
 	$(BIN)/python -m compileall -q bot
@@ -43,11 +52,11 @@ check-config: ## Validate that .env.example loads through the real settings
 		from bot.config import Settings; s = Settings(); \
 		print('config OK:', s.llm.provider, s.stt.provider, s.searxng.url)"
 
-check-sql: ## Parse the migration with PostgreSQL's own grammar (needs pglast)
+check-sql: ## Parse the migrations with PostgreSQL's own grammar (needs pglast)
 	@$(BIN)/python -c "import pglast" 2>/dev/null || { echo "pip install pglast to run this check"; exit 0; }
-	$(BIN)/python -c "import pglast; \
-		n = len(pglast.parse_sql(open('bot/services/db/migrations/001_init.sql').read())); \
-		print(f'migration parses: {n} statements')"
+	$(BIN)/python -c "import glob, pglast; \
+		[print(f'{f}: {len(pglast.parse_sql(open(f).read()))} statements') \
+		 for f in sorted(glob.glob('bot/services/db/migrations/*.sql'))]"
 
 check-api: ## Smoke-test the SearXNG JSON API (SearXNG must be running)
 	@curl -fsS "http://127.0.0.1:$(SEARXNG_PORT)/healthz" >/dev/null && echo "healthz OK"

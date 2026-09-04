@@ -15,13 +15,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from bot.config import Settings
-from bot.exceptions import BotError
+from bot.exceptions import BotError, PipelineTimeoutError
 from bot.handlers.formatting import format_result, format_summary
 from bot.keyboards.main_menu import main_menu_keyboard, mode_switch_keyboard
 from bot.keyboards.result import result_keyboard
 from bot.logging_conf import get_logger
-from bot.middlewares.throttling import SearchSlots
+from bot.middlewares.throttling import BUSY_MESSAGES, SearchSlots
 from bot.models.enums import Mode
+from bot.services.limits import QuotaKind, QuotaService
 from bot.services.pipeline import ResearchPipeline
 from bot.states import Research
 from bot.utils.text import plural_ru
@@ -47,6 +48,7 @@ async def on_text_query(
     pipeline: ResearchPipeline,
     settings: Settings,
     slots: SearchSlots,
+    quota: QuotaService,
 ) -> None:
     """A typed request."""
     await run_research(
@@ -55,6 +57,7 @@ async def on_text_query(
         pipeline=pipeline,
         settings=settings,
         slots=slots,
+        quota=quota,
         text=message.text or "",
     )
 
@@ -76,13 +79,17 @@ async def run_research(
     pipeline: ResearchPipeline,
     settings: Settings,
     slots: SearchSlots,
+    quota: QuotaService,
     text: str,
     transcript: str | None = None,
 ) -> None:
     """Run the pipeline for *text* and send everything back.
 
-    Owns the FSM transition into and out of ``processing`` and the global
-    concurrency slot, so both must be released on every exit path.
+    Owns the FSM transition into and out of ``processing`` and the concurrency
+    slot, so both must be released on every exit path. The order of the guards
+    matters: the cheap local checks come first, and the daily quota -- which
+    costs a database round trip and, once spent, cannot be given back -- is
+    only consumed once the request is definitely going to run.
     """
     user = message.from_user
     if user is None:
@@ -99,24 +106,43 @@ async def run_research(
         await message.answer("Сначала выберите режим:", reply_markup=main_menu_keyboard())
         return
 
-    if not slots.try_acquire():
-        await message.answer(
-            "🚦 Сейчас обрабатывается максимальное число запросов. "
-            "Попробуйте через минуту, пожалуйста."
-        )
+    denial = slots.try_acquire(user.id)
+    if denial is not None:
+        log.info("search.refused", user_id=user.id, reason=denial.value)
+        await message.answer(BUSY_MESSAGES[denial])
+        return
+
+    try:
+        await quota.consume(user.id, QuotaKind.SEARCHES)
+    except BotError as exc:
+        slots.release(user.id)
+        await message.answer(f"⚠️ {exc.user_message}")
+        return
+    except Exception:  # a leaked slot would lock the user out until a restart
+        slots.release(user.id)
+        log.exception("search.quota_check_failed", user_id=user.id)
+        await message.answer("⚠️ Не удалось проверить лимиты. Попробуйте ещё раз.")
         return
 
     status = await message.answer("🧠 Разбираю запрос…")
     await state.set_state(Research.processing)
 
+    timeout = settings.pipeline.timeout_seconds
     try:
-        outcome = await pipeline.run(
-            user_id=user.id,
-            mode=mode,
-            text=query,
-            transcript=transcript,
-            progress=lambda line: _update_status(status, line),
-        )
+        # Without this ceiling a provider that never answers leaves the user
+        # watching a status message forever, holding a slot the whole time.
+        async with asyncio.timeout(timeout):
+            outcome = await pipeline.run(
+                user_id=user.id,
+                mode=mode,
+                text=query,
+                transcript=transcript,
+                progress=lambda line: _update_status(status, line),
+            )
+    except TimeoutError:
+        log.warning("search.timed_out", user_id=user.id, timeout_seconds=timeout)
+        await _safe_edit(status, f"⚠️ {PipelineTimeoutError.default_user_message}")
+        return
     except BotError as exc:
         log.warning("search.failed", error=str(exc))
         await _safe_edit(status, f"⚠️ {exc.user_message}")
@@ -128,7 +154,10 @@ async def run_research(
         )
         return
     finally:
-        slots.release()
+        # Outside the timeout block on purpose: by the time this runs the
+        # cancellation has been converted to TimeoutError, so these awaits are
+        # not themselves cancelled and the slot is always given back.
+        slots.release(user.id)
         await state.set_state(Research.waiting_query)
 
     await _send_results(message, status, outcome, settings, mode)

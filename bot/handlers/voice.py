@@ -18,6 +18,7 @@ from bot.handlers.search import run_research
 from bot.keyboards.main_menu import main_menu_keyboard
 from bot.logging_conf import get_logger
 from bot.middlewares.throttling import SearchSlots
+from bot.services.limits import QuotaService
 from bot.services.pipeline import ResearchPipeline
 from bot.services.stt import AudioFile, STTManager
 from bot.states import Research
@@ -29,6 +30,29 @@ log = get_logger(__name__)
 _VOICE_FILTER = F.voice | F.audio | F.video_note
 
 
+@router.message(Research.processing, _VOICE_FILTER)
+async def on_voice_while_busy(message: Message) -> None:
+    """A voice note that arrived while a search is already running.
+
+    Registered ahead of the mode-less handler below, and it deliberately does
+    not touch the FSM. Without it a voice note during a search fell through to
+    `on_voice_without_mode`, which reset the state to `choosing_mode` -- so the
+    running search would finish and set the state back to `waiting_query`,
+    leaving the user staring at a mode menu that was already obsolete, with no
+    idea which of the two messages to believe.
+
+    Transcribing now and queueing the request was the alternative; refusing is
+    the honest one. The user gets an answer immediately and keeps their voice
+    note, instead of a request they can no longer see or cancel firing off
+    minutes later against a mode they may since have changed.
+    """
+    await message.answer(
+        "⏳ Сейчас выполняется ваш предыдущий запрос.\n"
+        "Дождитесь результатов и отправьте голосовое ещё раз — я его не потерял, "
+        "просто пока не могу взять в работу."
+    )
+
+
 @router.message(Research.waiting_query, _VOICE_FILTER)
 async def on_voice(
     message: Message,
@@ -36,9 +60,16 @@ async def on_voice(
     pipeline: ResearchPipeline,
     settings: Settings,
     slots: SearchSlots,
+    quota: QuotaService,
     stt: STTManager,
 ) -> None:
     """Transcribe, confirm, then run the normal search flow."""
+    if not settings.stt.enabled:
+        await message.answer(
+            "🔇 Распознавание голосовых сообщений отключено. Напишите запрос текстом, пожалуйста."
+        )
+        return
+
     status = await message.answer("🎧 Распознаю голосовое сообщение…")
 
     try:
@@ -65,6 +96,7 @@ async def on_voice(
         pipeline=pipeline,
         settings=settings,
         slots=slots,
+        quota=quota,
         text=transcript.text,
         transcript=transcript.text,
     )
@@ -72,7 +104,11 @@ async def on_voice(
 
 @router.message(_VOICE_FILTER)
 async def on_voice_without_mode(message: Message, state: FSMContext) -> None:
-    """A voice note arrived before a mode was picked."""
+    """A voice note arrived before a mode was picked.
+
+    Only reached when no search is in flight -- `on_voice_while_busy` claims
+    that case first -- so resetting the state here is safe.
+    """
     await state.set_state(Research.choosing_mode)
     await message.answer(
         "Сначала выберите режим, потом можно диктовать:",

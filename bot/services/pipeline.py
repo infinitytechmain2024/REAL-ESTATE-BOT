@@ -117,7 +117,7 @@ class ResearchPipeline:
             if progress is not None:
                 await progress(message)
 
-        parsed = await self.extract_query(text, mode)
+        parsed = await self.extract_query(text, mode, user_id=user_id)
         log.info("pipeline.parsed", user_id=user_id, summary=parsed.summary())
 
         queries = self.query_builder.build(parsed)
@@ -157,7 +157,7 @@ class ResearchPipeline:
 
         degraded = False
         try:
-            structured = await self.rank(parsed, candidates)
+            structured = await self.rank(parsed, candidates, user_id=user_id)
         except LLMError as exc:
             # The search worked; only the ranking failed. Sending unranked hits
             # is a much better outcome than sending nothing.
@@ -209,7 +209,7 @@ class ResearchPipeline:
 
     # -- stages ------------------------------------------------------------
 
-    async def extract_query(self, text: str, mode: Mode) -> ParsedQuery:
+    async def extract_query(self, text: str, mode: Mode, *, user_id: int | None = None) -> ParsedQuery:
         """Turn free-form text into a :class:`ParsedQuery`.
 
         The only stage allowed to abort the run: without an understood request
@@ -220,13 +220,18 @@ class ResearchPipeline:
             ParsedQuery,
             model=self.settings.llm.extract_model,
             purpose="extract",
+            user_id=user_id,
         )
         # The user picked the mode with a button; the model does not get to
         # overrule that.
         return parsed.model_copy(update={"mode": mode})
 
     async def rank(
-        self, parsed: ParsedQuery, candidates: list[tuple[SearchHit, PageContent | None]]
+        self,
+        parsed: ParsedQuery,
+        candidates: list[tuple[SearchHit, PageContent | None]],
+        *,
+        user_id: int | None = None,
     ) -> list[StructuredResult]:
         """Score, filter and summarise the candidates."""
         if not candidates:
@@ -243,6 +248,7 @@ class ResearchPipeline:
             RankedResults,
             model=self.settings.llm.rank_model,
             purpose="rank",
+            user_id=user_id,
         )
 
         # Models occasionally return a rewritten or hallucinated URL. Anything
@@ -258,7 +264,9 @@ class ResearchPipeline:
         kept.sort(key=lambda r: r.score, reverse=True)
         return kept
 
-    async def details(self, parsed: ParsedQuery, result: StoredResult) -> str:
+    async def details(
+        self, parsed: ParsedQuery, result: StoredResult, *, user_id: int | None = None
+    ) -> str:
         """Long-form briefing for the 'Подробнее' button.
 
         Re-fetches the page when the stored content is missing -- results saved
@@ -281,6 +289,7 @@ class ResearchPipeline:
             ],
             model=self.settings.llm.rank_model,
             purpose="details",
+            user_id=user_id,
         )
         return response.text.strip()
 

@@ -62,3 +62,34 @@ class RateLimitedError(BotError):
     """The user is sending requests faster than the cooldown allows."""
 
     default_user_message = "Слишком часто. Подождите пару секунд и повторите."
+
+
+class QuotaExceededError(BotError):
+    """The user has spent their allowance for the current UTC day."""
+
+    default_user_message = (
+        "Вы исчерпали дневной лимит запросов. Он обновится после 00:00 UTC."
+    )
+
+
+class BudgetExceededError(BotError):
+    """The deployment has spent its daily LLM budget.
+
+    Deliberately *not* an :class:`LLMError`: the pipeline degrades gracefully
+    around LLM failures, and degrading here would keep spending. This one has
+    to stop the run.
+    """
+
+    default_user_message = (
+        "Дневной бюджет на ИИ-запросы исчерпан. Поиск снова заработает после 00:00 UTC — "
+        "администратор уже уведомлён."
+    )
+
+
+class PipelineTimeoutError(BotError):
+    """One run exceeded ``PIPELINE_TIMEOUT_SECONDS``."""
+
+    default_user_message = (
+        "Запрос выполнялся слишком долго и был остановлен. "
+        "Попробуйте сформулировать его короче и конкретнее."
+    )

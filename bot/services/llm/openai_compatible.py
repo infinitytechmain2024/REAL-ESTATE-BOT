@@ -74,7 +74,8 @@ class OpenAICompatibleProvider(LLMProvider):
                 log.debug("llm.provider.key_from_env", provider=self.name, env_var=var)
                 return value
         raise ConfigurationError(
-            f"no API key for LLM provider {self.name!r}: set LLM_API_KEY or one of "
+            f"Не задан API-ключ для LLM-провайдера '{self.name}'.\n"
+            f"  Задайте одну из переменных: LLM_API_KEY, "
             f"{', '.join(self.api_key_env_vars)}"
         )
 

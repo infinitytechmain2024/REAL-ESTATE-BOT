@@ -59,8 +59,10 @@ class OpenAIWhisperProvider(STTProvider):
             if value:
                 return value
         raise ConfigurationError(
-            f"no API key for STT provider {self.name!r}: set STT_API_KEY or one of "
-            f"{', '.join(self.api_key_env_vars)}"
+            f"Не задан API-ключ для STT-провайдера '{self.name}'.\n"
+            f"  Задайте одну из переменных: STT_API_KEY, "
+            f"{', '.join(self.api_key_env_vars)}\n"
+            f"  Либо отключите распознавание речи: STT_ENABLED=false"
         )
 
     async def transcribe(

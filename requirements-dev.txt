@@ -1,0 +1,9 @@
+# Test and lint tooling. Not installed in the runtime image.
+-r requirements.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+ruff==0.14.2
+
+# Used by `make check-sql` to parse the migrations with PostgreSQL's grammar.
+pglast==7.7

@@ -11,6 +11,7 @@ from __future__ import annotations
 import abc
 import json
 import re
+from collections.abc import Callable
 from typing import Any, ClassVar, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -65,6 +66,10 @@ class LLMResponse(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+UsageSink = Callable[[LLMResponse], None]
+"""Notified of every provider response so its tokens can be accounted for."""
+
+
 class LLMProvider(abc.ABC):
     """Base class for chat-completion providers.
 
@@ -110,6 +115,7 @@ class LLMProvider(abc.ABC):
         max_tokens: int = 4096,
         timeout: float | None = None,
         repair_attempts: int = 1,
+        usage_sink: UsageSink | None = None,
     ) -> ModelT:
         """Return the reply parsed into *schema*.
 
@@ -118,6 +124,11 @@ class LLMProvider(abc.ABC):
         message. Either way the text is parsed defensively (models like to
         wrap JSON in prose or ```json fences) and, if that still fails, the
         model is shown its own broken output and asked to fix it.
+
+        *usage_sink* is called with every underlying :class:`LLMResponse`,
+        repair attempts included. Without it the token counts for this path
+        would be dropped on the floor -- and a repair round costs real money,
+        so it is exactly the call that must not go unmetered.
         """
         json_schema = schema.model_json_schema()
         prepared = list(messages)
@@ -132,6 +143,8 @@ class LLMProvider(abc.ABC):
             json_schema=json_schema if self.supports_json_mode else None,
             timeout=timeout,
         )
+        if usage_sink is not None:
+            usage_sink(response)
 
         last_error: Exception
         text = response.text
@@ -158,6 +171,8 @@ class LLMProvider(abc.ABC):
                     json_schema=json_schema if self.supports_json_mode else None,
                     timeout=timeout,
                 )
+                if usage_sink is not None:
+                    usage_sink(response)
                 text = response.text
 
         raise LLMResponseError(

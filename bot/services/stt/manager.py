@@ -109,6 +109,6 @@ class STTManager:
         for name, provider in self._providers.items():
             try:
                 await provider.aclose()
-            except Exception:
+            except Exception:  # noqa: BLE001 - a failed close must not block shutdown
                 log.warning("stt.provider.close_failed", provider=name, exc_info=True)
         self._providers.clear()
