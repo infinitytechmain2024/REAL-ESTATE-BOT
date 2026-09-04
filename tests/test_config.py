@@ -78,3 +78,41 @@ def test_the_example_env_file_is_a_valid_configuration(
     assert settings.limits.daily_searches > 0
     assert settings.pipeline.timeout_seconds > 0
     assert settings.parser.max_redirects >= 0
+
+
+@pytest.mark.parametrize(
+    ("given", "value", "missing"),
+    [
+        ("SUPABASE_URL", "https://project.supabase.co", "SUPABASE_KEY"),
+        ("SUPABASE_KEY", "service-role-key", "SUPABASE_URL"),
+    ],
+)
+def test_half_configured_supabase_is_refused(
+    monkeypatch: pytest.MonkeyPatch, given: str, value: str, missing: str
+) -> None:
+    """Half a credential is a typo, and silently disabling persistence hides it.
+
+    It would also downgrade the daily quotas to in-process counters that reset
+    on every restart -- the failure mode the limits exist to prevent.
+    """
+    monkeypatch.setenv("TELEGRAM_TOKEN", "123:token")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    monkeypatch.setenv(given, value)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        get_settings(env_file=None)
+
+    message = str(excinfo.value)
+    assert missing in message
+    assert given in message
+
+
+def test_supabase_may_be_left_out_entirely(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither half set stays a supported deployment, not an error."""
+    monkeypatch.setenv("TELEGRAM_TOKEN", "123:token")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+
+    settings = get_settings(env_file=None)
+    assert settings.supabase.configured is False

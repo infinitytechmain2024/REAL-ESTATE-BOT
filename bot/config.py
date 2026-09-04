@@ -327,6 +327,28 @@ class SupabaseSettings(_Base):
         """
         return bool(self.url and self.key)
 
+    @model_validator(mode="after")
+    def _both_or_neither(self) -> SupabaseSettings:
+        """Refuse a half-configured credential.
+
+        Running without Supabase is a supported choice; running with one half
+        of the pair filled in never is -- it is a typo, and the cost of
+        treating it as a choice is high. Persistence would be silently off,
+        and with it the daily quotas would fall back to in-process counters
+        that reset on every restart, so the one deployment that most needs the
+        spending limits is the one quietly running without them.
+        """
+        if bool(self.url) is bool(self.key):
+            return self
+        given, missing = (
+            ("SUPABASE_URL", "SUPABASE_KEY") if self.url else ("SUPABASE_KEY", "SUPABASE_URL")
+        )
+        raise ValueError(
+            f"задан {given}, но не задан {missing}. Укажите обе переменные — либо уберите "
+            "обе, чтобы осознанно запустить бота без сохранения результатов "
+            "(тогда дневные лимиты сбрасываются при перезапуске)."
+        )
+
 
 class PipelineSettings(_Base):
     """Knobs for the research pipeline itself."""
@@ -446,8 +468,14 @@ def _describe_validation_error(exc: ValidationError) -> str:
     """Turn a pydantic ValidationError into something an operator can act on."""
     missing: list[str] = []
     invalid: list[str] = []
+    general: list[str] = []
     for error in exc.errors():
-        field = str(error["loc"][-1]) if error["loc"] else "?"
+        if not error["loc"]:
+            # A whole-model check (see `SupabaseSettings._both_or_neither`)
+            # names its own variables, so there is nothing to prefix it with.
+            general.append(error["msg"].removeprefix("Value error, "))
+            continue
+        field = str(error["loc"][-1])
         name = _env_var_name(exc.title, field)
         if error["type"] == "missing":
             missing.append(name)
@@ -455,6 +483,9 @@ def _describe_validation_error(exc: ValidationError) -> str:
             invalid.append(f"{name}: {error['msg']}")
 
     lines: list[str] = []
+    if general:
+        lines.append("Ошибка в конфигурации:")
+        lines.extend(f"  - {item}" for item in general)
     if missing:
         lines.append("Не заданы обязательные переменные окружения:")
         lines.extend(f"  - {name}" for name in missing)
