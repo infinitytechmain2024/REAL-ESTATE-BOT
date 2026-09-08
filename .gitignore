@@ -22,3 +22,6 @@ htmlcov/
 # Runtime
 *.log
 data/
+
+# Documentation (vendored SearXNG docs are not needed at runtime; see .dockerignore)
+docs/
