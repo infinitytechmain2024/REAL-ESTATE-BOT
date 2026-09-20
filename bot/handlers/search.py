@@ -141,11 +141,15 @@ async def run_research(
 async def _send_results(message, status, outcome, settings: Settings, mode: Mode) -> None:  # type: ignore[no-untyped-def]
     """Send each result as its own message, then the closing summary."""
     total = len(outcome.results)
+    unavailable = ""
+    if outcome.failed_sources:
+        names = ", ".join("Facebook" if name == "facebook" else name for name in outcome.failed_sources)
+        unavailable = f"⚠️ Источники недоступны: {names}. Попробуйте повторить поиск позже."
 
     if total == 0:
         await _safe_edit(
             status,
-            format_summary(
+            unavailable or format_summary(
                 mode=mode,
                 sent=0,
                 hits=outcome.hits_found,
@@ -201,7 +205,7 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
             duplicates=outcome.duplicates_skipped,
             degraded=outcome.degraded,
             alternatives=len(outcome.alternatives),
-        ),
+        ) + (f"\n{unavailable}" if unavailable else ""),
         reply_markup=mode_switch_keyboard(mode),
     )
 

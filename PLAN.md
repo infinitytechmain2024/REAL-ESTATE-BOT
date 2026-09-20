@@ -128,17 +128,17 @@ a failure of it.
 
 ---
 
-### Stage 2 — Make failure visible · ~1 day
+### Stage 2 — Make failure visible · **DONE**
 
 Today, a dead Facebook session produces a normal-looking answer with no Facebook results
 and no alert to anyone. That is the one behaviour the plan's own honesty rules forbid.
 
 | # | Task | Done when |
 |---|---|---|
-| 2.1 | Session watchdog: observe state independently, transition the state machine, emit **exactly one** alert per incident and one on recovery (spec §112). | A fixture that flips the session to unhealthy produces one alert, not two, and not zero. |
-| 2.2 | Surface `source_failure` vs `no_matches` to the *user*, not just the log. "Facebook is unavailable right now" ≠ "nothing matched". | Both paths produce distinguishable user-facing text. |
-| 2.3 | Persist incident state to disk so a bot restart mid-incident doesn't re-alert (spec §188). | Restart during an incident sends no duplicate. |
-| 2.4 | Freeze jobs while not `HEALTHY`; assert state at job start and abort cleanly if it flips mid-job (spec §114). | A job started against a healthy session and flipped mid-run aborts without partial writes. |
+| 2.1 | ✅ Session watchdog: observe state independently, transition the state machine, emit **exactly one** alert per incident and one on recovery (spec §112). | A fixture that flips the session to unhealthy produces one alert, not two, and not zero. |
+| 2.2 | ✅ Surface `source_failure` vs `no_matches` to the *user*, not just the log. "Facebook is unavailable right now" ≠ "nothing matched". | Both paths produce distinguishable user-facing text. |
+| 2.3 | ✅ Persist incident state in the existing Supabase incidents table so a bot restart mid-incident doesn't re-alert (spec §188); fall back to in-process state when Supabase is unavailable. | Restart during an incident sends no duplicate. |
+| 2.4 | ✅ Freeze jobs while not `HEALTHY`; assert state at job start and abort cleanly if it flips mid-job (spec §114). | A job started against a healthy session and flipped mid-run aborts without partial writes. |
 
 **Skills:** `pytest` with async fakes; `/code-review` at medium.
 
@@ -245,7 +245,7 @@ which Stage 1 is what produces.
 | T.2 | ✅ Ported the fetcher-routing test into it. | 0 |
 | T.3 | Save real DOM snapshots from Stage 1 as fixtures. | 1 |
 | T.4 | Every selector gets a fixture test; a Facebook markup change must fail a test, not a user's search. | 4 |
-| T.5 | State-machine tests: exactly-one-alert, timeout, restart-mid-incident, job-abort-on-flip. | 2 |
+| T.5 | ✅ State-machine tests: exactly-one-alert, timeout, restart-mid-incident, job-abort-on-flip. | 2 |
 | T.6 | Gate tests: expired token, wrong PIN, rate limit, no public bind. | 3 |
 
 **Rule:** anything that touches Facebook markup is written test-first against a saved

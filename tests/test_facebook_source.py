@@ -1,0 +1,91 @@
+from unittest.mock import AsyncMock
+
+import pytest
+
+from bot.config import FacebookSettings
+from bot.models.enums import Mode
+from bot.models.query import ParsedQuery
+from bot.models.result import StructuredResult
+from bot.services.facebook import client
+from bot.services.facebook.browser import SessionState
+from bot.services.facebook.groups import GroupAccess, GroupPost
+from tests.conftest import FakePage, FakeSession
+
+
+async def test_flip_preserves_complete_hits_but_never_writes_partial_job(
+    monkeypatch, pipeline_factory
+):
+    session = FakeSession([SessionState.HEALTHY, SessionState.LOGIN_NEEDED])
+    session.page = FakePage()
+    groups = ["https://facebook.com/groups/1", "https://facebook.com/groups/2"]
+    access = AsyncMock(return_value=GroupAccess.ACCESSIBLE)
+    posts = AsyncMock(
+        return_value=[
+            GroupPost(
+                group_url=groups[0],
+                post_url=groups[0] + "/posts/1",
+                text="Land in Spain",
+            )
+        ]
+    )
+    monkeypatch.setattr(client, "check_access", access)
+    monkeypatch.setattr(client, "search_posts", posts)
+    source = client.FacebookSource(FacebookSettings(enabled=True, group_urls=groups), session)
+    pipeline, repo = pipeline_factory(source)
+    pipeline.rank.return_value = [
+        StructuredResult(
+            url=groups[0] + "/posts/1",
+            title="Land",
+            summary="Land",
+            score=90,
+        )
+    ]
+    outcome = await pipeline.run(user_id=1, mode=Mode.LAND, text="land")
+    assert outcome.failed_sources == ["facebook"]
+    assert outcome.hits_found == len(outcome.results) == 1
+    assert outcome.results[0].id is None
+    assert access.await_count == posts.await_count == 1
+    assert session.probe_calls == 1 and session.observed_unlocked == 0
+    repo.save_results.assert_not_awaited()
+
+
+@pytest.mark.parametrize("access_state", [GroupAccess.UNKNOWN_ERROR, GroupAccess.LOGIN_REQUIRED])
+async def test_failed_group_read_is_not_no_matches(monkeypatch, access_state):
+    session = FakeSession([SessionState.HEALTHY])
+    session.page = FakePage()
+    monkeypatch.setattr(client, "check_access", AsyncMock(return_value=access_state))
+    source = client.FacebookSource(FacebookSettings(enabled=True, group_urls=["group"]), session)
+    result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
+    assert result.failed is True
+
+
+async def test_read_exception_aborts_without_half_extracted_hits(monkeypatch):
+    session = FakeSession([SessionState.HEALTHY])
+    session.page = FakePage()
+    monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
+    posts = AsyncMock(side_effect=RuntimeError("browser disconnected"))
+    monkeypatch.setattr(client, "search_posts", posts)
+    source = client.FacebookSource(
+        FacebookSettings(enabled=True, group_urls=["first", "second"]), session
+    )
+    result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
+    assert result.failed and result.hits == []
+    assert posts.await_count == 1
+
+
+async def test_missing_search_box_is_a_failed_read():
+    from bot.services.facebook.groups import search_posts
+
+    with pytest.raises(RuntimeError, match="search box"):
+        await search_posts(FakePage(), "group", "land", max_posts=5)
+
+
+async def test_healthy_empty_group_is_a_successful_read(monkeypatch):
+    session = FakeSession([SessionState.HEALTHY] * 2)
+    session.page = FakePage()
+    monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
+    monkeypatch.setattr(client, "search_posts", AsyncMock(return_value=[]))
+    source = client.FacebookSource(FacebookSettings(enabled=True, group_urls=["first"]), session)
+    result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
+    assert result.failed is False
+    assert result.hits == []

@@ -186,6 +186,49 @@ class FakeTokenStore:
         return "tok"
 
 
+class FakeSource:
+    def __init__(self, result):
+        self.result = result
+
+    async def search(self, parsed):
+        return self.result
+
+
+@pytest.fixture
+def pipeline_factory():
+    from unittest.mock import AsyncMock, Mock
+
+    from bot.config import Settings
+    from bot.models.enums import Mode
+    from bot.models.query import ParsedQuery
+    from bot.services.pipeline import ResearchPipeline
+
+    def build(source):
+        settings = Settings()
+        settings.pipeline.skip_seen_results = False
+        settings.pipeline.send_delay_seconds = 0
+        repo = Mock(
+            create_search=AsyncMock(return_value=None),
+            save_results=AsyncMock(side_effect=lambda rows: rows),
+        )
+        pipeline = ResearchPipeline(
+            settings=settings,
+            llm=Mock(),
+            search=Mock(search_many=AsyncMock(return_value=[])),
+            query_builder=Mock(build=Mock(return_value=[])),
+            fetcher=Mock(),
+            repo=repo,
+            sources={"facebook": source.search},
+        )
+        pipeline.extract_query = AsyncMock(
+            return_value=ParsedQuery(mode=Mode.LAND, keywords=["land"])
+        )
+        pipeline.rank = AsyncMock(return_value=[])
+        return pipeline, repo
+
+    return build
+
+
 class FakeIncidentRepo:
     def __init__(self, current=None):
         self.current = current

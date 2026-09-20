@@ -146,7 +146,7 @@ async def search_posts(
     search_box = await _first_placeholder(page, SEARCH_PLACEHOLDERS)
     if search_box is None:
         log.warning("facebook.group.no_search_box", group_url=group_url)
-        return []
+        raise RuntimeError("Facebook group search box unavailable")
 
     await search_box.first.click()
     await search_box.first.fill(query)

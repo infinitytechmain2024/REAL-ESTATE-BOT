@@ -65,6 +65,17 @@ class RankedResults(BaseModel):
     results: list[StructuredResult] = Field(default_factory=list)
 
 
+class SourceSearchResult(BaseModel):
+    """Completed hits plus whether any part of this source could not be read.
+
+    An aborted job may return earlier, fully extracted hits for display. A
+    failed result's hits must not be persisted as a successfully completed job.
+    """
+
+    hits: list[SearchHit] = Field(default_factory=list)
+    failed: bool = False
+
+
 class PipelineOutcome(BaseModel):
     """Everything the handler needs to report on one request."""
 
@@ -77,6 +88,8 @@ class PipelineOutcome(BaseModel):
     exact_count: int = 0
     """How many of `results` are in budget. The rest are alternatives."""
     duplicates_skipped: int = 0
+    failed_sources: list[str] = Field(default_factory=list)
+    """Unavailable sources, distinct from successful reads with no matches."""
     degraded: bool = False
     """True when ranking fell back to raw search hits."""
 
@@ -112,6 +125,7 @@ class ResearchPipeline:
         query_builder: QueryBuilder,
         fetcher: Fetcher,
         repo: SupabaseRepository,
+        sources: dict[str, Callable[[ParsedQuery], Awaitable[SourceSearchResult]]] | None = None,
     ) -> None:
         self.settings = settings
         self.llm = llm
@@ -119,6 +133,8 @@ class ResearchPipeline:
         self.query_builder = query_builder
         self.fetcher = fetcher
         self.repo = repo
+        # Opt-in only: production Facebook wiring waits for the live Stage 1 probe.
+        self.sources = sources or {}
 
     async def run(
         self,
@@ -155,10 +171,20 @@ class ResearchPipeline:
             f"Поисковых запросов: {len(queries)}"
         )
         hits = await self.search.search_many(queries)
+        failed_sources: list[str] = []
+        unpersisted_urls: set[str] = set()
+        for name, search_source in self.sources.items():
+            result = await search_source(parsed)
+            hits.extend(result.hits)
+            if result.failed:
+                failed_sources.append(name)
+                unpersisted_urls.update(hit.url for hit in result.hits)
         log.info("pipeline.hits", user_id=user_id, hits=len(hits), queries=len(queries))
 
         if not hits:
-            return PipelineOutcome(search_id=search_id, parsed=parsed, queries=queries)
+            return PipelineOutcome(
+                search_id=search_id, parsed=parsed, queries=queries, failed_sources=failed_sources,
+            )
 
         fresh_hits, duplicates = await self._drop_seen(user_id, hits)
         if not fresh_hits:
@@ -168,6 +194,7 @@ class ResearchPipeline:
                 queries=queries,
                 hits_found=len(hits),
                 duplicates_skipped=duplicates,
+                failed_sources=failed_sources,
             )
 
         noun = plural_ru(len(fresh_hits), "ссылка", "ссылки", "ссылок")
@@ -209,6 +236,7 @@ class ResearchPipeline:
             user_id=user_id,
             mode=mode,
             search_id=search_id,
+            unpersisted_urls=unpersisted_urls,
         )
         # Persistence drops rows this user already has, which can shift the
         # boundary; recount rather than trusting the pre-save split.
@@ -234,6 +262,7 @@ class ResearchPipeline:
             exact_count=exact_count,
             duplicates_skipped=duplicates,
             degraded=degraded,
+            failed_sources=failed_sources,
         )
 
     # -- stages ------------------------------------------------------------
@@ -391,6 +420,7 @@ class ResearchPipeline:
         user_id: int,
         mode: Mode,
         search_id: UUID | None,
+        unpersisted_urls: set[str] | None = None,
     ) -> list[StoredResult]:
         """Store the kept results, carrying their page text and budget verdict."""
         if not results:
@@ -415,7 +445,12 @@ class ResearchPipeline:
                 )
             )
 
-        stored = await self.repo.save_results(rows)
+        # Aborted source jobs may return completed hits for display, but must
+        # never commit a partial job. Their buttons remain absent (no row id).
+        unpersisted_urls = unpersisted_urls or set()
+        transient = [row for row in rows if row.url in unpersisted_urls]
+        persistable = [row for row in rows if row.url not in unpersisted_urls]
+        stored = (await self.repo.save_results(persistable) if persistable else []) + transient
         # save_results returns only the rows it accepted, and in its own order;
         # restore the ranking order so matches still precede alternatives.
         position = {row.url: index for index, row in enumerate(rows)}
