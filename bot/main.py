@@ -31,6 +31,7 @@ from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, User
 from bot.middlewares.throttling import SearchSlots
 from bot.services.db import SupabaseRepository
 from bot.services.facebook import FacebookSession, TokenStore, build_gate_app
+from bot.services.facebook.discovery import FacebookPublicSource
 from bot.services.facebook.recheck import GroupRechecker
 from bot.services.facebook.watchdog import FacebookWatchdog
 from bot.services.llm import LLMManager
@@ -147,13 +148,16 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
     # `playwright install` is a start-up error rather than a failed search.
     await fetcher.preflight()
 
+    query_builder = QueryBuilder(settings.searxng)
+    public_facebook = FacebookPublicSource(settings.facebook, search, query_builder)
     pipeline = ResearchPipeline(
         settings=settings,
         llm=llm,
         search=search,
-        query_builder=QueryBuilder(settings.searxng),
+        query_builder=query_builder,
         fetcher=fetcher,
         repo=repo,
+        sources={"facebook": public_facebook.search} if settings.facebook.public_search_enabled else {},
     )
 
     # Not started here: launching a real browser is deferred to first use

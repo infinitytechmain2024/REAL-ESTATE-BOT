@@ -249,3 +249,23 @@ class FakeIncidentRepo:
     async def resolve_facebook_incident(self, incident_id):
         self.resolved.append(incident_id)
         self.current = None
+
+
+@pytest.fixture
+def public_source_factory():
+    from unittest.mock import AsyncMock, Mock
+
+    from bot.config import FacebookSettings, SearxngSettings
+    from bot.services.search import QueryBuilder
+
+    def build(batches, **options):
+        from bot.services.facebook.discovery import FacebookPublicSource
+
+        search_settings = SearxngSettings()
+        search = Mock(settings=search_settings, search=AsyncMock(side_effect=batches))
+        source = FacebookPublicSource(
+            FacebookSettings(**options), search, QueryBuilder(search_settings),
+        )
+        return source, search
+
+    return build

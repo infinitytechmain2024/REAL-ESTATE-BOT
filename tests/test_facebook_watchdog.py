@@ -74,8 +74,16 @@ async def test_background_loop_can_be_cancelled():
     assert len(bot.messages) == 1
 
 
-@pytest.mark.parametrize("enabled, admins", [(True, ["1"]), (True, []), (False, [])])
-async def test_services_start_and_stop_watchdog_without_browser(monkeypatch, enabled, admins):
+@pytest.mark.parametrize(
+    "enabled, admins, public_search",
+    [(True, ["1"], True), (True, [], True), (False, [], True), (False, [], False)],
+)
+async def test_services_start_and_stop_watchdog_without_browser(
+    monkeypatch,
+    enabled,
+    admins,
+    public_search,
+):
     from unittest.mock import AsyncMock, Mock
 
     from bot import main
@@ -103,11 +111,16 @@ async def test_services_start_and_stop_watchdog_without_browser(monkeypatch, ena
     monkeypatch.setattr(main.FacebookSession, "start", AsyncMock())
     services = await main.build_services(
         Settings(
-            facebook=FacebookSettings(enabled=enabled, admin_telegram_ids=admins),
+            facebook=FacebookSettings(
+                enabled=enabled,
+                admin_telegram_ids=admins,
+                public_search_enabled=public_search,
+            ),
             parser=ParserSettings(enabled=False),
         ),
         bot=FakeBot(),
     )
+    assert ("facebook" in services.pipeline.sources) is public_search
     task = services.facebook_watchdog_task
     assert (task is not None and not task.done()) if enabled else task is None
     if enabled and not admins:

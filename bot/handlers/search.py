@@ -146,16 +146,18 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
         names = ", ".join("Facebook" if name == "facebook" else name for name in outcome.failed_sources)
         unavailable = f"⚠️ Источники недоступны: {names}. Попробуйте повторить поиск позже."
 
+    source_note = "\n".join(outcome.source_notes)
+
     if total == 0:
         await _safe_edit(
             status,
-            unavailable or format_summary(
+            (unavailable or format_summary(
                 mode=mode,
                 sent=0,
                 hits=outcome.hits_found,
                 duplicates=outcome.duplicates_skipped,
                 degraded=outcome.degraded,
-            ),
+            )) + (f"\n{source_note}" if source_note else ""),
         )
         return
 
@@ -205,7 +207,8 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
             duplicates=outcome.duplicates_skipped,
             degraded=outcome.degraded,
             alternatives=len(outcome.alternatives),
-        ) + (f"\n{unavailable}" if unavailable else ""),
+        ) + (f"\n{unavailable}" if unavailable else "")
+        + (f"\n{source_note}" if source_note else ""),
         reply_markup=mode_switch_keyboard(mode),
     )
 

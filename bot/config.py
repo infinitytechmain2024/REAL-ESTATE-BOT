@@ -382,7 +382,16 @@ class FacebookSettings(_Base):
 
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "FACEBOOK_"})
 
-    enabled: bool = Field(default=False, description="Set true once a profile/groups are configured")
+    enabled: bool = Field(
+        default=False,
+        description="Enable the shared Facebook browser and admin tools; public search is independent",
+    )
+
+    public_search_enabled: bool = Field(
+        default=True,
+        description="Discover public group posts through web search; requires no Facebook login",
+    )
+    max_discovered_groups: int = Field(default=3, ge=1, le=10)
 
     watchdog_interval_seconds: float = Field(default=60.0, gt=0)
 
@@ -408,8 +417,8 @@ class FacebookSettings(_Base):
 
     group_urls: CsvList = Field(
         default_factory=list,
-        description="Facebook group URLs to read, comma-separated. Supplied by the operator, "
-        "never discovered automatically in v1.",
+        description="Group URLs for the logged-in browser reader, comma-separated. "
+        "Public web-search discovery does not require this list.",
     )
     max_posts_per_group: int = Field(default=20, ge=1, le=200)
     max_comments_per_post: int = Field(default=15, ge=0, le=200)

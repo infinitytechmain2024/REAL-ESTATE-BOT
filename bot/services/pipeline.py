@@ -74,6 +74,7 @@ class SourceSearchResult(BaseModel):
 
     hits: list[SearchHit] = Field(default_factory=list)
     failed: bool = False
+    notes: list[str] = Field(default_factory=list)
 
 
 class PipelineOutcome(BaseModel):
@@ -88,6 +89,7 @@ class PipelineOutcome(BaseModel):
     exact_count: int = 0
     """How many of `results` are in budget. The rest are alternatives."""
     duplicates_skipped: int = 0
+    source_notes: list[str] = Field(default_factory=list)
     failed_sources: list[str] = Field(default_factory=list)
     """Unavailable sources, distinct from successful reads with no matches."""
     degraded: bool = False
@@ -172,18 +174,22 @@ class ResearchPipeline:
         )
         hits = await self.search.search_many(queries)
         failed_sources: list[str] = []
+        source_notes: list[str] = []
         unpersisted_urls: set[str] = set()
         for name, search_source in self.sources.items():
             result = await search_source(parsed)
             hits.extend(result.hits)
+            source_notes.extend(note for note in result.notes if note not in source_notes)
             if result.failed:
                 failed_sources.append(name)
                 unpersisted_urls.update(hit.url for hit in result.hits)
+        hits = list({hit.url_hash: hit for hit in hits}.values())
         log.info("pipeline.hits", user_id=user_id, hits=len(hits), queries=len(queries))
 
         if not hits:
             return PipelineOutcome(
                 search_id=search_id, parsed=parsed, queries=queries, failed_sources=failed_sources,
+                source_notes=source_notes,
             )
 
         fresh_hits, duplicates = await self._drop_seen(user_id, hits)
@@ -195,6 +201,7 @@ class ResearchPipeline:
                 hits_found=len(hits),
                 duplicates_skipped=duplicates,
                 failed_sources=failed_sources,
+                source_notes=source_notes,
             )
 
         noun = plural_ru(len(fresh_hits), "ссылка", "ссылки", "ссылок")
@@ -263,6 +270,7 @@ class ResearchPipeline:
             duplicates_skipped=duplicates,
             degraded=degraded,
             failed_sources=failed_sources,
+            source_notes=source_notes,
         )
 
     # -- stages ------------------------------------------------------------
@@ -322,6 +330,11 @@ class ResearchPipeline:
         Re-fetches the page when the stored content is missing -- results saved
         before the parser ran, or truncated at storage time.
         """
+        if result.raw.get("source_kind") == "facebook_public":
+            return (
+                "Доступен только фрагмент публикации из веб-поиска. "
+                "Полный текст не проверен — откройте ссылку на Facebook."
+            )
         content = result.content or ""
         if not content:
             page = await self.fetcher.fetch(result.url)
@@ -401,7 +414,12 @@ class ResearchPipeline:
             for hit in hits
             if hit.content
         }
-        to_fetch_hits = [hit for hit in hits if hit.url not in pre_read]
+        # Public Facebook discovery provides search snippets, not full posts.
+        # Fetching their URLs would often rank a login wall as listing content.
+        to_fetch_hits = [
+            hit for hit in hits
+            if hit.url not in pre_read and "facebook_public" not in hit.engines
+        ]
 
         fetched: dict[str, PageContent] = {}
         if self.settings.parser.enabled and to_fetch_hits:
@@ -429,6 +447,7 @@ class ResearchPipeline:
         content_by_url = {
             hit.url: page.text for hit, page in candidates if page is not None and page.ok
         }
+        public_post_urls = {hit.url for hit, _ in candidates if "facebook_public" in hit.engines}
         rows = []
         for result in results:
             verdict = verdicts.get(result.url) or BudgetMatch()
@@ -444,6 +463,9 @@ class ResearchPipeline:
                     budget_currency=verdict.currency,
                 )
             )
+
+            if result.url in public_post_urls:
+                rows[-1].raw["source_kind"] = "facebook_public"
 
         # Aborted source jobs may return completed hits for display, but must
         # never commit a partial job. Their buttons remain absent (no row id).
