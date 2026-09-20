@@ -103,6 +103,28 @@ class Services:
                 log.warning("shutdown.close_failed", service=name, exc_info=True)
 
 
+def deployment_warnings(settings: Settings) -> list[str]:
+    """Configuration that works, but that a deployment should probably not have.
+
+    Kept separate from validation on purpose: none of this is wrong enough to
+    refuse to start, and an operator mid-incident should not be locked out of
+    their own bot over a posture preference.
+    """
+    warnings: list[str] = []
+    if not settings.facebook.enabled:
+        return warnings
+
+    if settings.facebook.login_password is not None:
+        warnings.append(
+            "FACEBOOK_PASSWORD is set. The human-login path is the primary one, and with "
+            "2FA off on the bot account a stored password is most of what protects it -- "
+            "sitting on the same machine as a browser that is already logged in. Unset "
+            "both it and FACEBOOK_EMAIL unless the one automatic attempt is genuinely "
+            "wanted; the live-view button covers the rest."
+        )
+    return warnings
+
+
 async def build_services(settings: Settings, bot: Bot) -> Services:
     """Construct the service graph."""
     repo = SupabaseRepository(settings.supabase)
@@ -136,6 +158,9 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
     facebook_gate_runner = None
     if facebook_token_store is not None:
         facebook_gate_runner = await _start_facebook_gate(settings, facebook_token_store)
+
+    for warning in deployment_warnings(settings):
+        log.warning("startup.deployment_posture", detail=warning)
 
     watchdog = None
     watchdog_task = None

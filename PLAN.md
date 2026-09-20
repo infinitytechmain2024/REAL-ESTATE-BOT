@@ -196,7 +196,7 @@ to drive the live browser. TDD against saved fixtures throughout.
 
 ---
 
-### Stage 6 — Deployment · ~1 day
+### Stage 6 — Deployment · **DONE** · see `DEPLOYMENT.md`
 
 Decision taken: **old home computer + Tailscale**, not a rented VPS. With 2FA switched
 off, a familiar residential IP is one of the few signals left keeping the account
@@ -205,11 +205,11 @@ removes the residential-proxy line item and the budget pressure of a GUI-capable
 
 | # | Task | Done when |
 |---|---|---|
-| 6.1 | Compose/systemd for Xvfb + system Chrome + x11vnc + websockify + gate + bot, restarting together. | Machine reboots and everything comes back. |
-| 6.2 | CDP bound to loopback only. If bot and Chrome are separate containers, put them in one network namespace rather than widening the bind. | `:9222` unreachable from another host. |
-| 6.3 | Tailscale. Prefer **tailnet-private** over Funnel if the admin's phone has the app — no public exposure at all. | Admin opens the Telegram button from a phone abroad and sees the browser. |
-| 6.4 | Drop `FACEBOOK_EMAIL` / `FACEBOOK_PASSWORD` from the deployment. | Human login is the primary path; not storing them deletes a whole risk class *and* the auto-login branch. |
-| 6.5 | Keep the portal fetcher's browser separate from the Facebook Chrome. | Routing portal fetches through the logged-in profile would put your Facebook identity behind every Idealista request. |
+| 6.1 | ✅ Compose/systemd for Xvfb + system Chrome + x11vnc + websockify + gate + bot, restarting together. | Machine reboots and everything comes back. |
+| 6.2 | ✅ CDP bound to loopback only. If bot and Chrome are separate containers, put them in one network namespace rather than widening the bind. | `:9222` unreachable from another host. |
+| 6.3 | ✅ Tailscale. Prefer **tailnet-private** over Funnel if the admin's phone has the app — no public exposure at all. | Admin opens the Telegram button from a phone abroad and sees the browser. |
+| 6.4 | ✅ Drop `FACEBOOK_EMAIL` / `FACEBOOK_PASSWORD` from the deployment. | Human login is the primary path; not storing them deletes a whole risk class *and* the auto-login branch. |
+| 6.5 | ✅ Keep the portal fetcher's browser separate from the Facebook Chrome. | Routing portal fetches through the logged-in profile would put your Facebook identity behind every Idealista request. |
 
 ---
 
