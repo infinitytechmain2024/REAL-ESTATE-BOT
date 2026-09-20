@@ -122,7 +122,9 @@ It prints an address like `https://your-machine.your-tailnet.ts.net`. Put that i
 `FACEBOOK_DESKTOP_PUBLIC_BASE` (no trailing slash).
 
 **Funnel is genuinely public.** The bot therefore refuses to start unless
-`FACEBOOK_DESKTOP_PIN` is also set — without it, possession of a forwarded Telegram
+`FACEBOOK_DESKTOP_PIN` is also set — as it does for any base another device could
+open, including a LAN address. A loopback base is exempt, which is what makes local
+development and the first Facebook login straightforward — without it, possession of a forwarded Telegram
 message is possession of a browser logged into Facebook. Over HTTPS the PIN cookie is
 also marked `Secure` automatically.
 

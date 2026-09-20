@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import json
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -45,6 +46,24 @@ def _parse_str_list(value: object) -> object:
             if isinstance(decoded, list):
                 return [str(item).strip() for item in decoded if str(item).strip()]
     return [part.strip() for part in text.split(",") if part.strip()]
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _is_reachable_base(base: str | None) -> bool:
+    """Whether *base* is an address some other device could open.
+
+    Anything that is not loopback counts, including a LAN address: the point
+    is whether the live view can be reached from a machine that is not this
+    one, not whether it is on the public internet.
+    """
+    if not base:
+        return False
+    host = urlsplit(base.strip()).hostname
+    if host is None:
+        return True  # unparsable: assume the riskier reading
+    return host.lower() not in _LOOPBACK_HOSTS
+
 
 BotMode = Literal["polling", "webhook"]
 LogFormat = Literal["console", "json"]
@@ -427,14 +446,18 @@ class FacebookSettings(_Base):
 
     @model_validator(mode="after")
     def _public_view_needs_a_pin(self) -> FacebookSettings:
-        """A publicly reachable live view must have more than a URL in front of it.
+        """A reachable live view must have more than a URL in front of it.
 
         The token travels in a Telegram message, so without a PIN, possession
         of that message is possession of a browser logged into Facebook -- a
-        forwarded chat or an unlocked phone is enough. Loopback-only
-        deployments (no public base) need nothing extra.
+        forwarded chat or an unlocked phone is enough.
+
+        A loopback base is exempt because no second device can open it. That
+        exemption matters in practice: running locally is how the first
+        Facebook login gets done, and refusing to start there would only teach
+        people to invent a throwaway PIN before the base becomes real.
         """
-        if self.desktop_public_base and not self.desktop_pin:
+        if _is_reachable_base(self.desktop_public_base) and not self.desktop_pin:
             raise ValueError(
                 "FACEBOOK_DESKTOP_PIN is required when FACEBOOK_DESKTOP_PUBLIC_BASE is set: "
                 "the live view would otherwise be protected by the link alone"

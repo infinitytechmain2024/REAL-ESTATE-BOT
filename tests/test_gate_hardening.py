@@ -108,3 +108,40 @@ def test_entrypoint_binds_the_back_doors_to_loopback() -> None:
     assert "--remote-debugging-address=127.0.0.1" in entrypoint, "CDP is not pinned to loopback"
     assert "-localhost" in entrypoint, "x11vnc is not pinned to loopback"
     assert "websockify --web=/usr/share/novnc 127.0.0.1:6080" in entrypoint
+
+
+# --- a loopback base is not a published one --------------------------------
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://localhost:8090",
+        "http://127.0.0.1:8090",
+        "http://[::1]:8090",
+        "http://LOCALHOST:8090",
+    ],
+)
+def test_a_loopback_base_needs_no_pin(base: str) -> None:
+    """Nobody can reach it, so there is nothing for a PIN to protect.
+
+    Running locally is the normal way to develop and to do the first Facebook
+    login, and refusing to start there would push people to invent a throwaway
+    PIN -- which teaches exactly the wrong habit for when the base is real.
+    """
+    assert FacebookSettings(desktop_public_base=base).desktop_pin is None
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "https://fb.example.com",
+        "http://fb.example.com",
+        "https://machine.tailnet.ts.net",
+        "http://192.168.1.50:8090",
+    ],
+)
+def test_any_reachable_base_still_needs_one(base: str) -> None:
+    """Anything a second device could open, including on a LAN."""
+    with pytest.raises(ValidationError, match="FACEBOOK_DESKTOP_PIN"):
+        FacebookSettings(desktop_public_base=base)
