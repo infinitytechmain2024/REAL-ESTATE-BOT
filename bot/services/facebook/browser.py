@@ -216,6 +216,13 @@ class FacebookSession:
         return self._lock
 
     @property
+    def has_live_context(self) -> bool:
+        """Whether observation can run without starting a browser. Hold lock when checking."""
+        return self._context is not None and any(
+            not page.is_closed() for page in self._context.pages
+        )
+
+    @property
     def page(self) -> Page:
         if self._page is None:
             raise RuntimeError("FacebookSession.start() was not called")

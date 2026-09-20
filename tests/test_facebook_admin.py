@@ -16,51 +16,7 @@ import pytest
 from bot.config import FacebookSettings, Settings
 from bot.handlers import facebook_admin
 from bot.services.facebook.browser import SessionState
-
-
-class FakeSession:
-    """Records whether the lock was held at the moment state was observed."""
-
-    def __init__(self, states: list[SessionState]) -> None:
-        self._states = list(states)
-        self.lock = asyncio.Lock()
-        self.observed_unlocked = 0
-        self.probe_calls = 0
-        self.observe_calls = 0
-
-    async def observe_state(self) -> SessionState:
-        self.observe_calls += 1
-        if not self.lock.locked():
-            self.observed_unlocked += 1
-        return self._states.pop(0) if self._states else SessionState.HUMAN_REQUIRED
-
-    async def probe_state(self) -> SessionState:
-        self.probe_calls += 1
-        if not self.lock.locked():
-            self.observed_unlocked += 1
-        return self._states.pop(0) if self._states else SessionState.HUMAN_REQUIRED
-
-    async def start(self) -> None:
-        return None
-
-
-class FakeBot:
-    def __init__(self) -> None:
-        self.messages: list[str] = []
-
-    async def send_message(self, _chat_id: int, text: str, **_kwargs: object) -> None:
-        self.messages.append(text)
-
-
-class FakeTokenStore:
-    def __init__(self) -> None:
-        self.invalidated = 0
-
-    async def invalidate(self) -> None:
-        self.invalidated += 1
-
-    async def get_or_create(self, _ttl: int) -> str:
-        return "tok"
+from tests.conftest import FakeBot, FakeSession, FakeTokenStore
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +30,8 @@ def _fast_watcher(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(facebook_admin, "_WATCH_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(facebook_admin, "_WATCH_TIMEOUT_SECONDS", 0.05)
     facebook_admin._watcher_task = None
+    facebook_admin._last_known_state = None
+    facebook_admin._last_change_at = None
 
 
 def _settings() -> Settings:

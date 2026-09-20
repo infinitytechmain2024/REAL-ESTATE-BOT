@@ -31,6 +31,7 @@ from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, User
 from bot.middlewares.throttling import SearchSlots
 from bot.services.db import SupabaseRepository
 from bot.services.facebook import FacebookSession, TokenStore, build_gate_app
+from bot.services.facebook.watchdog import FacebookWatchdog
 from bot.services.llm import LLMManager
 from bot.services.parser import Fetcher, build_fetcher
 from bot.services.pipeline import ResearchPipeline
@@ -68,8 +69,15 @@ class Services:
     Runs whenever Facebook is enabled, independent of whether a public tunnel is pointed
     at it -- see bot/services/facebook/gate.py."""
 
+    facebook_watchdog: FacebookWatchdog | None = None
+    facebook_watchdog_task: asyncio.Task[None] | None = None
+
     async def aclose(self) -> None:
         """Close every service, letting each failure be logged not raised."""
+        if self.facebook_watchdog_task is not None:
+            self.facebook_watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.facebook_watchdog_task
         closers: list[tuple[str, object]] = [
             ("llm", self.llm.aclose),
             ("stt", self.stt.aclose),
@@ -88,7 +96,7 @@ class Services:
                 log.warning("shutdown.close_failed", service=name, exc_info=True)
 
 
-async def build_services(settings: Settings) -> Services:
+async def build_services(settings: Settings, bot: Bot) -> Services:
     """Construct the service graph."""
     repo = SupabaseRepository(settings.supabase)
     await repo.connect()
@@ -122,6 +130,14 @@ async def build_services(settings: Settings) -> Services:
     if facebook_token_store is not None:
         facebook_gate_runner = await _start_facebook_gate(settings, facebook_token_store)
 
+    watchdog = None
+    watchdog_task = None
+    if facebook_session is not None:
+        if not settings.facebook.admin_telegram_ids:
+            log.warning("startup.facebook_no_admins", detail="Facebook alerts have no recipients")
+        watchdog = FacebookWatchdog(facebook_session, facebook_token_store, settings, bot, repo)
+        watchdog_task = asyncio.create_task(watchdog.run(), name="facebook-watchdog")
+
     return Services(
         llm=llm,
         stt=stt,
@@ -133,6 +149,8 @@ async def build_services(settings: Settings) -> Services:
         facebook_session=facebook_session,
         facebook_token_store=facebook_token_store,
         facebook_gate_runner=facebook_gate_runner,
+        facebook_watchdog=watchdog,
+        facebook_watchdog_task=watchdog_task,
     )
 
 
@@ -175,6 +193,7 @@ def build_dispatcher(settings: Settings, services: Services) -> Dispatcher:
         slots=services.slots,
         facebook_session=services.facebook_session,
         facebook_token_store=services.facebook_token_store,
+        facebook_watchdog=services.facebook_watchdog,
     )
 
     for observer in (dispatcher.message, dispatcher.callback_query):
@@ -277,7 +296,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    services = await build_services(settings)
+    services = await build_services(settings, bot)
     dispatcher = build_dispatcher(settings, services)
 
     runner = run_webhook if settings.telegram.mode == "webhook" else run_polling

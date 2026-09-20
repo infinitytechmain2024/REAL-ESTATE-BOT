@@ -10,9 +10,12 @@ an assertion instead of a code review comment.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
+
+from bot.services.facebook.browser import SessionState
 
 
 class FakeLocator:
@@ -134,3 +137,72 @@ def _minimal_env(monkeypatch: pytest.MonkeyPatch) -> None:
     placeholder so `Settings()` can be built in a test at all.
     """
     monkeypatch.setenv("TELEGRAM_TOKEN", "123456:test-token-not-real")
+
+
+class FakeSession:
+    """Records whether the lock was held at the moment state was observed."""
+
+    def __init__(self, states: list[SessionState]) -> None:
+        self._states = list(states)
+        self.has_live_context = True
+        self.start_calls = 0
+        self.lock = asyncio.Lock()
+        self.observed_unlocked = 0
+        self.probe_calls = 0
+        self.observe_calls = 0
+
+    async def observe_state(self) -> SessionState:
+        self.observe_calls += 1
+        if not self.lock.locked():
+            self.observed_unlocked += 1
+        return self._states.pop(0) if self._states else SessionState.HUMAN_REQUIRED
+
+    async def probe_state(self) -> SessionState:
+        self.probe_calls += 1
+        if not self.lock.locked():
+            self.observed_unlocked += 1
+        return self._states.pop(0) if self._states else SessionState.HUMAN_REQUIRED
+
+    async def start(self) -> None:
+        self.start_calls += 1
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send_message(self, _chat_id: int, text: str, **_kwargs: object) -> None:
+        self.messages.append(text)
+
+
+class FakeTokenStore:
+    def __init__(self) -> None:
+        self.invalidated = 0
+
+    async def invalidate(self) -> None:
+        self.invalidated += 1
+
+    async def get_or_create(self, _ttl: int) -> str:
+        return "tok"
+
+
+class FakeIncidentRepo:
+    def __init__(self, current=None):
+        self.current = current
+        self.opened = []
+        self.resolved = []
+
+    async def current_facebook_incident(self):
+        return self.current
+
+    async def open_facebook_incident(self, state):
+        from uuid import uuid4
+
+        incident_id = uuid4()
+        self.opened.append(state)
+        self.current = {"id": str(incident_id), "state": state}
+        return incident_id
+
+    async def resolve_facebook_incident(self, incident_id):
+        self.resolved.append(incident_id)
+        self.current = None

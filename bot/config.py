@@ -357,6 +357,8 @@ class FacebookSettings(_Base):
 
     enabled: bool = Field(default=False, description="Set true once a profile/groups are configured")
 
+    watchdog_interval_seconds: float = Field(default=60.0, gt=0)
+
     profile_dir: str = Field(
         default="./data/facebook_profile",
         description="Persistent Playwright user-data-dir; holds the login session on disk",

@@ -26,17 +26,18 @@ from datetime import UTC, datetime
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 
 from bot.config import Settings
 from bot.keyboards.facebook_admin import FacebookAdminCallback, facebook_admin_keyboard
 from bot.logging_conf import get_logger
 from bot.services.facebook import FacebookSession, SessionState, TokenStore
+from bot.services.facebook.alerts import RECOVERY_TEXT
+from bot.services.facebook.alerts import open_button as _open_button
+from bot.services.facebook.watchdog import FacebookWatchdog
 
 router = Router(name="facebook_admin")
 log = get_logger(__name__)
-
-OPEN_BUTTON_TEXT = "Открыть Facebook"
 
 STATE_LABEL = {
     SessionState.HEALTHY: "✅ Подключено",
@@ -85,24 +86,6 @@ def _format_last_change() -> str:
     return f"{minutes} минут назад"
 
 
-async def _open_button(
-    settings: Settings, token_store: TokenStore | None
-) -> InlineKeyboardMarkup | None:
-    """A keyboard with the live-view link, or None if there is nothing to link to.
-
-    Reuses the current token if one is still valid rather than always minting
-    a fresh one -- see ``TokenStore.get_or_create`` for why: a fresh token on
-    every button tap would invalidate a login the admin is already mid-way
-    through in an open tab.
-    """
-    if token_store is None or not settings.facebook.desktop_public_base:
-        return None
-    token = await token_store.get_or_create(settings.facebook.desktop_token_ttl_seconds)
-    url = f"{settings.facebook.desktop_public_base.rstrip('/')}/s/{token}"
-    button = InlineKeyboardButton(text=OPEN_BUTTON_TEXT, url=url)
-    return InlineKeyboardMarkup(inline_keyboard=[[button]])
-
-
 async def _watch_for_recovery(
     facebook_session: FacebookSession,
     token_store: TokenStore | None,
@@ -138,7 +121,7 @@ async def _watch_for_recovery(
             log.info("facebook.admin.watch_recovered", chat_id=chat_id, elapsed_seconds=elapsed)
             if token_store is not None:
                 await token_store.invalidate()
-            await bot.send_message(chat_id, "Готово. Страницу можно закрыть. Бот продолжит работу.")
+            await bot.send_message(chat_id, RECOVERY_TEXT)
             return
 
     log.warning("facebook.admin.watch_timed_out", chat_id=chat_id)
@@ -194,6 +177,7 @@ async def on_facebook_admin_action(
     settings: Settings,
     facebook_session: FacebookSession | None,
     facebook_token_store: TokenStore | None,
+    facebook_watchdog: FacebookWatchdog | None = None,
 ) -> None:
     if query.from_user is None or not _is_admin(query.from_user.id, settings):
         await query.answer()
@@ -249,7 +233,9 @@ async def on_facebook_admin_action(
             )
         await query.message.answer(text, reply_markup=keyboard)
 
-        if query.bot is not None:
+        if facebook_watchdog is not None:
+            await facebook_watchdog.tick()
+        elif query.bot is not None:
             _start_watcher(
                 facebook_session, facebook_token_store, settings, query.bot, query.message.chat.id
             )

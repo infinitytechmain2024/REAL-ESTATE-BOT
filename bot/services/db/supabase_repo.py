@@ -310,6 +310,42 @@ class SupabaseRepository:
         )
         return [_row_to_result(row) for row in rows or []]
 
+    # -- Facebook session incidents ----------------------------------------
+
+    async def open_facebook_incident(self, state: str) -> UUID | None:
+        if self._client is None:
+            return None
+        rows = await self._execute(
+            "open_facebook_incident",
+            lambda: self._table("facebook_session_incidents").insert({"state": state}),
+        )
+        if not rows:
+            return None
+        try:
+            return UUID(str(rows[0]["id"]))
+        except (KeyError, ValueError):
+            return None
+
+    async def current_facebook_incident(self) -> dict[str, Any] | None:
+        if self._client is None:
+            return None
+        rows = await self._execute(
+            "current_facebook_incident",
+            lambda: self._table("facebook_session_incidents").select("*")
+            .is_("resolved_at", "null").order("detected_at", desc=True).limit(1),
+        )
+        return rows[0] if rows else None
+
+    async def resolve_facebook_incident(self, incident_id: UUID) -> None:
+        if self._client is None:
+            return
+        await self._execute(
+            "resolve_facebook_incident",
+            lambda: self._table("facebook_session_incidents")
+            .update({"resolved_at": dt.datetime.now(dt.UTC).isoformat()})
+            .eq("id", str(incident_id)).is_("resolved_at", "null"),
+        )
+
     # -- internals ---------------------------------------------------------
 
     def _table(self, name: str):  # type: ignore[no-untyped-def]
