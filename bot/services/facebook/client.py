@@ -54,7 +54,6 @@ class FacebookSource:
                     log.warning("facebook.source.session_not_healthy", state=state.value)
                     return SourceSearchResult(failed=True)
 
-                failed = False
                 for index, group_url in enumerate(self.settings.group_urls):
                     if index and await self.session.observe_state() != SessionState.HEALTHY:
                         return SourceSearchResult(hits=hits, failed=True)
@@ -63,9 +62,10 @@ class FacebookSource:
                         log.info(
                             "facebook.source.group_skipped", group_url=group_url, access=access.value
                         )
-                        failed = True
                         if access in (GroupAccess.LOGIN_REQUIRED, GroupAccess.UNKNOWN_ERROR):
                             return SourceSearchResult(hits=hits, failed=True)
+                        # Known group restrictions are not a broken source; keep
+                        # reading and allow completed hits from other groups to save.
                         continue
 
                     # Only a fully completed group read contributes hits. Exceptions
@@ -79,7 +79,7 @@ class FacebookSource:
                     hits.extend(_post_to_hit(post) for post in posts)
 
                 # Also catch a flip during the last (or only) group.
-                failed = failed or await self.session.observe_state() != SessionState.HEALTHY
+                failed = await self.session.observe_state() != SessionState.HEALTHY
                 return SourceSearchResult(hits=hits, failed=failed)
             except Exception:
                 log.exception("facebook.source.read_failed")

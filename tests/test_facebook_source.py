@@ -89,3 +89,41 @@ async def test_healthy_empty_group_is_a_successful_read(monkeypatch):
     result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
     assert result.failed is False
     assert result.hits == []
+
+
+@pytest.mark.parametrize(
+    "access_state",
+    [GroupAccess.MEMBERSHIP_REQUIRED, GroupAccess.PENDING_APPROVAL, GroupAccess.UNAVAILABLE],
+)
+async def test_known_group_access_limits_do_not_fail_other_groups(
+    monkeypatch, pipeline_factory, access_state
+):
+    session = FakeSession([SessionState.HEALTHY] * 4)
+    session.page = FakePage()
+    groups = [f"https://facebook.com/groups/{index}" for index in range(3)]
+    access = AsyncMock(side_effect=[GroupAccess.ACCESSIBLE, access_state, GroupAccess.ACCESSIBLE])
+    posts = AsyncMock(
+        side_effect=[
+            [GroupPost(group_url=group, post_url=group + "/posts/1", text="Land in Spain")]
+            for group in (groups[0], groups[2])
+        ]
+    )
+    monkeypatch.setattr(client, "check_access", access)
+    monkeypatch.setattr(client, "search_posts", posts)
+    source = client.FacebookSource(FacebookSettings(enabled=True, group_urls=groups), session)
+    pipeline, repo = pipeline_factory(source)
+    expected_urls = [group + "/posts/1" for group in (groups[0], groups[2])]
+    pipeline.rank.return_value = [
+        StructuredResult(url=url, title="Land", summary="Land", score=90)
+        for url in expected_urls
+    ]
+
+    outcome = await pipeline.run(user_id=1, mode=Mode.LAND, text="land")
+
+    assert outcome.failed_sources == []
+    assert [row.url for row in outcome.results] == expected_urls
+    assert [call.args[1] for call in access.await_args_list] == groups
+    assert [call.args[1] for call in posts.await_args_list] == [groups[0], groups[2]]
+    repo.save_results.assert_awaited_once()
+    assert [row.url for row in repo.save_results.call_args.args[0]] == expected_urls
+    assert session.observed_unlocked == 0
