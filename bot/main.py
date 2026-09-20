@@ -31,6 +31,7 @@ from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, User
 from bot.middlewares.throttling import SearchSlots
 from bot.services.db import SupabaseRepository
 from bot.services.facebook import FacebookSession, TokenStore, build_gate_app
+from bot.services.facebook.recheck import GroupRechecker
 from bot.services.facebook.watchdog import FacebookWatchdog
 from bot.services.llm import LLMManager
 from bot.services.parser import Fetcher, build_fetcher
@@ -72,12 +73,18 @@ class Services:
     facebook_watchdog: FacebookWatchdog | None = None
     facebook_watchdog_task: asyncio.Task[None] | None = None
 
+    facebook_rechecker: GroupRechecker | None = None
+    facebook_recheck_task: asyncio.Task[None] | None = None
+    """Rechecks the configured group list and alerts the operator when a group
+    stops being readable -- see bot/services/facebook/recheck.py."""
+
     async def aclose(self) -> None:
         """Close every service, letting each failure be logged not raised."""
-        if self.facebook_watchdog_task is not None:
-            self.facebook_watchdog_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.facebook_watchdog_task
+        for task in (self.facebook_watchdog_task, self.facebook_recheck_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         closers: list[tuple[str, object]] = [
             ("llm", self.llm.aclose),
             ("stt", self.stt.aclose),
@@ -132,11 +139,16 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
 
     watchdog = None
     watchdog_task = None
+    rechecker = None
+    recheck_task = None
     if facebook_session is not None:
         if not settings.facebook.admin_telegram_ids:
             log.warning("startup.facebook_no_admins", detail="Facebook alerts have no recipients")
         watchdog = FacebookWatchdog(facebook_session, facebook_token_store, settings, bot, repo)
         watchdog_task = asyncio.create_task(watchdog.run(), name="facebook-watchdog")
+        if settings.facebook.group_urls:
+            rechecker = GroupRechecker(facebook_session, settings, bot, repo)
+            recheck_task = asyncio.create_task(rechecker.run(), name="facebook-group-recheck")
 
     return Services(
         llm=llm,
@@ -151,6 +163,8 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
         facebook_gate_runner=facebook_gate_runner,
         facebook_watchdog=watchdog,
         facebook_watchdog_task=watchdog_task,
+        facebook_rechecker=rechecker,
+        facebook_recheck_task=recheck_task,
     )
 
 

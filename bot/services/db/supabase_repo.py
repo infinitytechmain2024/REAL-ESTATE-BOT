@@ -346,6 +346,42 @@ class SupabaseRepository:
             .eq("id", str(incident_id)).is_("resolved_at", "null"),
         )
 
+    # -- facebook groups ---------------------------------------------------
+
+    async def facebook_group_access(self, url: str) -> str | None:
+        """The access state last recorded for *url*, or None if unrecorded.
+
+        None is deliberately ambiguous between "never checked" and "the query
+        failed": the caller treats both as "no previous state", which at worst
+        repeats one alert rather than swallowing one.
+        """
+        if self._client is None:
+            return None
+        rows = await self._execute(
+            "facebook_group_access",
+            lambda: self._table("facebook_groups").select("access_state").eq("url", url).limit(1),
+        )
+        if not rows:
+            return None
+        state = rows[0].get("access_state")
+        return str(state) if state else None
+
+    async def record_facebook_group_access(self, url: str, access_state: str) -> None:
+        """Remember what a group looked like, so a restart does not re-announce it."""
+        if self._client is None:
+            return
+        await self._execute(
+            "record_facebook_group_access",
+            lambda: self._table("facebook_groups").upsert(
+                {
+                    "url": url,
+                    "access_state": access_state,
+                    "last_checked_at": dt.datetime.now(dt.UTC).isoformat(),
+                },
+                on_conflict="url",
+            ),
+        )
+
     # -- internals ---------------------------------------------------------
 
     def _table(self, name: str):  # type: ignore[no-untyped-def]
