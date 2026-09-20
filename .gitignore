@@ -22,3 +22,13 @@ htmlcov/
 # Runtime
 *.log
 data/
+
+# Browser profiles and debug artefacts — these hold live session cookies
+# and screenshots of group members, and must never reach the repo.
+chrome-profile/
+fb-bot-profile/
+**/Default/
+**/Local State
+**/Cookies
+screenshots/
+*.png

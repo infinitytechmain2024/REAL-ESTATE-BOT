@@ -11,12 +11,13 @@ The flow is::
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from bot.models.enums import Mode, ResultStatus
+from bot.models.enums import BudgetFit, Mode, ResultStatus
 from bot.utils.urls import url_hash
 
 
@@ -32,6 +33,16 @@ class SearchHit(BaseModel):
     score: float = 0.0
     published_at: dt.datetime | None = None
     query: str | None = Field(default=None, description="Which of our queries produced this hit")
+
+    content: str | None = Field(
+        default=None,
+        description="Pre-extracted page text, when the source already read it (e.g. a Facebook "
+        "group post). When set, the pipeline skips fetching this URL and ranks on this text "
+        "directly -- the normal HTTP fetcher cannot reach an authenticated Facebook page anyway.",
+    )
+    author: str | None = Field(
+        default=None, description="Displayed author name, for sources that have one (e.g. a comment)"
+    )
 
     @property
     def url_hash(self) -> str:
@@ -55,6 +66,19 @@ class PageContent(BaseModel):
     lang: str | None = None
     fetched_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
     error: str | None = Field(default=None, description="Why extraction failed, if it did")
+    status: int | None = Field(
+        default=None, description="HTTP status of the response, when there was one"
+    )
+
+    @property
+    def blocked(self) -> bool:
+        """Whether the failure looks like bot protection rather than a dead page.
+
+        403 and 429 are what Cloudflare-fronted listing sites answer a plain
+        HTTP client with; 404 or a genuine timeout are not worth a second,
+        much more expensive, attempt through a real browser.
+        """
+        return self.status in (401, 403, 429, 503)
 
     @property
     def ok(self) -> bool:
@@ -77,6 +101,14 @@ class StructuredResult(BaseModel):
 
     location: str | None = Field(default=None, description="Location mentioned by the source")
     price: str | None = Field(default=None, description="Price as written, with currency")
+    price_value: float | None = Field(
+        default=None,
+        description="The price as a plain number, no separators or currency symbol. "
+        "For a range, the lower end. Null if the page states no price.",
+    )
+    price_currency: str | None = Field(
+        default=None, description="ISO-4217 code of `price_value`, e.g. EUR"
+    )
     area: str | None = Field(default=None, description="Area as written, with units")
     contacts: list[str] = Field(
         default_factory=list, description="Phone numbers, e-mails or contact page URLs found"
@@ -96,6 +128,33 @@ class StructuredResult(BaseModel):
         if 0.0 < number <= 1.0:
             number *= 100
         return int(max(0, min(100, round(number))))
+
+    @field_validator("price_value", mode="before")
+    @classmethod
+    def _parse_price(cls, value: object) -> object:
+        """Tolerate "285 000", "€285,000" and "285000 EUR" as well as a number."""
+        if value is None or isinstance(value, (int, float)):
+            return value
+        if not isinstance(value, str):
+            return None
+        cleaned = re.sub(r"[^\d.,]", "", value).replace(" ", "")
+        if not cleaned:
+            return None
+        # Thousands separators vary by locale; the last separator is decimal
+        # only when it is followed by exactly two digits.
+        if re.search(r"[.,]\d{2}$", cleaned):
+            cleaned = cleaned[:-3].replace(",", "").replace(".", "") + "." + cleaned[-2:]
+        else:
+            cleaned = cleaned.replace(",", "").replace(".", "")
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    @field_validator("price_currency")
+    @classmethod
+    def _upper_currency(cls, value: str | None) -> str | None:
+        return value.upper()[:3] if value else None
 
     @field_validator("contacts", mode="before")
     @classmethod
@@ -128,6 +187,18 @@ class StoredResult(BaseModel):
     content: str | None = None
     created_at: dt.datetime | None = None
 
+    # Derived at request time from the user's budget, not persisted as columns
+    # (they live inside `raw`): the same listing is a match for one user and a
+    # near miss for another, so the verdict belongs to the answer, not the row.
+    budget_fit: BudgetFit = BudgetFit.UNKNOWN
+    budget_delta: float | None = None
+    budget_currency: str | None = None
+
+    @property
+    def is_alternative(self) -> bool:
+        """Whether this was offered as a near miss rather than a match."""
+        return self.budget_fit.is_alternative
+
     @classmethod
     def from_structured(
         cls,
@@ -137,6 +208,9 @@ class StoredResult(BaseModel):
         mode: Mode,
         search_id: UUID | None,
         content: str | None = None,
+        budget_fit: BudgetFit = BudgetFit.UNKNOWN,
+        budget_delta: float | None = None,
+        budget_currency: str | None = None,
     ) -> StoredResult:
         return cls(
             search_id=search_id,
@@ -150,4 +224,7 @@ class StoredResult(BaseModel):
             status=ResultStatus.NEW,
             raw=result.model_dump(mode="json"),
             content=content,
+            budget_fit=budget_fit,
+            budget_delta=budget_delta,
+            budget_currency=budget_currency,
         )

@@ -42,13 +42,14 @@ from bot.prompts import (
     build_extract_prompt,
     build_rank_prompt,
 )
+from bot.services.budget import BudgetMatch, split_by_fit
 from bot.services.llm import ChatMessage
 from bot.utils.text import plural_ru, truncate
 
 if TYPE_CHECKING:
     from bot.services.db import SupabaseRepository
     from bot.services.llm import LLMManager
-    from bot.services.parser import PageFetcher
+    from bot.services.parser import Fetcher
     from bot.services.search import QueryBuilder, SearXNGClient
 
 log = get_logger(__name__)
@@ -72,6 +73,9 @@ class PipelineOutcome(BaseModel):
     queries: list[SearchQuery] = Field(default_factory=list)
     hits_found: int = 0
     results: list[StoredResult] = Field(default_factory=list)
+    """Matches first, then near misses. Ordering is what the handler sends."""
+    exact_count: int = 0
+    """How many of `results` are in budget. The rest are alternatives."""
     duplicates_skipped: int = 0
     degraded: bool = False
     """True when ranking fell back to raw search hits."""
@@ -79,6 +83,21 @@ class PipelineOutcome(BaseModel):
     @property
     def is_empty(self) -> bool:
         return not self.results
+
+    @property
+    def alternatives(self) -> list[StoredResult]:
+        """Results offered as near misses because their price was out of range."""
+        return self.results[self.exact_count :]
+
+    @property
+    def only_alternatives(self) -> bool:
+        """Nothing was in budget, but something close was found.
+
+        This is the case the user is told about explicitly -- an empty answer
+        and "nothing in your range, but here is one 45 000 more" are very
+        different outcomes.
+        """
+        return self.exact_count == 0 and bool(self.results)
 
 
 class ResearchPipeline:
@@ -91,7 +110,7 @@ class ResearchPipeline:
         llm: LLMManager,
         search: SearXNGClient,
         query_builder: QueryBuilder,
-        fetcher: PageFetcher,
+        fetcher: Fetcher,
         repo: SupabaseRepository,
     ) -> None:
         self.settings = settings
@@ -168,23 +187,32 @@ class ResearchPipeline:
         # In the degraded path the scores are placeholders, not judgements, so
         # applying the relevance threshold to them would discard everything for
         # anyone who raised PIPELINE_MIN_SCORE.
-        keep = (
+        relevant = (
             structured
             if degraded
             else [r for r in structured if r.score >= self.settings.pipeline.min_score]
         )
-        keep = keep[: self.settings.pipeline.max_results_to_user]
+        keep, verdicts, exact_count = self._select(relevant, parsed)
         log.info(
             "pipeline.ranked",
             user_id=user_id,
             ranked=len(structured),
-            kept=len(keep),
+            matches=exact_count,
+            alternatives=len(keep) - exact_count,
             degraded=degraded,
         )
 
         stored = await self._persist(
-            keep, candidates=candidates, user_id=user_id, mode=mode, search_id=search_id
+            keep,
+            verdicts=verdicts,
+            candidates=candidates,
+            user_id=user_id,
+            mode=mode,
+            search_id=search_id,
         )
+        # Persistence drops rows this user already has, which can shift the
+        # boundary; recount rather than trusting the pre-save split.
+        exact_count = sum(1 for row in stored if not row.is_alternative)
 
         if search_id is not None:
             await self.repo.finish_search(
@@ -203,6 +231,7 @@ class ResearchPipeline:
             queries=queries,
             hits_found=len(hits),
             results=stored,
+            exact_count=exact_count,
             duplicates_skipped=duplicates,
             degraded=degraded,
         )
@@ -286,6 +315,34 @@ class ResearchPipeline:
 
     # -- helpers -----------------------------------------------------------
 
+    def _select(
+        self, results: list[StructuredResult], query: ParsedQuery
+    ) -> tuple[list[StructuredResult], dict[str, BudgetMatch], int]:
+        """Choose what to send: matches first, then the closest near misses.
+
+        Returns the chosen results, their budget verdicts keyed by URL, and how
+        many of the chosen ones are actually in budget.
+
+        Alternatives fill whatever room the matches leave, so a request with
+        plenty of in-budget results is unaffected, while one with none still
+        comes back with something useful instead of a shrug.
+        """
+        limit = self.settings.pipeline.max_results_to_user
+        matches, alternatives = split_by_fit(results, query)
+        verdicts = {result.url: match for result, match in (*matches, *alternatives)}
+
+        chosen = [result for result, _ in matches][:limit]
+
+        if self.settings.pipeline.include_alternatives:
+            room = min(
+                limit - len(chosen),
+                self.settings.pipeline.max_alternatives,
+            )
+            if room > 0:
+                chosen += [result for result, _ in alternatives[:room]]
+
+        return chosen, verdicts, min(len(matches), limit)
+
     async def _drop_seen(self, user_id: int, hits: list[SearchHit]) -> tuple[list[SearchHit], int]:
         """Remove hits this user was already shown, if we can tell."""
         if not self.settings.pipeline.skip_seen_results:
@@ -301,45 +358,69 @@ class ResearchPipeline:
     async def _collect_content(
         self, hits: list[SearchHit]
     ) -> list[tuple[SearchHit, PageContent | None]]:
-        """Fetch the top hits and pair every hit with its page, if any.
+        """Pair every hit with its page text, fetching what nothing already read.
 
-        Only ``PARSER_MAX_PAGES`` hits are fetched -- the rest still reach the
-        ranker with their snippets, which is often enough to score them.
+        A hit that arrives with ``content`` pre-filled (e.g. a Facebook group
+        post the facebook source already read) is never fetched -- the plain
+        HTTP fetcher cannot reach an authenticated page anyway, and re-fetching
+        would just throw away a real read. Only ``PARSER_MAX_PAGES`` of the
+        *remaining* hits are fetched; the rest still reach the ranker with
+        their snippets, which is often enough to score them.
         """
-        if not self.settings.parser.enabled:
-            return [(hit, None) for hit in hits]
+        pre_read = {
+            hit.url: PageContent(url=hit.url, title=hit.title, text=hit.content)
+            for hit in hits
+            if hit.content
+        }
+        to_fetch_hits = [hit for hit in hits if hit.url not in pre_read]
 
-        to_fetch = hits[: self.settings.parser.max_pages]
-        pages = await self.fetcher.fetch_many([hit.url for hit in to_fetch])
+        fetched: dict[str, PageContent] = {}
+        if self.settings.parser.enabled and to_fetch_hits:
+            to_fetch = to_fetch_hits[: self.settings.parser.max_pages]
+            fetched = await self.fetcher.fetch_many([hit.url for hit in to_fetch])
+
+        pages = {**fetched, **pre_read}
         return [(hit, pages.get(hit.url)) for hit in hits]
 
     async def _persist(
         self,
         results: list[StructuredResult],
         *,
+        verdicts: dict[str, BudgetMatch],
         candidates: list[tuple[SearchHit, PageContent | None]],
         user_id: int,
         mode: Mode,
         search_id: UUID | None,
     ) -> list[StoredResult]:
-        """Store the kept results, carrying their page text along."""
+        """Store the kept results, carrying their page text and budget verdict."""
         if not results:
             return []
 
         content_by_url = {
             hit.url: page.text for hit, page in candidates if page is not None and page.ok
         }
-        rows = [
-            StoredResult.from_structured(
-                result,
-                user_id=user_id,
-                mode=mode,
-                search_id=search_id,
-                content=content_by_url.get(result.url),
+        rows = []
+        for result in results:
+            verdict = verdicts.get(result.url) or BudgetMatch()
+            rows.append(
+                StoredResult.from_structured(
+                    result,
+                    user_id=user_id,
+                    mode=mode,
+                    search_id=search_id,
+                    content=content_by_url.get(result.url),
+                    budget_fit=verdict.fit,
+                    budget_delta=verdict.delta,
+                    budget_currency=verdict.currency,
+                )
             )
-            for result in results
-        ]
-        return await self.repo.save_results(rows)
+
+        stored = await self.repo.save_results(rows)
+        # save_results returns only the rows it accepted, and in its own order;
+        # restore the ranking order so matches still precede alternatives.
+        position = {row.url: index for index, row in enumerate(rows)}
+        stored.sort(key=lambda row: position.get(row.url, len(position)))
+        return stored
 
 
 def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredResult]:

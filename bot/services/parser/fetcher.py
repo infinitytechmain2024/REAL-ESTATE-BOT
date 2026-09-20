@@ -41,6 +41,10 @@ class PageFetcher:
         )
         self._semaphore = asyncio.Semaphore(settings.concurrency)
 
+    async def preflight(self) -> None:
+        """Nothing to check: an HTTP client has no runtime to be missing."""
+        return None
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -67,8 +71,8 @@ class PageFetcher:
         try:
             html, final_url = await self._download(url)
         except _FetchFailure as exc:
-            log.debug("parser.fetch.failed", url=url, error=str(exc))
-            return PageContent(url=url, error=str(exc))
+            log.debug("parser.fetch.failed", url=url, error=str(exc), status=exc.status)
+            return PageContent(url=url, error=str(exc), status=exc.status)
         except Exception as exc:
             log.warning("parser.fetch.unexpected", url=url, error=str(exc), exc_info=True)
             return PageContent(url=url, error=f"unexpected error: {type(exc).__name__}")
@@ -82,9 +86,11 @@ class PageFetcher:
             # buffered in full and then discarded.
             async with self._client.stream("GET", url) as response:
                 if response.status_code >= 400:
-                    raise _FetchFailure(f"HTTP {response.status_code}")
+                    raise _FetchFailure(f"HTTP {response.status_code}", status=response.status_code)
 
-                content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                content_type = (
+                    response.headers.get("content-type", "").split(";")[0].strip().lower()
+                )
                 if content_type and not content_type.startswith(_HTML_CONTENT_TYPES):
                     raise _FetchFailure(f"unsupported content type {content_type!r}")
 
@@ -112,4 +118,13 @@ class PageFetcher:
 
 
 class _FetchFailure(Exception):
-    """Internal: a page-level failure, converted to ``PageContent.error``."""
+    """Internal: a page-level failure, converted to ``PageContent.error``.
+
+    ``status`` is set only when the failure *was* an HTTP response, so that a
+    caller can tell bot protection (403/429) from a page that simply is not
+    there -- see :attr:`bot.models.result.PageContent.blocked`.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
