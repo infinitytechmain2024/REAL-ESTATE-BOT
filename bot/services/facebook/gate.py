@@ -26,7 +26,7 @@ import asyncio
 import time
 from collections import defaultdict, deque
 
-from aiohttp import ClientSession, ClientWSTimeout, WSMsgType, web
+from aiohttp import ClientError, ClientSession, ClientWSTimeout, WSMsgType, web
 
 from bot.logging_conf import get_logger
 from bot.services.facebook.tokens import TokenStore
@@ -40,6 +40,14 @@ _EXPIRED_HTML = """<!doctype html>
 <p>This link expired. Wait for a new Telegram message.</p>
 </body>"""
 
+_UNAVAILABLE_HTML = """<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live view unavailable</title>
+<body style="font-family: sans-serif; text-align: center; padding: 4em 1em;">
+<p>The browser on the server is not responding. The link is still valid --
+try again in a moment.</p>
+</body>"""
+
 _PIN_FORM_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Enter PIN</title>
@@ -50,6 +58,30 @@ _PIN_FORM_HTML = """<!doctype html>
 <p><button type="submit" style="font-size: 1.2em;">Continue</button></p>
 </form>
 </body>"""
+
+
+# noVNC builds its own WebSocket URL from ``window.location`` plus a ``path``
+# setting that defaults to ``websockify`` -- so a plain ``/s/<token>/vnc.html``
+# loads the page and then dials ``wss://<host>/websockify`` at the *root*,
+# which this gate does not route: everything here lives under ``/s/<token>/``.
+# The link therefore has to carry the prefixed path explicitly (no leading
+# slash -- noVNC joins it on itself), or the viewer opens to a page that never
+# connects. Tokens are ``secrets.token_urlsafe``, so they are already safe to
+# drop into a query value unescaped.
+#
+# ``autoconnect`` skips noVNC's own "Connect" screen -- opening a tokenised
+# link is the authentication, a second button to press is just one more thing
+# to do one-handed on a phone. ``resize=scale`` fits the 1280x900 desktop onto
+# that phone screen instead of showing the top-left corner of it.
+def _viewer_path(token: str) -> str:
+    return (
+        f"/s/{token}/vnc.html"
+        f"?path=s/{token}/websockify"
+        "&autoconnect=true"
+        "&resize=scale"
+        "&reconnect=true"
+    )
+
 
 # Rate limiting: this many failed token/PIN checks per client IP within the
 # window locks that IP out for the rest of the window. Not a defense against
@@ -117,7 +149,7 @@ def build_gate_app(
         form = await request.post()
         if form.get("pin") == pin:
             pin_verified.add(token)
-            raise web.HTTPFound(f"/s/{token}/vnc.html")
+            raise web.HTTPFound(_viewer_path(token))
         rate_limiter.record_failure(ip)
         return web.Response(
             text=_PIN_FORM_HTML.format(action=f"/s/{token}/pin"), content_type="text/html"
@@ -125,7 +157,7 @@ def build_gate_app(
 
     async def handle_entry(request: web.Request) -> web.Response:
         token = request.match_info["token"]
-        raise web.HTTPFound(f"/s/{token}/vnc.html")
+        raise web.HTTPFound(_viewer_path(token))
 
     async def handle_proxy(request: web.Request) -> web.StreamResponse:
         token = await require_valid_token(request)
@@ -163,34 +195,73 @@ def build_gate_app(
                 headers=response_headers,
             )
 
-    async def _proxy_websocket(request: web.Request, upstream_url: str) -> web.WebSocketResponse:
-        ws_server = web.WebSocketResponse()
-        await ws_server.prepare(request)
+    async def _proxy_websocket(request: web.Request, upstream_url: str) -> web.StreamResponse:
         ws_url = upstream_url.replace("http://", "ws://").replace("https://", "wss://")
+        # noVNC asks for a subprotocol ("binary", plus "base64" on older
+        # builds). A proxy that answers the handshake before knowing what the
+        # upstream picked can echo back a protocol websockify never agreed to,
+        # and the browser then drops the connection. So: connect upstream
+        # first, and answer this side with whatever it actually chose.
+        offered = [
+            proto.strip()
+            for proto in request.headers.get("Sec-WebSocket-Protocol", "").split(",")
+            if proto.strip()
+        ]
 
-        async with ClientSession() as session, session.ws_connect(
-            ws_url, timeout=ClientWSTimeout(ws_close=10)
-        ) as ws_client:
+        async with ClientSession() as session:
+            try:
+                ws_client = await session.ws_connect(
+                    ws_url, protocols=offered, timeout=ClientWSTimeout(ws_close=10)
+                )
+            except (OSError, ClientError) as exc:
+                # The upstream is noVNC on loopback: unreachable means the
+                # browser stack died, not that the admin did anything wrong.
+                log.warning("facebook.gate.upstream_unreachable", error=str(exc))
+                return web.Response(text=_UNAVAILABLE_HTML, content_type="text/html", status=502)
 
-            async def client_to_upstream() -> None:
-                async for msg in ws_server:
-                    if msg.type == WSMsgType.TEXT:
-                        await ws_client.send_str(msg.data)
-                    elif msg.type == WSMsgType.BINARY:
-                        await ws_client.send_bytes(msg.data)
-                    elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
-                        break
+            ws_server = web.WebSocketResponse(
+                protocols=[ws_client.protocol] if ws_client.protocol else ()
+            )
+            await ws_server.prepare(request)
 
-            async def upstream_to_client() -> None:
-                async for msg in ws_client:
-                    if msg.type == WSMsgType.TEXT:
-                        await ws_server.send_str(msg.data)
-                    elif msg.type == WSMsgType.BINARY:
-                        await ws_server.send_bytes(msg.data)
-                    elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
-                        break
+            async with ws_client:
 
-            await asyncio.gather(client_to_upstream(), upstream_to_client())
+                async def client_to_upstream() -> None:
+                    async for msg in ws_server:
+                        if msg.type == WSMsgType.TEXT:
+                            await ws_client.send_str(msg.data)
+                        elif msg.type == WSMsgType.BINARY:
+                            await ws_client.send_bytes(msg.data)
+                        elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                            break
+
+                async def upstream_to_client() -> None:
+                    async for msg in ws_client:
+                        if msg.type == WSMsgType.TEXT:
+                            await ws_server.send_str(msg.data)
+                        elif msg.type == WSMsgType.BINARY:
+                            await ws_server.send_bytes(msg.data)
+                        elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                            break
+
+                # Whichever direction ends first -- almost always the admin
+                # closing the phone tab -- tears down the other. Waiting for
+                # *both* (the shape this started as) leaks one connection to
+                # websockify per viewing session: the upstream pump has no
+                # reason to return until websockify itself times out, so the
+                # handler never finishes and the socket sits there.
+                pumps = [
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                ]
+                try:
+                    await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for pump in pumps:
+                        pump.cancel()
+                    await asyncio.gather(*pumps, return_exceptions=True)
+                    await ws_client.close()
+                    await ws_server.close()
         return ws_server
 
     app = web.Application()
