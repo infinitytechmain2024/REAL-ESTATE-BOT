@@ -73,8 +73,19 @@ docker compose up --build
 ### Локально, без Docker
 
 ```sh
+make install    # venv, зависимости, Chromium для резервного фетчера
+make setup      # спросит ключи и запишет .env
+make searxng    # терминал 1
+make run        # терминал 2
+```
+
+То же самое руками, если make не нужен:
+
+```sh
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r searxng/requirements.txt -r searxng/requirements-server.txt
+pip install -r requirements.txt -r requirements-dev.txt \
+    -r searxng/requirements.txt -r searxng/requirements-server.txt
+playwright install chromium
 
 cp .env.example .env
 
@@ -93,6 +104,78 @@ python -m bot.main
 ```sh
 curl -s 'http://127.0.0.1:8888/search?q=land+for+sale+cyprus&format=json' | head -c 400
 ```
+
+## Локальная разработка
+
+### Проверки
+
+```sh
+make check        # всё разом: lint, импорты, конфиг, миграция, гейт
+make lint         # только ruff
+make probe-gate   # только живой просмотр Facebook
+```
+
+`make probe-gate` — единственная проверка здесь, которая гоняет настоящий код
+по настоящему сценарию: поднимает заглушки вместо noVNC и websockify и дёргает
+гейт так, как это сделал бы телефон (ссылка, страница, сокет, подпротокол,
+кадры в обе стороны, закрытие). Браузер ей не нужен, идёт полсекунды, и именно
+она поймала три ошибки, из-за которых ссылка из Telegram открывалась в пустоту.
+Её же гоняет CI на каждый push.
+
+`ruff format` в `make check` нет намеренно: дерево старше текущего
+форматтера, 16 файлов не прошли бы. Это отдельная уборка, а не условие для
+того, чтобы проверки вообще были.
+
+### macOS на Apple Silicon
+
+Повседневно бот запускается нативно — `make run`, безо всякого Docker, и
+`make browsers` качает arm64-сборку Chromium. Быстро и без эмуляции.
+
+Docker на M-процессоре — это про «проверить перед деплоем», а не про
+повседневную работу: образ собирается под `linux/amd64`, потому что Google не
+выпускает `google-chrome-stable` под arm64. Docker Desktop прогонит его через
+Rosetta (включается в Settings → General → «Use Rosetta for x86/amd64
+emulation», заметно быстрее) или через QEMU (медленно, по умолчанию).
+Платформа уже закреплена в `docker-compose.yml`, отдельных флагов не нужно.
+
+### Facebook локально
+
+Локально ничего из серверной машинерии не нужно: ни Xvfb, ни x11vnc, ни noVNC,
+ни туннеля. Без `FACEBOOK_CDP_URL` бот сам запускает браузер через Playwright и
+просто открывает окно у вас на экране — входите и проходите проверку в нём.
+
+Нужен установленный **Google Chrome** (обычное приложение в `/Applications`):
+сессия Facebook запускается с `channel="chrome"`, то есть настоящим Chrome, а
+не сборкой Chromium из Playwright — у настоящего браузера обычный отпечаток, и
+для автоматизации Facebook это строго лучше. `make browsers` его не качает и
+не должен.
+
+```sh
+FACEBOOK_ENABLED=true
+FACEBOOK_HEADLESS=false                   # чтобы окно было видно
+FACEBOOK_ADMIN_TELEGRAM_IDS=<ваш id>
+FACEBOOK_GROUP_URLS=https://www.facebook.com/groups/...
+# FACEBOOK_CDP_URL и FACEBOOK_DESKTOP_PUBLIC_BASE — не задавать
+```
+
+Профиль ложится в `./data/facebook_profile` и переживает перезапуски, так что
+вход нужен один раз. `/facebook` в Telegram работает и здесь, только кнопки
+«Открыть Facebook» не будет: `FACEBOOK_DESKTOP_PUBLIC_BASE` не задан, ссылку
+выдавать не на что — бот так и напишет и предложит окно на этой машине. Это не
+ошибка, а ровно тот случай, для которого писался запасной текст.
+
+Прочитать реальную группу и посмотреть, что вышло:
+
+```sh
+python scripts/facebook_probe.py "<ссылка на группу>" "<поисковая фраза>"
+```
+
+### Что на Mac проверить нельзя
+
+Xvfb, x11vnc и noVNC — линуксовые, и весь путь «кнопка в Telegram → токен →
+живое окно на сервере» целиком собирается только там. Логику гейта закрывает
+`make probe-gate`, всё остальное — только на VPS (или в Docker на линуксовой
+машине). Зелёный `make check` про этот стек не говорит ничего.
 
 ## Настройка
 
@@ -402,10 +485,15 @@ Wikidata. Первые четыре и Qwant с Mojeek в upstream выключ�
 
 ```sh
 make help          # список целей
-make install       # venv и зависимости
+make setup         # спросить ключи и записать .env
+make install       # venv, зависимости и браузер
+make browsers      # только Chromium для Playwright
 make run           # бот локально
 make searxng       # SearXNG локально
-make check         # компиляция, конфиг, миграция, JSON API
+make lint          # ruff
+make probe-gate    # живой просмотр Facebook, целиком
+make check         # lint, импорты, конфиг, миграция, гейт
+make check-api     # SearXNG JSON API (SearXNG должен быть запущен)
 make docker-up     # то же, что на Render
 ```
 

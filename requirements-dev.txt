@@ -1,0 +1,19 @@
+# ---------------------------------------------------------------------------
+# Development and CI tooling. Deliberately not in the image: the Dockerfile
+# installs requirements.txt only, and nothing here runs in production.
+#
+#   pip install -r requirements-dev.txt
+#
+# Installed for you by `make install`.
+# ---------------------------------------------------------------------------
+
+# Pinned on purpose, and pinned here rather than in the workflow: an unpinned
+# linter turns someone else's release into a red build on a branch nobody
+# touched. CI installs this same file, so the version has one home.
+ruff==0.15.8
+
+# `make check-sql` also wants pglast, to parse the migration with
+# PostgreSQL's own grammar. It is left out on purpose -- it builds a C
+# extension, which is a poor thing to make every clone of this repo pay for
+# to run one optional check. The target skips itself with a message when it
+# is missing; `pip install pglast` if you want it.
