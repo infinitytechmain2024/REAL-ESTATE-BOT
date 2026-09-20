@@ -144,19 +144,19 @@ and no alert to anyone. That is the one behaviour the plan's own honesty rules f
 
 ---
 
-### Stage 3 — Harden the gate · ~half a day · **before any tunnel is opened**
+### Stage 3 — Harden the gate · **DONE**
 
 The gate is currently loopback-only, which is why these are not yet urgent. They become
 urgent the moment a Cloudflare/Tailscale tunnel points at it.
 
 | # | Task | Finding |
 |---|---|---|
-| 3.1 | Bind PIN verification to a per-client cookie, not to the token. | `gate.py:119` — `pin_verified` is a set of *tokens*, so once the admin enters the PIN, anyone holding that link skips it. |
-| 3.2 | Prune the rate-limiter and stop `is_blocked` inserting an entry per IP queried. | `gate.py:68` — unbounded `defaultdict` growth under scanning. |
-| 3.3 | Constant-time PIN comparison. | `gate.py:118` uses `==` while the token correctly uses `compare_digest`. |
-| 3.4 | `chmod 600` the token file. | `tokens.py:107` writes with default umask; the file is a live bearer token for a logged-in browser. |
-| 3.5 | Make the PIN **mandatory**, not optional, once a public tunnel exists. | That link grants control of a logged-in Facebook account; today only phone possession stands in front of it. |
-| 3.6 | Extend the "not reachable publicly" acceptance test to CDP `:9222`, not just noVNC `:6080`. | The DevTools protocol has **no authentication whatsoever**; reaching it means owning the session and its cookies. |
+| 3.1 | ✅ Bind PIN verification to a per-client cookie, not to the token. | `gate.py:119` — `pin_verified` is a set of *tokens*, so once the admin enters the PIN, anyone holding that link skips it. |
+| 3.2 | ✅ Prune the rate-limiter and stop `is_blocked` inserting an entry per IP queried. | `gate.py:68` — unbounded `defaultdict` growth under scanning. |
+| 3.3 | ✅ Constant-time PIN comparison. | `gate.py:118` uses `==` while the token correctly uses `compare_digest`. |
+| 3.4 | ✅ `chmod 600` the token file. | `tokens.py:107` writes with default umask; the file is a live bearer token for a logged-in browser. |
+| 3.5 | ✅ Make the PIN **mandatory**, not optional, once a public tunnel exists. | That link grants control of a logged-in Facebook account; today only phone possession stands in front of it. |
+| 3.6 | ✅ Extend the "not reachable publicly" acceptance test to CDP `:9222`, not just noVNC `:6080`. | The DevTools protocol has **no authentication whatsoever**; reaching it means owning the session and its cookies. |
 
 **Skills:** `/security-review` on the gate module specifically. This is the one place in
 the codebase where a mistake is remotely exploitable.
@@ -246,7 +246,7 @@ which Stage 1 is what produces.
 | T.3 | Save real DOM snapshots from Stage 1 as fixtures. | 1 |
 | T.4 | Every selector gets a fixture test; a Facebook markup change must fail a test, not a user's search. | 4 |
 | T.5 | ✅ State-machine tests: exactly-one-alert, timeout, restart-mid-incident, job-abort-on-flip. | 2 |
-| T.6 | Gate tests: expired token, wrong PIN, rate limit, no public bind. | 3 |
+| T.6 | ✅ Gate tests: expired/invalidated token, PIN scoping, wrong PIN, rate limit, WebSocket auth, token file mode, and no public bind of 6080/5900/9222. | 3 |
 
 **Rule:** anything that touches Facebook markup is written test-first against a saved
 fixture. The live account is for discovering reality, not for regression testing.

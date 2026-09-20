@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import time
 from dataclasses import asdict, dataclass
@@ -102,7 +103,20 @@ class TokenStore:
             return None
 
     def _write(self, record: _TokenRecord) -> None:
+        """Replace the stored token, owner-readable only.
+
+        The file is a bearer credential: whoever reads it can open the live
+        view of a browser already logged into Facebook. It is therefore
+        created at 0600 rather than written wide and chmod-ed afterwards,
+        which would leave a window where anyone on the host could read it.
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(record)), encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(asdict(record)))
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         tmp.replace(self._path)

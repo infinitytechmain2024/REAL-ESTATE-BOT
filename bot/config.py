@@ -412,8 +412,26 @@ class FacebookSettings(_Base):
         "it must be reissued"
     )
     desktop_pin: str | None = Field(
-        default=None, description="Optional PIN required before the live browser view is shown"
+        default=None,
+        description="Required once FACEBOOK_DESKTOP_PUBLIC_BASE is set: the second factor "
+        "behind a link that would otherwise be the only thing protecting the session",
     )
+
+    @model_validator(mode="after")
+    def _public_view_needs_a_pin(self) -> FacebookSettings:
+        """A publicly reachable live view must have more than a URL in front of it.
+
+        The token travels in a Telegram message, so without a PIN, possession
+        of that message is possession of a browser logged into Facebook -- a
+        forwarded chat or an unlocked phone is enough. Loopback-only
+        deployments (no public base) need nothing extra.
+        """
+        if self.desktop_public_base and not self.desktop_pin:
+            raise ValueError(
+                "FACEBOOK_DESKTOP_PIN is required when FACEBOOK_DESKTOP_PUBLIC_BASE is set: "
+                "the live view would otherwise be protected by the link alone"
+            )
+        return self
     gate_bind_address: str = Field(default="127.0.0.1")
     gate_port: int = Field(default=8090)
     novnc_internal_url: str = Field(
