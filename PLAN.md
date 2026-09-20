@@ -184,13 +184,13 @@ to drive the live browser. TDD against saved fixtures throughout.
 
 ---
 
-### Stage 5 — Portals · ~1 day
+### Stage 5 — Portals · ~1 day · **tooling ready, blocked on the list**
 
 | # | Task | Done when |
 |---|---|---|
-| 5.1 | Pick **3–5** portals, not 20. Operator supplies the list. | List agreed in writing. |
-| 5.2 | Add blocked domains to `PARSER_BROWSER_DOMAINS` so they skip the doomed HTTP attempt. | Each portal returns extracted text, not a 403. |
-| 5.3 | Validate extraction quality per portal (price, area, location actually present). | Hand-check 10 listings per portal. |
+| 5.1 | ⬜ **Operator:** pick **3–5** portals, not 20, and supply the list. | List agreed in writing. |
+| 5.2 | 🛠 `scripts/portal_probe.py` reports which domains answer like bot protection and prints the `PARSER_BROWSER_DOMAINS` line to paste. Needs 5.1. | Each portal returns extracted text, not a 403. |
+| 5.3 | 🛠 The same probe judges usability, not just fetchability: a 200 that extracts to a cookie banner is reported THIN, and the run exits non-zero. Needs 5.1, and must run from the host machine — egress decides the answer. | Hand-check 10 listings per portal. |
 
 **Skills:** `/code-review`; the existing routing behaviour test as the pattern to extend.
 
