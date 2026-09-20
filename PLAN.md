@@ -213,7 +213,7 @@ removes the residential-proxy line item and the budget pressure of a GUI-capable
 
 ---
 
-### Stage 7 — Compliance, explicitly · ongoing, decide before posting
+### Stage 7 — Compliance, explicitly · **documented in `COMPLIANCE.md`** · decisions still open
 
 Not a blocker to building; a blocker to *auto-posting*.
 
@@ -228,6 +228,13 @@ Not a blocker to building; a blocker to *auto-posting*.
 - **Default posture: draft-only, per-comment approval, no bulk approve.** This is also the
   better engineering default, matching the existing rule against auto-retrying an
   ambiguous submission.
+- **Found while writing it up: there is no retention limit and no erasure path.** Nothing
+  in `results` or `searches` ever expires, and no command deletes a user. Storage
+  limitation is the cheapest of these duties to satisfy in code and the most conspicuous
+  to be missing. Two small pieces close it — a configurable retention window with a
+  periodic purge, and a `/forget` command riding the existing `on delete cascade`. Not
+  built unasked: the window length is a policy choice, and picking a number quietly is
+  the decision-by-omission this stage exists to prevent. See `COMPLIANCE.md` §6.
 
 ---
 
