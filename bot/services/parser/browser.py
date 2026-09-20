@@ -124,7 +124,7 @@ class BrowserFetcher:
             try:
                 # Playwright's own handle stops, the others close.
                 await (closer.stop() if name == "playwright" else closer.close())
-            except Exception:
+            except Exception:  # noqa: BLE001 - one bad closer must not strand the rest
                 log.warning("browser.close_failed", component=name, exc_info=True)
         self._context = self._browser = self._playwright = None
 
@@ -148,7 +148,7 @@ class BrowserFetcher:
         """Load one URL in a fresh tab. Never raises."""
         try:
             context = await self._ensure_context()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - documented never to raise: one failed page
             log.warning("browser.start_failed", url=url, error=str(exc), exc_info=True)
             return PageContent(url=url, error=f"browser unavailable: {type(exc).__name__}")
 

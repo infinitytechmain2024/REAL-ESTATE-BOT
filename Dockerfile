@@ -65,6 +65,10 @@ RUN pip install --no-cache-dir \
 COPY searxng/ ./searxng/
 COPY bot/ ./bot/
 COPY docker/ ./docker/
+# Small, and they make the image self-checking: after a deploy,
+# `docker compose exec bot python scripts/gate_probe.py` validates the
+# live-view path without installing anything on the host.
+COPY scripts/ ./scripts/
 
 RUN chmod +x docker/entrypoint.sh \
     && useradd --create-home --uid 10001 appuser \
