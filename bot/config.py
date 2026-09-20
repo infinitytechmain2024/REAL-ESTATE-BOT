@@ -246,6 +246,48 @@ class ParserSettings(_Base):
         )
     )
 
+    # -- browser fallback --------------------------------------------------
+    # Large listing portals answer a plain HTTP client with 403 however polite
+    # its headers are. These control the Playwright fetcher that gets past
+    # that; it is off by default because it needs Chromium in the image.
+
+    browser_enabled: bool = Field(
+        default=False, description="Use Playwright for blocked pages (needs requirements-browser)"
+    )
+    browser_domains: CsvList = Field(
+        default_factory=list,
+        description="Domains always fetched in a browser, skipping the HTTP attempt",
+    )
+    browser_proxy_url: str | None = Field(
+        default=None,
+        description="Egress proxy for the browser, e.g. http://user:pass@host:port. "
+        "A residential/mobile endpoint is strongly recommended: datacenter IPs "
+        "are the main thing these sites' protections key on.",
+    )
+    browser_headless: bool = Field(default=True)
+    browser_concurrency: int = Field(
+        default=2, ge=1, le=10, description="Tabs at once; each is a real page render"
+    )
+    browser_timeout_seconds: float = Field(default=30.0, gt=0, description="Navigation timeout")
+    browser_wait_until: Literal["load", "domcontentloaded", "networkidle", "commit"] = Field(
+        default="domcontentloaded",
+        description="Playwright navigation milestone to wait for before reading the DOM",
+    )
+    browser_user_agent: str = Field(
+        default=(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        ),
+        description="Sent by the browser fetcher; the bot-identifying default above "
+        "defeats the point of using a browser at all",
+    )
+    browser_locale: str = Field(default="es-ES", description="Browser locale, e.g. es-ES")
+
+    @field_validator("browser_domains", mode="before")
+    @classmethod
+    def _split_browser_domains(cls, value: object) -> object:
+        return _parse_str_list(value)
+
 
 class SupabaseSettings(_Base):
     """Supabase / PostgREST credentials."""
@@ -276,9 +318,13 @@ class PipelineSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PIPELINE_"})
 
     max_results_to_user: int = Field(default=8, ge=1, le=30)
-    min_score: int = Field(default=45, ge=0, le=100, description="Drop results the LLM scored lower")
+    min_score: int = Field(
+        default=45, ge=0, le=100, description="Drop results the LLM scored lower"
+    )
     send_delay_seconds: float = Field(
-        default=0.4, ge=0.0, description="Pause between result messages to stay under Telegram limits"
+        default=0.4,
+        ge=0.0,
+        description="Pause between result messages to stay under Telegram limits",
     )
     skip_seen_results: bool = Field(
         default=True, description="Never show a user the same url_hash twice"

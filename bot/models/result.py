@@ -55,6 +55,19 @@ class PageContent(BaseModel):
     lang: str | None = None
     fetched_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
     error: str | None = Field(default=None, description="Why extraction failed, if it did")
+    status: int | None = Field(
+        default=None, description="HTTP status of the response, when there was one"
+    )
+
+    @property
+    def blocked(self) -> bool:
+        """Whether the failure looks like bot protection rather than a dead page.
+
+        403 and 429 are what Cloudflare-fronted listing sites answer a plain
+        HTTP client with; 404 or a genuine timeout are not worth a second,
+        much more expensive, attempt through a real browser.
+        """
+        return self.status in (401, 403, 429, 503)
 
     @property
     def ok(self) -> bool:

@@ -30,7 +30,7 @@ from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, User
 from bot.middlewares.throttling import SearchSlots
 from bot.services.db import SupabaseRepository
 from bot.services.llm import LLMManager
-from bot.services.parser import PageFetcher
+from bot.services.parser import Fetcher, build_fetcher
 from bot.services.pipeline import ResearchPipeline
 from bot.services.search import QueryBuilder, SearXNGClient
 from bot.services.stt import STTManager
@@ -51,7 +51,7 @@ class Services:
     llm: LLMManager
     stt: STTManager
     search: SearXNGClient
-    fetcher: PageFetcher
+    fetcher: Fetcher
     repo: SupabaseRepository
     pipeline: ResearchPipeline
     slots: SearchSlots
@@ -79,7 +79,7 @@ async def build_services(settings: Settings) -> Services:
     llm = LLMManager(settings.llm)
     stt = STTManager(settings.stt)
     search = SearXNGClient(settings.searxng)
-    fetcher = PageFetcher(settings.parser)
+    fetcher = build_fetcher(settings.parser)
 
     pipeline = ResearchPipeline(
         settings=settings,
@@ -118,9 +118,7 @@ def build_dispatcher(settings: Settings, services: Services) -> Dispatcher:
         observer.middleware(LoggingContextMiddleware())
         observer.middleware(UserMiddleware(services.repo))
 
-    dispatcher.message.middleware(
-        ThrottlingMiddleware(settings.telegram.request_cooldown_seconds)
-    )
+    dispatcher.message.middleware(ThrottlingMiddleware(settings.telegram.request_cooldown_seconds))
 
     dispatcher.include_router(build_router())
     dispatcher.include_router(errors.router)
@@ -154,7 +152,9 @@ async def _on_startup(bot: Bot, settings: Settings, services: Services) -> None:
     )
 
 
-async def run_polling(bot: Bot, dispatcher: Dispatcher, settings: Settings, services: Services) -> None:
+async def run_polling(
+    bot: Bot, dispatcher: Dispatcher, settings: Settings, services: Services
+) -> None:
     """Long polling. The default, and what Render's background worker runs."""
     await _on_startup(bot, settings, services)
     # Updates queued while the bot was down are usually stale by the time it
@@ -163,7 +163,9 @@ async def run_polling(bot: Bot, dispatcher: Dispatcher, settings: Settings, serv
     await dispatcher.start_polling(bot, handle_signals=True)
 
 
-async def run_webhook(bot: Bot, dispatcher: Dispatcher, settings: Settings, services: Services) -> None:
+async def run_webhook(
+    bot: Bot, dispatcher: Dispatcher, settings: Settings, services: Services
+) -> None:
     """Webhook mode: an aiohttp server Telegram posts updates to."""
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
     from aiohttp import web

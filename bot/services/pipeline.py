@@ -48,7 +48,7 @@ from bot.utils.text import plural_ru, truncate
 if TYPE_CHECKING:
     from bot.services.db import SupabaseRepository
     from bot.services.llm import LLMManager
-    from bot.services.parser import PageFetcher
+    from bot.services.parser import Fetcher
     from bot.services.search import QueryBuilder, SearXNGClient
 
 log = get_logger(__name__)
@@ -91,7 +91,7 @@ class ResearchPipeline:
         llm: LLMManager,
         search: SearXNGClient,
         query_builder: QueryBuilder,
-        fetcher: PageFetcher,
+        fetcher: Fetcher,
         repo: SupabaseRepository,
     ) -> None:
         self.settings = settings
