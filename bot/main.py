@@ -36,6 +36,7 @@ from bot.services.facebook.watchdog import FacebookWatchdog
 from bot.services.llm import LLMManager
 from bot.services.parser import Fetcher, build_fetcher
 from bot.services.pipeline import ResearchPipeline
+from bot.services.retention import RetentionPurger
 from bot.services.search import QueryBuilder, SearXNGClient
 from bot.services.stt import STTManager
 
@@ -45,6 +46,7 @@ COMMANDS = [
     BotCommand(command="start", description="Начать и выбрать режим"),
     BotCommand(command="mode", description="Сменить режим поиска"),
     BotCommand(command="help", description="Как пользоваться ботом"),
+    BotCommand(command="forget", description="Удалить все мои данные"),
 ]
 
 
@@ -73,6 +75,9 @@ class Services:
     facebook_watchdog: FacebookWatchdog | None = None
     facebook_watchdog_task: asyncio.Task[None] | None = None
 
+    retention_task: asyncio.Task[None] | None = None
+    """Expires stored rows past SUPABASE_RETENTION_DAYS -- see COMPLIANCE.md."""
+
     facebook_rechecker: GroupRechecker | None = None
     facebook_recheck_task: asyncio.Task[None] | None = None
     """Rechecks the configured group list and alerts the operator when a group
@@ -80,7 +85,11 @@ class Services:
 
     async def aclose(self) -> None:
         """Close every service, letting each failure be logged not raised."""
-        for task in (self.facebook_watchdog_task, self.facebook_recheck_task):
+        for task in (
+            self.facebook_watchdog_task,
+            self.facebook_recheck_task,
+            self.retention_task,
+        ):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -159,6 +168,17 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
     if facebook_token_store is not None:
         facebook_gate_runner = await _start_facebook_gate(settings, facebook_token_store)
 
+    purger = RetentionPurger(settings, repo)
+    retention_task = (
+        asyncio.create_task(purger.run(), name="retention-purge") if purger.enabled else None
+    )
+    if settings.supabase.configured and not settings.supabase.retention_days:
+        log.warning(
+            "startup.retention_disabled",
+            detail="SUPABASE_RETENTION_DAYS=0: stored page text and contact details of "
+            "people who never used the bot are kept indefinitely (see COMPLIANCE.md)",
+        )
+
     for warning in deployment_warnings(settings):
         log.warning("startup.deployment_posture", detail=warning)
 
@@ -190,6 +210,7 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
         facebook_watchdog_task=watchdog_task,
         facebook_rechecker=rechecker,
         facebook_recheck_task=recheck_task,
+        retention_task=retention_task,
     )
 
 

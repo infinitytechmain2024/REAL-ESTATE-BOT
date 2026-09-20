@@ -114,33 +114,43 @@ Not everything here is open. Several decisions are already made and enforced in 
 
 ---
 
-## 6. The gap this document found
+## 6. The gap this document found — now closed
 
-**There is no retention limit and no erasure path.** Nothing expires. `results`,
-`searches` and the page text inside them are kept indefinitely. The only deletion that
-exists anywhere is `on delete cascade` from `users`, and nothing ever deletes a user —
-there is no command for it and no scheduled job.
+Writing §2 surfaced something nobody had noticed: **there was no retention limit and no
+erasure path.** Nothing expired, and while `users` cascades to everything else, no code
+ever deleted a user. Both are now implemented.
 
-Storage limitation is not an optional nicety; it is the easiest of the data-protection
-duties to satisfy in code and the most conspicuous to be missing. Two things would close
-it, and neither is large:
+### Retention
 
-1. **A retention window.** A setting plus a periodic purge of `results` and `searches`
-   older than N days. The rechecker in `bot/services/facebook/recheck.py` is the pattern
-   to copy — a bounded periodic task that holds no locks it does not need.
-2. **Erasure on request.** A `/forget` command wiping that user's rows, which the
-   `on delete cascade` from `users` already makes nearly trivial.
+`SUPABASE_RETENTION_DAYS`, **defaulting to 90**. A daily pass deletes `results` and then
+`searches` older than the window — children first, so an interrupted purge leaves orphaned
+parents rather than results whose search has vanished.
 
-Neither is in `PLAN.md` Stage 7, which was written as a decision item before this gap was
-visible. I have not built them unasked, because retention length is a policy choice and
-picking a number silently would be exactly the kind of decision-by-omission this document
-exists to prevent.
+Setting it to `0` keeps everything. That is a deliberate opt-out rather than the default,
+and the bot logs a start-up warning naming what is being kept and why it matters.
 
-**Recommendation:** implement both, with the window set by config and defaulting to
-something short. Ask the client for the number; ship a default rather than nothing if the
-answer is slow.
+90 is a starting number, not an answer. **If the client has a view, change it** — it is one
+line in `.env`.
 
----
+### Erasure
+
+`/forget` erases everything held about the user who asks. One delete is enough: searches,
+results and feedback all reference `users` with `on delete cascade`.
+
+Two properties of it are worth stating, because both are easy to get wrong:
+
+- **It confirms first.** A single tap must not wipe a history that cannot be recovered.
+- **A failed delete says so.** Telling someone their data is gone when it is not would be
+  worse than not offering the command at all, so the repository returns whether the delete
+  succeeded and the handler reports it honestly.
+
+### What this does not cover
+
+`/forget` serves **users of the bot**. It does nothing for the people described in §2.2 —
+the ones whose contact details and comments are stored without their knowledge, who cannot
+ask because they do not know the system exists. Retention now bounds how long their data
+is held; nothing gives them access or erasure on request. That remains open decision §4.3,
+and no amount of code closes it.
 
 ## 7. What would change the answers
 

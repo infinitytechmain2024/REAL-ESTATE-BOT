@@ -298,6 +298,14 @@ class SupabaseSettings(_Base):
     key: SecretStr | None = Field(
         default=None, description="service_role key (server side) or anon key"
     )
+    retention_days: int = Field(
+        default=90,
+        ge=0,
+        description="Delete searches and results older than this many days. The stored "
+        "rows include page text and contact details of people who never used the bot "
+        "(see COMPLIANCE.md), so keeping them indefinitely is a choice, not a default: "
+        "0 means keep everything and is a deliberate opt-out.",
+    )
     schema_name: str = Field(default="public", alias="SUPABASE_SCHEMA")
     timeout_seconds: float = Field(default=20.0, gt=0)
 

@@ -346,6 +346,41 @@ class SupabaseRepository:
             .eq("id", str(incident_id)).is_("resolved_at", "null"),
         )
 
+    # -- retention and erasure ---------------------------------------------
+
+    async def purge_expired(self, cutoff: dt.datetime) -> None:
+        """Delete searches and results created before *cutoff*.
+
+        Results are deleted first: a search row is the parent, and clearing
+        the children first means an interrupted purge leaves orphaned parents
+        rather than results whose search has vanished.
+        """
+        if self._client is None:
+            return
+        stamp = cutoff.isoformat()
+        for table in ("results", "searches"):
+            await self._execute(
+                f"purge_{table}",
+                lambda table=table: self._table(table).delete().lt("created_at", stamp),
+            )
+        log.info("retention.purged", cutoff=stamp)
+
+    async def forget_user(self, telegram_id: int) -> bool:
+        """Erase everything held about one user. Returns whether it worked.
+
+        One delete is enough: searches, results and feedback all reference
+        ``users`` with ``on delete cascade``. The boolean matters -- the caller
+        tells the person their data is gone, and must not say that when the
+        delete failed.
+        """
+        if self._client is None:
+            return False
+        rows = await self._execute(
+            "forget_user",
+            lambda: self._table("users").delete().eq("telegram_id", telegram_id),
+        )
+        return rows is not None
+
     # -- facebook groups ---------------------------------------------------
 
     async def facebook_group_access(self, url: str) -> str | None:

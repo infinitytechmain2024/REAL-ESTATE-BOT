@@ -228,13 +228,11 @@ Not a blocker to building; a blocker to *auto-posting*.
 - **Default posture: draft-only, per-comment approval, no bulk approve.** This is also the
   better engineering default, matching the existing rule against auto-retrying an
   ambiguous submission.
-- **Found while writing it up: there is no retention limit and no erasure path.** Nothing
-  in `results` or `searches` ever expires, and no command deletes a user. Storage
-  limitation is the cheapest of these duties to satisfy in code and the most conspicuous
-  to be missing. Two small pieces close it — a configurable retention window with a
-  periodic purge, and a `/forget` command riding the existing `on delete cascade`. Not
-  built unasked: the window length is a policy choice, and picking a number quietly is
-  the decision-by-omission this stage exists to prevent. See `COMPLIANCE.md` §6.
+- ✅ **Retention and erasure, found while writing up the data flows and since built.**
+  `SUPABASE_RETENTION_DAYS` (default 90) expires `results` and `searches` on a daily
+  pass; `0` keeps everything and warns at start-up. `/forget` erases a user's own data,
+  confirming first and reporting honestly if the delete fails. Neither helps the people
+  in `COMPLIANCE.md` §2.2 who do not know the system exists — that stays open.
 
 ---
 
