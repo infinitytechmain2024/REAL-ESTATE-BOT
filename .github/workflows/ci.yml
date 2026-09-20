@@ -1,0 +1,63 @@
+# The smallest workflow that would have caught something real. The token gate
+# and the noVNC WebSocket path in front of it held three separate faults until
+# someone actually ran them (see scripts/gate_probe.py); a green tick on the
+# other two steps means the tree still imports and still lints.
+#
+# Deliberately absent, so their absence reads as a decision rather than an
+# oversight:
+#
+#   - `ruff format --check`: the tree predates the current formatter and 16
+#     files would fail it today. Reformatting them is its own commit, not a
+#     condition for having CI at all.
+#   - the import walk from `make check-imports`: it needs every runtime
+#     dependency to import cleanly on a machine nobody has run it on yet.
+#     Worth adding once someone has watched it pass.
+#   - anything touching Chrome, Xvfb or the real noVNC: none of it fits in a
+#     CI runner, and pretending otherwise would turn a green tick into a
+#     claim this cannot support. The deploy is still verified by hand on the
+#     VPS -- see "Деплой на VPS" in README.md.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push makes the run in flight pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        # ruff is pinned on purpose: unpinned, someone else's release adds a
+        # rule and turns a branch nobody touched red.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff==0.15.8
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Byte-compile
+        run: python -m compileall -q bot scripts
+
+      - name: Gate probe
+        # Needs no browser: it stands up stand-ins for noVNC and websockify
+        # and drives the real gate the way a phone would.
+        run: python scripts/gate_probe.py
