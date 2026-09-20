@@ -8,11 +8,14 @@ SEARXNG_PORT ?= 8888
 export PYTHONPATH := $(CURDIR):$(CURDIR)/searxng
 
 .DEFAULT_GOAL := help
-.PHONY: help install run searxng check check-imports check-config check-sql check-api docker-up docker-down clean
+.PHONY: help setup install run searxng check check-imports check-config check-sql check-api docker-up docker-down clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+
+setup: ## Ask for your keys and write .env (nothing is sent anywhere)
+	@$(PYTHON) scripts/setup_env.py
 
 install: ## Create the venv and install bot + SearXNG dependencies
 	$(PYTHON) -m venv $(VENV)

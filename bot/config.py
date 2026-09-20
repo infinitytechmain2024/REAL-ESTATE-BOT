@@ -330,6 +330,19 @@ class PipelineSettings(_Base):
         default=True, description="Never show a user the same url_hash twice"
     )
 
+    include_alternatives: bool = Field(
+        default=True,
+        description="When a result matches everything except the budget, offer it as a "
+        "near miss ('nothing in your range, but here is one 45 000 more') instead of "
+        "dropping it",
+    )
+    max_alternatives: int = Field(
+        default=4,
+        ge=1,
+        le=20,
+        description="Cap on near misses per answer, so alternatives never crowd out matches",
+    )
+
 
 class Settings(_Base):
     """Root settings object; build it with :func:`get_settings`."""

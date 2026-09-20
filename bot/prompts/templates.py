@@ -49,14 +49,28 @@ You receive the user's structured request and a numbered list of candidate
 pages with whatever text could be extracted from each. Judge each candidate on
 whether it actually serves the request.
 
-Scoring (0-100):
-  85-100  directly matches: the right kind of object/company, right location,
-          and within the stated constraints
-  60-84   plausible match with one constraint unverified or slightly off
+Scoring (0-100) -- judge everything EXCEPT price:
+  85-100  directly matches: the right kind of object/company, in the right
+          location, with the right characteristics
+  60-84   plausible match with one characteristic unverified or slightly off
   40-59   relevant context (an agency covering the area, a directory page)
           but not itself the thing requested
   0-39    listing aggregator front pages, unrelated regions, news, spam,
           expired or empty pages
+
+PRICE IS NOT PART OF THE SCORE. A plot in exactly the right place, of exactly
+the right kind, that costs twice the stated budget is still an 85+. The caller
+compares prices itself and tells the user "nothing in your range, but here is
+one 45 000 more" -- which is far more useful than an empty answer. So never
+drop, and never mark down, a good match because of its price.
+
+To make that possible, `price_value` and `price_currency` matter:
+- `price_value` is a plain number: no spaces, no separators, no symbol.
+  "€285,000" is 285000. A range like "from 280k" is 280000.
+- `price_currency` is the ISO-4217 code, e.g. EUR, USD, GBP.
+- Leave BOTH null when the page states no price. Never estimate one, and never
+  carry a price over from a different listing on the same page -- a wrong
+  number here is quoted straight back to the user as a difference in euros.
 
 Rules:
 - Write `summary` in the SAME LANGUAGE the user wrote their request in.
