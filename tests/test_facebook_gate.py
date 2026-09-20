@@ -219,3 +219,45 @@ async def test_websocket_works_once_the_pin_is_passed(store, upstream) -> None:
             message = await socket.receive()
             assert UPSTREAM_BODY in str(message.data)
     await server.close()
+
+
+# --- the PIN cookie is itself a credential ---------------------------------
+
+
+async def _pin_cookie_header(store, upstream, **gate_kwargs) -> str:
+    """The raw Set-Cookie the gate issues when the PIN is accepted."""
+    token = await store.create(ttl_seconds=60)
+    app = build_gate_app(store, novnc_internal_url=upstream, pin=PIN, **gate_kwargs)
+    server = TestServer(app)
+    await server.start_server()
+    async with _browser(server) as client:
+        response = await client.post(
+            f"/s/{token}/pin", data={"pin": PIN}, allow_redirects=False
+        )
+        header = response.headers.get("Set-Cookie", "")
+    await server.close()
+    return header
+
+
+async def test_published_gate_marks_the_pin_cookie_https_only(store, upstream) -> None:
+    """Without Secure, a single plaintext request leaks the session.
+
+    The cookie is all that separates a browser that passed the PIN from one
+    merely holding the link, and SameSite=Lax still sends it on a top-level
+    navigation -- so an http:// redirect would hand it to anyone on the path.
+    """
+    header = await _pin_cookie_header(store, upstream, secure_cookie=True)
+    assert "Secure" in header, header
+    assert "HttpOnly" in header
+
+
+async def test_loopback_gate_does_not_mark_it_secure(store, upstream) -> None:
+    """Plain http on 127.0.0.1 has no network to intercept, and some clients
+    will not return a Secure cookie over it."""
+    header = await _pin_cookie_header(store, upstream, secure_cookie=False)
+    assert "Secure" not in header, header
+
+
+async def test_pin_cookie_does_not_outlive_the_link(store, upstream) -> None:
+    header = await _pin_cookie_header(store, upstream, cookie_max_age=1800)
+    assert "Max-Age=1800" in header, header

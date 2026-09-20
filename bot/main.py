@@ -163,10 +163,18 @@ async def _start_facebook_gate(settings: Settings, token_store: TokenStore) -> w
     unused on localhost, and building it this way means turning a public tunnel on
     or off later needs no code change here.
     """
+    # The PIN cookie is the only thing separating a browser that passed the
+    # PIN from one merely holding the link, so it must not travel in clear
+    # once the gate is published. Loopback-only keeps it unmarked: there is no
+    # network to intercept, and not every client returns a Secure cookie over
+    # plain http.
+    public_base = settings.facebook.desktop_public_base or ""
     app = build_gate_app(
         token_store,
         novnc_internal_url=settings.facebook.novnc_internal_url,
         pin=settings.facebook.desktop_pin,
+        secure_cookie=public_base.lower().startswith("https://"),
+        cookie_max_age=settings.facebook.desktop_token_ttl_seconds,
     )
     runner = web.AppRunner(app)
     await runner.setup()

@@ -102,8 +102,23 @@ def build_gate_app(
     token_store: TokenStore,
     novnc_internal_url: str,
     pin: str | None,
+    *,
+    secure_cookie: bool = False,
+    cookie_max_age: int | None = None,
 ) -> web.Application:
-    """Build the aiohttp app; caller owns running it (see bot/main.py)."""
+    """Build the aiohttp app; caller owns running it (see bot/main.py).
+
+    ``secure_cookie`` marks the PIN cookie HTTPS-only. It is not simply always
+    on because a loopback-only deployment serves the gate over plain http on
+    127.0.0.1, where a Secure cookie is not sent back by every client -- and
+    where there is no network for anyone to sit on anyway. The caller turns it
+    on exactly when the gate is published over HTTPS, which is the case the
+    flag exists for.
+
+    ``cookie_max_age`` bounds the cookie to the life of the link it belongs
+    to, so a browser does not keep a usable session credential after the
+    incident that issued it is over.
+    """
     rate_limiter = _RateLimiter()
     # token -> the cookie values of browsers that passed the PIN for it.
     # Keyed by token so a new incident's token starts with nobody admitted.
@@ -162,6 +177,8 @@ def build_gate_app(
                 path=f"/s/{token}",
                 httponly=True,
                 samesite="Lax",
+                secure=secure_cookie,
+                max_age=cookie_max_age,
             )
             raise response
         rate_limiter.record_failure(ip)
