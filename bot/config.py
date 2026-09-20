@@ -298,6 +298,97 @@ class PipelineSettings(_Base):
     )
 
 
+class FacebookSettings(_Base):
+    """Facebook group scraping: the shared, operator-controlled browser session.
+
+    End users never touch Facebook directly -- this is a single persistent,
+    visible browser profile that the bot drives to read group posts/comments,
+    and that a human takes over when login or verification is required. See
+    ``bot/services/facebook/`` for the session and group-reading logic.
+    """
+
+    model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "FACEBOOK_"})
+
+    enabled: bool = Field(default=False, description="Set true once a profile/groups are configured")
+
+    profile_dir: str = Field(
+        default="./data/facebook_profile",
+        description="Persistent Playwright user-data-dir; holds the login session on disk",
+    )
+    headless: bool = Field(
+        default=False,
+        description="Keep false: a visible window is what the operator takes over during recovery",
+    )
+    nav_timeout_seconds: float = Field(default=30.0, gt=0)
+    cdp_url: str | None = Field(
+        default=None,
+        description="Attach to an already-running Chrome via CDP (e.g. http://127.0.0.1:9222) "
+        "instead of launching one. Set this on the VM, where a supervised system Chrome is the "
+        "long-lived process; leave unset for local dev, where launch_persistent_context is used.",
+    )
+    action_delay_ms: tuple[int, int] = Field(
+        default=(600, 1800),
+        description="Random pause range between actions (scroll/click), min/max ms",
+    )
+
+    group_urls: CsvList = Field(
+        default_factory=list,
+        description="Facebook group URLs to read, comma-separated. Supplied by the operator, "
+        "never discovered automatically in v1.",
+    )
+    max_posts_per_group: int = Field(default=20, ge=1, le=200)
+    max_comments_per_post: int = Field(default=15, ge=0, le=200)
+    min_group_recheck_minutes: int = Field(
+        default=60, ge=1, description="Do not re-open a group more often than this"
+    )
+
+    login_email: str | None = Field(default=None, description="Only used for the one automatic attempt")
+    login_password: SecretStr | None = Field(
+        default=None, description="Never logged; used once per incident, then the operator takes over"
+    )
+
+    admin_telegram_ids: CsvList = Field(
+        default_factory=list,
+        description="Numeric Telegram IDs to alert on login/verification failures",
+    )
+
+    # --- Remote live-view gate (Telegram button -> token-gated noVNC) ---
+    desktop_public_base: str | None = Field(
+        default=None,
+        description="Public HTTPS base the gate is reachable at (e.g. a Tailscale Funnel "
+        "address), used to build the Telegram button URL. Unset means the login/checkpoint "
+        "alert falls back to plain text with no button.",
+    )
+    desktop_token_ttl_seconds: int = Field(
+        default=1800, ge=60, description="How long a login/checkpoint link stays valid before "
+        "it must be reissued"
+    )
+    desktop_pin: str | None = Field(
+        default=None, description="Optional PIN required before the live browser view is shown"
+    )
+    gate_bind_address: str = Field(default="127.0.0.1")
+    gate_port: int = Field(default=8090)
+    novnc_internal_url: str = Field(
+        default="http://127.0.0.1:6080",
+        description="Where noVNC/websockify actually listens; reached only through this gate, "
+        "never exposed directly",
+    )
+    token_store_path: str = Field(default="./data/facebook_gate_token.json")
+
+    @field_validator("group_urls", "admin_telegram_ids", mode="before")
+    @classmethod
+    def _parse_lists(cls, value: object) -> object:
+        return _parse_str_list(value)
+
+    @field_validator("action_delay_ms", mode="before")
+    @classmethod
+    def _parse_delay(cls, value: object) -> object:
+        if isinstance(value, str):
+            parts = [int(p.strip()) for p in value.split(",")]
+            return tuple(parts[:2])
+        return value
+
+
 class Settings(_Base):
     """Root settings object; build it with :func:`get_settings`."""
 
@@ -312,6 +403,7 @@ class Settings(_Base):
     parser: ParserSettings = Field(default_factory=ParserSettings)
     supabase: SupabaseSettings = Field(default_factory=SupabaseSettings)
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
+    facebook: FacebookSettings = Field(default_factory=FacebookSettings)
 
     @field_validator("log_level")
     @classmethod

@@ -358,16 +358,28 @@ class ResearchPipeline:
     async def _collect_content(
         self, hits: list[SearchHit]
     ) -> list[tuple[SearchHit, PageContent | None]]:
-        """Fetch the top hits and pair every hit with its page, if any.
+        """Pair every hit with its page text, fetching what nothing already read.
 
-        Only ``PARSER_MAX_PAGES`` hits are fetched -- the rest still reach the
-        ranker with their snippets, which is often enough to score them.
+        A hit that arrives with ``content`` pre-filled (e.g. a Facebook group
+        post the facebook source already read) is never fetched -- the plain
+        HTTP fetcher cannot reach an authenticated page anyway, and re-fetching
+        would just throw away a real read. Only ``PARSER_MAX_PAGES`` of the
+        *remaining* hits are fetched; the rest still reach the ranker with
+        their snippets, which is often enough to score them.
         """
-        if not self.settings.parser.enabled:
-            return [(hit, None) for hit in hits]
+        pre_read = {
+            hit.url: PageContent(url=hit.url, title=hit.title, text=hit.content)
+            for hit in hits
+            if hit.content
+        }
+        to_fetch_hits = [hit for hit in hits if hit.url not in pre_read]
 
-        to_fetch = hits[: self.settings.parser.max_pages]
-        pages = await self.fetcher.fetch_many([hit.url for hit in to_fetch])
+        fetched: dict[str, PageContent] = {}
+        if self.settings.parser.enabled and to_fetch_hits:
+            to_fetch = to_fetch_hits[: self.settings.parser.max_pages]
+            fetched = await self.fetcher.fetch_many([hit.url for hit in to_fetch])
+
+        pages = {**fetched, **pre_read}
         return [(hit, pages.get(hit.url)) for hit in hits]
 
     async def _persist(

@@ -21,6 +21,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
+from aiohttp import web
 
 from bot.config import Settings, get_settings
 from bot.exceptions import ConfigurationError
@@ -29,6 +30,7 @@ from bot.logging_conf import configure_logging, get_logger
 from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.middlewares.throttling import SearchSlots
 from bot.services.db import SupabaseRepository
+from bot.services.facebook import FacebookSession, TokenStore, build_gate_app
 from bot.services.llm import LLMManager
 from bot.services.parser import PageFetcher
 from bot.services.pipeline import ResearchPipeline
@@ -55,16 +57,31 @@ class Services:
     repo: SupabaseRepository
     pipeline: ResearchPipeline
     slots: SearchSlots
+    facebook_session: FacebookSession | None = None
+    """None when FACEBOOK_ENABLED is false -- the admin command then says so
+    rather than the bot launching a browser nobody asked for."""
+    facebook_token_store: TokenStore | None = None
+    """Backs the token-gated remote live-view link; None alongside facebook_session."""
+
+    facebook_gate_runner: web.AppRunner | None = None
+    """The always-on-localhost aiohttp server proxying to noVNC through a token check.
+    Runs whenever Facebook is enabled, independent of whether a public tunnel is pointed
+    at it -- see bot/services/facebook/gate.py."""
 
     async def aclose(self) -> None:
         """Close every service, letting each failure be logged not raised."""
-        for name, closer in (
+        closers: list[tuple[str, object]] = [
             ("llm", self.llm.aclose),
             ("stt", self.stt.aclose),
             ("search", self.search.aclose),
             ("fetcher", self.fetcher.aclose),
             ("repo", self.repo.aclose),
-        ):
+        ]
+        if self.facebook_gate_runner is not None:
+            closers.append(("facebook_gate_runner", self.facebook_gate_runner.cleanup))
+        if self.facebook_session is not None:
+            closers.append(("facebook_session", self.facebook_session.stop))
+        for name, closer in closers:
             try:
                 await closer()
             except Exception:
@@ -90,6 +107,18 @@ async def build_services(settings: Settings) -> Services:
         repo=repo,
     )
 
+    # Not started here: launching a real browser is deferred to first use
+    # (the /facebook admin command), so a bot run with FACEBOOK_ENABLED=true
+    # but nobody touching the feature yet does not open a window for no
+    # reason.
+    facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
+    facebook_token_store = (
+        TokenStore(settings.facebook.token_store_path) if settings.facebook.enabled else None
+    )
+    facebook_gate_runner = None
+    if facebook_token_store is not None:
+        facebook_gate_runner = await _start_facebook_gate(settings, facebook_token_store)
+
     return Services(
         llm=llm,
         stt=stt,
@@ -98,7 +127,36 @@ async def build_services(settings: Settings) -> Services:
         repo=repo,
         pipeline=pipeline,
         slots=SearchSlots(settings.telegram.max_concurrent_searches),
+        facebook_session=facebook_session,
+        facebook_token_store=facebook_token_store,
+        facebook_gate_runner=facebook_gate_runner,
     )
+
+
+async def _start_facebook_gate(settings: Settings, token_store: TokenStore) -> web.AppRunner:
+    """Start the token-gated proxy in front of noVNC, bound to gate_bind_address:gate_port.
+
+    Runs whenever Facebook is enabled, regardless of whether
+    FACEBOOK_DESKTOP_PUBLIC_BASE is set -- that setting only controls whether the
+    Telegram alert includes a clickable link. The gate itself is harmless sitting
+    unused on localhost, and building it this way means turning a public tunnel on
+    or off later needs no code change here.
+    """
+    app = build_gate_app(
+        token_store,
+        novnc_internal_url=settings.facebook.novnc_internal_url,
+        pin=settings.facebook.desktop_pin,
+    )
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, settings.facebook.gate_bind_address, settings.facebook.gate_port)
+    await site.start()
+    log.info(
+        "facebook.gate.listening",
+        host=settings.facebook.gate_bind_address,
+        port=settings.facebook.gate_port,
+    )
+    return runner
 
 
 def build_dispatcher(settings: Settings, services: Services) -> Dispatcher:
@@ -112,6 +170,8 @@ def build_dispatcher(settings: Settings, services: Services) -> Dispatcher:
         stt=services.stt,
         llm=services.llm,
         slots=services.slots,
+        facebook_session=services.facebook_session,
+        facebook_token_store=services.facebook_token_store,
     )
 
     for observer in (dispatcher.message, dispatcher.callback_query):
@@ -166,7 +226,6 @@ async def run_polling(bot: Bot, dispatcher: Dispatcher, settings: Settings, serv
 async def run_webhook(bot: Bot, dispatcher: Dispatcher, settings: Settings, services: Services) -> None:
     """Webhook mode: an aiohttp server Telegram posts updates to."""
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-    from aiohttp import web
 
     telegram = settings.telegram
     assert telegram.webhook_url  # guaranteed by the settings validator

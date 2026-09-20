@@ -34,6 +34,16 @@ class SearchHit(BaseModel):
     published_at: dt.datetime | None = None
     query: str | None = Field(default=None, description="Which of our queries produced this hit")
 
+    content: str | None = Field(
+        default=None,
+        description="Pre-extracted page text, when the source already read it (e.g. a Facebook "
+        "group post). When set, the pipeline skips fetching this URL and ranks on this text "
+        "directly -- the normal HTTP fetcher cannot reach an authenticated Facebook page anyway.",
+    )
+    author: str | None = Field(
+        default=None, description="Displayed author name, for sources that have one (e.g. a comment)"
+    )
+
     @property
     def url_hash(self) -> str:
         return url_hash(self.url)
