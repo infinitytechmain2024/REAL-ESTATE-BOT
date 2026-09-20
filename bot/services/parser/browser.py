@@ -7,8 +7,9 @@ gets through where an HTTP client does not, at maybe twenty times the cost per
 page, so this fetcher is deliberately the exception and not the default: see
 :class:`~bot.services.parser.routing.RoutingFetcher` for when it is used.
 
-Playwright is an optional dependency (``requirements-browser.txt``). Importing
-this module without it installed is fine, and so is constructing the fetcher;
+Playwright ships in ``requirements.txt`` for the Facebook module, but the
+browser binary is a separate download, so neither is assumed here. Importing
+this module without either is fine, and so is constructing the fetcher;
 :func:`~bot.services.parser.routing.build_fetcher` is what refuses to start,
 at boot, with a :class:`ConfigurationError` naming the fix. Once running, a
 fetch never raises -- a dead browser is one failed page, not a failed request.
@@ -65,8 +66,7 @@ class BrowserFetcher:
             except ImportError as exc:  # pragma: no cover - depends on install
                 raise ConfigurationError(
                     "PARSER_BROWSER_ENABLED is on but Playwright is not installed; "
-                    "pip install -r requirements-browser.txt "
-                    "&& playwright install --with-deps chromium"
+                    "pip install -r requirements.txt"
                 ) from exc
 
             self._playwright = await async_playwright().start()
@@ -93,6 +93,24 @@ class BrowserFetcher:
                 proxied=bool(self.settings.browser_proxy_url),
             )
             return self._context
+
+    async def preflight(self) -> None:
+        """Launch the browser once so a broken install fails at start-up.
+
+        Raises :class:`ConfigurationError` when Playwright is absent or its
+        browser binary was never downloaded. The context is kept warm rather
+        than closed, so this costs start-up time, not an extra launch.
+        """
+        try:
+            await self._ensure_context()
+        except ConfigurationError:
+            raise
+        except Exception as exc:
+            raise ConfigurationError(
+                f"PARSER_BROWSER_ENABLED is on but Chromium will not launch "
+                f"({type(exc).__name__}: {exc}). Run `playwright install chromium`, "
+                f"or set PARSER_BROWSER_ENABLED=false."
+            ) from exc
 
     async def aclose(self) -> None:
         """Tear the browser down. Safe to call when it never started."""

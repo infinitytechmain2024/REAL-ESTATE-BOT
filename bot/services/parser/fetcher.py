@@ -41,6 +41,10 @@ class PageFetcher:
         )
         self._semaphore = asyncio.Semaphore(settings.concurrency)
 
+    async def preflight(self) -> None:
+        """Nothing to check: an HTTP client has no runtime to be missing."""
+        return None
+
     async def aclose(self) -> None:
         await self._client.aclose()
 

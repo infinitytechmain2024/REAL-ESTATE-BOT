@@ -10,16 +10,15 @@ Two rules, in order:
    :attr:`~bot.models.result.PageContent.blocked`).
 
 With the browser disabled this collapses to the plain HTTP fetcher, which is
-what the search-only deployment runs.
+what the search-only deployment runs: Playwright is installed either way (the
+Facebook module needs it), but no browser is ever launched.
 """
 
 from __future__ import annotations
 
-import importlib.util
 from typing import Protocol
 
 from bot.config import ParserSettings
-from bot.exceptions import ConfigurationError
 from bot.logging_conf import get_logger
 from bot.models.result import PageContent
 from bot.utils.urls import domain_of
@@ -33,6 +32,8 @@ class Fetcher(Protocol):
     async def fetch_many(self, urls: list[str]) -> dict[str, PageContent]: ...
 
     async def fetch(self, url: str) -> PageContent: ...
+
+    async def preflight(self) -> None: ...
 
     async def aclose(self) -> None: ...
 
@@ -51,6 +52,20 @@ class RoutingFetcher:
         self._http = http
         self._browser = browser
         self._browser_domains = {d.lower().lstrip(".") for d in settings.browser_domains}
+
+    async def preflight(self) -> None:
+        """Prove at start-up that the browser can actually launch.
+
+        Importing Playwright is no longer evidence of anything -- it ships in
+        requirements.txt for the Facebook module, so it is always present even
+        when ``playwright install chromium`` was never run. The browser binary
+        is what is actually missing in that case, and without this the first
+        person to search would be the one to find out.
+        """
+        if self._browser is None:
+            return
+        await self._browser.preflight()
+        log.info("parser.browser.preflight_ok")
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -112,16 +127,6 @@ def build_fetcher(settings: ParserSettings) -> Fetcher:
     http = PageFetcher(settings)
     if not settings.browser_enabled:
         return http
-
-    # Checked here so a missing optional dependency is a readable start-up
-    # failure, not a surprise in the middle of somebody's search.
-    if importlib.util.find_spec("playwright") is None:
-        raise ConfigurationError(
-            "PARSER_BROWSER_ENABLED=true but Playwright is not installed; "
-            "pip install -r requirements-browser.txt "
-            "&& playwright install --with-deps chromium "
-            "(or set PARSER_BROWSER_ENABLED=false)"
-        )
 
     from bot.services.parser.browser import BrowserFetcher
 

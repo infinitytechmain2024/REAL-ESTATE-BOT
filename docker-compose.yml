@@ -16,6 +16,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # google-chrome-stable (needed only when FACEBOOK_ENABLED=true) is only
+      # published for amd64 -- Google does not ship an arm64 build. Pin the
+      # platform so this still builds on Apple Silicon; Docker Desktop then runs
+      # it under Rosetta (fast, enable "Use Rosetta for x86/amd64 emulation" in
+      # Settings > General) or QEMU (slower, the default). On an amd64 host this
+      # line is a no-op.
+      platforms:
+        - linux/amd64
+    platform: linux/amd64
     env_file: .env
     environment:
       ENVIRONMENT: docker
@@ -23,10 +32,28 @@ services:
       SEARXNG_BIND_ADDRESS: 127.0.0.1
       # Uncomment to let the cache service below be used.
       # SEARXNG_VALKEY_URL: valkey://valkey:6379/0
+    volumes:
+      # Without this, the container filesystem (and with it the Facebook Chrome
+      # profile + the live-view token file) resets on every `docker compose up`
+      # after a `down` -- you would have to clear the login checkpoint again on
+      # every restart. Bind-mounting ./data keeps FACEBOOK_PROFILE_DIR and
+      # FACEBOOK_TOKEN_STORE_PATH (both default to ./data/... inside the
+      # container) on the host, surviving container recreation.
+      - ./data:/app/data
     ports:
       # Exposed only so you can curl the API while developing. Drop this
       # mapping and SearXNG is unreachable from outside the container.
       - "127.0.0.1:8888:8888"
+      # The token-gated proxy in front of the Facebook browser's noVNC view
+      # (bot/services/facebook/gate.py), only real when FACEBOOK_ENABLED=true.
+      # Loopback here on purpose -- on a VPS, a Tailscale Funnel pointed at this
+      # port is what makes the Telegram "Open Facebook" button work from
+      # anywhere, without publishing anything yourself (see the README's
+      # "Tailscale Funnel setup" section). Harmless when Facebook is disabled:
+      # nothing listens on 8090 and the mapping just sits idle. Never publish
+      # noVNC's own 6080 or Chrome's CDP port -- this gate is the only
+      # intended way in.
+      - "127.0.0.1:8090:8090"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8888/healthz"]
@@ -41,6 +68,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # See the note on the bot service above -- same Dockerfile, same amd64-only
+      # Chrome dependency at build time.
+      platforms:
+        - linux/amd64
+    platform: linux/amd64
     environment:
       SEARXNG_BIND_ADDRESS: 0.0.0.0
       SEARXNG_SECRET: ${SEARXNG_SECRET:-dev-secret-change-me}
