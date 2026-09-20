@@ -121,12 +121,16 @@ tailscale funnel --bg 8090
 It prints an address like `https://your-machine.your-tailnet.ts.net`. Put that in
 `FACEBOOK_DESKTOP_PUBLIC_BASE` (no trailing slash).
 
-**Funnel is genuinely public.** The bot therefore refuses to start unless
-`FACEBOOK_DESKTOP_PIN` is also set — as it does for any base another device could
-open, including a LAN address. A loopback base is exempt, which is what makes local
-development and the first Facebook login straightforward — without it, possession of a forwarded Telegram
-message is possession of a browser logged into Facebook. Over HTTPS the PIN cookie is
-also marked `Secure` automatically.
+**Funnel is genuinely public**, so the bot refuses to start unless
+`FACEBOOK_DESKTOP_PIN` is also set. Without it, possession of a forwarded Telegram message
+is possession of a browser logged into Facebook.
+
+The same rule applies to any base another device could open, a LAN address included — the
+question is whether a second machine can reach the live view, not whether it is on the
+public internet. A loopback base (`localhost`, `127.0.0.1`) is exempt, which is what keeps
+local development and the first Facebook login straightforward.
+
+Over HTTPS the PIN cookie is also marked `Secure` automatically.
 
 Whichever you choose: **never** `tailscale funnel` ports 6080, 5900 or 9222, and never add
 a compose mapping for them. The gate is the only intended way in.
