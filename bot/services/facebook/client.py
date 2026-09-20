@@ -45,7 +45,7 @@ class FacebookSource:
             return []
 
         async with self.session.lock:
-            state = await self.session.check_state()
+            state = await self.session.probe_state()
             if state != SessionState.HEALTHY:
                 log.warning("facebook.source.session_not_healthy", state=state.value)
                 return []

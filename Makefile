@@ -17,10 +17,14 @@ help: ## Show this help
 setup: ## Ask for your keys and write .env (nothing is sent anywhere)
 	@$(PYTHON) scripts/setup_env.py
 
+test: ## Run the test suite
+	$(BIN)/python -m pytest
+
 install: ## Create the venv and install bot + SearXNG dependencies
 	$(PYTHON) -m venv $(VENV)
 	$(BIN)/pip install --upgrade pip
 	$(BIN)/pip install -r requirements.txt \
+		-r requirements-dev.txt \
 		-r searxng/requirements.txt \
 		-r searxng/requirements-server.txt
 
@@ -33,7 +37,7 @@ searxng: ## Run the SearXNG JSON API on 127.0.0.1:$(SEARXNG_PORT)
 	$(BIN)/granian --interface wsgi --host 127.0.0.1 --port $(SEARXNG_PORT) \
 		searxng.api_only:application
 
-check: check-imports check-config check-sql ## Run every static check
+check: check-imports check-config check-sql test ## Run every static check and the tests
 
 check-imports: ## Byte-compile the bot package and import every module
 	$(BIN)/python -m compileall -q bot

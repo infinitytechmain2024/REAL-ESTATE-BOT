@@ -89,17 +89,17 @@ group activity sampling · proactive session alerts · any automated test suite.
 Ordered by *cost of being wrong*. Stage 0 exists because without it Stage 1 produces
 misleading results, and Stage 1 gates everything after it.
 
-### Stage 0 — Unblock the probe · ~half a day · **do first**
+### Stage 0 — Unblock the probe · ~half a day · **DONE except 0.4 (operator)**
 
 Three defects found in review that will make the first real validation run fail in ways
 that look like Facebook's fault rather than ours.
 
 | # | Task | Why it blocks | Done when |
 |---|---|---|---|
-| 0.1 | Split `check_state()` into a passive `observe_state()` (reads `page.url` + current DOM, never navigates) and a navigating `probe_state()`. Point the recovery watcher at the passive one. | `browser.py:205` calls `page.goto(FACEBOOK_HOME)`; `facebook_admin.py:50` polls it every 10s. In CDP mode that is the *same tab* the admin sees — the login form resets every 10 seconds for 15 minutes. Completing a login is impossible. | A watcher tick during a simulated human login leaves the page untouched; a pre-job check still navigates. |
-| 0.2 | Hold `FacebookSession.lock` in the admin path. | `client.py:47` takes the lock; `facebook_admin.py:127,205,221` and the watcher do not. A status check during a group read navigates the job's page away. | Two concurrent callers serialise; a test proves the second waits. |
-| 0.3 | Reorder challenge/access detection: URL path → DOM structure → localized text last. Add a Spanish string table beside the English one. | Six English-only matchers in `groups.py`; `locale="en-US"` only applies in local-dev launch mode, and Facebook renders in the *account's* language regardless. A Spanish inline challenge currently classifies as `HEALTHY` — jobs keep running against a challenge page and nobody is alerted. | A Spanish checkpoint fixture returns `HUMAN_REQUIRED`; a Spanish group page classifies correctly. |
-| 0.4 | Set the Facebook account's own language to English in its settings. | Free, removes most of 0.3's risk surface immediately. | Operator confirms. |
+| 0.1 | ✅ Split `check_state()` into a passive `observe_state()` (reads `page.url` + current DOM, never navigates) and a navigating `probe_state()`. Point the recovery watcher at the passive one. | `browser.py:205` calls `page.goto(FACEBOOK_HOME)`; `facebook_admin.py:50` polls it every 10s. In CDP mode that is the *same tab* the admin sees — the login form resets every 10 seconds for 15 minutes. Completing a login is impossible. | A watcher tick during a simulated human login leaves the page untouched; a pre-job check still navigates. |
+| 0.2 | ✅ Hold `FacebookSession.lock` in the admin path. | `client.py:47` takes the lock; `facebook_admin.py:127,205,221` and the watcher do not. A status check during a group read navigates the job's page away. | Two concurrent callers serialise; a test proves the second waits. |
+| 0.3 | ✅ Reorder challenge/access detection: URL path → DOM structure → localized text last. Add a Spanish string table beside the English one. | Six English-only matchers in `groups.py`; `locale="en-US"` only applies in local-dev launch mode, and Facebook renders in the *account's* language regardless. A Spanish inline challenge currently classifies as `HEALTHY` — jobs keep running against a challenge page and nobody is alerted. | A Spanish checkpoint fixture returns `HUMAN_REQUIRED`; a Spanish group page classifies correctly. |
+| 0.4 | ⬜ **Operator:** set the Facebook account's own language to English in its settings. | Free, removes most of 0.3's risk surface immediately. | Operator confirms. |
 
 **Skills:** write the fixtures first (`pytest` + fake `Page` objects) — this is exactly
 where test-first pays, because the alternative is discovering it against a live account.
@@ -233,14 +233,16 @@ Not a blocker to building; a blocker to *auto-posting*.
 
 ## 4. Testing — currently zero
 
-There is no test framework in this repo. Not pytest, not a `tests/` directory, nothing.
-Everything verified so far was verified by ad-hoc scripts. That is survivable for a
-pipeline and fatal for browser selectors, which break silently and constantly.
+There was no test framework in this repo at all until Stage 0. There are now 34 tests
+covering session classification, the recovery watcher's invariants, group access in both
+languages, and fetcher routing -- run with `make test`. Everything below T.2 is still
+outstanding, and the gap that matters most is fixtures taken from real markup (T.3),
+which Stage 1 is what produces.
 
 | # | Task | Stage |
 |---|---|---|
-| T.1 | Add `pytest` + `pytest-asyncio` and a `tests/` tree; wire `make test`. | 0 |
-| T.2 | Port the existing ad-hoc fetcher-routing test into it. | 0 |
+| T.1 | ✅ Added `pytest` + `pytest-asyncio`, a `tests/` tree and `make test`. | 0 |
+| T.2 | ✅ Ported the fetcher-routing test into it. | 0 |
 | T.3 | Save real DOM snapshots from Stage 1 as fixtures. | 1 |
 | T.4 | Every selector gets a fixture test; a Facebook markup change must fail a test, not a user's search. | 4 |
 | T.5 | State-machine tests: exactly-one-alert, timeout, restart-mid-incident, job-abort-on-flip. | 2 |

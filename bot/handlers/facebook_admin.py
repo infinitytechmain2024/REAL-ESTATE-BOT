@@ -114,7 +114,7 @@ async def _watch_for_recovery(
 
     Runs as a detached background task started from the callback handler
     below. Never raises into the event loop's default handler on its own
-    account: a failed check_state() call is logged and treated as "still not
+    account: a failed observe_state() call is logged and treated as "still not
     recovered" rather than crashing the watcher. On recovery, invalidates the
     live-view token so the old link stops working the moment it is no longer
     needed, matching "close the page" in the message the admin gets.
@@ -124,7 +124,12 @@ async def _watch_for_recovery(
         await asyncio.sleep(_WATCH_INTERVAL_SECONDS)
         elapsed += _WATCH_INTERVAL_SECONDS
         try:
-            state = await facebook_session.check_state()
+            # observe_state, never probe_state: a human is typing in this very
+            # browser -- in CDP mode, this very tab. Navigating would wipe
+            # their half-finished login every few seconds. And the lock is
+            # held because a group job may be driving the same single page.
+            async with facebook_session.lock:
+                state = await facebook_session.observe_state()
         except Exception:
             log.exception("facebook.admin.watch_check_failed")
             continue
@@ -202,7 +207,8 @@ async def on_facebook_admin_action(
 
     if callback_data.action == "status":
         await query.answer("Проверяю…")
-        state = await facebook_session.check_state()
+        async with facebook_session.lock:
+            state = await facebook_session.probe_state()
         _note_state(state)
         log.info("facebook.admin.status_checked", admin_id=query.from_user.id, state=state.value)
 
@@ -218,7 +224,8 @@ async def on_facebook_admin_action(
 
     if callback_data.action == "start_login":
         await query.answer("Проверяю…")
-        state = await facebook_session.check_state()
+        async with facebook_session.lock:
+            state = await facebook_session.probe_state()
         _note_state(state)
         log.info("facebook.admin.login_started", admin_id=query.from_user.id, state=state.value)
 

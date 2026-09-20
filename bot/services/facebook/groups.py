@@ -20,6 +20,41 @@ from bot.logging_conf import get_logger
 
 log = get_logger(__name__)
 
+# Facebook renders in the *account's* language, not the browser's, and in
+# CDP-attach mode we do not control either. Every visible-text probe below
+# therefore carries its Spanish variant beside the English one -- Spain is
+# the v1 market, so Spanish is the likely default, not the exception.
+#
+# Accents are a real hazard here: a group rendered with "Ver más" and one
+# rendered "Ver mas" are the same button, so both spellings are listed rather
+# than relying on normalisation Facebook does not promise.
+JOIN_SIGNALS = ("Join Group", "Join group", "Unirse al grupo", "Unirte al grupo")
+PENDING_SIGNALS = ("Pending", "Pendiente")
+UNAVAILABLE_SIGNALS = ("isn't available", "no está disponible", "no esta disponible")
+COMPOSER_SIGNALS = ("Write something", "Escribe algo")
+SEARCH_PLACEHOLDERS = ("Search this group", "Buscar en este grupo")
+SEE_MORE_SIGNALS = ("See more", "Ver más", "Ver mas")
+
+# Structural: a login form is a login form in any language.
+LOGIN_FORM_SELECTOR = "#login_form, form[data-testid='royal_login_form']"
+
+
+async def _any_text(page: Page, signals: tuple[str, ...]) -> bool:
+    """Whether any localized variant of *signals* is visible on *page*."""
+    for signal in signals:
+        if await page.get_by_text(signal, exact=False).count() > 0:
+            return True
+    return False
+
+
+async def _first_placeholder(page: Page, signals: tuple[str, ...]) -> Locator | None:
+    """The first input whose placeholder matches any variant, or None."""
+    for signal in signals:
+        locator = page.get_by_placeholder(signal, exact=False)
+        if await locator.count() > 0:
+            return locator
+    return None
+
 
 class GroupAccess(StrEnum):
     """What the group looked like when we tried to open it.
@@ -72,23 +107,26 @@ async def check_access(page: Page, group_url: str) -> GroupAccess:
 
     if response is not None and response.status in (404, 410):
         return GroupAccess.UNAVAILABLE
-    if "login" in page.url or await page.locator(
-        "#login_form, form[data-testid='royal_login_form']"
-    ).count():
+
+    # Structural signals first: the URL and the login form mean the same
+    # thing in every market, so they are trusted ahead of any visible text.
+    if "login" in page.url or await page.locator(LOGIN_FORM_SELECTOR).count():
         return GroupAccess.LOGIN_REQUIRED
 
-    if await page.get_by_text("Join Group", exact=False).count() > 0:
+    if await _any_text(page, JOIN_SIGNALS):
         return GroupAccess.MEMBERSHIP_REQUIRED
-    if await page.get_by_text("Pending", exact=False).count() > 0:
+    if await _any_text(page, PENDING_SIGNALS):
         return GroupAccess.PENDING_APPROVAL
-    if await page.get_by_text("isn't available", exact=False).count() > 0:
+    if await _any_text(page, UNAVAILABLE_SIGNALS):
         return GroupAccess.UNAVAILABLE
 
-    # A post composer or the feed's own search box is the strongest signal of
-    # real membership; anything else is a guess and stays UNKNOWN_ERROR.
-    if await page.get_by_placeholder("Search this group", exact=False).count() > 0:
+    # A post composer or the group's own search box is the strongest signal
+    # of real membership; anything else is a guess and stays UNKNOWN_ERROR --
+    # which is not the same as "empty" or "inactive", and must never be
+    # reported as one.
+    if await _first_placeholder(page, SEARCH_PLACEHOLDERS) is not None:
         return GroupAccess.ACCESSIBLE
-    if await page.get_by_text("Write something", exact=False).count() > 0:
+    if await _any_text(page, COMPOSER_SIGNALS):
         return GroupAccess.ACCESSIBLE
 
     log.warning("facebook.group.unrecognised_layout", group_url=group_url, url=page.url)
@@ -105,8 +143,8 @@ async def search_posts(
     post needs "See more" expanded before it is complete all vary. Treat the
     first real run of this as a validation step, not a working feature.
     """
-    search_box = page.get_by_placeholder("Search this group", exact=False)
-    if await search_box.count() == 0:
+    search_box = await _first_placeholder(page, SEARCH_PLACEHOLDERS)
+    if search_box is None:
         log.warning("facebook.group.no_search_box", group_url=group_url)
         return []
 
@@ -146,10 +184,12 @@ async def _extract_post(article: Locator, group_url: str) -> GroupPost | None:
     Returns ``None`` if it does not look like a real post (no permalink
     found) rather than returning a half-populated, misleading record.
     """
-    see_more = article.get_by_text("See more", exact=False)
-    if await see_more.count() > 0:
-        with contextlib.suppress(Exception):  # expanding text is an optimisation, not required
-            await see_more.first.click()
+    for signal in SEE_MORE_SIGNALS:
+        see_more = article.get_by_text(signal, exact=False)
+        if await see_more.count() > 0:
+            with contextlib.suppress(Exception):  # expanding is an optimisation, not required
+                await see_more.first.click()
+            break
 
     text = (await article.inner_text()).strip()
     if not text:

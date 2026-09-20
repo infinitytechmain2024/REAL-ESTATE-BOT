@@ -41,7 +41,7 @@ async def main() -> int:
     try:
         page = session.page
         print("-> checking session state...")
-        state = await session.check_state()
+        state = await session.probe_state()
         print(f"   session: {state.value}")
         if state == SessionState.LOGIN_NEEDED:
             print("   Not logged in. Log in by hand in the opened browser window, then re-run.")
