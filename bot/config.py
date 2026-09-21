@@ -216,6 +216,15 @@ class SearxngSettings(_Base):
         description="Engines requested per query; must be enabled in settings.yml",
     )
     max_queries: int = Field(default=6, ge=1, le=20, description="Search strings per user request")
+    max_languages: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description="How many languages one request is searched in. A listing is "
+        "advertised in the local language, the seller may write in English, and the "
+        "person asking may have typed in a third -- searching only one finds only one "
+        "slice of what exists. Costs query budget, so it trades breadth against depth.",
+    )
     results_per_query: int = Field(default=15, ge=1, le=50)
     max_hits: int = Field(default=40, ge=1, le=200, description="Cap after merging and de-duping")
     concurrency: int = Field(default=4, ge=1, le=20, description="Parallel SearXNG requests")
@@ -421,6 +430,15 @@ class FacebookSettings(_Base):
         "Public web-search discovery does not require this list.",
     )
     max_posts_per_group: int = Field(default=20, ge=1, le=200)
+    max_search_terms: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description="Localized search phrases tried per group. Spanish sellers post in "
+        "Spanish and the diaspora groups in Russian, so one phrase finds one slice. Each "
+        "extra term is a full in-group search -- navigation, typing, scrolling -- through "
+        "the one shared browser, so this buys coverage with time.",
+    )
     max_comments_per_post: int = Field(default=15, ge=0, le=200)
     min_group_recheck_minutes: int = Field(
         default=60, ge=1, description="Do not re-open a group more often than this"
