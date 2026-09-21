@@ -174,6 +174,7 @@ class FakeSession:
         self._states = list(states)
         self.has_live_context = True
         self.start_calls = 0
+        self.stop_calls = 0
         self.lock = asyncio.Lock()
         self.observed_unlocked = 0
         self.probe_calls = 0
@@ -193,6 +194,9 @@ class FakeSession:
 
     async def start(self) -> None:
         self.start_calls += 1
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
 
 
 class FakeBot:

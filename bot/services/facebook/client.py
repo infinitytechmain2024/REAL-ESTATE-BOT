@@ -51,7 +51,8 @@ class FacebookSource:
 
         hits: list[SearchHit] = []
         groups: list[SourceGroup] = []
-        if not self.session.has_live_context:
+        started_here = not self.session.has_live_context
+        if started_here:
             await self.session.start()
         async with self.session.lock:
             try:
@@ -97,7 +98,13 @@ class FacebookSource:
 
                 # Also catch a flip during the last (or only) group.
                 failed = await self.session.observe_state() != SessionState.HEALTHY
-                return SourceSearchResult(hits=hits, failed=failed, groups=groups)
+                result = SourceSearchResult(hits=hits, failed=failed, groups=groups)
+                if started_here and not failed:
+                    # The browser is a login/recovery tool, not a permanent
+                    # preview window. A healthy job can release it; an
+                    # unhealthy one stays open for the operator.
+                    await self.session.stop()
+                return result
             except Exception:
                 log.exception("facebook.source.read_failed")
                 return SourceSearchResult(hits=hits, failed=True, groups=groups)
