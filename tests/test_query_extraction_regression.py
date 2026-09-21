@@ -10,6 +10,22 @@ REQUEST = (
 )
 
 
+def test_query_criteria_accept_common_local_model_json_variants():
+    parsed = ParsedQuery.model_validate(
+        {
+            "mode": "land",
+            "criteria": [
+                {"name": "buildable", "value": True, "importance": "required"},
+                {"type": "required", "value": "area ≥ 2000 m²"},
+            ],
+        }
+    )
+
+    assert parsed.criteria[0].value == "true"
+    assert parsed.criteria[1].name == "area ≥ 2000 m²"
+    assert parsed.criteria[1].importance == "required"
+
+
 class EmptyStructuredLLM:
     """Model stub that exposes deterministic recovery from a sparse response."""
 
@@ -43,3 +59,35 @@ async def test_extract_query_recovers_critical_criteria_from_exact_user_request(
     assert parsed.metro_drive_minutes == 5
     assert parsed.buildable_required is True
     assert parsed.building_required is None
+    assert parsed.object_type == "land plot"
+    assert parsed.languages[:2] == ["es", "en"]
+    assert len(parsed.languages) == len(set(parsed.languages))
+
+    criteria = {criterion.name: criterion for criterion in parsed.criteria}
+    assert criteria["area_min"].value == "2000 m²"
+    assert criteria["area_min"].importance == "required"
+    assert criteria["location"].value == "Madrid suburbs"
+    assert criteria["location"].importance == "required"
+    assert criteria["metro_drive_minutes"].value == "5 minutes by car"
+    assert criteria["metro_drive_minutes"].importance == "required"
+    assert criteria["buildable_required"].importance == "required"
+    assert criteria["building"].importance == "optional"
+
+
+async def test_recovery_does_not_turn_walking_time_or_negative_use_into_requirements():
+    llm = EmptyStructuredLLM()
+    pipeline = ResearchPipeline(
+        settings=Settings(),
+        llm=llm,
+        search=None,
+        query_builder=None,
+        fetcher=None,
+        repo=None,
+    )
+
+    parsed = await pipeline.extract_query(
+        "Участок в 5 минутах пешком от метро, не для застройки.", Mode.LAND
+    )
+
+    assert parsed.metro_drive_minutes is None
+    assert parsed.buildable_required is False

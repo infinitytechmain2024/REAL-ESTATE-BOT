@@ -34,7 +34,7 @@ from bot.config import Settings
 from bot.exceptions import LLMError
 from bot.logging_conf import get_logger
 from bot.models.enums import Mode
-from bot.models.query import ParsedQuery, SearchQuery
+from bot.models.query import ParsedQuery, QueryCriterion, SearchQuery
 from bot.models.result import PageContent, SearchHit, StoredResult, StructuredResult
 from bot.prompts import (
     DETAILS_SYSTEM,
@@ -512,58 +512,103 @@ class ResearchPipeline:
 def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuery:
     """Fill critical fields a small/local model occasionally leaves empty.
 
-    This is intentionally conservative: it only fills a field when the model
-    omitted it and only recognises unambiguous phrases. The LLM remains the
-    source for the complete schema; these guards keep location and hard
-    constraints from disappearing on a degraded extraction response.
+    This is intentionally conservative: it recognises only unambiguous
+    phrases. Explicit values in the raw request win over the model because a
+    missing or misread hard constraint changes which listings are acceptable.
+    The LLM remains the source for the rest of the schema.
     """
     lowered = text.casefold()
     updates: dict[str, object] = {}
 
-    if parsed.area_min is None:
-        area_match = re.search(
-            r"(?:від|от|from)\s*(\d[\d\s]*(?:[.,]\d+)?)\s*(?:м|m)\b",
-            lowered,
-        )
-        if area_match:
-            raw_area = area_match.group(1).replace(" ", "").replace(",", ".")
-            with suppress(ValueError):
-                updates["area_min"] = float(raw_area)
-
-    if parsed.metro_drive_minutes is None:
-        metro_match = re.search(
-            r"(?:метро|metro).{0,40}?\b(\d+)\s*(?:хв|хвилин|мин|минут|minutes?)\b",
-            lowered,
-        ) or re.search(
-            r"\b(\d+)\s*(?:хв|хвилин|мин|минут|minutes?).{0,40}?(?:метро|metro)",
-            lowered,
-        )
-        if metro_match:
-            updates["metro_drive_minutes"] = int(metro_match.group(1))
-
-    if not parsed.buildable_required and re.search(
-        r"для\s+забудови|для\s+застройки|строительн\w*|buildable|urbanizable|edificable",
+    area_match = re.search(
+        r"(?:від|от|from|at\s+least)\s*(\d[\d\s]*(?:[.,]\d+)?)\s*"
+        r"(?:м(?:\s*2|²|\s+квадратн\w*)?|m(?:\s*2|²)|square\s+met(?:er|re)s?)\b",
         lowered,
-    ):
+    )
+    explicit_area: float | None = None
+    if area_match:
+        raw_area = area_match.group(1).replace(" ", "").replace(",", ".")
+        with suppress(ValueError):
+            explicit_area = float(raw_area)
+            updates["area_min"] = explicit_area
+
+    duration = r"(\d{1,3})\s*(?:хв(?:илин\w*)?|мин(?:ут\w*)?|minutes?)\b"
+    driving = r"(?:на\s+(?:машин\w*|авто(?:мобил\w*)?)|by\s+car|driv\w*)"
+    metro_match = re.search(
+        rf"(?:метро|metro).{{0,50}}?{duration}.{{0,24}}?{driving}", lowered
+    ) or re.search(rf"{duration}.{{0,24}}?{driving}.{{0,50}}?(?:метро|metro)", lowered)
+    if metro_match:
+        updates["metro_drive_minutes"] = int(metro_match.group(1))
+
+    buildable_negative = re.search(
+        r"(?:не\s+(?:для\s+)?застройк\w*|не\s+для\s+забудови|not\s+buildable|"
+        r"not\s+for\s+(?:construction|development)|no\s+urbanizable)",
+        lowered,
+    )
+    buildable_positive = re.search(
+        r"для\s+забудови|для\s+застройки|для\s+строительств\w*|"
+        r"buildable|for\s+(?:construction|development)|urbanizable|edificable",
+        lowered,
+    )
+    if buildable_negative:
+        updates["buildable_required"] = False
+    elif buildable_positive:
         updates["buildable_required"] = True
 
-    if parsed.building_required is not None and re.search(
-        r"з\s+будинками?\s+або\s+без|с\s+домом?\s+или\s+без|with\s+or\s+without\s+(?:a\s+)?house",
+    building_optional = re.search(
+        r"з\s+будинками?\s+або\s+без|с\s+дом\w*\s+или\s+без|"
+        r"with\s+or\s+without\s+(?:a\s+)?house|con\s+o\s+sin\s+casa",
         lowered,
-    ):
+    )
+    if building_optional:
         updates["building_required"] = None
 
+    land_request = re.search(
+        r"земельн\w*\s+(?:участк\w*|ділян\w*)|земельн\w*\s+ділян\w*|land\s+plots?",
+        lowered,
+    )
+    if parsed.object_type is None and land_request:
+        updates["object_type"] = "land plot"
+
     location = parsed.location
-    if location.city is None and re.search(r"мадрид|madrid", lowered):
-        updates["location"] = location.model_copy(
+    madrid_match = re.search(
+        r"(?:пригород\w*\s+мадрид\w*|madrid\s+suburbs?)", text, re.IGNORECASE
+    )
+    if re.search(r"мадрид|madrid", lowered):
+        location = location.model_copy(
             update={
                 "city": "Madrid",
-                "country": location.country or "Spain",
-                "raw": location.raw or text.strip(),
+                "country": "Spain",
+                "raw": location.raw or (madrid_match.group(0) if madrid_match else "Madrid"),
             }
         )
-    elif location.country is None and location.city and re.search(r"мадрид|madrid", lowered):
-        updates["location"] = location.model_copy(update={"country": "Spain"})
+        updates["location"] = location
+
+    if location.country and location.country.casefold() in {"spain", "españa"}:
+        languages = ["es", "en", *parsed.languages]
+        updates["languages"] = list(dict.fromkeys(code.casefold() for code in languages if code))
+
+    criteria = list(parsed.criteria)
+
+    def set_criterion(name: str, value: str, importance: str) -> None:
+        nonlocal criteria
+        criteria = [criterion for criterion in criteria if criterion.name != name]
+        criteria.append(QueryCriterion(name=name, value=value, importance=importance))
+
+    if explicit_area is not None:
+        set_criterion("area_min", f"{explicit_area:g} m²", "required")
+    if re.search(r"пригород\w*\s+мадрид\w*|madrid\s+suburbs?", lowered):
+        set_criterion("location", "Madrid suburbs", "required")
+    if metro_match:
+        set_criterion(
+            "metro_drive_minutes", f"{int(metro_match.group(1))} minutes by car", "required"
+        )
+    if buildable_positive and not buildable_negative:
+        set_criterion("buildable_required", "suitable for construction", "required")
+    if building_optional:
+        set_criterion("building", "with or without a house", "optional")
+    if criteria != parsed.criteria:
+        updates["criteria"] = criteria
 
     return parsed.model_copy(update=updates) if updates else parsed
 
