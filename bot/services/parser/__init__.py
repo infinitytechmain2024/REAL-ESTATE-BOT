@@ -4,12 +4,14 @@ from bot.services.parser.browser import BrowserFetcher
 from bot.services.parser.extractor import extract_text
 from bot.services.parser.fetcher import PageFetcher
 from bot.services.parser.routing import Fetcher, RoutingFetcher, build_fetcher
+from bot.services.parser.stealth import StealthFetcher
 
 __all__ = [
     "BrowserFetcher",
     "Fetcher",
     "PageFetcher",
     "RoutingFetcher",
+    "StealthFetcher",
     "build_fetcher",
     "extract_text",
 ]

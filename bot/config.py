@@ -246,6 +246,31 @@ class ParserSettings(_Base):
         )
     )
 
+    # -- stealth fetcher ---------------------------------------------------
+    # The cheap rung between plain HTTP and a real browser: Scrapling replays
+    # Chrome's TLS/header fingerprint over curl_cffi, which is what most
+    # listing portals actually reject httpx for. Off by default because it is
+    # an optional dependency -- `pip install "scrapling[fetchers]"`.
+
+    stealth_enabled: bool = Field(
+        default=False,
+        description="Retry blocked pages with a browser TLS fingerprint before the browser",
+    )
+    stealth_impersonate: str = Field(
+        default="chrome",
+        description="curl_cffi profile to impersonate: 'chrome' tracks the latest, or pin "
+        "one like 'chrome131' / 'firefox135'",
+    )
+    stealth_concurrency: int = Field(
+        default=3, ge=1, le=20, description="Parallel stealth requests; cheaper than a tab, not free"
+    )
+    stealth_timeout_seconds: float = Field(default=20.0, gt=0)
+    stealth_proxy_url: str | None = Field(
+        default=None,
+        description="Egress proxy for the stealth fetcher, e.g. http://user:pass@host:port. "
+        "A convincing handshake from a datacenter IP is still a datacenter IP.",
+    )
+
     # -- browser fallback --------------------------------------------------
     # Large listing portals answer a plain HTTP client with 403 however polite
     # its headers are. These control the Playwright fetcher that gets past

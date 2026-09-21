@@ -77,12 +77,53 @@ class PageContent(BaseModel):
         403 and 429 are what Cloudflare-fronted listing sites answer a plain
         HTTP client with; 404 or a genuine timeout are not worth a second,
         much more expensive, attempt through a real browser.
+
+        The status is not the whole story, though: a good share of the same
+        protections answer **200** and put the challenge in the body, which
+        extracts to a short "enable JavaScript to continue" page. That reads
+        as a perfectly good result to everything downstream -- the ranker
+        would score the challenge text as if it were the listing -- so it
+        counts as blocked too, and gets escalated like any 403.
         """
-        return self.status in (401, 403, 429, 503)
+        if self.status in (401, 403, 429, 503):
+            return True
+        return _looks_like_challenge(self.text)
 
     @property
     def ok(self) -> bool:
         return self.error is None and bool(self.text.strip())
+
+
+_CHALLENGE_MARKERS = (
+    "enable javascript",
+    "javascript is disabled",
+    "checking your browser",
+    "verify you are human",
+    "verifying you are human",
+    "client challenge",
+    "attention required",
+    "ddos protection by",
+    "please turn javascript on",
+    "unusual traffic from your computer",
+)
+"""Phrases that only ever appear on an interstitial, never on a listing."""
+
+_CHALLENGE_MAX_CHARS = 1_200
+"""A real page that happens to mention JavaScript is far longer than this.
+
+The length test is what keeps the markers from firing on genuine content:
+an article about scraping may well say "enable JavaScript", but it will not
+be a 400-character page that says nothing else.
+"""
+
+
+def _looks_like_challenge(text: str) -> bool:
+    """Whether *text* is a bot-protection interstitial served with a 200."""
+    stripped = text.strip()
+    if not stripped or len(stripped) > _CHALLENGE_MAX_CHARS:
+        return False
+    lowered = stripped.lower()
+    return any(marker in lowered for marker in _CHALLENGE_MARKERS)
 
 
 class StructuredResult(BaseModel):
