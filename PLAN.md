@@ -359,10 +359,10 @@ test is not treated as proof that an external service is reachable.
 4. **P1 — Web extraction.** The Scrapling fallback and limits are ✅. Probe three Spanish listing portals through the normal HTTP
    fetcher, Scrapling fallback and browser fallback. Keep the smallest route that returns
    usable listing text and contacts.
-5. **P2 — One evaluator and deduplication.** Merge Facebook, SearXNG, Scrapling and Maps
-   hits before ranking. Preserve source URLs in provenance, but send one card per listing
-   or business. Merge only on a canonical URL or a strong identity key (name + address +
-   phone); never merge two merely similar properties.
+5. **P2 — One evaluator and deduplication.** ✅ The pipeline now merges Facebook, SearXNG,
+   and Maps hits before ranking, preserves source engines in the result, and renders them
+   in Telegram. It sends one card per canonical URL. Identity-key merging (name + address +
+   phone) remains open for Maps rows that have no website.
 6. **P2 — ScrapeGraphAI trial.** Add it only as an opt-in extractor for failed/ambiguous
    pages, using the same `StructuredResult` schema and the existing Ollama endpoint. A
    successful trial must show better field completeness without increasing duplicate or
