@@ -21,8 +21,10 @@ the request at all aborts the run, because there is nothing to search for.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -312,7 +314,9 @@ class ResearchPipeline:
             purpose="extract",
         )
         # The user picked the mode with a button; the model does not get to
-        # overrule that.
+        # overrule that. Recover a few high-value constraints from the raw
+        # request when a local model omits them.
+        parsed = _recover_critical_query_fields(text, parsed)
         return parsed.model_copy(update={"mode": mode})
 
     async def rank(
@@ -503,6 +507,65 @@ class ResearchPipeline:
         position = {row.url: index for index, row in enumerate(rows)}
         stored.sort(key=lambda row: position.get(row.url, len(position)))
         return stored
+
+
+def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuery:
+    """Fill critical fields a small/local model occasionally leaves empty.
+
+    This is intentionally conservative: it only fills a field when the model
+    omitted it and only recognises unambiguous phrases. The LLM remains the
+    source for the complete schema; these guards keep location and hard
+    constraints from disappearing on a degraded extraction response.
+    """
+    lowered = text.casefold()
+    updates: dict[str, object] = {}
+
+    if parsed.area_min is None:
+        area_match = re.search(
+            r"(?:від|от|from)\s*(\d[\d\s]*(?:[.,]\d+)?)\s*(?:м|m)\b",
+            lowered,
+        )
+        if area_match:
+            raw_area = area_match.group(1).replace(" ", "").replace(",", ".")
+            with suppress(ValueError):
+                updates["area_min"] = float(raw_area)
+
+    if parsed.metro_drive_minutes is None:
+        metro_match = re.search(
+            r"(?:метро|metro).{0,40}?\b(\d+)\s*(?:хв|хвилин|мин|минут|minutes?)\b",
+            lowered,
+        ) or re.search(
+            r"\b(\d+)\s*(?:хв|хвилин|мин|минут|minutes?).{0,40}?(?:метро|metro)",
+            lowered,
+        )
+        if metro_match:
+            updates["metro_drive_minutes"] = int(metro_match.group(1))
+
+    if not parsed.buildable_required and re.search(
+        r"для\s+забудови|для\s+застройки|строительн\w*|buildable|urbanizable|edificable",
+        lowered,
+    ):
+        updates["buildable_required"] = True
+
+    if parsed.building_required is not None and re.search(
+        r"з\s+будинками?\s+або\s+без|с\s+домом?\s+или\s+без|with\s+or\s+without\s+(?:a\s+)?house",
+        lowered,
+    ):
+        updates["building_required"] = None
+
+    location = parsed.location
+    if location.city is None and re.search(r"мадрид|madrid", lowered):
+        updates["location"] = location.model_copy(
+            update={
+                "city": "Madrid",
+                "country": location.country or "Spain",
+                "raw": location.raw or text.strip(),
+            }
+        )
+    elif location.country is None and location.city and re.search(r"мадрид|madrid", lowered):
+        updates["location"] = location.model_copy(update={"country": "Spain"})
+
+    return parsed.model_copy(update=updates) if updates else parsed
 
 
 def _merge_hits(hits: list[SearchHit]) -> list[SearchHit]:
