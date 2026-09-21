@@ -305,6 +305,10 @@ class ParserSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PARSER_"})
 
     enabled: bool = Field(default=True, description="Set false to rank on snippets alone")
+    scrapling_enabled: bool = Field(
+        default=False,
+        description="Use Scrapling as an adaptive HTTP fallback when the regular fetcher fails",
+    )
     max_pages: int = Field(default=8, ge=1, le=50, description="Hits to actually fetch")
     concurrency: int = Field(default=5, ge=1, le=20)
     timeout_seconds: float = Field(default=15.0, gt=0)
@@ -423,6 +427,22 @@ class PipelineSettings(_Base):
         le=20,
         description="Cap on near misses per answer, so alternatives never crowd out matches",
     )
+
+
+class GoogleMapsSettings(_Base):
+    """Optional local Google Maps Scraper Kit sidecar."""
+
+    model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "GOOGLE_MAPS_"})
+
+    enabled: bool = Field(default=False, description="Query a local Maps Scraper Kit sidecar")
+    base_url: str = Field(default="http://127.0.0.1:8080")
+    latitude: float | None = None
+    longitude: float | None = None
+    radius_meters: int = Field(default=10_000, ge=100, le=100_000)
+    depth: int = Field(default=5, ge=1, le=20)
+    timeout_seconds: float = Field(default=120.0, gt=0)
+    poll_seconds: float = Field(default=2.0, gt=0)
+    max_results: int = Field(default=30, ge=1, le=200)
 
 
 class FacebookSettings(_Base):
@@ -582,6 +602,7 @@ class Settings(_Base):
     parser: ParserSettings = Field(default_factory=ParserSettings)
     supabase: SupabaseSettings = Field(default_factory=SupabaseSettings)
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
+    google_maps: GoogleMapsSettings = Field(default_factory=GoogleMapsSettings)
     facebook: FacebookSettings = Field(default_factory=FacebookSettings)
 
     @field_validator("log_level")

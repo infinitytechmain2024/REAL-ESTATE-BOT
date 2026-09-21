@@ -15,6 +15,10 @@ httpx[http2]==0.28.1
 # trafilatura brings its own lxml-based fallbacks; SearXNG already pins lxml.
 trafilatura==2.0.0
 
+# Adaptive HTTP fallback for listing sites whose markup or TLS fingerprint changes.
+scrapling==0.4.8
+curl-cffi>=0.15.0
+
 # Supabase (PostgREST) client.
 supabase==2.31.0
 

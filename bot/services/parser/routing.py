@@ -47,10 +47,12 @@ class RoutingFetcher:
         *,
         http: Fetcher,
         browser: Fetcher | None = None,
+        scrapling: Fetcher | None = None,
     ) -> None:
         self.settings = settings
         self._http = http
         self._browser = browser
+        self._scrapling = scrapling
         self._browser_domains = {d.lower().lstrip(".") for d in settings.browser_domains}
 
     async def preflight(self) -> None:
@@ -69,6 +71,8 @@ class RoutingFetcher:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+        if self._scrapling is not None:
+            await self._scrapling.aclose()
         if self._browser is not None:
             await self._browser.aclose()
 
@@ -96,6 +100,13 @@ class RoutingFetcher:
         if direct and self._browser is not None:
             log.info("parser.route.browser_first", count=len(direct))
             pages.update(await self._browser.fetch_many(sorted(direct)))
+
+        # Scrapling is an adaptive HTTP fallback.  It runs before Playwright,
+        # so a changed selector or TLS fingerprint does not cost a browser tab.
+        retry = [url for url, page in pages.items() if not page.ok]
+        if retry and self._scrapling is not None:
+            log.info("parser.route.scrapling", count=len(retry))
+            pages.update(await self._scrapling.fetch_many(retry))
 
         retry = [url for url, page in pages.items() if page.blocked]
         if retry and self._browser is not None:
@@ -125,8 +136,19 @@ def build_fetcher(settings: ParserSettings) -> Fetcher:
     from bot.services.parser.fetcher import PageFetcher
 
     http = PageFetcher(settings)
+    scrapling = None
+    if settings.scrapling_enabled:
+        try:
+            from bot.services.parser.scrapling import ScraplingFetcher
+
+            scrapling = ScraplingFetcher(settings)
+        except RuntimeError as exc:
+            log.warning("parser.scrapling.unavailable", error=str(exc))
+
     if not settings.browser_enabled:
-        return http
+        if scrapling is None:
+            return http
+        return RoutingFetcher(settings, http=http, scrapling=scrapling)
 
     from bot.services.parser.browser import BrowserFetcher
 
@@ -135,4 +157,9 @@ def build_fetcher(settings: ParserSettings) -> Fetcher:
         domains=sorted(settings.browser_domains),
         proxied=bool(settings.browser_proxy_url),
     )
-    return RoutingFetcher(settings, http=http, browser=BrowserFetcher(settings))
+    return RoutingFetcher(
+        settings,
+        http=http,
+        browser=BrowserFetcher(settings),
+        scrapling=scrapling,
+    )
