@@ -110,6 +110,12 @@ def format_result(result: StoredResult, index: int, total: int) -> str:
     if contacts:
         shown = ", ".join(escape_html(str(c)) for c in contacts[:3])
         lines += ["", f"☎️ {shown}"]
+    else:
+        lines += ["", "☎️ Контактная информация: не указана"]
+
+    seller = facts.get("seller")
+    if seller:
+        lines += ["", f"👤 Продавец: {escape_html(str(seller))}"]
 
     why = facts.get("why_relevant")
     if why:

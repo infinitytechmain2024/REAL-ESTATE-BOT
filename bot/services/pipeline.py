@@ -43,6 +43,7 @@ from bot.prompts import (
     build_rank_prompt,
 )
 from bot.services.budget import BudgetMatch, split_by_fit
+from bot.services.facts import extract_listing_facts
 from bot.services.llm import ChatMessage
 from bot.utils.text import plural_ru, truncate
 
@@ -509,6 +510,8 @@ def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredRe
             summary=hit.snippet or "Описание недоступно — откройте ссылку, чтобы посмотреть.",
             score=50,
             language=None,
+            seller=hit.author,
+            **extract_listing_facts(hit.content or hit.snippet),
         )
         for hit in hits[:limit]
     ]

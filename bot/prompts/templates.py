@@ -134,6 +134,7 @@ def build_rank_prompt(
             f"### Candidate {index}\n"
             f"URL: {hit.url}\n"
             f"Title: {hit.title or '(none)'}\n"
+            f"Author/seller: {hit.author or '(not shown)'}\n"
             f"Search snippet: {hit.snippet or '(none)'}\n"
             f"Found by: {', '.join(hit.engines) or 'unknown'}\n"
             f"Extracted text:\n{body}\n"

@@ -113,6 +113,7 @@ class StructuredResult(BaseModel):
     contacts: list[str] = Field(
         default_factory=list, description="Phone numbers, e-mails or contact page URLs found"
     )
+    seller: str | None = Field(default=None, description="Seller or author name shown by the source")
     language: str | None = Field(default=None, description="ISO-639-1 code of the source page")
 
     @field_validator("score", mode="before")

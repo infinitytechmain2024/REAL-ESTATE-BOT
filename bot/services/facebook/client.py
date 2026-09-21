@@ -62,6 +62,13 @@ class FacebookSource:
         if not terms:
             return SourceSearchResult()
         query_text = terms[0]
+        extras = [
+            " ".join(part for part in (" ".join(parsed.keywords), parsed.location.as_text()) if part),
+            " ".join(part for part in (parsed.object_type, parsed.location.as_text()) if part),
+        ]
+        terms = list(dict.fromkeys([*terms, *(term for term in extras if term.strip())]))[
+            : self.settings.max_search_terms
+        ]
 
         hits: list[SearchHit] = []
         groups: list[SourceGroup] = []
