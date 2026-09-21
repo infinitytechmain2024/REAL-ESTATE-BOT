@@ -159,8 +159,8 @@ async def cmd_facebook(
 
     if not settings.facebook.enabled or facebook_session is None:
         await message.answer(
-            "Facebook-модуль выключен. Задайте FACEBOOK_ENABLED=true, "
-            "FACEBOOK_GROUP_URLS и перезапустите бота, чтобы включить его."
+            "Facebook-модуль выключен. Задайте FACEBOOK_ENABLED=true и "
+            "перезапустите бота, чтобы включить его. Группы бот найдёт сам по запросу."
         )
         return
 
