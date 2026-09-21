@@ -3,9 +3,8 @@
 See ``browser.py`` for the shared persistent session, ``groups.py`` for
 group-level operations, ``client.py`` for the bridge into the research
 pipeline's ``SearchHit`` shape, ``tokens.py`` for the remote live-view access
-token, and ``gate.py`` for the token-gated proxy in front of noVNC. Nothing
-in this package is validated against a real Facebook group yet -- run
-``scripts/facebook_probe.py`` first.
+token, and ``gate.py`` for the token-gated proxy in front of noVNC. The native
+group reader has been validated against a live public group and never joins groups.
 """
 
 from bot.services.facebook.browser import FacebookSession, SessionState

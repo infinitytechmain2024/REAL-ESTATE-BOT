@@ -91,6 +91,33 @@ async def test_healthy_empty_group_is_a_successful_read(monkeypatch):
     assert result.hits == []
 
 
+async def test_no_configured_groups_are_discovered_and_read(monkeypatch):
+    session = FakeSession([SessionState.HEALTHY, SessionState.HEALTHY])
+    session.page = FakePage()
+    monkeypatch.setattr(
+        client,
+        "discover_groups",
+        AsyncMock(return_value=[("https://facebook.com/groups/public", "Public land")]),
+    )
+    monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
+    monkeypatch.setattr(
+        client,
+        "search_posts",
+        AsyncMock(return_value=[
+            GroupPost(
+                group_url="https://facebook.com/groups/public",
+                post_url="https://facebook.com/groups/public/posts/1/",
+                author="Author",
+                text="Land in Spain",
+            )
+        ]),
+    )
+    source = client.FacebookSource(FacebookSettings(enabled=True), session)
+    result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
+    assert result.hits[0].author == "Author"
+    assert [(group.title, group.access) for group in result.groups] == [("Public land", "accessible")]
+
+
 @pytest.mark.parametrize(
     "access_state",
     [GroupAccess.MEMBERSHIP_REQUIRED, GroupAccess.PENDING_APPROVAL, GroupAccess.UNAVAILABLE],

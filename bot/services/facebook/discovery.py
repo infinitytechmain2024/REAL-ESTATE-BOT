@@ -1,7 +1,7 @@
 """Discover groups and indexed public posts through web search, without a login.
 
-This source does not drive Facebook's unvalidated browser reader or join groups.
-Coverage is limited to search-engine indexing, and summaries use snippets only.
+This source does not drive the browser reader or join groups. Coverage is
+limited to search-engine indexing, and summaries use snippets only.
 The ordinary web client's social-domain blocklist stays unchanged: this dedicated
 source accepts only verified Facebook group/post URL shapes from raw results.
 """
@@ -16,7 +16,7 @@ from bot.exceptions import SearchError
 from bot.logging_conf import get_logger
 from bot.models.query import ParsedQuery, SearchQuery
 from bot.models.result import SearchHit
-from bot.services.pipeline import SourceSearchResult
+from bot.services.pipeline import SourceGroup, SourceSearchResult
 from bot.services.search import QueryBuilder, SearXNGClient
 
 log = get_logger(__name__)
@@ -76,7 +76,7 @@ class FacebookPublicSource:
             }
         )
         queries = self.query_builder.build(discovery_query)[:2]
-        groups: dict[str, None] = {}
+        groups: dict[str, SourceGroup] = {}
         posts: dict[str, SearchHit] = {}
         failed = False
 
@@ -96,7 +96,12 @@ class FacebookPublicSource:
                 group, post = links
                 if expected_group is not None and group != expected_group:
                     continue
-                groups.setdefault(group, None)
+                if group not in groups:
+                    groups[group] = SourceGroup(
+                        url=group, title=f"Группа Facebook {group.rstrip('/').rsplit('/', 1)[-1]}",
+                    )
+                if post is None and hit.title.strip():
+                    groups[group].title = hit.title.strip()
                 if post is None or not hit.snippet.strip():
                     continue
                 previous = posts.get(post)
@@ -134,4 +139,5 @@ class FacebookPublicSource:
             hits=hits,
             failed=failed,
             notes=[PUBLIC_SEARCH_NOTE] if hits else [],
+            groups=list(groups.values())[:self.settings.max_discovered_groups],
         )

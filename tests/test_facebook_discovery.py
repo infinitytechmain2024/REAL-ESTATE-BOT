@@ -225,3 +225,23 @@ async def test_discovery_uses_real_client_json_conversion_despite_web_domain_fil
         )
     finally:
         await client.aclose()
+
+
+async def test_discovered_groups_are_visible_even_without_matching_posts(
+    public_source_factory, pipeline_factory,
+):
+    source, _ = public_source_factory([
+        [SearchHit(url=GROUP, title='Terrenos & Parcelas <Valencia>')], [], [],
+    ])
+    pipeline, _ = pipeline_factory(source)
+    pipeline.extract_query.return_value = QUERY
+    outcome = await pipeline.run(user_id=1, mode=Mode.LAND, text='terreno Valencia')
+    assert [(group.url, group.title) for group in outcome.source_groups] == [
+        (GROUP, 'Terrenos & Parcelas <Valencia>'),
+    ]
+    message = AsyncMock()
+    await _send_results(message, AsyncMock(), outcome, pipeline.settings, Mode.LAND)
+    text = message.answer.call_args.args[0]
+    assert GROUP in text
+    assert 'Terrenos &amp; Parcelas &lt;Valencia&gt;' in text
+    assert 'Группы Facebook' in text
