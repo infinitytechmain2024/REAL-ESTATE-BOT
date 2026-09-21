@@ -11,7 +11,9 @@
 #     condition for having CI at all.
 #   - the import walk from `make check-imports`: it needs every runtime
 #     dependency to import cleanly on a machine nobody has run it on yet.
-#     Worth adding once someone has watched it pass.
+#     Worth adding once someone has watched it pass. (It has now been watched
+#     to pass locally; what it would not have caught is the vendored snapshot,
+#     because `searxng/` is outside the walk -- hence the separate step below.)
 #   - anything touching Chrome, Xvfb or the real noVNC: none of it fits in a
 #     CI runner, and pretending otherwise would turn a green tick into a
 #     claim this cannot support. The deploy is still verified by hand on the
@@ -51,6 +53,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Vendor snapshot
+        # First, because it needs nothing installed and its failure explains
+        # every later one: without searx/data the whole search backend is dead
+        # on a fresh clone, which is exactly how this shipped once already.
+        run: python scripts/check_vendor.py
 
       - name: Lint
         run: ruff check .

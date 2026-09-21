@@ -110,10 +110,22 @@ curl -s 'http://127.0.0.1:8888/search?q=land+for+sale+cyprus&format=json' | head
 ### Проверки
 
 ```sh
-make check        # всё разом: lint, импорты, конфиг, миграция, гейт
-make lint         # только ruff
-make probe-gate   # только живой просмотр Facebook
+make check         # всё разом: снимок, lint, импорты, конфиг, миграция, гейт
+make lint          # только ruff
+make probe-gate    # только живой просмотр Facebook
+make check-vendor  # только целостность вендоренного SearXNG
 ```
+
+`make check-vendor` проверяет, что снимок SearXNG дошёл до репозитория целиком.
+Проверка появилась не на пустом месте: правило `data/` в корневом `.gitignore`
+(написанное для рабочего каталога бота) не было привязано к корню, а непривязанное
+правило совпадает на любой глубине — и git молча не закоммитил
+`searxng/searx/data/`. Это пакет из 16 файлов, который SearXNG импортирует при
+старте, так что на свежем клоне поиск не поднимался вообще:
+`ImportError: cannot import name 'data' from 'searx'`. На машине, где снимок
+делали, всё работало — файлы просто лежали на диске. Ни lint, ни байт-компиляция
+`searxng/` не трогают, поэтому не поймал никто. Теперь ловит эта проверка — и
+заодно любое другое ignore-правило, дотягивающееся до снимка.
 
 `make probe-gate` — единственная проверка здесь, которая гоняет настоящий код
 по настоящему сценарию: поднимает заглушки вместо noVNC и websockify и дёргает
@@ -492,7 +504,8 @@ make run           # бот локально
 make searxng       # SearXNG локально
 make lint          # ruff
 make probe-gate    # живой просмотр Facebook, целиком
-make check         # lint, импорты, конфиг, миграция, гейт
+make check-vendor  # целостность вендоренного SearXNG
+make check         # снимок, lint, импорты, конфиг, миграция, гейт
 make check-api     # SearXNG JSON API (SearXNG должен быть запущен)
 make docker-up     # то же, что на Render
 ```
