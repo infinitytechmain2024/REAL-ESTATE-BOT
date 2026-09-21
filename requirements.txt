@@ -16,7 +16,12 @@ httpx[http2]==0.28.1
 trafilatura==2.0.0
 
 # Adaptive HTTP fallback for listing sites whose markup or TLS fingerprint changes.
-scrapling[fetchers]==0.4.8
+# Deliberately without its `fetchers` extra: that extra pins playwright==1.59.0,
+# which cannot be installed beside the 1.63.0 the Facebook reader needs, and it
+# pulls in browserforge, a browser-fingerprint generator this project does not
+# want. Without the extra `scrapling.fetchers` does not import, so the fallback
+# stays switched off and build_fetcher() degrades to the plain HTTP fetcher.
+scrapling==0.4.8
 curl-cffi>=0.15.0
 
 # Supabase (PostgREST) client.

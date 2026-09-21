@@ -12,6 +12,13 @@ from bot.services.facebook.groups import GroupAccess, GroupPost
 from tests.conftest import FakePage, FakeSession
 
 
+def _madrid() -> ParsedQuery:
+    """A request with a place in it -- group discovery needs one to search."""
+    return ParsedQuery(
+        mode=Mode.LAND, location=Location(city="Madrid", country="Spain"), keywords=["land"]
+    )
+
+
 async def test_flip_preserves_complete_hits_but_never_writes_partial_job(
     monkeypatch, pipeline_factory
 ):
@@ -108,7 +115,7 @@ async def test_no_configured_groups_are_discovered_and_read(monkeypatch):
     monkeypatch.setattr(
         client,
         "discover_groups",
-        AsyncMock(return_value=[("https://facebook.com/groups/public", "Public land")]),
+        AsyncMock(return_value=[("https://facebook.com/groups/public", "Public land Madrid")]),
     )
     monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
     monkeypatch.setattr(
@@ -124,9 +131,11 @@ async def test_no_configured_groups_are_discovered_and_read(monkeypatch):
         ]),
     )
     source = client.FacebookSource(FacebookSettings(enabled=True), session)
-    result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
+    result = await source.search(_madrid())
     assert result.hits[0].author == "Author"
-    assert [(group.title, group.access) for group in result.groups] == [("Public land", "accessible")]
+    assert [(group.title, group.access) for group in result.groups] == [
+        ("Public land Madrid", "accessible")
+    ]
 
 
 async def test_discovered_groups_are_location_filtered_and_return_post_links(monkeypatch):
@@ -178,12 +187,12 @@ async def test_browser_started_for_a_healthy_job_stays_available(monkeypatch):
     monkeypatch.setattr(
         client,
         "discover_groups",
-        AsyncMock(return_value=[("https://facebook.com/groups/public", "Public land")]),
+        AsyncMock(return_value=[("https://facebook.com/groups/public", "Public land Madrid")]),
     )
     monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
     monkeypatch.setattr(client, "search_posts", AsyncMock(return_value=[]))
     source = client.FacebookSource(FacebookSettings(enabled=True), session)
-    result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
+    result = await source.search(_madrid())
     assert not result.failed
     assert session.start_calls == 1
     assert session.stop_calls == 0

@@ -83,3 +83,58 @@ async def test_only_completed_source_results_are_persisted(pipeline_factory):
     outcome = await pipeline.run(user_id=1, mode=Mode.LAND, text="land")
     assert len(outcome.results) == 2
     assert [row.url for row in repo.save_results.call_args.args[0]] == [web.url]
+
+
+# --- a search that was never really run -------------------------------------
+
+
+def _searxng(payload: dict):
+    """A client whose instance answers 200 with *payload* to everything."""
+    import httpx
+
+    from bot.config import SearxngSettings
+    from bot.services.search import SearXNGClient
+
+    settings = SearxngSettings()
+    client = SearXNGClient(settings)
+    client._client = httpx.AsyncClient(
+        base_url=settings.url,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=payload)),
+    )
+    return client
+
+
+async def test_engines_that_refuse_to_answer_are_not_reported_as_no_matches():
+    """A rate limit arrives as a perfectly successful, perfectly empty 200.
+
+    Told "ничего не нашлось", the user rewrites a request that was never
+    searched. SearXNG names the engines that failed; the answer has to say so.
+    """
+    from bot.exceptions import SearchError
+    from bot.models.query import SearchQuery
+
+    client = _searxng(
+        {"results": [], "unresponsive_engines": [["google", "CAPTCHA"], ["bing", "timeout"]]}
+    )
+    try:
+        with pytest.raises(SearchError) as failure:
+            await client.search_many([SearchQuery(query="terreno Madrid", language="es")])
+    finally:
+        await client.aclose()
+
+    assert "google" in str(failure.value) and "bing" in str(failure.value)
+    # The user hears that the search failed, and not which engine: user_message
+    # never carries provider names.
+    assert "не отсутствие" in failure.value.user_message
+    assert "google" not in failure.value.user_message
+
+
+async def test_a_genuinely_empty_answer_stays_an_empty_answer():
+    """Nothing indexed for a request is a valid result, not a failure."""
+    from bot.models.query import SearchQuery
+
+    client = _searxng({"results": [], "unresponsive_engines": []})
+    try:
+        assert await client.search_many([SearchQuery(query="terreno Madrid")]) == []
+    finally:
+        await client.aclose()

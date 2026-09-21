@@ -8,11 +8,9 @@ the normal criterion-aware ranker.
 
 from __future__ import annotations
 
-import re
-import unicodedata
-
 from bot.models.enums import Mode
 from bot.models.query import ParsedQuery
+from bot.utils.places import mentions_place, place_tokens
 
 _COUNTRY_LANGUAGE = {
     "spain": ("es", ("terreno", "parcela", "solar", "finca", "urbanizable")),
@@ -26,7 +24,16 @@ _COUNTRY_LANGUAGE = {
 
 def target_language(query: ParsedQuery) -> str:
     location = " ".join(
-        part for part in (query.location.country, query.location.region, query.location.city) if part
+        part
+        for part in (
+            query.location.country,
+            query.location.region,
+            query.location.city,
+            # The user may have named the country themselves when the model
+            # did not normalise it into a field of its own.
+            query.location.raw,
+        )
+        if part
     ).lower()
     for country, (language, _terms) in _COUNTRY_LANGUAGE.items():
         if country in location:
@@ -76,16 +83,11 @@ def post_terms(query: ParsedQuery, *, limit: int) -> list[str]:
 
 
 def location_matches(title: str, query: ParsedQuery) -> bool:
-    """Reject obviously unrelated groups while allowing generic city groups."""
-    tokens = [query.location.city, query.location.region, query.location.country]
-    tokens = [_normalise(token) for token in tokens if token]
-    if not tokens:
-        return True
-    haystack = _normalise(title)
-    return any(token and token in haystack for token in tokens)
+    """Reject obviously unrelated groups while allowing generic city groups.
 
-
-def _normalise(value: str) -> str:
-    value = unicodedata.normalize("NFKD", value)
-    value = "".join(char for char in value if not unicodedata.combining(char))
-    return re.sub(r"[^a-z0-9а-яё]+", " ", value.lower()).strip()
+    Falls back to the user's own wording when the model left the normalised
+    fields empty. That used to return True for every group, which is how a
+    request for plots outside Madrid came back with Bulgarian and Malaysian
+    property groups: no place in the query, no place in the filter.
+    """
+    return mentions_place(title, place_tokens(query.location))

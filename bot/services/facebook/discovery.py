@@ -18,6 +18,7 @@ from bot.models.query import ParsedQuery, SearchQuery
 from bot.models.result import SearchHit
 from bot.services.pipeline import SourceGroup, SourceSearchResult
 from bot.services.search import QueryBuilder, SearXNGClient
+from bot.utils.places import mentions_any, place_tokens
 
 log = get_logger(__name__)
 
@@ -78,6 +79,11 @@ class FacebookPublicSource:
         queries = self.query_builder.build(discovery_query)[:2]
         groups: dict[str, SourceGroup] = {}
         posts: dict[str, SearchHit] = {}
+        # Whatever a search engine showed us about each group. A group is
+        # reported only if one of these lines names the place that was asked
+        # for -- a `site:` operator is a hint to an engine, not a filter, and
+        # the groups it returns are otherwise sent to the user unjudged.
+        seen_text: dict[str, list[str]] = {}
         failed = False
 
         async def collect(query: SearchQuery, expected_group: str | None = None) -> None:
@@ -100,6 +106,9 @@ class FacebookPublicSource:
                     groups[group] = SourceGroup(
                         url=group, title=f"Группа Facebook {group.rstrip('/').rsplit('/', 1)[-1]}",
                     )
+                seen_text.setdefault(group, []).extend(
+                    text for text in (hit.title, hit.snippet) if text.strip()
+                )
                 if post is None and hit.title.strip():
                     groups[group].title = hit.title.strip()
                 if post is None or not hit.snippet.strip():
@@ -134,10 +143,22 @@ class FacebookPublicSource:
                 expected_group=group,
             )
         hits = list(posts.values())[: self.client.settings.max_hits]
-        log.info("facebook.discovery.done", groups=len(groups), posts=len(hits), failed=failed)
+        place = place_tokens(parsed.location)
+        relevant = [
+            group
+            for url, group in groups.items()
+            if mentions_any([group.title, *seen_text.get(url, [])], place)
+        ]
+        log.info(
+            "facebook.discovery.done",
+            groups=len(relevant),
+            elsewhere=len(groups) - len(relevant),
+            posts=len(hits),
+            failed=failed,
+        )
         return SourceSearchResult(
             hits=hits,
             failed=failed,
             notes=[PUBLIC_SEARCH_NOTE] if hits else [],
-            groups=list(groups.values())[:self.settings.max_discovered_groups],
+            groups=relevant[: self.settings.max_discovered_groups],
         )

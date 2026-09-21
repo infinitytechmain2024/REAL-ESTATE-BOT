@@ -48,11 +48,10 @@ def _settings(**overrides) -> ParserSettings:
 
 
 async def test_scrapling_fetch_extracts_text_and_forwards_limits() -> None:
-    fetcher = ScraplingFetcher(_settings(timeout_seconds=0.25))
     _FakeAsyncFetcher.calls = []
     _FakeAsyncFetcher.response = _Response(HTML)
     _FakeAsyncFetcher.error = None
-    fetcher._fetcher = _FakeAsyncFetcher
+    fetcher = ScraplingFetcher(_settings(timeout_seconds=0.25), _FakeAsyncFetcher)
 
     page = await fetcher.fetch(URL)
 
@@ -68,10 +67,9 @@ async def test_scrapling_fetch_extracts_text_and_forwards_limits() -> None:
 
 
 async def test_scrapling_rejects_oversized_body_before_extraction() -> None:
-    fetcher = ScraplingFetcher(_settings(max_bytes=8))
     _FakeAsyncFetcher.response = _Response(HTML)
     _FakeAsyncFetcher.error = None
-    fetcher._fetcher = _FakeAsyncFetcher
+    fetcher = ScraplingFetcher(_settings(max_bytes=8), _FakeAsyncFetcher)
 
     page = await fetcher.fetch(URL)
 
@@ -81,15 +79,13 @@ async def test_scrapling_rejects_oversized_body_before_extraction() -> None:
 
 
 async def test_scrapling_timeout_becomes_page_error() -> None:
-    fetcher = ScraplingFetcher(_settings(timeout_seconds=0.01))
-
     async def slow_get(*args, **kwargs):
         await asyncio.sleep(0.1)
 
     class SlowFetcher:
         get = slow_get
 
-    fetcher._fetcher = SlowFetcher
+    fetcher = ScraplingFetcher(_settings(timeout_seconds=0.01), SlowFetcher)
 
     page = await fetcher.fetch(URL)
 

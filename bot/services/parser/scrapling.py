@@ -9,6 +9,7 @@ and never raises a page-level error into the pipeline.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from bot.config import ParserSettings
 from bot.logging_conf import get_logger
@@ -21,14 +22,26 @@ log = get_logger(__name__)
 class ScraplingFetcher:
     """Use Scrapling's asynchronous fetcher while preserving our PageContent API."""
 
-    def __init__(self, settings: ParserSettings) -> None:
+    def __init__(self, settings: ParserSettings, fetcher: Any | None = None) -> None:
+        """*fetcher* substitutes for Scrapling's ``AsyncFetcher``.
+
+        The wrapper's own behaviour -- the size guard, the timeout, the
+        extraction -- is the part worth testing, and none of it needs the
+        optional dependency to be installed. Passing it in keeps those tests
+        offline, which matters here: the extra cannot be installed alongside
+        this project's playwright pin (see requirements.txt).
+        """
         self.settings = settings
         self._semaphore = asyncio.Semaphore(settings.concurrency)
-        try:
-            from scrapling.fetchers import AsyncFetcher
-        except ImportError as exc:  # pragma: no cover - exercised in deployments without extra
-            raise RuntimeError("Scrapling is not installed; run pip install 'scrapling[fetchers]'") from exc
-        self._fetcher = AsyncFetcher
+        if fetcher is None:
+            try:
+                from scrapling.fetchers import AsyncFetcher
+            except ImportError as exc:  # pragma: no cover - the usual case here
+                raise RuntimeError(
+                    "Scrapling is not installed; run pip install 'scrapling[fetchers]'"
+                ) from exc
+            fetcher = AsyncFetcher
+        self._fetcher = fetcher
 
     async def preflight(self) -> None:
         return None

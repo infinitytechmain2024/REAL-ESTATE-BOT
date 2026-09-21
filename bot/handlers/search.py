@@ -171,6 +171,15 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
     source_note = "\n".join(outcome.source_notes)
 
     if total == 0:
+        # An empty location is the difference between a search and a guess, and
+        # the user is the only one who can fix it. Say so instead of suggesting
+        # they "уточните локацию" when none was understood in the first place.
+        blind = (
+            "\n📍 Место в запросе я не распознал — без него поиск идёт вслепую. "
+            "Назовите город, регион или страну."
+            if outcome.parsed.location.is_empty()
+            else ""
+        )
         await _safe_edit(
             status,
             (unavailable or format_summary(
@@ -179,7 +188,7 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
                 hits=outcome.hits_found,
                 duplicates=outcome.duplicates_skipped,
                 degraded=outcome.degraded,
-            )) + (f"\n{source_note}" if source_note else ""),
+            )) + blind + (f"\n{source_note}" if source_note else ""),
         )
         return
 

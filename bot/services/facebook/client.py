@@ -25,8 +25,14 @@ from bot.services.facebook.groups import (
 from bot.services.facebook.query import group_query, location_matches, post_terms
 from bot.services.facebook.store import FacebookGroupStore
 from bot.services.pipeline import SourceGroup, SourceSearchResult
+from bot.utils.places import place_tokens
 
 log = get_logger(__name__)
+
+NO_LOCATION_NOTE = (
+    "Facebook: в запросе не указано место, поэтому поиск групп пропущен — "
+    "без него Facebook возвращает случайные группы со всего мира."
+)
 
 
 class FacebookSource:
@@ -63,6 +69,16 @@ class FacebookSource:
         if not terms:
             return SourceSearchResult()
         query_text = group_query(parsed)
+
+        # Facebook's group search always answers. Without a place the query is
+        # a bare "land property", and what comes back is the property groups of
+        # the whole world -- which is how a request for plots outside Madrid
+        # was once answered with two Bulgarian groups and one from Malaysia.
+        # An explicitly configured group list is still read: that is a choice.
+        place = place_tokens(parsed.location)
+        if not place and not self.settings.group_urls:
+            log.info("facebook.source.no_location", query=parsed.summary())
+            return SourceSearchResult(notes=[NO_LOCATION_NOTE])
 
         hits: list[SearchHit] = []
         groups: list[SourceGroup] = []
