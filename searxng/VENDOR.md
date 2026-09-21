@@ -56,6 +56,26 @@ rm -rf .git .github
 # re-apply the '!searx/version_frozen.py' line in .gitignore
 ```
 
-Then update the commit/date/version table above and re-run
-`make searxng-smoke` (see the project README) to confirm the JSON API still
+Then update the commit/date/version table above, run `make check-vendor`, and
+re-run `make check-api` (see the project README) to confirm the JSON API still
 answers.
+
+> **Check what actually got committed, not what is on disk.**
+>
+> `searx/data/` is a package, not a cache: sixteen files that seventeen SearXNG
+> modules import at start-up. It went missing once. The root `.gitignore` had an
+> unanchored `data/` rule — written for the bot's own `./data/` runtime
+> directory — and an unanchored rule matches at every depth, so git silently
+> declined to commit `searxng/searx/data/` at all. On the machine that vendored
+> the snapshot everything worked, because the files were sitting right there.
+> Every fresh clone got:
+>
+> ```
+> ImportError: cannot import name 'data' from 'searx'
+> ```
+>
+> Lint did not catch it, the byte-compile did not catch it, and neither touches
+> `searxng/`. `make check-vendor` (`scripts/check_vendor.py`) now does, and also
+> fails on any *other* ignore rule that reaches into this directory. Run it after
+> every snapshot update, and keep new `.gitignore` entries anchored with a
+> leading slash unless they are genuinely meant to match at every depth.

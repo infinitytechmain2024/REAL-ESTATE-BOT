@@ -25,6 +25,8 @@ htmlcov/
 # directory of that name at ANY depth, which silently swallowed the vendored
 # searxng/searx/data package -- SearXNG cannot import without it, so the whole
 # search engine was missing from every clone. See tests/test_deployment.py.
+# This rule is only meant for the bot's own runtime directory at the repo root
+# (the Facebook profile and the gate token live there).
 /data/
 
 # Browser profiles and debug artefacts — these hold live session cookies
