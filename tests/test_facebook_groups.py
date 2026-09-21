@@ -186,8 +186,9 @@ async def test_read_recent_posts_collects_newly_loaded_posts_and_deduplicates(mo
 
     assert posts == [first, second]
     assert extract.await_count == 3
+    # It scrolled to get there; how far is the scroller's business, and the
+    # feed reader and the in-group search now share one.
     assert page.mouse.wheel.await_count == 2
-    page.mouse.wheel.assert_any_await(0, 1800)
 
 
 async def test_read_recent_posts_skips_one_unreadable_article(monkeypatch):

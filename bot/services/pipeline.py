@@ -49,6 +49,7 @@ from bot.prompts import (
 from bot.services.budget import BudgetMatch, split_by_fit
 from bot.services.facts import extract_listing_facts
 from bot.services.llm import ChatMessage
+from bot.services.relevance import most_promising
 from bot.utils.text import plural_ru, truncate
 
 if TYPE_CHECKING:
@@ -225,7 +226,23 @@ class ResearchPipeline:
 
         noun = plural_ru(len(fresh_hits), "ссылка", "ссылки", "ссылок")
         await report(f"📄 Найдено {len(fresh_hits)} {noun}, изучаю содержимое…")
-        candidates = await self._collect_content(fresh_hits)
+        # Reading a whole group can produce hundreds of posts, and the ranking
+        # call is one prompt. Order them by what is countable in the text -- the
+        # place, the wording, an area, a price -- and judge the best of them.
+        # Nothing is dropped for being unreadable, only for being outranked.
+        promising = most_promising(
+            [(hit, None) for hit in fresh_hits],
+            parsed,
+            limit=self.settings.pipeline.max_candidates_to_rank,
+        )
+        if len(promising) < len(fresh_hits):
+            log.info(
+                "pipeline.candidates.trimmed",
+                user_id=user_id,
+                found=len(fresh_hits),
+                ranked=len(promising),
+            )
+        candidates = await self._collect_content([hit for hit, _ in promising])
 
         degraded = False
         try:

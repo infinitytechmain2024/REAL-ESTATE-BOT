@@ -7,6 +7,8 @@ configured, then reads their matching posts under the shared session lock.
 
 from __future__ import annotations
 
+import time
+
 from bot.config import FacebookSettings
 from bot.logging_conf import get_logger
 from bot.models.query import ParsedQuery
@@ -144,25 +146,34 @@ class FacebookSource:
                     # max_posts_per_group visible posts -- which is all of them.
                     # The feed then fills whatever room is left, because in-group
                     # search is literal and a natural request often misses.
-                    budget = self.settings.max_posts_per_group
+                    # 0 means every post the group will give up. What stops
+                    # the reader then is the clock: the browser is shared and
+                    # single-threaded, so a group with ten thousand posts must
+                    # not hold every other search behind it.
+                    budget = self.settings.max_posts_per_group or None
+                    deadline = time.monotonic() + self.settings.group_read_seconds
                     found: dict[str, GroupPost] = {}
                     try:
                         for term in terms:
-                            if len(found) >= budget:
+                            room = None if budget is None else budget - len(found)
+                            if (room is not None and room <= 0) or time.monotonic() >= deadline:
                                 break
                             posts = await search_posts(
                                 self.session.page,
                                 group_url,
                                 term,
-                                max_posts=budget - len(found),
+                                max_posts=room,
+                                deadline=deadline,
                             )
                             for post in posts:
                                 found.setdefault(post.post_url, post)
-                        if len(found) < budget:
+                        room = None if budget is None else budget - len(found)
+                        if (room is None or room > 0) and time.monotonic() < deadline:
                             for post in await read_recent_posts(
                                 self.session.page,
                                 group_url,
-                                max_posts=budget - len(found),
+                                max_posts=room,
+                                deadline=deadline,
                             ):
                                 found.setdefault(post.post_url, post)
                     except Exception:

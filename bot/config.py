@@ -403,6 +403,14 @@ class PipelineSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PIPELINE_"})
 
     max_results_to_user: int = Field(default=8, ge=1, le=30)
+    max_candidates_to_rank: int = Field(
+        default=60,
+        ge=1,
+        le=500,
+        description="Candidates handed to the ranking model in one call. Reading "
+        "a whole group can produce hundreds of posts; they are ordered by a "
+        "local, deterministic score first, and this many are judged by the LLM.",
+    )
     min_score: int = Field(
         default=45, ge=0, le=100, description="Drop results the LLM scored lower"
     )
@@ -509,10 +517,19 @@ class FacebookSettings(_Base):
         "Public web-search discovery does not require this list.",
     )
     max_posts_per_group: int = Field(
-        default=10,
-        ge=1,
-        le=200,
-        description="Recent posts inspected per group before criterion ranking",
+        default=0,
+        ge=0,
+        le=5000,
+        description="Posts read per group. 0 means every post the group's feed "
+        "will give up -- what actually stops the reader is group_read_seconds "
+        "and the feed running out of new posts.",
+    )
+    group_read_seconds: float = Field(
+        default=180.0,
+        gt=0,
+        description="Wall-clock budget for reading one group. The Facebook "
+        "browser is shared and single-threaded: without this, one busy group "
+        "holds every other search behind it.",
     )
     max_search_terms: int = Field(
         default=3,

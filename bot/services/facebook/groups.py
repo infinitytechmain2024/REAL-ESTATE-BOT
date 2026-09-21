@@ -6,6 +6,7 @@ Unknown layouts fail visibly; reading never joins a group.
 
 from __future__ import annotations
 
+import time
 from enum import StrEnum
 from urllib.parse import quote, urljoin
 
@@ -166,8 +167,80 @@ async def join_group(page: Page) -> bool:
     return False
 
 
+#: Re-read this many already-seen cards each round. Facebook inserts posts as
+#: you scroll, and occasionally shifts the list; the overlap absorbs a small
+#: shift without re-extracting the whole feed, which would make reading a
+#: 300-post group quadratic in browser calls.
+_OVERLAP = 5
+
+_STAGNANT_ROUNDS = 3
+"""Scroll rounds that add nothing before the feed is called exhausted. Facebook
+loads lazily, so one empty round means very little."""
+
+
+async def _collect_posts(
+    page: Page,
+    group_url: str,
+    *,
+    max_posts: int | None,
+    deadline: float | None,
+) -> list[GroupPost]:
+    """Scroll a post list, extracting every card, until one of the ends.
+
+    The ends are: *max_posts* collected (``None`` means no limit -- read the
+    whole group), the wall-clock *deadline*, an explicit "no posts" state, or
+    the feed producing nothing new for several rounds.
+
+    A card that cannot be extracted is skipped, never fatal. Over hundreds of
+    posts a malformed one is a certainty, and one broken permalink must not
+    cost the group.
+    """
+    posts: list[GroupPost] = []
+    seen_urls: set[str] = set()
+    stagnant_rounds = 0
+    processed = 0
+
+    def full() -> bool:
+        return max_posts is not None and len(posts) >= max_posts
+
+    def out_of_time() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    while not full() and not out_of_time() and stagnant_rounds < _STAGNANT_ROUNDS:
+        before = len(posts)
+        articles = page.locator("div[role='article']")
+        count = await articles.count()
+        for index in range(max(0, processed - _OVERLAP), count):
+            if full() or out_of_time():
+                break
+            try:
+                post = await _extract_post(articles.nth(index), group_url)
+            except RuntimeError:
+                continue
+            if post is None or post.post_url in seen_urls:
+                continue
+            seen_urls.add(post.post_url)
+            posts.append(post)
+        processed = count
+
+        if full() or out_of_time() or await _any_text(page, EMPTY_SIGNALS):
+            break
+        await page.mouse.wheel(0, 2000)
+        await page.wait_for_timeout(1200)
+        stagnant_rounds = stagnant_rounds + 1 if len(posts) == before else 0
+
+    if out_of_time():
+        log.info("facebook.group.read_budget_spent", group_url=group_url, posts=len(posts))
+    return posts
+
+
 async def search_posts(
-    page: Page, group_url: str, query: str, *, max_posts: int
+    page: Page,
+    group_url: str,
+    query: str,
+    *,
+    max_posts: int | None = None,
+    deadline: float | None = None,
 ) -> list[GroupPost]:
     """Search and collect real posts, ignoring people cards and UI text."""
     search_box = await _first_placeholder(page, SEARCH_PLACEHOLDERS)
@@ -194,28 +267,7 @@ async def search_posts(
         await page.wait_for_url("**/search**", timeout=15000)
     await page.wait_for_selector("div[role='article']", timeout=15000)
 
-    posts: list[GroupPost] = []
-    seen_urls: set[str] = set()
-    stagnant_rounds = 0
-
-    while len(posts) < max_posts and stagnant_rounds < 3:
-        before = len(posts)
-        articles = page.locator("div[role='article']")
-        count = await articles.count()
-        for i in range(count):
-            if len(posts) >= max_posts:
-                break
-            post = await _extract_post(articles.nth(i), group_url)
-            if post is None or post.post_url in seen_urls:
-                continue
-            seen_urls.add(post.post_url)
-            posts.append(post)
-
-        if len(posts) >= max_posts or await _any_text(page, EMPTY_SIGNALS):
-            break
-        await page.mouse.wheel(0, 2000)
-        await page.wait_for_timeout(1200)
-        stagnant_rounds = stagnant_rounds + 1 if len(posts) == before else 0
+    posts = await _collect_posts(page, group_url, max_posts=max_posts, deadline=deadline)
 
     if not posts and not await _any_text(page, EMPTY_SIGNALS):
         raise RuntimeError("Facebook search returned no readable posts or explicit empty state")
@@ -225,31 +277,14 @@ async def search_posts(
 
 
 async def read_recent_posts(
-    page: Page, group_url: str, *, max_posts: int
+    page: Page,
+    group_url: str,
+    *,
+    max_posts: int | None = None,
+    deadline: float | None = None,
 ) -> list[GroupPost]:
-    """Read the newest visible feed posts when in-group keyword search misses."""
-    posts: list[GroupPost] = []
-    seen_urls: set[str] = set()
-    stagnant_rounds = 0
-    while len(posts) < max_posts and stagnant_rounds < 2:
-        before = len(posts)
-        articles = page.locator("div[role='article']")
-        for index in range(await articles.count()):
-            if len(posts) >= max_posts:
-                break
-            try:
-                post = await _extract_post(articles.nth(index), group_url)
-            except RuntimeError:
-                continue
-            if post is None or post.post_url in seen_urls:
-                continue
-            seen_urls.add(post.post_url)
-            posts.append(post)
-        if len(posts) >= max_posts:
-            break
-        await page.mouse.wheel(0, 1800)
-        await page.wait_for_timeout(1000)
-        stagnant_rounds = stagnant_rounds + 1 if len(posts) == before else 0
+    """Read the group's feed, newest first, as far as it will go."""
+    posts = await _collect_posts(page, group_url, max_posts=max_posts, deadline=deadline)
     log.info("facebook.group.recent_posts", group_url=group_url, found=len(posts))
     return posts
 
