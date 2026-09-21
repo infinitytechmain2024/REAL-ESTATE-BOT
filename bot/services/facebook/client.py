@@ -20,6 +20,7 @@ from bot.services.facebook.groups import (
     search_posts,
 )
 from bot.services.pipeline import SourceGroup, SourceSearchResult
+from bot.services.search.query_builder import localized_terms
 
 log = get_logger(__name__)
 
@@ -45,9 +46,15 @@ class FacebookSource:
         if not self.settings.enabled:
             return SourceSearchResult()
 
-        query_text = parsed.human_summary() or " ".join(parsed.keywords)
-        if not query_text:
+        # One phrase per language rather than one string: which language the
+        # person happened to type in should not decide which posts exist.
+        terms = localized_terms(parsed, limit=self.settings.max_search_terms)
+        if not terms:
+            fallback = parsed.human_summary() or " ".join(parsed.keywords)
+            terms = [fallback] if fallback else []
+        if not terms:
             return SourceSearchResult()
+        query_text = terms[0]
 
         hits: list[SearchHit] = []
         groups: list[SourceGroup] = []
@@ -88,13 +95,21 @@ class FacebookSource:
 
                     # Only a fully completed group read contributes hits. Exceptions
                     # discard the current group's local extraction buffer.
-                    posts = await search_posts(
-                        self.session.page,
-                        group_url,
-                        query_text,
-                        max_posts=self.settings.max_posts_per_group,
-                    )
-                    hits.extend(_post_to_hit(post) for post in posts)
+                    # The same post surfaces under more than one phrasing, so
+                    # collect by permalink and report each one once.
+                    found: dict[str, GroupPost] = {}
+                    for term in terms:
+                        posts = await search_posts(
+                            self.session.page,
+                            group_url,
+                            term,
+                            max_posts=self.settings.max_posts_per_group,
+                        )
+                        for post in posts:
+                            found.setdefault(post.post_url, post)
+                        if len(found) >= self.settings.max_posts_per_group:
+                            break
+                    hits.extend(_post_to_hit(post) for post in found.values())
 
                 # Also catch a flip during the last (or only) group.
                 failed = await self.session.observe_state() != SessionState.HEALTHY

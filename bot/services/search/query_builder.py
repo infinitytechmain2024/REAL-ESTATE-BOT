@@ -48,13 +48,61 @@ _TEMPLATES: dict[Mode, dict[str, list[str]]] = {
     },
 }
 
-_MAX_LANGUAGES = 2
-"""More than two languages spends the query budget on breadth over depth."""
-
 _ISO_639_1_LENGTH = 2
 """SearXNG expects 'el' or 'el-GR'; it answers 200 and silently ignores an
 unrecognised code, so the only thing worth guarding is the shape -- an LLM that
 answers "greek" or "russian" must not turn into a bogus filter."""
+
+
+def localized_terms(query: ParsedQuery, *, limit: int) -> list[str]:
+    """Short search phrases for *query*, one per language, most useful first.
+
+    Built for search boxes that take a single string -- Facebook's in-group
+    search, say -- where the web path's full query set does not fit. Each term
+    is the local phrasing plus the location, so a Valencia plot is looked for
+    as "terreno en venta Valencia" and not only as whatever language the
+    person happened to type their request in.
+
+    Falls back to the raw keywords when the request carries nothing else, so a
+    bare "finca rustica" still searches for something.
+    """
+    languages = _normalised_languages(query.languages, limit=limit)
+    location = query.location.as_text()
+    templates = _TEMPLATES[query.mode]
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for language in languages:
+        phrasings = templates.get(language) or templates["en"]
+        candidate = " ".join(part for part in (phrasings[0], location) if part).strip()
+        if candidate and candidate.lower() not in seen:
+            seen.add(candidate.lower())
+            terms.append(candidate)
+
+    if not terms and query.keywords:
+        terms.append(" ".join(query.keywords[:5]))
+    return terms[:limit]
+
+
+def _normalised_languages(codes: list[str], *, limit: int) -> list[str]:
+    """Valid ISO-639-1 codes from *codes*, always ending with English.
+
+    Codes that are not a bare pair are dropped rather than passed through, so
+    a model answering "greek" does not become a search filter -- and is not
+    truncated to "gr", which is a country.
+    """
+    ordered: list[str] = []
+    for code in codes:
+        normalised = (code or "").strip().lower()
+        if len(normalised) == 5 and normalised[2] == "-":
+            normalised = normalised[:_ISO_639_1_LENGTH]
+        if len(normalised) != _ISO_639_1_LENGTH or not normalised.isalpha():
+            continue
+        if normalised not in ordered:
+            ordered.append(normalised)
+    if "en" not in ordered:
+        ordered.append("en")
+    return ordered[:limit]
 
 
 class QueryBuilder:
@@ -104,20 +152,7 @@ class QueryBuilder:
         Codes that are not a bare ISO-639-1 pair are dropped rather than passed
         through, so a model answering "greek" does not become a search filter.
         """
-        ordered: list[str] = []
-        for code in query.languages:
-            # Validate before truncating: "greek"[:2] would otherwise become
-            # "gr", which is a country, not a language.
-            normalised = (code or "").strip().lower()
-            if len(normalised) == 5 and normalised[2] == "-":
-                normalised = normalised[:_ISO_639_1_LENGTH]
-            if len(normalised) != _ISO_639_1_LENGTH or not normalised.isalpha():
-                continue
-            if normalised not in ordered:
-                ordered.append(normalised)
-        if "en" not in ordered:
-            ordered.append("en")
-        return ordered[:_MAX_LANGUAGES]
+        return _normalised_languages(query.languages, limit=self.settings.max_languages)
 
     def _constraint_terms(self, query: ParsedQuery) -> str:
         """Budget and area as search-friendly text.
