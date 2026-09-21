@@ -113,16 +113,29 @@ class LLMProvider(abc.ABC):
     ) -> ModelT:
         """Return the reply parsed into *schema*.
 
-        Providers with native JSON mode get the JSON schema passed through;
-        the rest are steered with an instruction appended to the system
-        message. Either way the text is parsed defensively (models like to
-        wrap JSON in prose or ```json fences) and, if that still fails, the
-        model is shown its own broken output and asked to fix it.
+        The schema is *always* appended to the system message, and providers
+        with native JSON mode additionally get ``response_format`` set. The two
+        do different jobs and are not alternatives: JSON mode only guarantees
+        that the reply parses as JSON, it says nothing about which fields the
+        caller wants. This used to be an either/or, which meant that on every
+        OpenAI-compatible gateway -- OpenRouter included, and it is the default
+        provider -- the model was told "reply in JSON" and never told the shape.
+
+        That failed quietly rather than loudly. The models here have optional
+        fields and ``extra="ignore"``, so a reply full of plausible-but-wrong
+        key names still validates; it just validates to nulls. A request with a
+        budget and a location would come back with `budget_max=None` and an
+        empty `Location`, and the search would run with those constraints
+        silently dropped. Where it did not validate, the repair round below
+        paid for a second call to recover the shape that could have been stated
+        up front.
+
+        Either way the text is parsed defensively (models like to wrap JSON in
+        prose or ```json fences) and, if that still fails, the model is shown
+        its own broken output and asked to fix it.
         """
         json_schema = schema.model_json_schema()
-        prepared = list(messages)
-        if not self.supports_json_mode:
-            prepared = _append_schema_instruction(prepared, json_schema)
+        prepared = _append_schema_instruction(list(messages), json_schema)
 
         response = await self.chat(
             prepared,
