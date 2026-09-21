@@ -6,10 +6,13 @@ __pycache__/
 venv/
 .python-version
 
-# Environment
+# Environment. `*.env` matches a file ENDING in .env, which is not the shape
+# a backup takes: `.env.backup` reached the repository through that gap, with
+# live values in it. `.env.*` closes it, and the example is let back in.
 .env
 .env.local
 *.env
+.env.*
 !.env.example
 
 # Tooling

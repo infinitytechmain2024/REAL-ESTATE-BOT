@@ -114,3 +114,36 @@ def test_the_bots_own_runtime_directory_is_still_ignored() -> None:
     )
 
     assert result.returncode == 0, "./data is no longer ignored — session cookies could be committed"
+
+
+def test_no_environment_file_is_tracked_except_the_example() -> None:
+    """`.env.backup` reached this repository, with values in it.
+
+    The ignore rule was `*.env`, which matches a file *ending* in .env -- not
+    the shape a backup takes. The example file is the one env file that belongs
+    here, because it carries names and no values.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", "*.env", ".env", ".env.*"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split("\0")
+    offenders = [name for name in tracked if name and name != ".env.example"]
+
+    assert offenders == [], f"environment files are tracked in git: {offenders}"
+
+
+def test_an_env_backup_cannot_be_added_again() -> None:
+    repo = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        ["git", "check-ignore", ".env.backup"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, ".env.backup is not gitignored"
