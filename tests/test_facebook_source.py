@@ -116,6 +116,24 @@ async def test_no_configured_groups_are_discovered_and_read(monkeypatch):
     result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
     assert result.hits[0].author == "Author"
     assert [(group.title, group.access) for group in result.groups] == [("Public land", "accessible")]
+    assert session.stop_calls == 0  # This fake started with a live context.
+
+
+async def test_browser_started_for_a_healthy_job_is_closed_after_read(monkeypatch):
+    session = FakeSession([SessionState.HEALTHY, SessionState.HEALTHY])
+    session.has_live_context = False
+    session.page = FakePage()
+    monkeypatch.setattr(
+        client,
+        "discover_groups",
+        AsyncMock(return_value=[("https://facebook.com/groups/public", "Public land")]),
+    )
+    monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
+    monkeypatch.setattr(client, "search_posts", AsyncMock(return_value=[]))
+    source = client.FacebookSource(FacebookSettings(enabled=True), session)
+    result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
+    assert not result.failed
+    assert session.start_calls == session.stop_calls == 1
 
 
 @pytest.mark.parametrize(

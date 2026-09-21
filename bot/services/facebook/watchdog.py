@@ -88,6 +88,12 @@ class FacebookWatchdog:
                     except Exception:
                         log.exception("facebook.watchdog.invalidate_failed")
                 await self._notify(RECOVERY_TEXT)
+                # The live browser is needed for human recovery only. Once
+                # Facebook is healthy again, close the preview window; the
+                # next job or incident will start it lazily when needed.
+                async with self.session.lock:
+                    if self.session.has_live_context:
+                        await self.session.stop()
 
     async def _notify(self, text: str, **kwargs: object) -> None:
         for chat_id in dict.fromkeys(self.settings.facebook.admin_telegram_ids):
