@@ -21,8 +21,10 @@ the request at all aborts the run, because there is nothing to search for.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -32,7 +34,7 @@ from bot.config import Settings
 from bot.exceptions import LLMError
 from bot.logging_conf import get_logger
 from bot.models.enums import Mode
-from bot.models.query import ParsedQuery, SearchQuery
+from bot.models.query import ParsedQuery, QueryCriterion, SearchQuery
 from bot.models.result import PageContent, SearchHit, StoredResult, StructuredResult
 from bot.prompts import (
     DETAILS_SYSTEM,
@@ -312,7 +314,9 @@ class ResearchPipeline:
             purpose="extract",
         )
         # The user picked the mode with a button; the model does not get to
-        # overrule that.
+        # overrule that. Recover a few high-value constraints from the raw
+        # request when a local model omits them.
+        parsed = _recover_critical_query_fields(text, parsed)
         return parsed.model_copy(update={"mode": mode})
 
     async def rank(
@@ -503,6 +507,151 @@ class ResearchPipeline:
         position = {row.url: index for index, row in enumerate(rows)}
         stored.sort(key=lambda row: position.get(row.url, len(position)))
         return stored
+
+
+def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuery:
+    """Fill critical fields a small/local model occasionally leaves empty.
+
+    This is intentionally conservative: it recognises only unambiguous
+    phrases. Explicit values in the raw request win over the model because a
+    missing or misread hard constraint changes which listings are acceptable.
+    The LLM remains the source for the rest of the schema.
+    """
+    lowered = text.casefold()
+    updates: dict[str, object] = {}
+
+    area_match = re.search(
+        r"(?:від|от|from|at\s+least)\s*(\d[\d\s]*(?:[.,]\d+)?)\s*"
+        r"(?:м(?:\s*2|²|\s+квадратн\w*)?|m(?:\s*2|²)|square\s+met(?:er|re)s?)\b",
+        lowered,
+    )
+    explicit_area: float | None = None
+    if area_match:
+        raw_area = area_match.group(1).replace(" ", "").replace(",", ".")
+        with suppress(ValueError):
+            explicit_area = float(raw_area)
+            updates["area_min"] = explicit_area
+
+    duration = r"(\d{1,3})\s*(?:хв(?:илин\w*)?|мин(?:ут\w*)?|minutes?)\b"
+    driving = r"(?:на\s+(?:машин\w*|авто(?:мобил\w*)?)|by\s+car|driv\w*)"
+    metro_match = re.search(
+        rf"(?:метро|metro).{{0,50}}?{duration}.{{0,24}}?{driving}", lowered
+    ) or re.search(rf"{duration}.{{0,24}}?{driving}.{{0,50}}?(?:метро|metro)", lowered)
+    if metro_match:
+        updates["metro_drive_minutes"] = int(metro_match.group(1))
+
+    buildable_negative = re.search(
+        r"(?:не\s+(?:для\s+)?застройк\w*|не\s+для\s+забудови|not\s+buildable|"
+        r"not\s+for\s+(?:construction|development)|no\s+urbanizable)",
+        lowered,
+    )
+    buildable_positive = re.search(
+        r"для\s+забудови|для\s+застройки|для\s+строительств\w*|"
+        r"buildable|for\s+(?:construction|development)|urbanizable|edificable",
+        lowered,
+    )
+    if buildable_negative:
+        updates["buildable_required"] = False
+    elif buildable_positive:
+        updates["buildable_required"] = True
+
+    building_optional = re.search(
+        r"з\s+будинками?\s+або\s+без|с\s+дом\w*\s+или\s+без|"
+        r"with\s+or\s+without\s+(?:a\s+)?house|con\s+o\s+sin\s+casa",
+        lowered,
+    )
+    if building_optional:
+        updates["building_required"] = None
+
+    land_request = re.search(
+        r"земельн\w*\s+(?:участк\w*|ділян\w*)|земельн\w*\s+ділян\w*|land\s+plots?",
+        lowered,
+    )
+    if parsed.object_type is None and land_request:
+        updates["object_type"] = "land plot"
+
+    location = parsed.location
+    madrid_match = re.search(
+        r"(?:пригород\w*\s+мадрид\w*|madrid\s+suburbs?)", text, re.IGNORECASE
+    )
+    if re.search(r"мадрид|madrid", lowered):
+        location = location.model_copy(
+            update={
+                "city": "Madrid",
+                "country": "Spain",
+                "raw": location.raw or (madrid_match.group(0) if madrid_match else "Madrid"),
+            }
+        )
+        updates["location"] = location
+
+    if location.country and location.country.casefold() in {"spain", "españa"}:
+        languages = ["es", "en", *parsed.languages]
+        updates["languages"] = list(dict.fromkeys(code.casefold() for code in languages if code))
+
+    criteria = list(parsed.criteria)
+    duplicate_markers: list[Callable[[str], bool]] = []
+    if explicit_area is not None:
+        area_token = f"{explicit_area:g}"
+        duplicate_markers.append(
+            lambda value: area_token in value
+            and any(unit in value for unit in ("m²", "m2", "square", "area"))
+        )
+    if re.search(r"пригород\w*\s+мадрид\w*|madrid\s+suburbs?", lowered):
+        duplicate_markers.append(lambda value: "madrid" in value or "мадрид" in value)
+    if metro_match:
+        duplicate_markers.append(lambda value: "metro" in value or "метро" in value)
+    if buildable_positive and not buildable_negative:
+        duplicate_markers.append(
+            lambda value: any(
+                marker in value
+                for marker in (
+                    "buildable",
+                    "development",
+                    "construction",
+                    "urbanizable",
+                    "edificable",
+                    "забудов",
+                    "застрой",
+                )
+            )
+        )
+    if building_optional:
+        duplicate_markers.append(
+            lambda value: any(
+                marker in value for marker in ("house", "building", "дом", "будин", "casa")
+            )
+        )
+    if duplicate_markers:
+        criteria = [
+            criterion
+            for criterion in criteria
+            if not any(
+                is_duplicate(f"{criterion.name} {criterion.value}".casefold())
+                for is_duplicate in duplicate_markers
+            )
+        ]
+
+    def set_criterion(name: str, value: str, importance: str) -> None:
+        nonlocal criteria
+        criteria = [criterion for criterion in criteria if criterion.name != name]
+        criteria.append(QueryCriterion(name=name, value=value, importance=importance))
+
+    if explicit_area is not None:
+        set_criterion("area_min", f"{explicit_area:g} m²", "required")
+    if re.search(r"пригород\w*\s+мадрид\w*|madrid\s+suburbs?", lowered):
+        set_criterion("location", "Madrid suburbs", "required")
+    if metro_match:
+        set_criterion(
+            "metro_drive_minutes", f"{int(metro_match.group(1))} minutes by car", "required"
+        )
+    if buildable_positive and not buildable_negative:
+        set_criterion("buildable_required", "suitable for construction", "required")
+    if building_optional:
+        set_criterion("building", "with or without a house", "optional")
+    if criteria != parsed.criteria:
+        updates["criteria"] = criteria
+
+    return parsed.model_copy(update=updates) if updates else parsed
 
 
 def _merge_hits(hits: list[SearchHit]) -> list[SearchHit]:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from bot.models.enums import Mode
 
@@ -41,6 +41,28 @@ class QueryCriterion(BaseModel):
     importance: Literal["required", "preferred", "optional"] = Field(
         description="Whether this condition is mandatory, desired, or merely allowed"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_local_model_shape(cls, value: object) -> object:
+        """Accept two harmless JSON variations emitted by smaller models."""
+        if not isinstance(value, dict):
+            return value
+        normalised = dict(value)
+        if "importance" not in normalised and normalised.get("type") in {
+            "required",
+            "preferred",
+            "optional",
+        }:
+            normalised["importance"] = normalised["type"]
+        if "name" not in normalised and normalised.get("value") is not None:
+            normalised["name"] = str(normalised["value"])
+        criterion_value = normalised.get("value")
+        if isinstance(criterion_value, bool):
+            normalised["value"] = str(criterion_value).lower()
+        elif criterion_value is not None and not isinstance(criterion_value, str):
+            normalised["value"] = str(criterion_value)
+        return normalised
 
 
 class ParsedQuery(BaseModel):
