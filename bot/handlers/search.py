@@ -139,7 +139,12 @@ async def run_research(
 
 
 async def _send_results(message, status, outcome, settings: Settings, mode: Mode) -> None:  # type: ignore[no-untyped-def]
-    """Send each result as its own message, then the closing summary."""
+    """Send each listing as its own message, then the closing summary.
+
+    One object per message, web results and Facebook posts in the same ranked
+    stream: the user scrolls one list, and each message carries its own link,
+    price, contacts and feedback buttons.
+    """
     total = len(outcome.results)
 
     if total == 0:
@@ -148,9 +153,10 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
             format_summary(
                 mode=mode,
                 sent=0,
-                hits=outcome.hits_found,
+                stats=outcome.stats,
                 duplicates=outcome.duplicates_skipped,
                 degraded=outcome.degraded,
+                archive_path=outcome.archive_path,
             ),
         )
         return
@@ -162,11 +168,14 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
     else:
         noun = plural_ru(
             outcome.exact_count,
-            "подходящий результат",
-            "подходящих результата",
-            "подходящих результатов",
+            "подходящий объект",
+            "подходящих объекта",
+            "подходящих объектов",
         )
-        await _safe_edit(status, f"✅ Нашёл {outcome.exact_count} {noun}, отправляю…")
+        await _safe_edit(
+            status,
+            f"✅ Нашёл {outcome.exact_count} {noun} — отправляю каждый отдельным сообщением…",
+        )
 
     sent = 0
     for index, result in enumerate(outcome.results, start=1):
@@ -197,10 +206,11 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
         format_summary(
             mode=mode,
             sent=sent,
-            hits=outcome.hits_found,
+            stats=outcome.stats,
             duplicates=outcome.duplicates_skipped,
             degraded=outcome.degraded,
             alternatives=len(outcome.alternatives),
+            archive_path=outcome.archive_path,
         ),
         reply_markup=mode_switch_keyboard(mode),
     )

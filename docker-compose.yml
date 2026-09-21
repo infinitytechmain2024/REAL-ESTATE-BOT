@@ -54,11 +54,12 @@ services:
     shm_size: 2gb
     volumes:
       # Without this, the container filesystem (and with it the Facebook Chrome
-      # profile + the live-view token file) resets on every `docker compose up`
-      # after a `down` -- you would have to clear the login checkpoint again on
-      # every restart. Bind-mounting ./data keeps FACEBOOK_PROFILE_DIR and
-      # FACEBOOK_TOKEN_STORE_PATH (both default to ./data/... inside the
-      # container) on the host, surviving container recreation.
+      # profile, the live-view token file and the research archive) resets on
+      # every `docker compose up` after a `down` -- you would have to clear the
+      # login checkpoint again on every restart, and every search ever run would
+      # be gone. Bind-mounting ./data keeps FACEBOOK_PROFILE_DIR,
+      # FACEBOOK_TOKEN_STORE_PATH and ARCHIVE_DIR (all default to ./data/...
+      # inside the container) on the host, surviving container recreation.
       - ./data:/app/data
     ports:
       # Exposed only so you can curl the API while developing. Drop this

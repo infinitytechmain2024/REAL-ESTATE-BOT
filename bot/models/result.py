@@ -17,7 +17,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from bot.models.enums import BudgetFit, Mode, ResultStatus
+from bot.models.enums import BudgetFit, HitSource, Mode, ResultStatus
 from bot.utils.urls import url_hash
 
 
@@ -42,6 +42,11 @@ class SearchHit(BaseModel):
     )
     author: str | None = Field(
         default=None, description="Displayed author name, for sources that have one (e.g. a comment)"
+    )
+    source: HitSource = Field(
+        default=HitSource.WEB,
+        description="Which source produced this hit. Web and Facebook hits are merged into "
+        "one ranked list; this only labels where it came from.",
     )
 
     @property
@@ -195,6 +200,19 @@ class StoredResult(BaseModel):
     budget_currency: str | None = None
 
     @property
+    def source(self) -> HitSource:
+        """Where this result came from, as stored in ``raw``.
+
+        Read back from ``raw`` rather than held as a column so a row loaded
+        from Supabase (the 'Подробнее' button) is labelled the same as one
+        fresh out of the pipeline.
+        """
+        try:
+            return HitSource(self.raw.get("source") or HitSource.WEB)
+        except ValueError:
+            return HitSource.WEB
+
+    @property
     def is_alternative(self) -> bool:
         """Whether this was offered as a near miss rather than a match."""
         return self.budget_fit.is_alternative
@@ -208,6 +226,7 @@ class StoredResult(BaseModel):
         mode: Mode,
         search_id: UUID | None,
         content: str | None = None,
+        source: HitSource = HitSource.WEB,
         budget_fit: BudgetFit = BudgetFit.UNKNOWN,
         budget_delta: float | None = None,
         budget_currency: str | None = None,
@@ -222,7 +241,7 @@ class StoredResult(BaseModel):
             summary=result.summary,
             score=result.score,
             status=ResultStatus.NEW,
-            raw=result.model_dump(mode="json"),
+            raw={**result.model_dump(mode="json"), "source": source.value},
             content=content,
             budget_fit=budget_fit,
             budget_delta=budget_delta,

@@ -24,6 +24,38 @@ class Mode(StrEnum):
         return {Mode.LAND: "🏡 Участки и объекты", Mode.INVESTORS: "💼 Инвесторы и компании"}[self]
 
 
+class HitSource(StrEnum):
+    """Where a hit came from.
+
+    The bot searches the open web and the operator's Facebook groups for the
+    same request and answers from one merged, ranked list -- a listing is a
+    listing whoever published it, and splitting the answer by source made the
+    user compare two lists by hand. The source survives as a label on the
+    individual result so provenance is still visible per listing.
+    """
+
+    WEB = "web"
+    """A public page found by a search engine through SearXNG."""
+
+    FACEBOOK = "facebook"
+    """A post read from a Facebook group the operator's session is a member of."""
+
+    @property
+    def badge(self) -> str:
+        return {HitSource.WEB: "🌐 Веб-поиск", HitSource.FACEBOOK: "📘 Facebook-группа"}[self]
+
+    @property
+    def trusted(self) -> bool:
+        """Whether the blocked-domain list should be skipped for this source.
+
+        ``SEARXNG_BLOCKED_DOMAINS`` exists to keep social-network noise out of
+        engine results, and it lists facebook.com. A post we read ourselves,
+        inside a group we are a member of, is the opposite of noise -- it must
+        not be dropped by a filter aimed at drive-by engine hits.
+        """
+        return self is not HitSource.WEB
+
+
 class ResultStatus(StrEnum):
     """Lifecycle of a single result, as seen by one user."""
 

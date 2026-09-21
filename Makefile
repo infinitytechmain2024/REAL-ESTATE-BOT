@@ -9,7 +9,7 @@ export PYTHONPATH := $(CURDIR):$(CURDIR)/searxng
 
 .DEFAULT_GOAL := help
 .PHONY: help setup install browsers run searxng check lint probe-gate check-imports \
-        check-config check-sql check-api check-vendor docker-up docker-down clean
+        check-config check-sql check-api check-vendor archive docker-up docker-down clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -51,6 +51,10 @@ lint: ## Lint with the pinned ruff
 
 probe-gate: ## Drive the Facebook live-view gate end to end (no browser needed)
 	$(BIN)/python scripts/gate_probe.py
+
+archive: ## Show the newest listings from the local research archive
+	# Pass anything through: `make archive ARGS="--source facebook --format csv"`.
+	$(BIN)/python scripts/archive_export.py $(ARGS)
 
 check-vendor: ## Verify the vendored SearXNG snapshot is complete in git
 	# Needs no venv and no dependencies -- run it with any python3.

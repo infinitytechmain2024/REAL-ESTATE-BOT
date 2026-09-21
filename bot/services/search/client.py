@@ -13,6 +13,7 @@ import datetime as dt
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, Field
 
 from bot.config import SearxngSettings
 from bot.exceptions import SearchError
@@ -22,6 +23,30 @@ from bot.models.result import SearchHit
 from bot.utils.urls import domain_of, url_hash
 
 log = get_logger(__name__)
+
+
+class SearchBatch(BaseModel):
+    """The hits of one round of searching, with the counts behind them.
+
+    The counts exist so the bot can tell the user what actually happened
+    instead of a number that is really just a cap: ``raw`` entries came back
+    from the engines, they collapsed to ``unique`` distinct URLs, and
+    ``truncated`` says whether the cap then cut the list short. Reporting
+    ``len(hits)`` alone is what made every answer claim the same suspiciously
+    round figure.
+    """
+
+    hits: list[SearchHit] = Field(default_factory=list)
+    raw: int = 0
+    """Entries returned by the engines, before de-duplication."""
+    unique: int = 0
+    """Distinct URLs after merging and dropping blocked domains."""
+    blocked: int = 0
+    """Hits dropped because their host is on SEARXNG_BLOCKED_DOMAINS."""
+    truncated: bool = False
+    """Whether SEARXNG_MAX_HITS cut the merged list short."""
+    failed_queries: int = 0
+    """Queries that errored out; their hits are missing from this batch."""
 
 
 class SearXNGClient:
@@ -86,7 +111,7 @@ class SearXNGClient:
         )
         return hits
 
-    async def search_many(self, queries: list[SearchQuery]) -> list[SearchHit]:
+    async def search_many(self, queries: list[SearchQuery]) -> SearchBatch:
         """Run *queries* concurrently and merge the results.
 
         A failing query is logged and skipped: partial results beat no results.
@@ -94,14 +119,18 @@ class SearXNGClient:
         is down and the user should be told.
         """
         if not queries:
-            return []
+            return SearchBatch()
+
+        failures = 0
 
         async def one(query: SearchQuery) -> list[SearchHit]:
+            nonlocal failures
             async with self._semaphore:
                 try:
                     return await self.search(query)
                 except SearchError as exc:
                     log.warning("searxng.query.failed", query=query.query, error=str(exc))
+                    failures += 1
                     return []
 
         batches = await asyncio.gather(*(one(q) for q in queries))
@@ -111,11 +140,20 @@ class SearXNGClient:
             raise SearchError(f"SearXNG at {self.settings.url} is not responding")
 
         weights = {q.query: q.weight for q in queries}
-        return self.merge(
-            [hit for batch in batches for hit in batch],
-            weights=weights,
-            limit=self.settings.max_hits,
-        )
+        raw_hits = [hit for batch in batches for hit in batch]
+        batch = self.merge_batch(raw_hits, weights=weights, limit=self.settings.max_hits)
+        batch.failed_queries = failures
+        if batch.truncated:
+            # Worth its own line: a saturated cap is exactly what makes every
+            # answer report the same number, and it means results were thrown
+            # away before anything read them.
+            log.info(
+                "searxng.merge.truncated",
+                unique=batch.unique,
+                cap=self.settings.max_hits,
+                dropped=batch.unique - len(batch.hits),
+            )
+        return batch
 
     def merge(
         self,
@@ -124,17 +162,34 @@ class SearXNGClient:
         weights: dict[str, float] | None = None,
         limit: int | None = None,
     ) -> list[SearchHit]:
-        """De-duplicate by ``url_hash``, drop blocked domains, sort by score.
+        """De-duplicate by ``url_hash``, drop blocked domains, sort by score."""
+        return self.merge_batch(hits, weights=weights, limit=limit).hits
+
+    def merge_batch(
+        self,
+        hits: list[SearchHit],
+        *,
+        weights: dict[str, float] | None = None,
+        limit: int | None = None,
+    ) -> SearchBatch:
+        """:meth:`merge`, plus the counts that describe what it did.
 
         A URL found by several queries or engines is a stronger signal than one
         found by a single query, so duplicates accumulate score and merge their
         engine lists instead of being discarded outright.
+
+        Hits from a trusted source (a Facebook group post we read ourselves)
+        skip the blocked-domain filter: that list is there to keep social-media
+        noise out of *engine* results, and it would otherwise silently delete
+        every post the Facebook source just went and fetched.
         """
         weights = weights or {}
         merged: dict[str, SearchHit] = {}
+        blocked = 0
 
         for hit in hits:
-            if self.is_blocked(hit.url):
+            if not hit.source.trusted and self.is_blocked(hit.url):
+                blocked += 1
                 continue
             key = hit.url_hash
             weight = weights.get(hit.query or "", 1.0)
@@ -157,9 +212,22 @@ class SearXNGClient:
                 existing.snippet = hit.snippet
             if not existing.title and hit.title:
                 existing.title = hit.title
+            # A URL the engines also found, that we additionally read inside a
+            # group, keeps the read text and the stronger provenance.
+            if hit.source.trusted:
+                existing.source = hit.source
+                if hit.content and not existing.content:
+                    existing.content = hit.content
 
         ordered = sorted(merged.values(), key=lambda h: h.score, reverse=True)
-        return ordered[:limit] if limit else ordered
+        kept = ordered[:limit] if limit else ordered
+        return SearchBatch(
+            hits=kept,
+            raw=len(hits),
+            unique=len(ordered),
+            blocked=blocked,
+            truncated=bool(limit) and len(ordered) > len(kept),
+        )
 
     def is_blocked(self, url: str) -> bool:
         """Whether *url* is on a blocked host (suffix match, so subdomains count)."""
@@ -246,4 +314,4 @@ def _to_hit(item: dict[str, Any], query: str) -> SearchHit | None:
     )
 
 
-__all__ = ["SearXNGClient", "url_hash"]
+__all__ = ["SearXNGClient", "SearchBatch", "url_hash"]

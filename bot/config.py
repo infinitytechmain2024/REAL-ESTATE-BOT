@@ -196,10 +196,17 @@ class SearxngSettings(_Base):
         default_factory=lambda: ["google", "bing", "duckduckgo", "brave", "startpage"],
         description="Engines requested per query; must be enabled in settings.yml",
     )
-    max_queries: int = Field(default=6, ge=1, le=20, description="Search strings per user request")
-    results_per_query: int = Field(default=15, ge=1, le=50)
-    max_hits: int = Field(default=40, ge=1, le=200, description="Cap after merging and de-duping")
-    concurrency: int = Field(default=4, ge=1, le=20, description="Parallel SearXNG requests")
+    max_queries: int = Field(default=8, ge=1, le=20, description="Search strings per user request")
+    results_per_query: int = Field(default=20, ge=1, le=50)
+    max_hits: int = Field(
+        default=150,
+        ge=1,
+        le=500,
+        description="Cap after merging and de-duping. Keep it well above what a request "
+        "realistically finds: a cap the search saturates every time turns the "
+        "'found N links' line into a constant, which is both useless and untrue.",
+    )
+    concurrency: int = Field(default=6, ge=1, le=20, description="Parallel SearXNG requests")
 
     blocked_domains: CsvList = Field(
         default_factory=lambda: [
@@ -232,8 +239,8 @@ class ParserSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PARSER_"})
 
     enabled: bool = Field(default=True, description="Set false to rank on snippets alone")
-    max_pages: int = Field(default=8, ge=1, le=50, description="Hits to actually fetch")
-    concurrency: int = Field(default=5, ge=1, le=20)
+    max_pages: int = Field(default=20, ge=1, le=80, description="Hits to actually fetch")
+    concurrency: int = Field(default=6, ge=1, le=20)
     timeout_seconds: float = Field(default=15.0, gt=0)
     max_bytes: int = Field(default=1_500_000, gt=0, description="Abort downloads larger than this")
     max_chars: int = Field(
@@ -317,14 +324,32 @@ class PipelineSettings(_Base):
 
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PIPELINE_"})
 
-    max_results_to_user: int = Field(default=8, ge=1, le=30)
+    max_results_to_user: int = Field(
+        default=20,
+        ge=1,
+        le=60,
+        description="Listings sent per request. Each one is its own Telegram message.",
+    )
     min_score: int = Field(
         default=45, ge=0, le=100, description="Drop results the LLM scored lower"
     )
+    rank_batch_size: int = Field(
+        default=25,
+        ge=1,
+        le=200,
+        description="Candidates per ranking call. The hit pool is far larger than one "
+        "prompt should carry, so it is ranked in batches and the batches are merged; "
+        "a batch that fails costs only its own candidates, not the whole answer.",
+    )
+    rank_concurrency: int = Field(
+        default=3, ge=1, le=10, description="Ranking batches in flight at once"
+    )
     send_delay_seconds: float = Field(
-        default=0.4,
+        default=0.7,
         ge=0.0,
-        description="Pause between result messages to stay under Telegram limits",
+        description="Pause between result messages to stay under Telegram limits. "
+        "Every listing is its own message, so a full answer is a burst of them; "
+        "Telegram throttles a chat at roughly one message a second.",
     )
     skip_seen_results: bool = Field(
         default=True, description="Never show a user the same url_hash twice"
@@ -341,6 +366,39 @@ class PipelineSettings(_Base):
         ge=1,
         le=20,
         description="Cap on near misses per answer, so alternatives never crowd out matches",
+    )
+
+
+class ArchiveSettings(_Base):
+    """The local, on-disk record of everything a search found.
+
+    Supabase stores the handful of results that were actually sent. This
+    stores the whole run -- every hit from every source, what was read, what
+    the ranker made of it and what was filtered out -- as structured JSON on
+    the machine the bot runs on, so a run can be re-read, exported or
+    re-examined after the fact without repeating the search. It is
+    deliberately independent of Supabase: it keeps working when the database
+    is unconfigured or down, which is exactly when having the data locally
+    matters most.
+    """
+
+    model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "ARCHIVE_"})
+
+    enabled: bool = Field(default=True, description="Set false to keep nothing on disk")
+    dir: str = Field(
+        default="./data/research",
+        description="Directory for the per-search JSON files and the listings index",
+    )
+    max_content_chars: int = Field(
+        default=20_000,
+        ge=0,
+        description="Page text kept per hit. 0 stores metadata only; the default keeps "
+        "enough to re-read a listing without re-fetching it.",
+    )
+    keep_days: int = Field(
+        default=90,
+        ge=0,
+        description="Delete per-search files older than this on start-up. 0 keeps everything.",
     )
 
 
@@ -449,6 +507,7 @@ class Settings(_Base):
     parser: ParserSettings = Field(default_factory=ParserSettings)
     supabase: SupabaseSettings = Field(default_factory=SupabaseSettings)
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
+    archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
     facebook: FacebookSettings = Field(default_factory=FacebookSettings)
 
     @field_validator("log_level")

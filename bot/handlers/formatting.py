@@ -6,9 +6,10 @@ web pages via an LLM and must never be trusted to be markup-safe.
 
 from __future__ import annotations
 
-from bot.models.enums import BudgetFit, Mode
+from bot.models.enums import BudgetFit, HitSource, Mode
 from bot.models.query import ParsedQuery
 from bot.models.result import StoredResult
+from bot.services.pipeline import SearchStats
 from bot.utils.text import TELEGRAM_MESSAGE_LIMIT, escape_html, plural_ru, truncate
 from bot.utils.urls import domain_of
 
@@ -115,10 +116,16 @@ def format_result(result: StoredResult, index: int, total: int) -> str:
     if why:
         lines += ["", f"<i>{escape_html(truncate(str(why), 200))}</i>"]
 
+    # The source belongs on the listing, not on a section header: results from
+    # the web and from Facebook groups arrive in one ranked stream, so this is
+    # the only place provenance can be shown.
+    link_label = (
+        "facebook.com" if result.source is HitSource.FACEBOOK else domain_of(result.url)
+    )
     lines += [
         "",
-        f'🔗 <a href="{escape_html(result.url)}">{escape_html(domain_of(result.url))}</a>',
-        f"<i>{index}/{total} · релевантность {result.score}%</i>",
+        f'🔗 <a href="{escape_html(result.url)}">{escape_html(link_label)}</a>',
+        f"<i>{index}/{total} · {result.source.badge} · релевантность {result.score}%</i>",
     ]
 
     body = "\n".join(lines)
@@ -127,20 +134,72 @@ def format_result(result: StoredResult, index: int, total: int) -> str:
     return body[:TELEGRAM_MESSAGE_LIMIT]
 
 
+_SOURCE_LABELS = {HitSource.WEB: "🌐 интернет", HitSource.FACEBOOK: "📘 Facebook-группы"}
+"""Plural labels for the counts line. The singular ``HitSource.badge`` goes on
+an individual listing, where exactly one source applies."""
+
+
+def format_sources(stats: SearchStats) -> str | None:
+    """'🌐 интернет — 112 · 📘 Facebook-группы — 7', or None if nothing ran.
+
+    One line, both sources, in the order they contribute. Splitting the answer
+    into a web half and a Facebook half is exactly what this replaces: the
+    results themselves come back as one ranked stream, and this is the receipt
+    for what went into it.
+    """
+    parts: list[str] = []
+    for source, count in ((HitSource.WEB, stats.web), (HitSource.FACEBOOK, stats.facebook)):
+        if count:
+            parts.append(f"{_SOURCE_LABELS[source]} — {count}")
+    return " · ".join(parts) or None
+
+
+def format_search_stats(stats: SearchStats, duplicates: int) -> list[str]:
+    """The lines describing what the search covered.
+
+    Deliberately concrete: every number here moves from request to request, and
+    a fixed one would mean a cap is being reported as a finding -- which is
+    what made every previous answer claim the same round total.
+
+    Written as "label: number" rather than "N ссылок" on purpose. Russian
+    numerals govern the case of the noun *and* of any adjective and verb around
+    it, so a sentence built by substitution reads wrong for some counts
+    ("1 поисковых запрос не отработали"). A colon sidesteps all of it and
+    stays correct for every value.
+    """
+    lines = [f"🔗 Результатов поиска: {stats.raw} → уникальных ссылок: {stats.unique}."]
+
+    sources = format_sources(stats)
+    if sources:
+        lines.append(f"Источники: {sources}.")
+    if stats.read:
+        lines.append(f"Прочитано и разобрано страниц: {stats.read}.")
+    if duplicates:
+        lines.append(f"Пропущено ранее показанных: {duplicates}.")
+    if stats.truncated:
+        lines.append(
+            "Ссылок нашлось больше, чем помещается в один разбор — "
+            "оставлены самые релевантные."
+        )
+    if stats.failed_queries:
+        lines.append(f"⚠️ Не отработало поисковых запросов: {stats.failed_queries}.")
+    return lines
+
+
 def format_summary(
     *,
     mode: Mode,
     sent: int,
-    hits: int,
+    stats: SearchStats,
     duplicates: int,
     degraded: bool,
     alternatives: int = 0,
+    archive_path: str | None = None,
 ) -> str:
     """The closing message after all results have been sent."""
     if sent == 0:
         parts = ["😕 По этому запросу ничего подходящего не нашлось."]
-        if duplicates:
-            parts.append(f"Пропущено ранее показанных: {duplicates}.")
+        parts += format_search_stats(stats, duplicates)
         parts.append("Попробуйте уточнить локацию, бюджет или тип объекта.")
         return "\n".join(parts)
 
@@ -150,21 +209,22 @@ def format_summary(
     if alternatives and exact:
         parts = [
             f"✅ Готово: {exact} "
-            + plural_ru(exact, "результат", "результата", "результатов")
-            + f" в бюджете и ещё {alternatives} рядом с ним."
-            + f" Всего просмотрено ссылок: {hits}."
+            + plural_ru(exact, "объект", "объекта", "объектов")
+            + f" в бюджете и ещё {alternatives} рядом с ним — каждый отдельным сообщением."
         ]
     elif alternatives:
         parts = [
             f"✅ Готово: {alternatives} "
             + plural_ru(alternatives, "вариант", "варианта", "вариантов")
-            + f" вне запрошенного бюджета. Всего просмотрено ссылок: {hits}."
+            + " вне запрошенного бюджета — каждый отдельным сообщением."
         ]
     else:
-        results_noun = plural_ru(sent, "результат", "результата", "результатов")
-        parts = [f"✅ Готово: {sent} {results_noun}. Всего просмотрено ссылок: {hits}."]
-    if duplicates:
-        parts.append(f"Пропущено ранее показанных: {duplicates}.")
+        results_noun = plural_ru(sent, "объект", "объекта", "объектов")
+        parts = [f"✅ Готово: {sent} {results_noun} — каждый отдельным сообщением."]
+
+    parts += format_search_stats(stats, duplicates)
+    if archive_path:
+        parts.append(f"💾 Полные данные поиска сохранены: <code>{escape_html(archive_path)}</code>")
     if degraded:
         parts.append(
             "⚠️ ИИ-ранжирование было недоступно — показаны результаты поиска "

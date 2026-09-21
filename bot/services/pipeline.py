@@ -6,23 +6,33 @@ One user message goes in, a list of stored, ranked results comes out::
       -> transcribe (voice only)
       -> LLM: extract ParsedQuery
       -> QueryBuilder: search strings
-      -> SearXNG: hits, merged and de-duplicated
+      -> SearXNG *and* Facebook groups, concurrently
+      -> one merged, de-duplicated, ranked hit list
       -> Supabase: drop hits this user has already seen
       -> fetch and extract the most promising pages
-      -> LLM: rank, filter and summarise
+      -> LLM: rank, filter and summarise, in batches
+      -> local archive: the whole run, as structured JSON
       -> Supabase: store, enforcing UNIQUE (user_id, url_hash)
 
+The two sources are one search, not two. Web hits and Facebook group posts
+are merged into a single list before anything ranks them, so a post and a
+listing compete on relevance and the user gets one answer instead of two
+lists to reconcile by hand. The source survives as a label on each result.
+
 Every stage after extraction degrades rather than fails: if page fetching is
-off or unproductive the LLM ranks on snippets; if ranking itself fails the raw
-hits are returned with their snippets as summaries; if Supabase is unavailable
-the results are still sent, just not remembered. Only a failure to understand
-the request at all aborts the run, because there is nothing to search for.
+off or unproductive the LLM ranks on snippets; if a ranking batch fails only
+its own candidates are lost; if every batch fails the raw hits are returned
+with their snippets as summaries; if Supabase or the archive is unavailable
+the results are still sent. Only a failure to understand the request at all
+aborts the run, because there is nothing to search for.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -31,7 +41,7 @@ from pydantic import BaseModel, Field
 from bot.config import Settings
 from bot.exceptions import LLMError
 from bot.logging_conf import get_logger
-from bot.models.enums import Mode
+from bot.models.enums import HitSource, Mode
 from bot.models.query import ParsedQuery, SearchQuery
 from bot.models.result import PageContent, SearchHit, StoredResult, StructuredResult
 from bot.prompts import (
@@ -47,7 +57,9 @@ from bot.services.llm import ChatMessage
 from bot.utils.text import plural_ru, truncate
 
 if TYPE_CHECKING:
+    from bot.services.archive import ResearchArchive
     from bot.services.db import SupabaseRepository
+    from bot.services.facebook import FacebookSource
     from bot.services.llm import LLMManager
     from bot.services.parser import Fetcher
     from bot.services.search import QueryBuilder, SearXNGClient
@@ -65,6 +77,38 @@ class RankedResults(BaseModel):
     results: list[StructuredResult] = Field(default_factory=list)
 
 
+class SearchStats(BaseModel):
+    """What the search actually did, in numbers the user can be told.
+
+    Reporting one number for all of this is what produced the same suspicious
+    "found 40 links" on every request: that 40 was the merge cap, not a
+    finding. These are the real quantities -- how many entries the engines and
+    groups returned, how many distinct links that came to, how many were new
+    for this user, and how many pages were opened and read.
+    """
+
+    raw: int = 0
+    """Entries returned by every source, before de-duplication."""
+    unique: int = 0
+    """Distinct links after merging web and Facebook hits."""
+    web: int = 0
+    """Of `unique`, how many came from the open web."""
+    facebook: int = 0
+    """Of `unique`, how many came from Facebook groups. Adds up with `web`."""
+    fresh: int = 0
+    """Links left after dropping the ones this user was already shown."""
+    read: int = 0
+    """Pages whose text was actually read (fetched, or read in the group)."""
+    truncated: bool = False
+    """Whether SEARXNG_MAX_HITS cut the merged list short."""
+    failed_queries: int = 0
+    """Search queries that errored out."""
+
+    def per_source(self) -> dict[str, int]:
+        """Non-zero source counts, for the 'where these came from' line."""
+        return {name: count for name, count in (("web", self.web), ("facebook", self.facebook)) if count}
+
+
 class PipelineOutcome(BaseModel):
     """Everything the handler needs to report on one request."""
 
@@ -72,6 +116,9 @@ class PipelineOutcome(BaseModel):
     parsed: ParsedQuery
     queries: list[SearchQuery] = Field(default_factory=list)
     hits_found: int = 0
+    """Distinct links found across every source. Kept as its own field because
+    it is what the closing summary quotes."""
+    stats: SearchStats = Field(default_factory=SearchStats)
     results: list[StoredResult] = Field(default_factory=list)
     """Matches first, then near misses. Ordering is what the handler sends."""
     exact_count: int = 0
@@ -79,6 +126,8 @@ class PipelineOutcome(BaseModel):
     duplicates_skipped: int = 0
     degraded: bool = False
     """True when ranking fell back to raw search hits."""
+    archive_path: str | None = None
+    """Where this run was written on disk, when the archive is on."""
 
     @property
     def is_empty(self) -> bool:
@@ -112,6 +161,8 @@ class ResearchPipeline:
         query_builder: QueryBuilder,
         fetcher: Fetcher,
         repo: SupabaseRepository,
+        facebook: FacebookSource | None = None,
+        archive: ResearchArchive | None = None,
     ) -> None:
         self.settings = settings
         self.llm = llm
@@ -119,6 +170,10 @@ class ResearchPipeline:
         self.query_builder = query_builder
         self.fetcher = fetcher
         self.repo = repo
+        self.facebook = facebook
+        """Second hit source, merged into the same list. None when Facebook is off."""
+        self.archive = archive
+        """Local structured record of every run. None when the archive is off."""
 
     async def run(
         self,
@@ -150,39 +205,60 @@ class ResearchPipeline:
         )
 
         described = parsed.human_summary() or text
+        sources = "интернет" + (" и Facebook-группы" if self._facebook_active else "")
         await report(
             f"🔎 Ищу: {described}\n"
+            f"Источники: {sources}\n"
             f"Поисковых запросов: {len(queries)}"
         )
-        hits = await self.search.search_many(queries)
-        log.info("pipeline.hits", user_id=user_id, hits=len(hits), queries=len(queries))
+
+        hits, stats = await self._gather_hits(parsed, queries)
+        log.info(
+            "pipeline.hits",
+            user_id=user_id,
+            queries=len(queries),
+            **stats.model_dump(exclude={"fresh", "read"}),
+        )
 
         if not hits:
-            return PipelineOutcome(search_id=search_id, parsed=parsed, queries=queries)
+            return PipelineOutcome(
+                search_id=search_id, parsed=parsed, queries=queries, stats=stats
+            )
 
         fresh_hits, duplicates = await self._drop_seen(user_id, hits)
+        stats.fresh = len(fresh_hits)
         if not fresh_hits:
             return PipelineOutcome(
                 search_id=search_id,
                 parsed=parsed,
                 queries=queries,
-                hits_found=len(hits),
+                hits_found=stats.unique,
+                stats=stats,
                 duplicates_skipped=duplicates,
             )
 
-        noun = plural_ru(len(fresh_hits), "ссылка", "ссылки", "ссылок")
-        await report(f"📄 Найдено {len(fresh_hits)} {noun}, изучаю содержимое…")
-        candidates = await self._collect_content(fresh_hits)
+        # Report the split of what was found, not one lumped total: the counts
+        # differ per request, they add up, and the user can see which source
+        # carried the answer.
+        noun = plural_ru(stats.unique, "ссылка", "ссылки", "ссылок")
+        lines = [f"📄 Найдено {stats.unique} {noun} ({_source_line(stats)})"]
+        if duplicates:
+            lines.append(f"Из них уже показывал раньше: {duplicates}")
+        lines.append(f"Изучаю содержимое: {len(fresh_hits)}…")
+        await report("\n".join(lines))
 
-        degraded = False
-        try:
-            structured = await self.rank(parsed, candidates)
-        except LLMError as exc:
-            # The search worked; only the ranking failed. Sending unranked hits
-            # is a much better outcome than sending nothing.
-            log.warning("pipeline.rank.degraded", user_id=user_id, error=str(exc))
-            structured = _fallback_results(fresh_hits, limit=self.settings.pipeline.max_results_to_user)
-            degraded = True
+        candidates = await self._collect_content(fresh_hits)
+        stats.read = sum(1 for _, page in candidates if page is not None and page.ok)
+
+        await report(
+            f"🧩 Прочитано страниц: {stats.read} из {len(fresh_hits)}. "
+            "Отбираю подходящие объекты…"
+        )
+        structured, degraded = await self._rank_all(parsed, candidates, user_id=user_id)
+        if degraded:
+            structured = _fallback_results(
+                fresh_hits, limit=self.settings.pipeline.max_results_to_user
+            )
 
         # In the degraded path the scores are placeholders, not judgements, so
         # applying the relevance threshold to them would discard everything for
@@ -216,8 +292,24 @@ class ResearchPipeline:
 
         if search_id is not None:
             await self.repo.finish_search(
-                search_id, hits_found=len(hits), results_sent=len(stored)
+                search_id, hits_found=stats.unique, results_sent=len(stored)
             )
+
+        archive_path = await self._archive_run(
+            search_id=search_id,
+            user_id=user_id,
+            mode=mode,
+            raw_query=text,
+            transcript=transcript,
+            parsed=parsed,
+            queries=queries,
+            stats=stats,
+            duplicates=duplicates,
+            candidates=candidates,
+            ranked=structured,
+            sent=stored,
+            degraded=degraded,
+        )
 
         log.info(
             "pipeline.done",
@@ -229,11 +321,13 @@ class ResearchPipeline:
             search_id=search_id,
             parsed=parsed,
             queries=queries,
-            hits_found=len(hits),
+            hits_found=stats.unique,
+            stats=stats,
             results=stored,
             exact_count=exact_count,
             duplicates_skipped=duplicates,
             degraded=degraded,
+            archive_path=str(archive_path) if archive_path else None,
         )
 
     # -- stages ------------------------------------------------------------
@@ -253,6 +347,166 @@ class ResearchPipeline:
         # The user picked the mode with a button; the model does not get to
         # overrule that.
         return parsed.model_copy(update={"mode": mode})
+
+    @property
+    def _facebook_active(self) -> bool:
+        """Whether the Facebook source will actually contribute anything."""
+        return self.facebook is not None and self.facebook.settings.enabled and bool(
+            self.facebook.settings.group_urls
+        )
+
+    async def _gather_hits(
+        self, parsed: ParsedQuery, queries: list[SearchQuery]
+    ) -> tuple[list[SearchHit], SearchStats]:
+        """Search every source at once and merge the results into one list.
+
+        The web search and the Facebook groups run concurrently and their hits
+        go through the same merge, so the answer is one ranked list rather than
+        a web section followed by a Facebook section. A URL found both ways
+        keeps the group's read text and the stronger source label.
+
+        A failing Facebook source costs only its own hits: the browser session
+        may be logged out, mid-checkpoint, or reading a group whose layout
+        changed, none of which should cost the user the web half of the answer.
+        """
+
+        async def facebook_hits() -> list[SearchHit]:
+            if not self._facebook_active:
+                return []
+            assert self.facebook is not None
+            try:
+                return await self.facebook.search(parsed)
+            except Exception as exc:  # noqa: BLE001 - one source must not sink the other
+                log.warning("pipeline.facebook.failed", error=str(exc), exc_info=True)
+                return []
+
+        batch, fb_hits = await asyncio.gather(
+            self.search.search_many(queries), facebook_hits()
+        )
+
+        # Re-merge web and Facebook hits together rather than concatenating:
+        # de-duplication has to span the sources, or a listing cross-posted to
+        # a group arrives twice.
+        merged = self.search.merge_batch(
+            [*batch.hits, *fb_hits],
+            weights={query.query: query.weight for query in queries},
+            limit=self.settings.searxng.max_hits,
+        )
+        hits = merged.hits
+
+        stats = SearchStats(
+            raw=batch.raw + len(fb_hits),
+            unique=len(hits),
+            web=sum(1 for hit in hits if hit.source is HitSource.WEB),
+            facebook=sum(1 for hit in hits if hit.source is HitSource.FACEBOOK),
+            truncated=batch.truncated or merged.truncated,
+            failed_queries=batch.failed_queries,
+        )
+        return hits, stats
+
+    async def _rank_all(
+        self,
+        parsed: ParsedQuery,
+        candidates: list[tuple[SearchHit, PageContent | None]],
+        *,
+        user_id: int,
+    ) -> tuple[list[StructuredResult], bool]:
+        """Rank every candidate, in batches, and return them best first.
+
+        The hit pool is deliberately much larger than one prompt should carry,
+        so it is split into ``PIPELINE_RANK_BATCH_SIZE`` chunks ranked
+        concurrently. That is also the failure boundary: a batch the model
+        chokes on costs its own candidates, and the rest of the answer still
+        arrives. Only losing every batch is degradation worth telling the user
+        about, and that is what the second return value reports.
+        """
+        if not candidates:
+            return [], False
+
+        size = max(1, self.settings.pipeline.rank_batch_size)
+        batches = [candidates[i : i + size] for i in range(0, len(candidates), size)]
+        semaphore = asyncio.Semaphore(self.settings.pipeline.rank_concurrency)
+        failures = 0
+
+        async def rank_one(batch: list[tuple[SearchHit, PageContent | None]]) -> list[StructuredResult]:
+            nonlocal failures
+            async with semaphore:
+                try:
+                    return await self.rank(parsed, batch)
+                except LLMError as exc:
+                    failures += 1
+                    log.warning(
+                        "pipeline.rank.batch_failed",
+                        user_id=user_id,
+                        candidates=len(batch),
+                        error=str(exc),
+                    )
+                    return []
+
+        ranked_batches = await asyncio.gather(*(rank_one(batch) for batch in batches))
+        ranked = [result for batch in ranked_batches for result in batch]
+        ranked.sort(key=lambda result: result.score, reverse=True)
+
+        log.info(
+            "pipeline.rank.batches",
+            user_id=user_id,
+            batches=len(batches),
+            failed=failures,
+            ranked=len(ranked),
+        )
+        # Every batch failed: there is nothing ranked to show, so the caller
+        # falls back to raw hits and says so.
+        return ranked, failures == len(batches)
+
+    async def _archive_run(
+        self,
+        *,
+        search_id: UUID | None,
+        user_id: int,
+        mode: Mode,
+        raw_query: str,
+        transcript: str | None,
+        parsed: ParsedQuery,
+        queries: list[SearchQuery],
+        stats: SearchStats,
+        duplicates: int,
+        candidates: list[tuple[SearchHit, PageContent | None]],
+        ranked: list[StructuredResult],
+        sent: list[StoredResult],
+        degraded: bool,
+    ) -> Path | None:
+        """Write the whole run to the local archive.
+
+        Everything found is kept, not just what was sent: the candidates that
+        scored too low, the pages that would not open, the queries behind them.
+        A failure here is logged and swallowed -- the user's answer outranks
+        the record of it.
+
+        The write runs in a thread: a run file carries the page text of
+        everything that was read, so it is large enough that writing it on the
+        event loop would stall every other request in flight.
+        """
+        if self.archive is None or not self.archive.enabled:
+            return None
+        try:
+            return await asyncio.to_thread(
+                self.archive.save_run,
+                search_id=search_id,
+                user_id=user_id,
+                mode=mode,
+                raw_query=raw_query,
+                transcript=transcript,
+                parsed=parsed,
+                queries=queries,
+                counts={**stats.model_dump(), "duplicates_skipped": duplicates},
+                candidates=candidates,
+                ranked=ranked,
+                sent=sent,
+                degraded=degraded,
+            )
+        except Exception:  # noqa: BLE001 - the user's answer outranks the archive
+            log.warning("pipeline.archive.failed", exc_info=True)
+            return None
 
     async def rank(
         self, parsed: ParsedQuery, candidates: list[tuple[SearchHit, PageContent | None]]
@@ -399,6 +653,10 @@ class ResearchPipeline:
         content_by_url = {
             hit.url: page.text for hit, page in candidates if page is not None and page.ok
         }
+        # The ranker returns URLs, not hits, so the source label is carried
+        # over from the candidate that produced each one -- it is the only
+        # thing in the sent message that still says "this came from a group".
+        source_by_url = {hit.url: hit.source for hit, _ in candidates}
         rows = []
         for result in results:
             verdict = verdicts.get(result.url) or BudgetMatch()
@@ -409,6 +667,7 @@ class ResearchPipeline:
                     mode=mode,
                     search_id=search_id,
                     content=content_by_url.get(result.url),
+                    source=source_by_url.get(result.url, HitSource.WEB),
                     budget_fit=verdict.fit,
                     budget_delta=verdict.delta,
                     budget_currency=verdict.currency,
@@ -421,6 +680,17 @@ class ResearchPipeline:
         position = {row.url: index for index, row in enumerate(rows)}
         stored.sort(key=lambda row: position.get(row.url, len(position)))
         return stored
+
+
+def _source_line(stats: SearchStats) -> str:
+    """'интернет: 112, Facebook: 7' -- where the links actually came from.
+
+    Only sources that contributed are named, so a run with Facebook off does
+    not advertise an empty section.
+    """
+    labels = {"web": "интернет", "facebook": "Facebook"}
+    parts = [f"{labels[name]}: {count}" for name, count in stats.per_source().items()]
+    return ", ".join(parts) or "источники недоступны"
 
 
 def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredResult]:

@@ -29,8 +29,9 @@ from bot.handlers import build_router, errors
 from bot.logging_conf import configure_logging, get_logger
 from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.middlewares.throttling import SearchSlots
+from bot.services.archive import ResearchArchive
 from bot.services.db import SupabaseRepository
-from bot.services.facebook import FacebookSession, TokenStore, build_gate_app
+from bot.services.facebook import FacebookSession, FacebookSource, TokenStore, build_gate_app
 from bot.services.llm import LLMManager
 from bot.services.parser import Fetcher, build_fetcher
 from bot.services.pipeline import ResearchPipeline
@@ -55,6 +56,7 @@ class Services:
     search: SearXNGClient
     fetcher: Fetcher
     repo: SupabaseRepository
+    archive: ResearchArchive
     pipeline: ResearchPipeline
     slots: SearchSlots
     facebook_session: FacebookSession | None = None
@@ -101,6 +103,18 @@ async def build_services(settings: Settings) -> Services:
     # `playwright install` is a start-up error rather than a failed search.
     await fetcher.preflight()
 
+    # Everything a search finds is written here as structured JSON, whether or
+    # not Supabase is configured. Prepared up front so a bad path is a start-up
+    # warning rather than a surprise on the first search.
+    archive = ResearchArchive(settings.archive)
+    archive.prepare()
+
+    # Not started here: launching a real browser is deferred to first use
+    # (the /facebook admin command, or the first search once groups are
+    # configured), so a bot run with FACEBOOK_ENABLED=true but nobody touching
+    # the feature yet does not open a window for no reason.
+    facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
+
     pipeline = ResearchPipeline(
         settings=settings,
         llm=llm,
@@ -108,13 +122,16 @@ async def build_services(settings: Settings) -> Services:
         query_builder=QueryBuilder(settings.searxng),
         fetcher=fetcher,
         repo=repo,
+        # The second hit source. Its results are merged into the same ranked
+        # list as the web ones -- one answer, not a web section and a
+        # Facebook section.
+        facebook=(
+            FacebookSource(settings.facebook, facebook_session)
+            if facebook_session is not None
+            else None
+        ),
+        archive=archive,
     )
-
-    # Not started here: launching a real browser is deferred to first use
-    # (the /facebook admin command), so a bot run with FACEBOOK_ENABLED=true
-    # but nobody touching the feature yet does not open a window for no
-    # reason.
-    facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
     facebook_token_store = (
         TokenStore(settings.facebook.token_store_path) if settings.facebook.enabled else None
     )
@@ -128,6 +145,7 @@ async def build_services(settings: Settings) -> Services:
         search=search,
         fetcher=fetcher,
         repo=repo,
+        archive=archive,
         pipeline=pipeline,
         slots=SearchSlots(settings.telegram.max_concurrent_searches),
         facebook_session=facebook_session,
@@ -203,6 +221,12 @@ async def _on_startup(bot: Bot, settings: Settings, services: Services) -> None:
             "startup.supabase_disabled",
             detail="results will not be persisted; the result buttons are hidden",
         )
+    if settings.facebook.enabled and not settings.facebook.group_urls:
+        log.warning(
+            "startup.facebook_without_groups",
+            detail="FACEBOOK_ENABLED is true but FACEBOOK_GROUP_URLS is empty, so searches "
+            "will only cover the open web; set the group URLs to include them",
+        )
 
     me = await bot.get_me()
     log.info(
@@ -212,6 +236,8 @@ async def _on_startup(bot: Bot, settings: Settings, services: Services) -> None:
         llm_provider=settings.llm.provider,
         llm_model=settings.llm.model,
         stt_provider=settings.stt.provider if settings.stt.enabled else "disabled",
+        facebook_groups=len(settings.facebook.group_urls) if settings.facebook.enabled else 0,
+        archive_dir=settings.archive.dir if settings.archive.enabled else "disabled",
     )
 
 
