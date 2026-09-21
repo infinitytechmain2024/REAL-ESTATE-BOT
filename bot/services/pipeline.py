@@ -589,6 +589,47 @@ def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuer
         updates["languages"] = list(dict.fromkeys(code.casefold() for code in languages if code))
 
     criteria = list(parsed.criteria)
+    duplicate_markers: list[Callable[[str], bool]] = []
+    if explicit_area is not None:
+        area_token = f"{explicit_area:g}"
+        duplicate_markers.append(
+            lambda value: area_token in value
+            and any(unit in value for unit in ("m²", "m2", "square", "area"))
+        )
+    if re.search(r"пригород\w*\s+мадрид\w*|madrid\s+suburbs?", lowered):
+        duplicate_markers.append(lambda value: "madrid" in value or "мадрид" in value)
+    if metro_match:
+        duplicate_markers.append(lambda value: "metro" in value or "метро" in value)
+    if buildable_positive and not buildable_negative:
+        duplicate_markers.append(
+            lambda value: any(
+                marker in value
+                for marker in (
+                    "buildable",
+                    "development",
+                    "construction",
+                    "urbanizable",
+                    "edificable",
+                    "забудов",
+                    "застрой",
+                )
+            )
+        )
+    if building_optional:
+        duplicate_markers.append(
+            lambda value: any(
+                marker in value for marker in ("house", "building", "дом", "будин", "casa")
+            )
+        )
+    if duplicate_markers:
+        criteria = [
+            criterion
+            for criterion in criteria
+            if not any(
+                is_duplicate(f"{criterion.name} {criterion.value}".casefold())
+                for is_duplicate in duplicate_markers
+            )
+        ]
 
     def set_criterion(name: str, value: str, importance: str) -> None:
         nonlocal criteria

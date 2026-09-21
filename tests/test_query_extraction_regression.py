@@ -35,8 +35,32 @@ class EmptyStructuredLLM:
     async def chat_structured(self, messages, schema, **kwargs):
         self.messages = messages
         # Simulate a small model guessing a boolean where the request says
-        # explicitly that both variants are acceptable.
-        return ParsedQuery(mode=Mode.LAND, building_required=True)
+        # explicitly that both variants are acceptable, and describing the
+        # same criteria with inconsistent names and importance.
+        return ParsedQuery.model_validate(
+            {
+                "mode": "land",
+                "building_required": True,
+                "criteria": [
+                    {
+                        "name": "suburbs of Madrid",
+                        "value": "suburbs of Madrid",
+                        "importance": "required",
+                    },
+                    {"name": "2000 m²", "value": "2000 m²", "importance": "required"},
+                    {
+                        "name": "for development",
+                        "value": "for development",
+                        "importance": "required",
+                    },
+                    {
+                        "name": "5 minutes by car to metro",
+                        "value": "5 minutes by car to metro",
+                        "importance": "preferred",
+                    },
+                ],
+            }
+        )
 
 
 async def test_extract_query_recovers_critical_criteria_from_exact_user_request():
@@ -64,6 +88,7 @@ async def test_extract_query_recovers_critical_criteria_from_exact_user_request(
     assert len(parsed.languages) == len(set(parsed.languages))
 
     criteria = {criterion.name: criterion for criterion in parsed.criteria}
+    assert len(criteria) == 5
     assert criteria["area_min"].value == "2000 m²"
     assert criteria["area_min"].importance == "required"
     assert criteria["location"].value == "Madrid suburbs"
