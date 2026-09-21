@@ -4,7 +4,7 @@ import pytest
 
 from bot.config import FacebookSettings
 from bot.models.enums import Mode
-from bot.models.query import ParsedQuery
+from bot.models.query import Location, ParsedQuery
 from bot.models.result import StructuredResult
 from bot.services.facebook import client
 from bot.services.facebook.browser import SessionState
@@ -127,6 +127,48 @@ async def test_no_configured_groups_are_discovered_and_read(monkeypatch):
     result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
     assert result.hits[0].author == "Author"
     assert [(group.title, group.access) for group in result.groups] == [("Public land", "accessible")]
+
+
+async def test_discovered_groups_are_location_filtered_and_return_post_links(monkeypatch):
+    session = FakeSession([SessionState.HEALTHY] * 3)
+    session.page = FakePage()
+    monkeypatch.setattr(
+        client,
+        "discover_groups",
+        AsyncMock(
+            return_value=[
+                ("https://facebook.com/groups/vinnytsia", "Bazar Vinnytsia объявления"),
+                ("https://facebook.com/groups/madrid", "Terrenos Madrid y alrededores"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
+    monkeypatch.setattr(client, "read_recent_posts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        client,
+        "search_posts",
+        AsyncMock(
+            return_value=[
+                GroupPost(
+                    group_url="https://facebook.com/groups/madrid",
+                    post_url="https://facebook.com/groups/madrid/posts/42/",
+                    text="Terreno urbanizable en Madrid",
+                )
+            ]
+        ),
+    )
+    source = client.FacebookSource(FacebookSettings(enabled=True), session)
+
+    result = await source.search(
+        ParsedQuery(
+            mode=Mode.LAND,
+            location=Location(city="Madrid", country="Spain"),
+            keywords=["terreno"],
+        )
+    )
+
+    assert [group.url for group in result.groups] == ["https://facebook.com/groups/madrid"]
+    assert [hit.url for hit in result.hits] == ["https://facebook.com/groups/madrid/posts/42/"]
 
 
 async def test_browser_started_for_a_healthy_job_stays_available(monkeypatch):
