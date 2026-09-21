@@ -160,6 +160,6 @@ class LLMManager:
         for name, provider in self._providers.items():
             try:
                 await provider.aclose()
-            except Exception:  # noqa: BLE001 - one provider must not block the others
+            except Exception:
                 log.warning("llm.provider.close_failed", provider=name, exc_info=True)
         self._providers.clear()

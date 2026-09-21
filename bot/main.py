@@ -109,7 +109,7 @@ class Services:
         for name, closer in closers:
             try:
                 await closer()
-            except Exception:  # noqa: BLE001 - one bad closer must not strand the rest
+            except Exception:
                 log.warning("shutdown.close_failed", service=name, exc_info=True)
 
 
@@ -162,12 +162,14 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
         else {},
     )
 
-    # Not started here: launching a real browser is deferred to first use
-    # (the /facebook admin command), so a bot run with FACEBOOK_ENABLED=true
-    # but nobody touching the feature yet does not open a window for no
-    # reason.
+    # In local mode the browser is deferred until a job or the admin command.
+    # In VM/CDP mode Chrome is already supervised by the entrypoint, so this
+    # only attaches to that existing process and lets the watchdog observe it
+    # while the bot is idle; it never launches a second browser.
     facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
     if facebook_session is not None:
+        if settings.facebook.cdp_url:
+            await facebook_session.start()
         # Native Facebook reading is the primary source when the operator has
         # enabled the browser. It discovers public groups in Facebook itself;
         # the indexed source remains a separate, no-login fallback.
