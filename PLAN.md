@@ -338,8 +338,8 @@ test is not treated as proof that an external service is reachable.
 | Ollama / OpenAI-compatible LLM | **Working locally** | `/api/tags` answers; bot starts with `openai_compatible` and the configured local model | Send one real Telegram search and record extraction + ranking latency; add a timeout/fallback metric |
 | SearXNG | **Working locally** | `GET /healthz` answers; bot and SearXNG processes are running | Capture one real JSON search result and keep a smoke test in deployment checks |
 | Facebook Playwright session | **Partially working** | Browser opens and the bot reaches Facebook group search; screenshot showed an empty in-group search and an irrelevant discovered group; offline tests now cover recent-post fallback and permalink scope | Run Stage 1 against one known Madrid/Spain group; save DOM fixtures; verify ten recent post permalinks and location filtering |
-| Scrapling | **Installed and connected** | `scrapling[fetchers]` imports; `https://example.com` smoke fetch succeeds; routing uses it after an HTTP failure; 7 offline fallback tests pass | Test against 3 real listing portals and record which domains need browser fallback |
-| Google Maps Scraper Kit | **Adapter + offline-tested** | `GoogleMapsSource` creates/polls `/api/v1/jobs`; 6 offline tests cover CSV, status errors, aliases and deduplication; `127.0.0.1:8080` is currently unreachable | Clone/start the kit sidecar, set coordinates, run one low-depth agency search, then verify the live response |
+| Scrapling | **Installed and connected** | `scrapling[fetchers]` imports; `https://example.com` smoke fetch succeeds; routing uses it after an HTTP failure; 7 offline fallback tests pass; the live three-portal probe got Fotocasa usable (3,409 chars, price + area), Idealista blocked (403), and Habitaclia thin/404 on the attempted listing URL | Keep Fotocasa on the HTTP/Scrapling route; treat Idealista as blocked even with browser fallback; replace the Habitaclia URL with a verified listing/search URL before enabling it |
+| Google Maps Scraper Kit | **Adapter + live-smoke tested** | `GoogleMapsSource` creates/polls `/api/v1/jobs`; 6 offline tests cover CSV, status errors, aliases and deduplication; the kit's pinned `v1.15.0` image failed to download its Playwright 1.57 driver, while the multi-arch `latest` image completed a Madrid depth-1 job with 20 places and a 384,508-byte CSV | Pin a fixed image release that contains the working Playwright/browser bundle (or make the image tag configurable); keep one job at a time and document the first-run browser download. Do not ship `v1.15.0` unchanged |
 | ScrapeGraphAI | **Not connected** | No package, import, setting, or runtime call exists | Evaluate only behind an explicit feature flag on pages Scrapling cannot structure; do not run a second ranker for every result |
 | Supabase | **Intentionally disabled locally** | Startup reports `supabase.disabled`; local fallback works | Configure credentials only when persistent cross-request deduplication is required |
 
@@ -352,13 +352,16 @@ test is not treated as proof that an external service is reachable.
 2. **P0 — Facebook fixtures.** ✅ The recent-post extractor, permalink parser and
    empty-search fallback now have deterministic offline tests. Save real group/feed DOM
    from the next live run and add the selector fixtures.
-3. **P1 — Maps end-to-end.** Start the sidecar with depth 5 and one job at a time. The
-   adapter and offline contract tests are ✅; add a
-   health check and a clear Telegram note when it is unavailable; do not make a failed
-   Maps job hide Facebook or web results.
-4. **P1 — Web extraction.** The Scrapling fallback and limits are ✅. Probe three Spanish listing portals through the normal HTTP
-   fetcher, Scrapling fallback and browser fallback. Keep the smallest route that returns
-   usable listing text and contacts.
+3. **P1 — Maps end-to-end.** ✅ The sidecar was smoke-tested with one Madrid depth-1 job
+   and the adapter contract remains covered offline. Before enabling it in deployment,
+   replace the broken `v1.15.0` image pin with a release whose Playwright bundle is
+   available, and keep the existing source-failure note so a Maps outage cannot hide
+   Facebook or web results.
+4. **P1 — Web extraction.** ✅ The three-portal probe is recorded: Fotocasa returned
+   usable listing text through HTTP/Scrapling; Idealista returned 403 in both HTTP and
+   browser routes; the tested Habitaclia URL returned 404 and its home page was too thin.
+   Keep Fotocasa as the first portal route, and add verified listing URLs before making
+   Idealista or Habitaclia production sources.
 5. **P2 — One evaluator and deduplication.** ✅ The pipeline now merges Facebook, SearXNG,
    and Maps hits before ranking, preserves source engines in the result, and renders them
    in Telegram. It sends one card per canonical URL. Identity-key merging (name + address +
