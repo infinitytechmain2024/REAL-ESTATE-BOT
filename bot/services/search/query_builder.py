@@ -131,6 +131,39 @@ def _normalised_languages(
     return ordered
 
 
+def _fit_budget(queries: list[SearchQuery], *, limit: int) -> list[SearchQuery]:
+    """Trim to *limit*, giving every language its best query first.
+
+    Sorting by weight and slicing looks right and is not: three languages of
+    three phrasings overflow the default budget, so the lowest-weighted
+    language lost every slot and was not searched at all. A language that is
+    guaranteed up to the point the list is trimmed is not guaranteed.
+
+    So each language claims its strongest query, and whatever budget is left
+    is filled by weight as before. Order within the result stays by weight,
+    because that is what the merge step reads.
+    """
+    if len(queries) <= limit:
+        return queries
+
+    best_per_language: list[SearchQuery] = []
+    claimed: set[str] = set()
+    for query in queries:  # already sorted by weight
+        if query.language not in claimed:
+            claimed.add(query.language)
+            best_per_language.append(query)
+
+    kept = best_per_language[:limit]
+    for query in queries:
+        if len(kept) >= limit:
+            break
+        if query not in kept:
+            kept.append(query)
+
+    kept.sort(key=lambda q: q.weight, reverse=True)
+    return kept
+
+
 class QueryBuilder:
     """Builds the SearXNG query set for one user request."""
 
@@ -170,7 +203,7 @@ class QueryBuilder:
             add(f"{keywords} {location}".strip(), languages[0], 1.1)
 
         built.sort(key=lambda q: q.weight, reverse=True)
-        return built[: self.settings.max_queries]
+        return _fit_budget(built, limit=self.settings.max_queries)
 
     def _languages(self, query: ParsedQuery) -> list[str]:
         """Languages to search in, most promising first, always including English.
@@ -199,4 +232,10 @@ class QueryBuilder:
             parts.append(f"{int(query.area_min)}-{int(query.area_max)} m2")
         elif query.area_max:
             parts.append(f"{int(query.area_max)} m2")
+        elif query.area_min:
+            # "from 2000 m2" is a floor with no ceiling, which is how people
+            # actually ask for land. Rendered as the bare figure for the same
+            # reason as the ceiling: engines match it as a token, and pages
+            # offering a 2400 m2 plot rarely spell out a range.
+            parts.append(f"{int(query.area_min)} m2")
         return " ".join(parts)
