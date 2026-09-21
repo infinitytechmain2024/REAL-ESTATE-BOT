@@ -224,6 +224,36 @@ async def search_posts(
     return posts
 
 
+async def read_recent_posts(
+    page: Page, group_url: str, *, max_posts: int
+) -> list[GroupPost]:
+    """Read the newest visible feed posts when in-group keyword search misses."""
+    posts: list[GroupPost] = []
+    seen_urls: set[str] = set()
+    stagnant_rounds = 0
+    while len(posts) < max_posts and stagnant_rounds < 2:
+        before = len(posts)
+        articles = page.locator("div[role='article']")
+        for index in range(await articles.count()):
+            if len(posts) >= max_posts:
+                break
+            try:
+                post = await _extract_post(articles.nth(index), group_url)
+            except RuntimeError:
+                continue
+            if post is None or post.post_url in seen_urls:
+                continue
+            seen_urls.add(post.post_url)
+            posts.append(post)
+        if len(posts) >= max_posts:
+            break
+        await page.mouse.wheel(0, 1800)
+        await page.wait_for_timeout(1000)
+        stagnant_rounds = stagnant_rounds + 1 if len(posts) == before else 0
+    log.info("facebook.group.recent_posts", group_url=group_url, found=len(posts))
+    return posts
+
+
 async def _extract_post(article: Locator, group_url: str) -> GroupPost | None:
     """Read only a post's message, author and permalink, never comments/UI text."""
     links = article.locator(POST_LINKS)

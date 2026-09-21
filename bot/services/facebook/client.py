@@ -19,11 +19,12 @@ from bot.services.facebook.groups import (
     check_access,
     discover_groups,
     join_group,
+    read_recent_posts,
     search_posts,
 )
+from bot.services.facebook.query import group_query, location_matches, post_terms
 from bot.services.facebook.store import FacebookGroupStore
 from bot.services.pipeline import SourceGroup, SourceSearchResult
-from bot.services.search.query_builder import localized_terms
 
 log = get_logger(__name__)
 
@@ -53,22 +54,15 @@ class FacebookSource:
         if not self.settings.enabled:
             return SourceSearchResult()
 
-        # One phrase per language rather than one string: which language the
-        # person happened to type in should not decide which posts exist.
-        terms = localized_terms(parsed, limit=self.settings.max_search_terms)
+        # Use the target location's language, not the language of the user.
+        # A Ukrainian request about Madrid must search Spanish Facebook terms.
+        terms = post_terms(parsed, limit=self.settings.max_search_terms)
         if not terms:
             fallback = parsed.human_summary() or " ".join(parsed.keywords)
             terms = [fallback] if fallback else []
         if not terms:
             return SourceSearchResult()
-        query_text = terms[0]
-        extras = [
-            " ".join(part for part in (" ".join(parsed.keywords), parsed.location.as_text()) if part),
-            " ".join(part for part in (parsed.object_type, parsed.location.as_text()) if part),
-        ]
-        terms = list(dict.fromkeys([*terms, *(term for term in extras if term.strip())]))[
-            : self.settings.max_search_terms
-        ]
+        query_text = group_query(parsed)
 
         hits: list[SearchHit] = []
         groups: list[SourceGroup] = []
@@ -83,12 +77,17 @@ class FacebookSource:
 
                 configured = [(url, f"Группа Facebook {url.rstrip('/').rsplit('/', 1)[-1]}")
                               for url in self.settings.group_urls]
-                if not configured:
+                discovered = not configured
+                if discovered:
                     configured = await discover_groups(
                         self.session.page,
                         query_text,
                         max_groups=self.settings.max_discovered_groups,
                     )
+                if discovered:
+                    configured = [
+                        (url, title) for url, title in configured if location_matches(title, parsed)
+                    ]
                 for index, (group_url, title) in enumerate(configured):
                     group = SourceGroup(url=group_url, title=title)
                     groups.append(group)
@@ -122,13 +121,20 @@ class FacebookSource:
                         # reading and allow completed hits from other groups to save.
                         continue
 
-                    # Only a fully completed group read contributes hits. Exceptions
-                    # discard the current group's local extraction buffer.
-                    # The same post surfaces under more than one phrasing, so
-                    # collect by permalink and report each one once.
+                    # Read the newest posts first. In-group search is literal and
+                    # often returns nothing for a natural-language request; the
+                    # ranker can evaluate the recent feed against every criterion.
                     found: dict[str, GroupPost] = {}
                     try:
+                        for post in await read_recent_posts(
+                            self.session.page,
+                            group_url,
+                            max_posts=self.settings.max_posts_per_group,
+                        ):
+                            found.setdefault(post.post_url, post)
                         for term in terms:
+                            if len(found) >= self.settings.max_posts_per_group:
+                                break
                             posts = await search_posts(
                                 self.session.page,
                                 group_url,
@@ -145,9 +151,10 @@ class FacebookSource:
                         # discovered groups unless the shared session flipped.
                         if await self.session.observe_state() != SessionState.HEALTHY:
                             return SourceSearchResult(hits=hits, failed=True, groups=groups)
-                        group.access = GroupAccess.UNKNOWN_ERROR.value
-                        log.exception("facebook.source.group_read_failed", group_url=group_url)
-                        continue
+                        if not found:
+                            group.access = GroupAccess.UNKNOWN_ERROR.value
+                            log.exception("facebook.source.group_read_failed", group_url=group_url)
+                            continue
                     latest = next(iter(found.values()), None)
                     active = latest is not None and (
                         latest.posted_at_text is None

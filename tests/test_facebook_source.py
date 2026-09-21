@@ -78,7 +78,9 @@ async def test_read_exception_skips_one_group_and_reads_the_next(monkeypatch):
     result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
     assert result.failed is False
     assert [hit.url for hit in result.hits] == ["second/posts/1"]
-    assert posts.await_count == 4
+    # Location-first planning sends two short local terms instead of the old
+    # full-query variants; the failed group stops after its first failed term.
+    assert posts.await_count == 3
     assert {call.args[1] for call in posts.await_args_list} == {"first", "second"}
 
 

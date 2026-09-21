@@ -504,7 +504,12 @@ class FacebookSettings(_Base):
         description="Group URLs for the logged-in browser reader, comma-separated. "
         "Public web-search discovery does not require this list.",
     )
-    max_posts_per_group: int = Field(default=20, ge=1, le=200)
+    max_posts_per_group: int = Field(
+        default=10,
+        ge=1,
+        le=200,
+        description="Recent posts inspected per group before criterion ranking",
+    )
     max_search_terms: int = Field(
         default=3,
         ge=1,
