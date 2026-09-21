@@ -122,9 +122,6 @@ async def _watch_for_recovery(
             if token_store is not None:
                 await token_store.invalidate()
             await bot.send_message(chat_id, RECOVERY_TEXT)
-            async with facebook_session.lock:
-                if facebook_session.has_live_context:
-                    await facebook_session.stop()
             return
 
     log.warning("facebook.admin.watch_timed_out", chat_id=chat_id)
