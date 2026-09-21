@@ -11,14 +11,17 @@ from bot.config import FacebookSettings
 from bot.logging_conf import get_logger
 from bot.models.query import ParsedQuery
 from bot.models.result import SearchHit
+from bot.services.facebook.activity import is_recent
 from bot.services.facebook.browser import FacebookSession, SessionState
 from bot.services.facebook.groups import (
     GroupAccess,
     GroupPost,
     check_access,
     discover_groups,
+    join_group,
     search_posts,
 )
+from bot.services.facebook.store import FacebookGroupStore
 from bot.services.pipeline import SourceGroup, SourceSearchResult
 from bot.services.search.query_builder import localized_terms
 
@@ -38,9 +41,13 @@ class FacebookSource:
     arrives with ``content`` set).
     """
 
-    def __init__(self, settings: FacebookSettings, session: FacebookSession) -> None:
+    def __init__(
+        self, settings: FacebookSettings, session: FacebookSession,
+        store: FacebookGroupStore | None = None,
+    ) -> None:
         self.settings = settings
         self.session = session
+        self.store = store
 
     async def search(self, parsed: ParsedQuery) -> SourceSearchResult:
         if not self.settings.enabled:
@@ -83,6 +90,22 @@ class FacebookSource:
                     access = await check_access(self.session.page, group_url)
                     group.access = access.value
                     if access != GroupAccess.ACCESSIBLE:
+                        if access is GroupAccess.MEMBERSHIP_REQUIRED and self.settings.auto_join_groups:
+                            requested = await join_group(self.session.page)
+                            if requested and self.store is not None:
+                                self.store.record(
+                                    url=group_url,
+                                    title=title,
+                                    last_post_text=None,
+                                    access_state=access.value,
+                                    membership_state="join_requested",
+                                    active=False,
+                                )
+                            log.info(
+                                "facebook.source.group.join_requested",
+                                group_url=group_url,
+                                requested=requested,
+                            )
                         log.info(
                             "facebook.source.group_skipped", group_url=group_url, access=access.value
                         )
@@ -108,6 +131,26 @@ class FacebookSource:
                             found.setdefault(post.post_url, post)
                         if len(found) >= self.settings.max_posts_per_group:
                             break
+                    latest = next(iter(found.values()), None)
+                    active = latest is not None and (
+                        latest.posted_at_text is None
+                        or is_recent(latest.posted_at_text, max_age_days=self.settings.group_activity_days)
+                    )
+                    membership = "accessible"
+                    if active and self.settings.auto_join_groups and await join_group(self.session.page):
+                        membership = "join_requested"
+                    if self.store is not None:
+                        self.store.record(
+                            url=group_url,
+                            title=title,
+                            last_post_text=latest.posted_at_text if latest else None,
+                            access_state=access.value,
+                            membership_state=membership,
+                            active=active,
+                        )
+                    if not active:
+                        log.info("facebook.source.group_inactive", group_url=group_url)
+                        continue
                     hits.extend(_post_to_hit(post) for post in found.values())
 
                 # Also catch a flip during the last (or only) group.

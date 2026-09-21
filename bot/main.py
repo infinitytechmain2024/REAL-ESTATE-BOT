@@ -33,6 +33,7 @@ from bot.services.db import SupabaseRepository
 from bot.services.facebook import FacebookSession, FacebookSource, TokenStore, build_gate_app
 from bot.services.facebook.discovery import FacebookPublicSource
 from bot.services.facebook.recheck import GroupRechecker
+from bot.services.facebook.store import FacebookGroupStore
 from bot.services.facebook.watchdog import FacebookWatchdog
 from bot.services.llm import LLMManager
 from bot.services.parser import Fetcher, build_fetcher
@@ -173,7 +174,11 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
         # Native Facebook reading is the primary source when the operator has
         # enabled the browser. It discovers public groups in Facebook itself;
         # the indexed source remains a separate, no-login fallback.
-        native_facebook = FacebookSource(settings.facebook, facebook_session)
+        native_facebook = FacebookSource(
+            settings.facebook,
+            facebook_session,
+            FacebookGroupStore(settings.facebook.group_store_path),
+        )
         pipeline.sources["facebook"] = native_facebook.search
     facebook_token_store = (
         TokenStore(settings.facebook.token_store_path) if settings.facebook.enabled else None

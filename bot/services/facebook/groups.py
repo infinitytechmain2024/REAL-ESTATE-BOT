@@ -155,6 +155,17 @@ async def check_access(page: Page, group_url: str) -> GroupAccess:
     return GroupAccess.UNKNOWN_ERROR
 
 
+async def join_group(page: Page) -> bool:
+    """Click a normal public Join button; never handle challenges or questions."""
+    for signal in JOIN_SIGNALS:
+        button = page.get_by_role("button", name=signal, exact=True)
+        if await button.count():
+            await button.first.click()
+            await page.wait_for_timeout(1000)
+            return True
+    return False
+
+
 async def search_posts(
     page: Page, group_url: str, query: str, *, max_posts: int
 ) -> list[GroupPost]:

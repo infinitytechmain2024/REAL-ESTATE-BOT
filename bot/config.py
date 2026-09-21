@@ -446,6 +446,16 @@ class FacebookSettings(_Base):
         description="Discover public group posts through web search; requires no Facebook login",
     )
     max_discovered_groups: int = Field(default=3, ge=1, le=10)
+    group_activity_days: int = Field(
+        default=30, ge=1, le=365, description="Skip groups without a post this recent"
+    )
+    group_store_path: str = Field(
+        default="./data/facebook_groups.sqlite3", description="Local discovered-group registry"
+    )
+    auto_join_groups: bool = Field(
+        default=True,
+        description="Join an active public group when Facebook presents a normal Join button",
+    )
 
     watchdog_interval_seconds: float = Field(default=60.0, gt=0)
 
