@@ -32,6 +32,26 @@ services:
       SEARXNG_BIND_ADDRESS: 127.0.0.1
       # Uncomment to let the cache service below be used.
       # SEARXNG_VALKEY_URL: valkey://valkey:6379/0
+    # Resource ceiling. Nothing capped this before, so the container could
+    # grow into every last byte the host had -- and when a Linux box runs out
+    # of memory the OOM killer picks the largest process, which here is
+    # exactly the Chrome holding the logged-in Facebook session. Losing it
+    # means doing the whole verification again, so the point of these two
+    # lines is that the container hits a limit Docker enforces *before* the
+    # kernel starts shooting processes, with a slice of the host left over as
+    # spike buffer.
+    #
+    # Sized for a 4 vCPU / 16 GB VPS. On 2 vCPU / 8 GB use mem_limit: 6g and
+    # cpus: 1.5; on anything smaller, turn PARSER_BROWSER_ENABLED off -- the
+    # fallback Chromium is what pushes peak memory past the Facebook Chrome.
+    mem_limit: 11g
+    cpus: 3.0
+    # Chrome keeps shared memory between its processes in /dev/shm, which
+    # Docker mounts at 64 MB by default. That is nowhere near enough once a
+    # Facebook group is scrolling images, and the symptom is misleading: tabs
+    # die with "Target closed" at what look like random moments, with plenty
+    # of free RAM on the host. Not a leak -- a too-small mount.
+    shm_size: 2gb
     volumes:
       # Without this, the container filesystem (and with it the Facebook Chrome
       # profile + the live-view token file) resets on every `docker compose up`

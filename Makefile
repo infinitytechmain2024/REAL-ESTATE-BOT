@@ -8,7 +8,8 @@ SEARXNG_PORT ?= 8888
 export PYTHONPATH := $(CURDIR):$(CURDIR)/searxng
 
 .DEFAULT_GOAL := help
-.PHONY: help setup install run searxng check check-imports check-config check-sql check-api docker-up docker-down clean
+.PHONY: help setup install browsers run searxng check lint probe-gate check-imports \
+        check-config check-sql check-api docker-up docker-down clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -20,13 +21,20 @@ setup: ## Ask for your keys and write .env (nothing is sent anywhere)
 test: ## Run the test suite
 	$(BIN)/python -m pytest
 
-install: ## Create the venv and install bot + SearXNG dependencies
+install: ## Create the venv, install every dependency, fetch the browser
 	$(PYTHON) -m venv $(VENV)
 	$(BIN)/pip install --upgrade pip
 	$(BIN)/pip install -r requirements.txt \
 		-r requirements-dev.txt \
 		-r searxng/requirements.txt \
 		-r searxng/requirements-server.txt
+	$(MAKE) browsers
+
+browsers: ## Download the Chromium build Playwright drives (~150 MB)
+	# Only the parser's fallback fetcher uses this one. The Facebook session
+	# is deliberately a different browser -- channel="chrome", i.e. the real
+	# Google Chrome you already have installed -- so nothing here fetches it.
+	$(BIN)/playwright install chromium
 
 run: ## Run the bot (expects SearXNG to be up, or `make searxng` in another shell)
 	$(BIN)/python -m bot.main
@@ -37,7 +45,15 @@ searxng: ## Run the SearXNG JSON API on 127.0.0.1:$(SEARXNG_PORT)
 	$(BIN)/granian --interface wsgi --host 127.0.0.1 --port $(SEARXNG_PORT) \
 		searxng.api_only:application
 
-check: check-imports check-config check-sql test ## Run every static check and the tests
+check: lint check-imports check-config check-sql test probe-gate ## Run every check
+
+lint: ## Lint with the pinned ruff
+	# No `ruff format --check` here: the tree predates the current formatter
+	# and 16 files would fail it today. Reformatting them is its own commit.
+	$(BIN)/ruff check .
+
+probe-gate: ## Drive the Facebook live-view gate end to end (no browser needed)
+	$(BIN)/python scripts/gate_probe.py
 
 check-imports: ## Byte-compile the bot package and import every module
 	$(BIN)/python -m compileall -q bot
