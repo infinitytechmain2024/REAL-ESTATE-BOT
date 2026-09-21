@@ -6,7 +6,7 @@ from bot.config import Settings
 from bot.services.facebook.tokens import TokenStore
 
 OPEN_BUTTON_TEXT = "Открыть Facebook"
-RECOVERY_TEXT = "Готово. Страницу можно закрыть. Бот продолжит работу."
+RECOVERY_TEXT = "Готово. Проверка завершена. Бот продолжит работу."
 
 
 async def open_button(
