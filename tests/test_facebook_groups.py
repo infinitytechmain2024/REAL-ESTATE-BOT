@@ -69,3 +69,97 @@ async def test_unreadable_group_is_unknown_not_unavailable() -> None:
     """The distinction the whole design rests on: failure is not absence."""
     page = FakePage(url=GROUP)
     assert await check_access(page, GROUP) == GroupAccess.UNKNOWN_ERROR
+
+
+async def test_public_group_is_readable_without_joining():
+    page = FakePage(texts={"Join Group": 1, "Write something": 1})
+    assert await check_access(page, GROUP) == GroupAccess.ACCESSIBLE
+
+
+async def test_russian_public_group_is_readable_without_joining():
+    page = FakePage(texts={"Присоединиться к группе": 1, "Напишите что-нибудь": 1})
+    assert await check_access(page, GROUP) == GroupAccess.ACCESSIBLE
+
+
+async def test_pending_public_group_with_visible_posts_is_readable():
+    page = FakePage(texts={"Pending": 1}, selectors={
+        "div[role='article'] a[href*='/posts/'], div[role='article'] a[href*='/permalink/']": 1,
+    })
+    assert await check_access(page, GROUP) == GroupAccess.ACCESSIBLE
+
+
+async def test_real_post_extracts_message_author_and_clean_permalink():
+    from bot.services.facebook.groups import _extract_post
+    from tests.conftest import FakeLocator
+
+    # Minimal structural fixture from the observed Russian Facebook group search.
+    article = FakeLocator(count=1, text="Person A 2 ч. Listing Like Comment")
+    message = FakeLocator(count=1, text="Parcela 4000 m², 65000 EUR Показать меньше")
+    article.children["[data-ad-preview='message'], [data-ad-comet-preview='message']"] = message
+    article.children["a[href*='/posts/'], a[href*='/permalink/']"] = FakeLocator(
+        count=1, attribute="/groups/example/posts/123/?__cft__=tracking", text="2 ч.",
+    )
+    authors = FakeLocator()
+    authors.elements = [
+        FakeLocator(count=1, attribute="/groups/example/user/1/"),
+        FakeLocator(count=1, attribute="/groups/example/user/1/", text="Person A"),
+    ]
+    article.children["a[href*='/user/']"] = authors
+    more = FakeLocator(count=1)
+    message.texts["Ещё"] = more
+    post = await _extract_post(article, GROUP)
+    assert post is not None
+    assert post.post_url == GROUP + "/posts/123/"
+    assert post.author == "Person A"
+    assert post.text == "Parcela 4000 m², 65000 EUR"
+    assert post.posted_at_text == "2 ч."
+    assert more.click_calls == 1
+
+
+async def test_person_search_result_is_not_a_post():
+    from bot.services.facebook.groups import _extract_post
+    from tests.conftest import FakeLocator
+
+    person = FakeLocator(count=1, text="Person Terreno Добавить в друзья")
+    assert await _extract_post(person, GROUP) is None
+
+
+async def test_search_opens_russian_group_search_button_and_ignores_people(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from bot.services.facebook import groups
+    from tests.conftest import FakeLocator
+
+    page = FakePage(placeholders={"Поиск в этой группе": 1})
+    page.roles["Поиск по этой группе"] = FakeLocator(count=1)
+    page.locators["div[role='article']"] = FakeLocator(count=1)
+    post = groups.GroupPost(group_url=GROUP, post_url=GROUP + "/posts/123/", text="Full text")
+    extract = AsyncMock(side_effect=[None, None, post])
+    monkeypatch.setattr(groups, "_extract_post", extract)
+    result = await groups.search_posts(page, GROUP, "terreno", max_posts=1)
+    assert result == [post]
+    page.keyboard.press.assert_awaited_once_with("Enter")
+    assert not any(call.args == ("networkidle",) for call in page.wait_for_load_state.call_args_list)
+
+
+async def test_native_group_discovery_returns_named_groups_without_joining():
+    from bot.services.facebook.groups import discover_groups
+    from tests.conftest import FakeLocator
+
+    page = FakePage()
+    links = FakeLocator()
+    links.elements = [
+        FakeLocator(count=1, attribute="/groups/alpha/", text="Alpha terrenos"),
+        FakeLocator(count=1, attribute="/groups/alpha/?__tn__=x", text=""),
+        FakeLocator(count=1, attribute="/groups/beta/", text="Beta terrenos"),
+        FakeLocator(count=1, attribute="/groups/beta/posts/1/", text="A post"),
+    ]
+    page.locators["div[role='main'] a[href*='/groups/']"] = links
+    found = await discover_groups(page, "terreno Valencia", max_groups=5)
+    assert found == [
+        ("https://www.facebook.com/groups/alpha/", "Alpha terrenos"),
+        ("https://www.facebook.com/groups/beta/", "Beta terrenos"),
+    ]
+    assert page.goto_calls == [
+        "https://www.facebook.com/search/groups/?q=terreno%20Valencia"
+    ]

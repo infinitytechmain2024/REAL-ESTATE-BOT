@@ -120,7 +120,8 @@ async def test_services_start_and_stop_watchdog_without_browser(
         ),
         bot=FakeBot(),
     )
-    assert ("facebook" in services.pipeline.sources) is public_search
+    assert ("facebook_public" in services.pipeline.sources) is public_search
+    assert ("facebook" in services.pipeline.sources) is enabled
     task = services.facebook_watchdog_task
     assert (task is not None and not task.done()) if enabled else task is None
     if enabled and not admins:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -26,16 +27,30 @@ class FakeLocator:
         self._attribute = attribute
         self._text = text
         self.click_calls = 0
+        self.children: dict[str, FakeLocator] = {}
+        self.texts: dict[str, FakeLocator] = {}
+        self.elements: list[FakeLocator] | None = None
+        self.expanded_text: str | None = None
 
     async def count(self) -> int:
-        return self._count
+        return len(self.elements) if self.elements is not None else self._count
 
     @property
     def first(self) -> FakeLocator:
-        return self
+        return self.nth(0)
 
     def nth(self, _index: int) -> FakeLocator:
-        return self
+        return self.elements[_index] if self.elements is not None else self
+
+    def locator(self, selector: str) -> FakeLocator:
+        return self.children.get(selector, FakeLocator())
+
+    def get_by_text(self, text: str, exact: bool = False) -> FakeLocator:
+        return self.texts.get(text, FakeLocator())
+
+    async def wait_for(self, **kwargs) -> None:
+        if not await self.count():
+            raise TimeoutError("no matching element")
 
     async def click(self) -> None:
         self.click_calls += 1
@@ -82,6 +97,14 @@ class FakePage:
         self._closed = closed
         #: Every URL this page was navigated to. The point of the fake.
         self.goto_calls: list[str] = []
+        self.locators: dict[str, FakeLocator] = {}
+        self.roles: dict[str, FakeLocator] = {}
+        self.keyboard = type("Keyboard", (), {"press": AsyncMock()})()
+        self.mouse = type("Mouse", (), {"wheel": AsyncMock()})()
+        self.wait_for_timeout = AsyncMock()
+        self.wait_for_load_state = AsyncMock()
+        self.wait_for_selector = AsyncMock()
+        self.wait_for_url = AsyncMock()
 
     async def goto(self, url: str, **_kwargs: object) -> FakeResponse:
         self.goto_calls.append(url)
@@ -89,6 +112,8 @@ class FakePage:
         return FakeResponse(status=self._response_status)
 
     def locator(self, selector: str) -> FakeLocator:
+        if selector in self.locators:
+            return self.locators[selector]
         if selector == "body":
             return FakeLocator(count=1, text=self._body_text)
         return FakeLocator(count=self._selectors.get(selector, 0))
@@ -98,6 +123,9 @@ class FakePage:
 
     def get_by_placeholder(self, text: str, exact: bool = False) -> FakeLocator:
         return FakeLocator(count=self._placeholders.get(text, 0))
+
+    def get_by_role(self, role: str, *, name: str, exact: bool = False) -> FakeLocator:
+        return self.roles.get(name, FakeLocator())
 
     def is_closed(self) -> bool:
         return self._closed

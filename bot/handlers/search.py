@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from html import escape
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
@@ -140,10 +141,29 @@ async def run_research(
 
 async def _send_results(message, status, outcome, settings: Settings, mode: Mode) -> None:  # type: ignore[no-untyped-def]
     """Send each result as its own message, then the closing summary."""
+    if outcome.source_groups:
+        access_labels = {
+            "accessible": "Доступна для чтения",
+            "membership_required": "Нужно вступить в группу",
+            "pending_approval": "Ожидается одобрение вступления",
+            "login_required": "Нужен вход в Facebook",
+            "unavailable": "Группа недоступна",
+            "unknown_error": "Не удалось прочитать группу",
+        }
+        lines = ["Группы Facebook по вашему запросу:"]
+        for group in outcome.source_groups[:10]:
+            title = escape(group.title[:100])
+            label = access_labels.get(group.access, "Найдена; доступ к публикациям ещё не проверен")
+            lines.append(f'<a href="{escape(group.url, quote=True)}">{title}</a> — {label}')
+        await message.answer("\n\n".join(lines), disable_web_page_preview=True)
+
     total = len(outcome.results)
     unavailable = ""
     if outcome.failed_sources:
-        names = ", ".join("Facebook" if name == "facebook" else name for name in outcome.failed_sources)
+        names = ", ".join(
+            "Facebook" if name.startswith("facebook") else name
+            for name in outcome.failed_sources
+        )
         unavailable = f"⚠️ Источники недоступны: {names}. Попробуйте повторить поиск позже."
 
     source_note = "\n".join(outcome.source_notes)

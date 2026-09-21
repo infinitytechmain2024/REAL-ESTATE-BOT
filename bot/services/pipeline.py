@@ -65,6 +65,14 @@ class RankedResults(BaseModel):
     results: list[StructuredResult] = Field(default_factory=list)
 
 
+class SourceGroup(BaseModel):
+    """A discovered group, kept visible even if no matching posts can be read."""
+
+    url: str
+    title: str
+    access: str | None = None
+
+
 class SourceSearchResult(BaseModel):
     """Completed hits plus whether any part of this source could not be read.
 
@@ -75,6 +83,7 @@ class SourceSearchResult(BaseModel):
     hits: list[SearchHit] = Field(default_factory=list)
     failed: bool = False
     notes: list[str] = Field(default_factory=list)
+    groups: list[SourceGroup] = Field(default_factory=list)
 
 
 class PipelineOutcome(BaseModel):
@@ -89,6 +98,7 @@ class PipelineOutcome(BaseModel):
     exact_count: int = 0
     """How many of `results` are in budget. The rest are alternatives."""
     duplicates_skipped: int = 0
+    source_groups: list[SourceGroup] = Field(default_factory=list)
     source_notes: list[str] = Field(default_factory=list)
     failed_sources: list[str] = Field(default_factory=list)
     """Unavailable sources, distinct from successful reads with no matches."""
@@ -175,10 +185,12 @@ class ResearchPipeline:
         hits = await self.search.search_many(queries)
         failed_sources: list[str] = []
         source_notes: list[str] = []
+        source_groups: dict[str, SourceGroup] = {}
         unpersisted_urls: set[str] = set()
         for name, search_source in self.sources.items():
             result = await search_source(parsed)
             hits.extend(result.hits)
+            source_groups.update({group.url: group for group in result.groups})
             source_notes.extend(note for note in result.notes if note not in source_notes)
             if result.failed:
                 failed_sources.append(name)
@@ -190,6 +202,7 @@ class ResearchPipeline:
             return PipelineOutcome(
                 search_id=search_id, parsed=parsed, queries=queries, failed_sources=failed_sources,
                 source_notes=source_notes,
+                source_groups=list(source_groups.values()),
             )
 
         fresh_hits, duplicates = await self._drop_seen(user_id, hits)
@@ -202,6 +215,7 @@ class ResearchPipeline:
                 duplicates_skipped=duplicates,
                 failed_sources=failed_sources,
                 source_notes=source_notes,
+                source_groups=list(source_groups.values()),
             )
 
         noun = plural_ru(len(fresh_hits), "ссылка", "ссылки", "ссылок")
@@ -271,6 +285,7 @@ class ResearchPipeline:
             degraded=degraded,
             failed_sources=failed_sources,
             source_notes=source_notes,
+            source_groups=list(source_groups.values()),
         )
 
     # -- stages ------------------------------------------------------------

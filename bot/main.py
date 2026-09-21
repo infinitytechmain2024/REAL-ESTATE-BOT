@@ -30,7 +30,7 @@ from bot.logging_conf import configure_logging, get_logger
 from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.middlewares.throttling import SearchSlots
 from bot.services.db import SupabaseRepository
-from bot.services.facebook import FacebookSession, TokenStore, build_gate_app
+from bot.services.facebook import FacebookSession, FacebookSource, TokenStore, build_gate_app
 from bot.services.facebook.discovery import FacebookPublicSource
 from bot.services.facebook.recheck import GroupRechecker
 from bot.services.facebook.watchdog import FacebookWatchdog
@@ -157,7 +157,9 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
         query_builder=query_builder,
         fetcher=fetcher,
         repo=repo,
-        sources={"facebook": public_facebook.search} if settings.facebook.public_search_enabled else {},
+        sources={"facebook_public": public_facebook.search}
+        if settings.facebook.public_search_enabled
+        else {},
     )
 
     # Not started here: launching a real browser is deferred to first use
@@ -165,6 +167,12 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
     # but nobody touching the feature yet does not open a window for no
     # reason.
     facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
+    if facebook_session is not None:
+        # Native Facebook reading is the primary source when the operator has
+        # enabled the browser. It discovers public groups in Facebook itself;
+        # the indexed source remains a separate, no-login fallback.
+        native_facebook = FacebookSource(settings.facebook, facebook_session)
+        pipeline.sources["facebook"] = native_facebook.search
     facebook_token_store = (
         TokenStore(settings.facebook.token_store_path) if settings.facebook.enabled else None
     )
