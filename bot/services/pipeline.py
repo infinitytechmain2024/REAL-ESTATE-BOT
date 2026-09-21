@@ -230,7 +230,9 @@ class ResearchPipeline:
             # The search worked; only the ranking failed. Sending unranked hits
             # is a much better outcome than sending nothing.
             log.warning("pipeline.rank.degraded", user_id=user_id, error=str(exc))
-            structured = _fallback_results(fresh_hits, limit=self.settings.pipeline.max_results_to_user)
+            structured = _fallback_results(
+                fresh_hits, query=parsed, limit=self.settings.pipeline.max_results_to_user
+            )
             degraded = True
 
         # In the degraded path the scores are placeholders, not judgements, so
@@ -496,13 +498,22 @@ class ResearchPipeline:
         return stored
 
 
-def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredResult]:
+def _fallback_results(
+    hits: list[SearchHit], *, query: ParsedQuery, limit: int
+) -> list[StructuredResult]:
     """Raw hits dressed as results, for when the ranker is unavailable.
 
     The score is a placeholder: nothing has judged these. The caller skips the
     relevance threshold in this path, and the summary is the engine's own
     snippet -- honest, if unpolished.
     """
+    missing = []
+    if query.area_min is not None:
+        missing.append(f"площадь от {query.area_min:g} м² не проверена")
+    if query.metro_drive_minutes is not None:
+        missing.append("расстояние до метро не проверено")
+    if query.buildable_required:
+        missing.append("назначение под застройку не проверено")
     return [
         StructuredResult(
             url=hit.url,
@@ -511,6 +522,7 @@ def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredRe
             score=50,
             language=None,
             seller=hit.author,
+            missing_criteria=missing,
             **extract_listing_facts(hit.content or hit.snippet),
         )
         for hit in hits[:limit]

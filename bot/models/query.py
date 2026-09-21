@@ -50,6 +50,16 @@ class ParsedQuery(BaseModel):
     )
     area_min: float | None = Field(default=None, description="Minimum area, square metres")
     area_max: float | None = Field(default=None, description="Maximum area, square metres")
+    building_required: bool | None = Field(
+        default=None,
+        description="True only when a building is required; false means land without one; null means either",
+    )
+    metro_drive_minutes: int | None = Field(
+        default=None, description="Maximum driving minutes to the nearest metro station"
+    )
+    buildable_required: bool = Field(
+        default=False, description="The land must be suitable or permitted for construction"
+    )
     budget_min: float | None = Field(default=None, description="Minimum budget, in `currency`")
     budget_max: float | None = Field(default=None, description="Maximum budget, in `currency`")
     currency: str | None = Field(default=None, description="ISO-4217 code of the budget, e.g. EUR")

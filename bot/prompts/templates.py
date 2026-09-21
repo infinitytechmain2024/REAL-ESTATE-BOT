@@ -39,6 +39,8 @@ Rules:
   "en", then the language the user wrote in. These drive multilingual search.
 - `keywords` are the terms worth keeping verbatim in a search query. Do not
   pad them with generic words like "buy" or "property".
+- Extract hard constraints separately: minimum area, suburb/location, driving
+  time to metro, buildable/development use, and whether a building is optional.
 - `mode` is given to you; keep it unless the text plainly contradicts it.
 """
 
@@ -49,7 +51,8 @@ You receive the user's structured request and a numbered list of candidate
 pages with whatever text could be extracted from each. Judge each candidate on
 whether it actually serves the request.
 
-Scoring (0-100) -- judge everything EXCEPT price:
+Scoring (0-100) -- judge every requested criterion, while treating price as a
+separate budget comparison:
   85-100  directly matches: the right kind of object/company, in the right
           location, with the right characteristics
   60-84   plausible match with one characteristic unverified or slightly off
@@ -73,6 +76,12 @@ To make that possible, `price_value` and `price_currency` matter:
   number here is quoted straight back to the user as a difference in euros.
 
 Rules:
+- Treat `area_min`, `metro_drive_minutes` and `buildable_required` as hard
+  criteria. Set `criteria_match` false and list each missing or contradicted
+  criterion in `missing_criteria`. A building is optional when the request says
+  "with or without"; never penalise either form in that case.
+- Return close alternatives when no exact matches exist, but label the missing
+  criteria instead of presenting them as exact matches.
 - Write `summary` in the SAME LANGUAGE the user wrote their request in.
 - Summaries are factual and specific: what the object/company is, where, and
   the numbers that appear on the page. Never write marketing copy and never

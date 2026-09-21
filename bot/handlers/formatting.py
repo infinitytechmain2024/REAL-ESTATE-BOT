@@ -117,6 +117,10 @@ def format_result(result: StoredResult, index: int, total: int) -> str:
     if seller:
         lines += ["", f"👤 Продавец: {escape_html(str(seller))}"]
 
+    missing = facts.get("missing_criteria") or []
+    if missing:
+        lines += ["", "⚠️ Не подтверждено: " + escape_html(", ".join(map(str, missing)))]
+
     why = facts.get("why_relevant")
     if why:
         lines += ["", f"<i>{escape_html(truncate(str(why), 200))}</i>"]
