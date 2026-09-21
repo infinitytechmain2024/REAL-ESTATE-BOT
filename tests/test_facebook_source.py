@@ -44,7 +44,10 @@ async def test_flip_preserves_complete_hits_but_never_writes_partial_job(
     assert outcome.failed_sources == ["facebook"]
     assert outcome.hits_found == len(outcome.results) == 1
     assert outcome.results[0].id is None
-    assert access.await_count == posts.await_count == 1
+    assert access.await_count == 1
+    # One group reached before the flip, however many phrases it was searched
+    # with -- the point is that the second group was never opened.
+    assert len({call.args[1] for call in posts.await_args_list}) == 1
     assert session.probe_calls == 1 and session.observed_unlocked == 0
     repo.save_results.assert_not_awaited()
 
@@ -147,12 +150,14 @@ async def test_known_group_access_limits_do_not_fail_other_groups(
     session.page = FakePage()
     groups = [f"https://facebook.com/groups/{index}" for index in range(3)]
     access = AsyncMock(side_effect=[GroupAccess.ACCESSIBLE, access_state, GroupAccess.ACCESSIBLE])
-    posts = AsyncMock(
-        side_effect=[
-            [GroupPost(group_url=group, post_url=group + "/posts/1", text="Land in Spain")]
-            for group in (groups[0], groups[2])
+    # Keyed by group rather than by call order: each accessible group yields
+    # its post however many localized phrases it is searched with.
+    async def posts_for(_page, group_url, _term, **_kwargs):
+        return [
+            GroupPost(group_url=group_url, post_url=group_url + "/posts/1", text="Land in Spain")
         ]
-    )
+
+    posts = AsyncMock(side_effect=posts_for)
     monkeypatch.setattr(client, "check_access", access)
     monkeypatch.setattr(client, "search_posts", posts)
     source = client.FacebookSource(FacebookSettings(enabled=True, group_urls=groups), session)
@@ -168,7 +173,11 @@ async def test_known_group_access_limits_do_not_fail_other_groups(
     assert outcome.failed_sources == []
     assert [row.url for row in outcome.results] == expected_urls
     assert [call.args[1] for call in access.await_args_list] == groups
-    assert [call.args[1] for call in posts.await_args_list] == [groups[0], groups[2]]
+    # Distinct groups, not call count: each group is now searched once per
+    # localized phrase, and what this protects is that the restricted group in
+    # the middle was skipped while the other two were still read.
+    searched = list(dict.fromkeys(call.args[1] for call in posts.await_args_list))
+    assert searched == [groups[0], groups[2]]
     repo.save_results.assert_awaited_once()
     assert [row.url for row in repo.save_results.call_args.args[0]] == expected_urls
     assert session.observed_unlocked == 0

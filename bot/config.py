@@ -216,14 +216,20 @@ class SearxngSettings(_Base):
         description="Engines requested per query; must be enabled in settings.yml",
     )
     max_queries: int = Field(default=6, ge=1, le=20, description="Search strings per user request")
+    languages: CsvList = Field(
+        default_factory=lambda: ["en", "es", "ru"],
+        description="Always searched, whatever language the request arrived in and "
+        "whatever the Facebook account's interface is set to. The same plot is "
+        "advertised by a Spanish seller, discussed in a Russian-speaking group and "
+        "listed in English on a portal; searching one of those finds one slice of it.",
+    )
     max_languages: int = Field(
         default=3,
         ge=1,
         le=6,
-        description="How many languages one request is searched in. A listing is "
-        "advertised in the local language, the seller may write in English, and the "
-        "person asking may have typed in a third -- searching only one finds only one "
-        "slice of what exists. Costs query budget, so it trades breadth against depth.",
+        description="Upper bound on languages per request. The list above is always "
+        "covered even if this is lower; raising it leaves room for a local language "
+        "the request implies but the list does not carry -- Greek for Cyprus, say.",
     )
     results_per_query: int = Field(default=15, ge=1, le=50)
     max_hits: int = Field(default=40, ge=1, le=200, description="Cap after merging and de-duping")
@@ -248,7 +254,7 @@ class SearxngSettings(_Base):
     def _no_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
 
-    @field_validator("engines", "blocked_domains", mode="before")
+    @field_validator("languages", "engines", "blocked_domains", mode="before")
     @classmethod
     def _parse_lists(cls, value: object) -> object:
         return _parse_str_list(value)

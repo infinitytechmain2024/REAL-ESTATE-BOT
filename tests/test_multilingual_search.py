@@ -169,3 +169,55 @@ async def test_the_same_post_found_twice_is_reported_once(monkeypatch) -> None:
     result = await source.search(_query("ru", "es"))
 
     assert len(result.hits) == 1, [h.url for h in result.hits]
+
+
+# --- the three we always search --------------------------------------------
+
+
+def test_the_configured_languages_are_always_searched() -> None:
+    """English, Spanish and Russian, whatever the request looked like.
+
+    Neither the account's interface language nor the language the person
+    typed in should decide which listings exist. A Spanish seller, a Russian
+    diaspora group and an English portal listing are all the same plot.
+    """
+    built = QueryBuilder(SearxngSettings(max_queries=20)).build(_query())
+
+    assert {q.language for q in built} >= {"en", "es", "ru"}
+
+
+def test_a_request_with_no_detected_language_still_searches_all_three() -> None:
+    bare = ParsedQuery(mode=Mode.LAND, location=Location(city="Valencia"), keywords=["terreno"])
+    built = QueryBuilder(SearxngSettings(max_queries=20)).build(bare)
+
+    assert {q.language for q in built} >= {"en", "es", "ru"}
+
+
+def test_the_detected_language_still_leads() -> None:
+    """Coverage is guaranteed; order is still the best guess first.
+
+    The leading language carries the most weight when hits are merged, and
+    for a Spanish plot that should be Spanish rather than whichever language
+    happens to sit first in the configured list.
+    """
+    built = QueryBuilder(SearxngSettings(max_queries=20)).build(_query("es"))
+
+    assert built[0].language == "es"
+
+
+def test_a_local_language_is_picked_up_when_the_budget_allows() -> None:
+    """Cyprus is advertised in Greek, which is not one of the three."""
+    cyprus = ParsedQuery(
+        mode=Mode.LAND, location=Location(country="Cyprus"), languages=["el"], keywords=["plot"]
+    )
+    built = QueryBuilder(SearxngSettings(max_languages=4, max_queries=20)).build(cyprus)
+
+    assert {q.language for q in built} >= {"el", "en", "es", "ru"}
+
+
+def test_the_browser_terms_cover_the_same_three() -> None:
+    terms = " ".join(localized_terms(_query(), limit=3)).lower()
+
+    assert "land for sale" in terms
+    assert "terreno" in terms
+    assert "участок" in terms

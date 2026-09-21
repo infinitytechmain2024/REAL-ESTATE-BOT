@@ -12,6 +12,8 @@ under its English translation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from bot.config import SearxngSettings
 from bot.models.enums import Mode
 from bot.models.query import ParsedQuery, SearchQuery
@@ -54,6 +56,11 @@ unrecognised code, so the only thing worth guarding is the shape -- an LLM that
 answers "greek" or "russian" must not turn into a bogus filter."""
 
 
+#: Used when no settings object is to hand -- keep in step with
+#: SearxngSettings.languages, which is the configurable source of truth.
+DEFAULT_LANGUAGES = ("en", "es", "ru")
+
+
 def localized_terms(query: ParsedQuery, *, limit: int) -> list[str]:
     """Short search phrases for *query*, one per language, most useful first.
 
@@ -66,7 +73,7 @@ def localized_terms(query: ParsedQuery, *, limit: int) -> list[str]:
     Falls back to the raw keywords when the request carries nothing else, so a
     bare "finca rustica" still searches for something.
     """
-    languages = _normalised_languages(query.languages, limit=limit)
+    languages = _normalised_languages(query.languages, always=DEFAULT_LANGUAGES, limit=limit)
     location = query.location.as_text()
     templates = _TEMPLATES[query.mode]
 
@@ -84,25 +91,44 @@ def localized_terms(query: ParsedQuery, *, limit: int) -> list[str]:
     return terms[:limit]
 
 
-def _normalised_languages(codes: list[str], *, limit: int) -> list[str]:
-    """Valid ISO-639-1 codes from *codes*, always ending with English.
+def _normalised_languages(
+    codes: list[str], *, always: Sequence[str], limit: int
+) -> list[str]:
+    """The languages to search, detected ones first, *always* guaranteed.
 
-    Codes that are not a bare pair are dropped rather than passed through, so
-    a model answering "greek" does not become a search filter -- and is not
-    truncated to "gr", which is a country.
+    Order matters: the leading language carries the most weight when hits are
+    merged, so a Spanish plot should lead with Spanish rather than with
+    whichever code happens to sit first in the configured list. Coverage does
+    not depend on order, though -- everything in *always* is included even if
+    that means exceeding *limit*, because those languages are a decision
+    rather than a guess.
+
+    Codes that are not a bare ISO-639-1 pair are dropped rather than passed
+    through, so a model answering "greek" does not become a search filter --
+    and is not truncated to "gr", which is a country.
     """
-    ordered: list[str] = []
+    detected: list[str] = []
     for code in codes:
         normalised = (code or "").strip().lower()
         if len(normalised) == 5 and normalised[2] == "-":
             normalised = normalised[:_ISO_639_1_LENGTH]
         if len(normalised) != _ISO_639_1_LENGTH or not normalised.isalpha():
             continue
-        if normalised not in ordered:
-            ordered.append(normalised)
-    if "en" not in ordered:
-        ordered.append("en")
-    return ordered[:limit]
+        if normalised not in detected:
+            detected.append(normalised)
+
+    guaranteed = [code for code in always if code]
+
+    # A detected language that is already guaranteed is not an addition, it is
+    # a reordering: it leads, and coverage is unchanged. Only a language the
+    # list does not carry -- Greek for a Cyprus request -- spends budget, and
+    # it leads too, being the most specific signal about this request.
+    extras = [code for code in detected if code not in guaranteed]
+    extras = extras[: max(limit - len(guaranteed), 0)]
+
+    ordered = extras + [code for code in detected if code in guaranteed]
+    ordered += [code for code in guaranteed if code not in ordered]
+    return ordered
 
 
 class QueryBuilder:
@@ -152,7 +178,11 @@ class QueryBuilder:
         Codes that are not a bare ISO-639-1 pair are dropped rather than passed
         through, so a model answering "greek" does not become a search filter.
         """
-        return _normalised_languages(query.languages, limit=self.settings.max_languages)
+        return _normalised_languages(
+            query.languages,
+            always=self.settings.languages or DEFAULT_LANGUAGES,
+            limit=self.settings.max_languages,
+        )
 
     def _constraint_terms(self, query: ParsedQuery) -> str:
         """Budget and area as search-friendly text.
