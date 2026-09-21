@@ -116,12 +116,98 @@ async def test_real_post_extracts_message_author_and_clean_permalink():
     assert more.click_calls == 1
 
 
+async def test_post_permalink_is_canonical_for_absolute_tracking_link():
+    """Facebook adds tracking query parameters that must not reach Telegram."""
+    from bot.services.facebook.groups import _extract_post
+    from tests.conftest import FakeLocator
+
+    article = FakeLocator(count=1)
+    article.children["[data-ad-preview='message'], [data-ad-comet-preview='message']"] = (
+        FakeLocator(count=1, text="Solar edificable en Madrid")
+    )
+    article.children["a[href*='/posts/'], a[href*='/permalink/']"] = FakeLocator(
+        count=1,
+        attribute=(
+            "https://www.facebook.com/groups/example/posts/456/"
+            "?__cft__[0]=tracking&utm_source=facebook"
+        ),
+        text="1 h.",
+    )
+
+    post = await _extract_post(article, GROUP)
+
+    assert post is not None
+    assert post.post_url == GROUP + "/posts/456/"
+
+
+async def test_cross_group_permalink_is_not_returned_from_group_feed():
+    """A cross-post/recommendation must not escape the requested group scope."""
+    from bot.services.facebook.groups import _extract_post
+    from tests.conftest import FakeLocator
+
+    article = FakeLocator(count=1)
+    article.children["[data-ad-preview='message'], [data-ad-comet-preview='message']"] = (
+        FakeLocator(count=1, text="Unrelated listing")
+    )
+    article.children["a[href*='/posts/'], a[href*='/permalink/']"] = FakeLocator(
+        count=1,
+        attribute="/groups/another-group/posts/456/",
+        text="1 h.",
+    )
+
+    assert await _extract_post(article, GROUP) is None
+
+
 async def test_person_search_result_is_not_a_post():
     from bot.services.facebook.groups import _extract_post
     from tests.conftest import FakeLocator
 
     person = FakeLocator(count=1, text="Person Terreno Добавить в друзья")
     assert await _extract_post(person, GROUP) is None
+
+
+async def test_read_recent_posts_collects_newly_loaded_posts_and_deduplicates(monkeypatch):
+    """The feed reader scrolls only until it has the requested post budget."""
+    from unittest.mock import AsyncMock
+
+    from bot.services.facebook import groups
+    from tests.conftest import FakeLocator
+
+    page = FakePage()
+    articles = FakeLocator()
+    articles.elements = [FakeLocator(count=1)]
+    page.locators["div[role='article']"] = articles
+    first = groups.GroupPost(group_url=GROUP, post_url=GROUP + "/posts/1/", text="First")
+    second = groups.GroupPost(group_url=GROUP, post_url=GROUP + "/posts/2/", text="Second")
+    extract = AsyncMock(side_effect=[first, first, second])
+    monkeypatch.setattr(groups, "_extract_post", extract)
+
+    posts = await groups.read_recent_posts(page, GROUP, max_posts=2)
+
+    assert posts == [first, second]
+    assert extract.await_count == 3
+    assert page.mouse.wheel.await_count == 2
+    page.mouse.wheel.assert_any_await(0, 1800)
+
+
+async def test_read_recent_posts_skips_one_unreadable_article(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from bot.services.facebook import groups
+    from tests.conftest import FakeLocator
+
+    page = FakePage()
+    articles = FakeLocator()
+    articles.elements = [FakeLocator(count=1), FakeLocator(count=1)]
+    page.locators["div[role='article']"] = articles
+    post = groups.GroupPost(group_url=GROUP, post_url=GROUP + "/posts/3/", text="Readable")
+    extract = AsyncMock(side_effect=[RuntimeError("missing permalink"), post])
+    monkeypatch.setattr(groups, "_extract_post", extract)
+
+    posts = await groups.read_recent_posts(page, GROUP, max_posts=1)
+
+    assert posts == [post]
+    assert extract.await_count == 2
 
 
 async def test_search_opens_russian_group_search_button_and_ignores_people(monkeypatch):

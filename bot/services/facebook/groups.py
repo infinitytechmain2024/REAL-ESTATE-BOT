@@ -264,6 +264,13 @@ async def _extract_post(article: Locator, group_url: str) -> GroupPost | None:
     canonical = _group_and_post(urljoin("https://www.facebook.com/", href or ""))
     if canonical is None or canonical[1] is None:
         raise RuntimeError("Facebook post has no usable permalink")
+    # A feed can contain a recommended or cross-posted article whose permalink
+    # belongs to another group.  Keep the source scoped to the group we opened;
+    # otherwise a valid-looking Facebook URL leaks an unrelated result into the
+    # user's search.
+    expected_group = _group_and_post(urljoin("https://www.facebook.com/", group_url))
+    if expected_group is not None and canonical[0] != expected_group[0]:
+        return None
 
     message = article.locator(MESSAGE_SELECTOR).first
     if not await message.count():
