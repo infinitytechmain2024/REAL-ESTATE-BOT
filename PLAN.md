@@ -324,3 +324,50 @@ with joining and commenting as the following increment.
 | 2FA off on a dedicated bot account | Removes the code-entry branch; buys nothing against checkpoints, which is fine because the human-takeover path handles those. |
 | Playwright owned in-house, no OpenCLI | No daemon, no extension, no third-party release cycle in the core of the product. |
 | No CAPTCHA/2FA/anti-detect tooling, ever | Stated non-goal; the human-takeover flow is the answer. |
+
+## 9. External integrations audit — 2026-09-21
+
+This section records what is actually connected in the current branch. A green unit
+test is not treated as proof that an external service is reachable.
+
+| Integration | Current status | Evidence | Required follow-up |
+|---|---|---|---|
+| Ollama / OpenAI-compatible LLM | **Working locally** | `/api/tags` answers; bot starts with `openai_compatible` and the configured local model | Send one real Telegram search and record extraction + ranking latency; add a timeout/fallback metric |
+| SearXNG | **Working locally** | `GET /healthz` answers; bot and SearXNG processes are running | Capture one real JSON search result and keep a smoke test in deployment checks |
+| Facebook Playwright session | **Partially working** | Browser opens and the bot reaches Facebook group search; screenshot showed an empty in-group search and an irrelevant discovered group | Run Stage 1 against one known Madrid/Spain group; save DOM fixtures; verify ten recent post permalinks and location filtering |
+| Scrapling | **Installed and connected** | `scrapling[fetchers]` imports; `https://example.com` smoke fetch succeeds; routing uses it after an HTTP failure | Test against 3 real listing portals, confirm it respects byte/time limits, and add one blocked-page fixture |
+| Google Maps Scraper Kit | **Adapter only** | `GoogleMapsSource` creates/polls `/api/v1/jobs`; `127.0.0.1:8080` is currently unreachable | Clone/start the kit sidecar, set coordinates, run one low-depth agency search, then verify CSV-to-`SearchHit` and duplicate merging |
+| ScrapeGraphAI | **Not connected** | No package, import, setting, or runtime call exists | Evaluate only behind an explicit feature flag on pages Scrapling cannot structure; do not run a second ranker for every result |
+| Supabase | **Intentionally disabled locally** | Startup reports `supabase.disabled`; local fallback works | Configure credentials only when persistent cross-request deduplication is required |
+
+### Implementation sequence
+
+1. **P0 — Facebook correctness.** Run one real Madrid request with debug logging of the
+   parsed location, group query, post terms, group titles and every returned post URL.
+   Reject a discovered group without a location signal; never send a group link when a
+   concrete post was found.
+2. **P0 — Facebook fixtures.** Save the real group/feed DOM from that run and make the
+   recent-post extractor, permalink parser and empty-search fallback deterministic tests.
+3. **P1 — Maps end-to-end.** Start the sidecar with depth 5 and one job at a time. Add a
+   health check and a clear Telegram note when it is unavailable; do not make a failed
+   Maps job hide Facebook or web results.
+4. **P1 — Web extraction.** Probe three Spanish listing portals through the normal HTTP
+   fetcher, Scrapling fallback and browser fallback. Keep the smallest route that returns
+   usable listing text and contacts.
+5. **P2 — One evaluator and deduplication.** Merge Facebook, SearXNG, Scrapling and Maps
+   hits before ranking. Preserve source URLs in provenance, but send one card per listing
+   or business. Merge only on a canonical URL or a strong identity key (name + address +
+   phone); never merge two merely similar properties.
+6. **P2 — ScrapeGraphAI trial.** Add it only as an opt-in extractor for failed/ambiguous
+   pages, using the same `StructuredResult` schema and the existing Ollama endpoint. A
+   successful trial must show better field completeness without increasing duplicate or
+   hallucinated results.
+
+### Exit criteria for the integration work
+
+- A Madrid request produces post permalinks, not only group links.
+- At least one result has price, area, seller/contact status and a criterion verdict;
+  unknown fields are explicitly marked as unknown.
+- The same listing found by Facebook and the web is sent once with both sources retained.
+- Maps sidecar failure is reported as a source failure while other sources continue.
+- Every external integration has one live smoke command and one offline regression test.
