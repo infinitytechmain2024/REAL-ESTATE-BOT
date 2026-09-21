@@ -7,6 +7,8 @@ optional, because a user is allowed to say "land in Cyprus" and nothing else.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from bot.models.enums import Mode
@@ -29,6 +31,16 @@ class Location(BaseModel):
 
     def is_empty(self) -> bool:
         return not any((self.country, self.region, self.city, self.raw))
+
+
+class QueryCriterion(BaseModel):
+    """A condition extracted from the request, with its importance explicit."""
+
+    name: str = Field(description="Short criterion name, e.g. area or metro distance")
+    value: str = Field(description="Value normalised from the user's wording")
+    importance: Literal["required", "preferred", "optional"] = Field(
+        description="Whether this condition is mandatory, desired, or merely allowed"
+    )
 
 
 class ParsedQuery(BaseModel):
@@ -77,6 +89,10 @@ class ParsedQuery(BaseModel):
     )
     timeframe: str | None = Field(default=None, description="Recency constraint, if the user gave one")
     notes: str | None = Field(default=None, description="Anything else worth carrying into ranking")
+    criteria: list[QueryCriterion] = Field(
+        default_factory=list,
+        description="Every condition stated by the user, classified by importance",
+    )
 
     @field_validator("languages", "keywords", "exclude", mode="before")
     @classmethod

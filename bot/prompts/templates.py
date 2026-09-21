@@ -41,6 +41,10 @@ Rules:
   pad them with generic words like "buy" or "property".
 - Extract hard constraints separately: minimum area, suburb/location, driving
   time to metro, buildable/development use, and whether a building is optional.
+- Also return `criteria`: every condition the user actually stated, classified
+  as `required`, `preferred`, or `optional`. Missing information is not a
+  failure: never invent a criterion, and never make an unstated parameter
+  required. Wording such as "with or without a house" is `optional`.
 - `mode` is given to you; keep it unless the text plainly contradicts it.
 """
 
@@ -77,9 +81,10 @@ To make that possible, `price_value` and `price_currency` matter:
 
 Rules:
 - Treat `area_min`, `metro_drive_minutes` and `buildable_required` as hard
-  criteria. Set `criteria_match` false and list each missing or contradicted
-  criterion in `missing_criteria`. A building is optional when the request says
-  "with or without"; never penalise either form in that case.
+  criteria only when the extracted `criteria` marks them `required`. Set
+  `criteria_match` false and list each missing or contradicted required
+  criterion in `missing_criteria`. Preferred criteria affect ordering but do
+  not make a listing invalid. Optional criteria never penalise either form.
 - Return close alternatives when no exact matches exist, but label the missing
   criteria instead of presenting them as exact matches.
 - Write `summary` in the SAME LANGUAGE the user wrote their request in.
