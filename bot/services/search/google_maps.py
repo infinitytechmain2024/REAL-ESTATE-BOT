@@ -56,7 +56,7 @@ class GoogleMapsSource:
         try:
             response = await self._client.post("/api/v1/jobs", json=body)
             response.raise_for_status()
-            job_id = response.json().get("id")
+            job_id = _json_object(response).get("id")
             if not job_id:
                 return SourceSearchResult(failed=True, notes=["Google Maps не вернул id задания."])
             rows = await self._poll(job_id)
@@ -73,7 +73,10 @@ class GoogleMapsSource:
         while asyncio.get_running_loop().time() < deadline:
             response = await self._client.get(f"/api/v1/jobs/{job_id}")
             response.raise_for_status()
-            status = response.json().get("Status")
+            payload = _json_object(response)
+            # The kit currently returns ``Status``; accepting lowercase keeps
+            # this adapter tolerant of proxies and future API revisions.
+            status = payload.get("Status") or payload.get("status")
             if status == "ok":
                 download = await self._client.get(f"/api/v1/jobs/{job_id}/download")
                 download.raise_for_status()
@@ -93,18 +96,59 @@ def _keywords(parsed: ParsedQuery) -> list[str]:
 
 
 def _rows_to_hits(rows: list[dict[str, Any]], *, limit: int = 30) -> list[SearchHit]:
-    hits: list[SearchHit] = []
-    for row in rows[:limit]:
-        name = str(row.get("title") or "Google Maps listing").strip()
-        address = str(row.get("address") or "").strip()
-        website = str(row.get("website") or "").strip()
-        phone = str(row.get("phone") or "").strip()
+    """Convert rows to unique hits, applying the cap *after* de-duplication.
+
+    A Maps job can return the same business for overlapping keywords. Applying
+    the cap before de-duplication would waste the user's result budget on those
+    repeats. ``SearchHit.url_hash`` also removes tracking parameters from
+    websites, matching the pipeline's normal URL de-duplication rules.
+    """
+    if limit <= 0:
+        return []
+
+    unique: dict[str, SearchHit] = {}
+    for row in rows:
+        name = _text(row, "title", "name") or "Google Maps listing"
+        address = _text(row, "address")
+        website = _text(row, "website", "site", "url")
+        phone = _text(row, "phone", "phone_number")
+        category = _text(row, "category")
+        emails = _text(row, "emails", "email")
         url = website or _maps_url(name, address)
-        snippet = " | ".join(part for part in (address, phone, row.get("category"), row.get("emails")) if part)
-        hits.append(
-            SearchHit(url=url, title=name, snippet=snippet, engines=["google_maps_kit"], score=0.7)
-        )
-    return hits
+        snippet = " | ".join(part for part in (address, phone, category, emails) if part)
+        hit = SearchHit(url=url, title=name, snippet=snippet, engines=["google_maps_kit"], score=0.7)
+
+        existing = unique.get(hit.url_hash)
+        if existing is not None:
+            # Keep the first canonical URL, while retaining any richer text
+            # returned by a duplicate row.
+            if len(hit.snippet) > len(existing.snippet):
+                existing.snippet = hit.snippet
+            if existing.title == "Google Maps listing" and hit.title:
+                existing.title = hit.title
+            continue
+        unique[hit.url_hash] = hit
+        if len(unique) >= limit:
+            break
+    return list(unique.values())
+
+
+def _text(row: dict[str, Any], *keys: str) -> str:
+    """Return the first non-empty row field as a safe display string."""
+    for key in keys:
+        value = row.get(key)
+        if value is None or value == "":
+            continue
+        return str(value).strip()
+    return ""
+
+
+def _json_object(response: httpx.Response) -> dict[str, Any]:
+    """Parse a sidecar response and reject valid JSON of the wrong shape."""
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Google Maps sidecar returned a non-object JSON response")
+    return payload
 
 
 def _maps_url(name: str, address: str) -> str:
