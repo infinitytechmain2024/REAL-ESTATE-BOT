@@ -62,3 +62,9 @@ jobs:
         # Needs no browser: it stands up stand-ins for noVNC and websockify
         # and drives the real gate the way a phone would.
         run: python scripts/gate_probe.py
+
+      - name: Pipeline probe
+        # The Facebook source reads markup that changes without notice, so it
+        # breaking is the expected case. This is what keeps that from costing
+        # a search anything.
+        run: python scripts/pipeline_probe.py

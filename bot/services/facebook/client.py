@@ -1,11 +1,13 @@
 """Bridges Facebook group reading to the research pipeline's SearchHit shape.
 
-Not wired into :class:`bot.services.pipeline.ResearchPipeline` yet -- see the
-module docstring in ``bot/services/facebook/groups.py``. Wire it in only
-after ``scripts/facebook_probe.py`` has proven real group search against at
-least one real, accessible group; until then this is validated in isolation,
-not inside the live bot, per the implementation plan's "prove real group
-search before building a polished UI."
+Wired into :class:`bot.services.pipeline.ResearchPipeline` as an optional
+second hit source, behind ``FACEBOOK_SEARCH_ENABLED``, which defaults to
+off. That default is the point: the selectors in ``groups.py`` have never
+run against a real group, and Facebook's markup is both undocumented and
+actively hostile to being read this way. Prove them with
+``scripts/facebook_probe.py`` against one real, accessible group, then turn
+the flag on -- per the implementation plan's "prove real group search before
+building a polished UI."
 """
 
 from __future__ import annotations
@@ -37,7 +39,9 @@ class FacebookSource:
         self.session = session
 
     async def search(self, parsed: ParsedQuery) -> list[SearchHit]:
-        if not self.settings.enabled or not self.settings.group_urls:
+        if not self.settings.enabled or not self.settings.search_enabled:
+            return []
+        if not self.settings.group_urls:
             return []
 
         query_text = parsed.human_summary() or " ".join(parsed.keywords)
@@ -45,6 +49,10 @@ class FacebookSource:
             return []
 
         async with self.session.lock:
+            # Idempotent, and inside the lock on purpose: a search may be the
+            # first thing in the process to want a browser, and two arriving
+            # together must not race to launch two of them.
+            await self.session.start()
             state = await self.session.check_state()
             if state != SessionState.HEALTHY:
                 log.warning("facebook.source.session_not_healthy", state=state.value)

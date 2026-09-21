@@ -356,6 +356,13 @@ class FacebookSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "FACEBOOK_"})
 
     enabled: bool = Field(default=False, description="Set true once a profile/groups are configured")
+    search_enabled: bool = Field(
+        default=False,
+        description="Feed group posts into the research pipeline as a second source of hits. "
+        "Deliberately separate from `enabled`: the session and the admin takeover flow are worth "
+        "having on their own, and group reading should only be switched on once "
+        "scripts/facebook_probe.py has proven the selectors against a real, accessible group.",
+    )
 
     profile_dir: str = Field(
         default="./data/facebook_profile",
@@ -386,6 +393,13 @@ class FacebookSettings(_Base):
     max_comments_per_post: int = Field(default=15, ge=0, le=200)
     min_group_recheck_minutes: int = Field(
         default=60, ge=1, description="Do not re-open a group more often than this"
+    )
+    search_timeout_seconds: float = Field(
+        default=90.0,
+        gt=0,
+        description="Give up on reading groups after this long and answer from the web alone. "
+        "A browser walking several groups is slower than every other source here by an order of "
+        "magnitude, and the person who sent the message is waiting.",
     )
 
     login_email: str | None = Field(default=None, description="Only used for the one automatic attempt")

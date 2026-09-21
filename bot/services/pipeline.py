@@ -6,7 +6,7 @@ One user message goes in, a list of stored, ranked results comes out::
       -> transcribe (voice only)
       -> LLM: extract ParsedQuery
       -> QueryBuilder: search strings
-      -> SearXNG: hits, merged and de-duplicated
+      -> SearXNG, and Facebook groups when enabled: hits, merged and de-duplicated
       -> Supabase: drop hits this user has already seen
       -> fetch and extract the most promising pages
       -> LLM: rank, filter and summarise
@@ -21,6 +21,7 @@ the request at all aborts the run, because there is nothing to search for.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -48,6 +49,7 @@ from bot.utils.text import plural_ru, truncate
 
 if TYPE_CHECKING:
     from bot.services.db import SupabaseRepository
+    from bot.services.facebook import FacebookSource
     from bot.services.llm import LLMManager
     from bot.services.parser import Fetcher
     from bot.services.search import QueryBuilder, SearXNGClient
@@ -112,6 +114,7 @@ class ResearchPipeline:
         query_builder: QueryBuilder,
         fetcher: Fetcher,
         repo: SupabaseRepository,
+        facebook: FacebookSource | None = None,
     ) -> None:
         self.settings = settings
         self.llm = llm
@@ -119,6 +122,10 @@ class ResearchPipeline:
         self.query_builder = query_builder
         self.fetcher = fetcher
         self.repo = repo
+        # None whenever group reading is off, which is the default and also
+        # what every existing caller that does not pass it gets. The pipeline
+        # is then exactly what it was before this source existed.
+        self.facebook = facebook
 
     async def run(
         self,
@@ -150,12 +157,28 @@ class ResearchPipeline:
         )
 
         described = parsed.human_summary() or text
-        await report(
-            f"🔎 Ищу: {described}\n"
-            f"Поисковых запросов: {len(queries)}"
+        searching = f"🔎 Ищу: {described}\nПоисковых запросов: {len(queries)}"
+        if self.facebook is not None:
+            # Worth saying out loud: reading groups is the slow part of a run,
+            # and someone who knows why the wait got longer waits more happily.
+            searching += f"\nПлюс групп Facebook: {len(self.settings.facebook.group_urls)}"
+        await report(searching)
+
+        # Concurrently: a browser walking several groups takes far longer than
+        # the whole SearXNG fan-out, and there is no reason for one to wait on
+        # the other.
+        web_hits, facebook_hits = await asyncio.gather(
+            self.search.search_many(queries),
+            self._facebook_hits(parsed),
         )
-        hits = await self.search.search_many(queries)
-        log.info("pipeline.hits", user_id=user_id, hits=len(hits), queries=len(queries))
+        hits = _merge_sources(facebook_hits, web_hits)
+        log.info(
+            "pipeline.hits",
+            user_id=user_id,
+            hits=len(hits),
+            queries=len(queries),
+            facebook_hits=len(facebook_hits),
+        )
 
         if not hits:
             return PipelineOutcome(search_id=search_id, parsed=parsed, queries=queries)
@@ -343,6 +366,29 @@ class ResearchPipeline:
 
         return chosen, verdicts, min(len(matches), limit)
 
+    async def _facebook_hits(self, parsed: ParsedQuery) -> list[SearchHit]:
+        """Read the configured groups, or return nothing at all.
+
+        Never raises, and never holds the run open for long. This source is
+        driving one shared browser against a session that can be logged out,
+        sitting on a checkpoint, or mid-takeover by a human at any moment,
+        and the selectors it depends on are reading markup Facebook changes
+        without notice. Every one of those is a search answered from the web
+        alone -- which is the whole bot as it worked before this source
+        existed -- and not a failed search.
+        """
+        if self.facebook is None:
+            return []
+
+        timeout = self.settings.facebook.search_timeout_seconds
+        try:
+            return await asyncio.wait_for(self.facebook.search(parsed), timeout=timeout)
+        except TimeoutError:
+            log.warning("pipeline.facebook.timed_out", timeout_seconds=timeout)
+        except Exception as exc:  # noqa: BLE001 - one source failing is not a failed search
+            log.warning("pipeline.facebook.failed", error=str(exc), exc_info=True)
+        return []
+
     async def _drop_seen(self, user_id: int, hits: list[SearchHit]) -> tuple[list[SearchHit], int]:
         """Remove hits this user was already shown, if we can tell."""
         if not self.settings.pipeline.skip_seen_results:
@@ -421,6 +467,29 @@ class ResearchPipeline:
         position = {row.url: index for index, row in enumerate(rows)}
         stored.sort(key=lambda row: position.get(row.url, len(position)))
         return stored
+
+
+def _merge_sources(
+    facebook_hits: list[SearchHit], web_hits: list[SearchHit]
+) -> list[SearchHit]:
+    """One list, de-duplicated by ``url_hash``, Facebook's copy winning ties.
+
+    Order here is not a ranking -- the LLM re-orders everything downstream.
+    It decides only which copy survives when the same URL arrives from both
+    sources, and there the group post is the one to keep: it carries the
+    post text the source already read, and the plain HTTP fetcher cannot
+    reach an authenticated Facebook page to recover it (see
+    :meth:`ResearchPipeline._collect_content`, which skips fetching any hit
+    that already has ``content``).
+    """
+    seen: set[str] = set()
+    merged: list[SearchHit] = []
+    for hit in (*facebook_hits, *web_hits):
+        if hit.url_hash in seen:
+            continue
+        seen.add(hit.url_hash)
+        merged.append(hit)
+    return merged
 
 
 def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredResult]:

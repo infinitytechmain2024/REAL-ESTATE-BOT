@@ -8,8 +8,8 @@ SEARXNG_PORT ?= 8888
 export PYTHONPATH := $(CURDIR):$(CURDIR)/searxng
 
 .DEFAULT_GOAL := help
-.PHONY: help setup install browsers run searxng check lint probe-gate check-imports \
-        check-config check-sql check-api docker-up docker-down clean
+.PHONY: help setup install browsers run searxng check lint probe-gate probe-pipeline \
+        check-imports check-config check-sql check-api docker-up docker-down clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -42,7 +42,7 @@ searxng: ## Run the SearXNG JSON API on 127.0.0.1:$(SEARXNG_PORT)
 	$(BIN)/granian --interface wsgi --host 127.0.0.1 --port $(SEARXNG_PORT) \
 		searxng.api_only:application
 
-check: lint check-imports check-config check-sql probe-gate ## Run every check
+check: lint check-imports check-config check-sql probe-gate probe-pipeline ## Run every check
 
 lint: ## Lint with the pinned ruff
 	# No `ruff format --check` here: the tree predates the current formatter
@@ -51,6 +51,9 @@ lint: ## Lint with the pinned ruff
 
 probe-gate: ## Drive the Facebook live-view gate end to end (no browser needed)
 	$(BIN)/python scripts/gate_probe.py
+
+probe-pipeline: ## Check that a broken Facebook source cannot break a search
+	$(BIN)/python scripts/pipeline_probe.py
 
 check-imports: ## Byte-compile the bot package and import every module
 	$(BIN)/python -m compileall -q bot

@@ -30,7 +30,12 @@ from bot.logging_conf import configure_logging, get_logger
 from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.middlewares.throttling import SearchSlots
 from bot.services.db import SupabaseRepository
-from bot.services.facebook import FacebookSession, TokenStore, build_gate_app
+from bot.services.facebook import (
+    FacebookSession,
+    FacebookSource,
+    TokenStore,
+    build_gate_app,
+)
 from bot.services.llm import LLMManager
 from bot.services.parser import Fetcher, build_fetcher
 from bot.services.pipeline import ResearchPipeline
@@ -101,6 +106,22 @@ async def build_services(settings: Settings) -> Services:
     # `playwright install` is a start-up error rather than a failed search.
     await fetcher.preflight()
 
+    # Built before the pipeline, which takes the group reader as one of its
+    # hit sources. Not *started* here: launching a real browser is deferred to
+    # first use -- the /facebook admin command, or the first search that
+    # actually reads groups -- so a bot run with FACEBOOK_ENABLED=true but
+    # nobody touching the feature yet does not open a window for no reason.
+    facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
+    # Two flags because these are two decisions. FACEBOOK_ENABLED gives the
+    # operator a session to log into and recover; FACEBOOK_SEARCH_ENABLED puts
+    # what it reads in front of users. The second is only worth making once
+    # the first has proven itself against a real group.
+    facebook_source = (
+        FacebookSource(settings.facebook, facebook_session)
+        if facebook_session is not None and settings.facebook.search_enabled
+        else None
+    )
+
     pipeline = ResearchPipeline(
         settings=settings,
         llm=llm,
@@ -108,13 +129,8 @@ async def build_services(settings: Settings) -> Services:
         query_builder=QueryBuilder(settings.searxng),
         fetcher=fetcher,
         repo=repo,
+        facebook=facebook_source,
     )
-
-    # Not started here: launching a real browser is deferred to first use
-    # (the /facebook admin command), so a bot run with FACEBOOK_ENABLED=true
-    # but nobody touching the feature yet does not open a window for no
-    # reason.
-    facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
     facebook_token_store = (
         TokenStore(settings.facebook.token_store_path) if settings.facebook.enabled else None
     )
