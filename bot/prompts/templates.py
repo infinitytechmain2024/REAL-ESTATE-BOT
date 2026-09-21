@@ -48,6 +48,20 @@ Rules:
 - `mode` is given to you; keep it unless the text plainly contradicts it.
 """
 
+LOCATION_REPAIR_SYSTEM = """\
+You repair geographic location fields for real-estate search. Identify every
+place the user explicitly named using world knowledge. Translate inflected or
+non-Latin place names to their standard English names. Set city, region and
+country whenever they are knowable; never leave city null merely because the
+request uses Ukrainian, Russian, Greek or another grammatical form. Preserve
+only the exact geographic phrase in `raw`. Do not extract property constraints.
+
+Examples:
+- "ділянка біля Мюнхена" -> country Germany, city Munich, raw "біля Мюнхена"
+- "house near Λεμεσός" -> country Cyprus, city Limassol, raw "near Λεμεσός"
+- "land, at least 2 hectares" -> every location field null
+"""
+
 RANK_SYSTEM = """\
 You filter and summarise search results for a real-estate researcher.
 
@@ -116,6 +130,16 @@ def build_extract_prompt(text: str, mode: Mode) -> str:
         f"{_MODE_HINTS[mode]}\n\n"
         f"User request:\n\"\"\"\n{text.strip()}\n\"\"\"\n\n"
         "Extract the search parameters."
+    )
+
+
+def build_location_repair_prompt(text: str, raw: str | None) -> str:
+    """Focused retry when the first extraction kept no normalised place."""
+    previous = raw or "(none)"
+    return (
+        f"User request:\n\"\"\"\n{text.strip()}\n\"\"\"\n\n"
+        f"The first extraction preserved this raw location: {previous}\n"
+        "Return the corrected location only."
     )
 
 
