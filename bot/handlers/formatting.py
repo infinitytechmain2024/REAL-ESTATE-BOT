@@ -117,6 +117,17 @@ def format_result(result: StoredResult, index: int, total: int) -> str:
     if seller:
         lines += ["", f"👤 Продавец: {escape_html(str(seller))}"]
 
+    sources = facts.get("sources") or []
+    source_labels = {
+        "facebook_group": "Facebook",
+        "facebook_public": "Facebook",
+        "google_maps_kit": "Google Maps",
+        "scrapling": "веб-парсер",
+    }
+    shown_sources = [source_labels.get(str(source), str(source)) for source in sources]
+    if shown_sources:
+        lines += ["", "🔎 Источники: " + escape_html(", ".join(dict.fromkeys(shown_sources)))]
+
     missing = facts.get("missing_criteria") or []
     if missing:
         lines += ["", "⚠️ Не подтверждено: " + escape_html(", ".join(map(str, missing)))]

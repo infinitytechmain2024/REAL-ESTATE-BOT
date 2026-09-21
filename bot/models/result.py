@@ -119,6 +119,10 @@ class StructuredResult(BaseModel):
         default_factory=list, description="Hard criteria not evidenced by this source"
     )
     language: str | None = Field(default=None, description="ISO-639-1 code of the source page")
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Source engines or adapters that found this same result",
+    )
 
     @field_validator("score", mode="before")
     @classmethod

@@ -196,7 +196,7 @@ class ResearchPipeline:
             if result.failed:
                 failed_sources.append(name)
                 unpersisted_urls.update(hit.url for hit in result.hits)
-        hits = list({hit.url_hash: hit for hit in hits}.values())
+        hits = _merge_hits(hits)
         log.info("pipeline.hits", user_id=user_id, hits=len(hits), queries=len(queries))
 
         if not hits:
@@ -234,6 +234,12 @@ class ResearchPipeline:
                 fresh_hits, query=parsed, limit=self.settings.pipeline.max_results_to_user
             )
             degraded = True
+
+        source_by_url = {hit.url: list(dict.fromkeys(hit.engines)) for hit in fresh_hits}
+        structured = [
+            result.model_copy(update={"sources": source_by_url.get(result.url, result.sources)})
+            for result in structured
+        ]
 
         # In the degraded path the scores are placeholders, not judgements, so
         # applying the relevance threshold to them would discard everything for
@@ -332,10 +338,11 @@ class ResearchPipeline:
         # Models occasionally return a rewritten or hallucinated URL. Anything
         # that is not one of the URLs we supplied is dropped rather than sent.
         allowed = {hit.url for hit, _ in candidates}
+        sources_by_url = {hit.url: list(dict.fromkeys(hit.engines)) for hit, _ in candidates}
         kept: list[StructuredResult] = []
         for result in ranked.results:
             if result.url in allowed:
-                kept.append(result)
+                kept.append(result.model_copy(update={"sources": sources_by_url.get(result.url, [])}))
             else:
                 log.warning("pipeline.rank.unknown_url", url=result.url)
 
@@ -496,6 +503,29 @@ class ResearchPipeline:
         position = {row.url: index for index, row in enumerate(rows)}
         stored.sort(key=lambda row: position.get(row.url, len(position)))
         return stored
+
+
+def _merge_hits(hits: list[SearchHit]) -> list[SearchHit]:
+    """Merge source hits while retaining provenance and the richest content."""
+    merged: dict[str, SearchHit] = {}
+    for hit in hits:
+        existing = merged.get(hit.url_hash)
+        if existing is None:
+            merged[hit.url_hash] = hit
+            continue
+        existing.engines = list(dict.fromkeys([*existing.engines, *hit.engines]))
+        existing.score = max(existing.score, hit.score)
+        if len(hit.snippet) > len(existing.snippet):
+            existing.snippet = hit.snippet
+        if not existing.title and hit.title:
+            existing.title = hit.title
+        if existing.content is None and hit.content:
+            existing.content = hit.content
+        if existing.author is None and hit.author:
+            existing.author = hit.author
+        if existing.published_at is None and hit.published_at is not None:
+            existing.published_at = hit.published_at
+    return list(merged.values())
 
 
 def _fallback_results(

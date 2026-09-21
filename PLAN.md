@@ -246,13 +246,13 @@ Not a blocker to building; a blocker to *auto-posting*.
 
 ---
 
-## 4. Testing — currently zero
+## 4. Testing — 191 passing
 
-There was no test framework in this repo at all until Stage 0. There are now 34 tests
-covering session classification, the recovery watcher's invariants, group access in both
-languages, and fetcher routing -- run with `make test`. Everything below T.2 is still
-outstanding, and the gap that matters most is fixtures taken from real markup (T.3),
-which Stage 1 is what produces.
+The suite now covers session classification, the recovery watcher's invariants, group
+access in both languages, fetcher routing, recent Facebook post extraction, the Maps
+sidecar contract and Scrapling fallback routing. `make test` is the offline gate. The
+remaining gap that matters most is fixtures taken from real Facebook markup (T.3), which
+Stage 1 is what produces.
 
 | # | Task | Stage |
 |---|---|---|
@@ -262,6 +262,9 @@ which Stage 1 is what produces.
 | T.4 | Every selector gets a fixture test; a Facebook markup change must fail a test, not a user's search. | 4 |
 | T.5 | ✅ State-machine tests: exactly-one-alert, timeout, restart-mid-incident, job-abort-on-flip. | 2 |
 | T.6 | ✅ Gate tests: expired/invalidated token, PIN scoping, wrong PIN, rate limit, WebSocket auth, token file mode, and no public bind of 6080/5900/9222. | 3 |
+| T.7 | ✅ Facebook recent-feed fallback, post permalink scope and cross-source URL deduplication. | 4 / integrations |
+| T.8 | ✅ Google Maps sidecar create/poll/download, malformed responses, aliases and deduplication. | integrations |
+| T.9 | ✅ Scrapling extraction limits, timeout handling, optional dependency and routing escalation. | integrations |
 
 **Rule:** anything that touches Facebook markup is written test-first against a saved
 fixture. The live account is for discovering reality, not for regression testing.
@@ -334,9 +337,9 @@ test is not treated as proof that an external service is reachable.
 |---|---|---|---|
 | Ollama / OpenAI-compatible LLM | **Working locally** | `/api/tags` answers; bot starts with `openai_compatible` and the configured local model | Send one real Telegram search and record extraction + ranking latency; add a timeout/fallback metric |
 | SearXNG | **Working locally** | `GET /healthz` answers; bot and SearXNG processes are running | Capture one real JSON search result and keep a smoke test in deployment checks |
-| Facebook Playwright session | **Partially working** | Browser opens and the bot reaches Facebook group search; screenshot showed an empty in-group search and an irrelevant discovered group | Run Stage 1 against one known Madrid/Spain group; save DOM fixtures; verify ten recent post permalinks and location filtering |
-| Scrapling | **Installed and connected** | `scrapling[fetchers]` imports; `https://example.com` smoke fetch succeeds; routing uses it after an HTTP failure | Test against 3 real listing portals, confirm it respects byte/time limits, and add one blocked-page fixture |
-| Google Maps Scraper Kit | **Adapter only** | `GoogleMapsSource` creates/polls `/api/v1/jobs`; `127.0.0.1:8080` is currently unreachable | Clone/start the kit sidecar, set coordinates, run one low-depth agency search, then verify CSV-to-`SearchHit` and duplicate merging |
+| Facebook Playwright session | **Partially working** | Browser opens and the bot reaches Facebook group search; screenshot showed an empty in-group search and an irrelevant discovered group; offline tests now cover recent-post fallback and permalink scope | Run Stage 1 against one known Madrid/Spain group; save DOM fixtures; verify ten recent post permalinks and location filtering |
+| Scrapling | **Installed and connected** | `scrapling[fetchers]` imports; `https://example.com` smoke fetch succeeds; routing uses it after an HTTP failure; 7 offline fallback tests pass | Test against 3 real listing portals and record which domains need browser fallback |
+| Google Maps Scraper Kit | **Adapter + offline-tested** | `GoogleMapsSource` creates/polls `/api/v1/jobs`; 6 offline tests cover CSV, status errors, aliases and deduplication; `127.0.0.1:8080` is currently unreachable | Clone/start the kit sidecar, set coordinates, run one low-depth agency search, then verify the live response |
 | ScrapeGraphAI | **Not connected** | No package, import, setting, or runtime call exists | Evaluate only behind an explicit feature flag on pages Scrapling cannot structure; do not run a second ranker for every result |
 | Supabase | **Intentionally disabled locally** | Startup reports `supabase.disabled`; local fallback works | Configure credentials only when persistent cross-request deduplication is required |
 
@@ -346,12 +349,14 @@ test is not treated as proof that an external service is reachable.
    parsed location, group query, post terms, group titles and every returned post URL.
    Reject a discovered group without a location signal; never send a group link when a
    concrete post was found.
-2. **P0 — Facebook fixtures.** Save the real group/feed DOM from that run and make the
-   recent-post extractor, permalink parser and empty-search fallback deterministic tests.
-3. **P1 — Maps end-to-end.** Start the sidecar with depth 5 and one job at a time. Add a
+2. **P0 — Facebook fixtures.** ✅ The recent-post extractor, permalink parser and
+   empty-search fallback now have deterministic offline tests. Save real group/feed DOM
+   from the next live run and add the selector fixtures.
+3. **P1 — Maps end-to-end.** Start the sidecar with depth 5 and one job at a time. The
+   adapter and offline contract tests are ✅; add a
    health check and a clear Telegram note when it is unavailable; do not make a failed
    Maps job hide Facebook or web results.
-4. **P1 — Web extraction.** Probe three Spanish listing portals through the normal HTTP
+4. **P1 — Web extraction.** The Scrapling fallback and limits are ✅. Probe three Spanish listing portals through the normal HTTP
    fetcher, Scrapling fallback and browser fallback. Keep the smallest route that returns
    usable listing text and contacts.
 5. **P2 — One evaluator and deduplication.** Merge Facebook, SearXNG, Scrapling and Maps
