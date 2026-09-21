@@ -147,3 +147,30 @@ def test_an_env_backup_cannot_be_added_again() -> None:
     )
 
     assert result.returncode == 0, ".env.backup is not gitignored"
+
+
+def test_the_local_model_server_stays_on_loopback() -> None:
+    """A model server on a home network answers anyone who asks.
+
+    It has no authentication of any kind, exactly like the CDP port, so the
+    rule is the same one: bind to 127.0.0.1 and publish nothing.
+    """
+    script = Path(__file__).resolve().parent.parent / "scripts" / "run_llm.sh"
+    body = script.read_text(encoding="utf-8")
+
+    assert script.stat().st_mode & 0o111, "scripts/run_llm.sh is not executable"
+    assert "--host 127.0.0.1" in body, "the local model server must bind to loopback"
+    assert "0.0.0.0" not in body
+
+
+def test_the_local_model_server_sets_the_two_things_ollama_does_not() -> None:
+    """The whole reason this script exists rather than `ollama run`.
+
+    A 4096-token default that truncates silently, and a KV cache that cannot be
+    quantised, are what made a large context unusable.
+    """
+    script = Path(__file__).resolve().parent.parent / "scripts" / "run_llm.sh"
+    body = script.read_text(encoding="utf-8")
+
+    assert "--ctx-size" in body
+    assert "--cache-type-k" in body

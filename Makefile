@@ -45,6 +45,9 @@ searxng: ## Run the SearXNG JSON API on 127.0.0.1:$(SEARXNG_PORT)
 	$(BIN)/granian --interface wsgi --host 127.0.0.1 --port $(SEARXNG_PORT) \
 		searxng.api_only:application
 
+llm: ## Run a local model on 127.0.0.1:8080 (llama.cpp; see DEPLOYMENT.md §11)
+	./scripts/run_llm.sh
+
 check: check-vendor lint check-imports check-config check-sql test probe-gate ## Run every check
 
 lint: ## Lint with the pinned ruff

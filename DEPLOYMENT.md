@@ -217,3 +217,60 @@ entrypoint stops binding CDP, x11vnc and websockify to loopback.
 has no browser and no Facebook. They are not the path for the full product: Render cannot
 host a long-lived headed Chrome with a persistent profile, and its IPs are the datacenter
 addresses §1 is about avoiding.
+
+---
+
+## 11. Running the model on this machine
+
+Optional, and the only configuration in which no text leaves the machine. That
+matters more here than it looks: the text being judged is Facebook posts, which
+carry sellers' names and phone numbers. Sending them to a hosted API is a
+decision that belongs in `COMPLIANCE.md` §4, not a side effect of a setting.
+
+```bash
+brew install llama.cpp   # macOS; Linux: github.com/ggml-org/llama.cpp
+make llm
+```
+
+It prints the four lines to paste into `.env` and then serves on
+`127.0.0.1:8080`. The first run downloads the model (a few GB) and caches it.
+
+Everything is overridable:
+
+| Variable | Default | |
+|---|---|---|
+| `LLAMA_MODEL` | `unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL` | a Hugging Face repo, or a path to a `.gguf` |
+| `LLAMA_CTX` | `32768` | context window |
+| `LLAMA_KV_TYPE` | `q8_0` | KV cache quantisation |
+| `LLAMA_PORT` | `8080` | |
+
+### Why not Ollama
+
+Ollama is fine and it is also open source; two specifics make llama.cpp the
+better fit here.
+
+Its default context is **4096 tokens**, and when a prompt does not fit it
+truncates the beginning **silently** -- no error, no warning. The bot's ranking
+prompt carries the request plus every candidate, so it is the first thing to be
+cut, and the symptom is a model that appears to ignore what it was asked.
+
+And the KV cache is what makes a large window expensive: for an 8B model a 128k
+window costs roughly 19 GB on top of the weights. `--cache-type-k q8_0` cuts
+that several-fold, and Ollama does not expose the knob.
+
+`make llm` sets both, which is all it is for.
+
+### Why 32k is enough
+
+The ranking call is the only prompt that grows, and it is bounded:
+`PIPELINE_MAX_CANDIDATES_TO_RANK` (60 by default) decides how many candidates
+the model judges, after a local score has put the most promising first. Sixty
+posts is roughly 30-40k characters. Reading a whole group produces hundreds of
+posts, but they do not all go into one prompt.
+
+### The server has no authentication
+
+None. It binds to `127.0.0.1` and must stay there -- on a home network,
+`--host 0.0.0.0` is an open endpoint that will answer anyone who asks. Same
+rule as the CDP port in §2, and `tests/test_deployment.py` fails if the script
+stops binding to loopback.
