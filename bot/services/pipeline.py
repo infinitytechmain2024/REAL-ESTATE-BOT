@@ -34,14 +34,16 @@ from bot.config import Settings
 from bot.exceptions import LLMError
 from bot.logging_conf import get_logger
 from bot.models.enums import Mode
-from bot.models.query import ParsedQuery, QueryCriterion, SearchQuery
+from bot.models.query import Location, ParsedQuery, QueryCriterion, SearchQuery
 from bot.models.result import PageContent, SearchHit, StoredResult, StructuredResult
 from bot.prompts import (
     DETAILS_SYSTEM,
     EXTRACT_SYSTEM,
+    LOCATION_REPAIR_SYSTEM,
     RANK_SYSTEM,
     build_details_prompt,
     build_extract_prompt,
+    build_location_repair_prompt,
     build_rank_prompt,
 )
 from bot.services.budget import BudgetMatch, split_by_fit
@@ -313,11 +315,47 @@ class ResearchPipeline:
             model=self.settings.llm.model_for("extract"),
             purpose="extract",
         )
+        parsed = await self._repair_location(text, parsed)
         # The user picked the mode with a button; the model does not get to
         # overrule that. Recover a few high-value constraints from the raw
         # request when a local model omits them.
         parsed = _recover_critical_query_fields(text, parsed)
         return parsed.model_copy(update={"mode": mode})
+
+    async def _repair_location(self, text: str, parsed: ParsedQuery) -> ParsedQuery:
+        """Retry only the place when the main extraction did not normalise it."""
+        location = parsed.location
+        if any((location.city, location.region, location.country)):
+            return parsed
+        try:
+            repaired = await self.llm.chat_structured(
+                [
+                    ChatMessage.system(LOCATION_REPAIR_SYSTEM),
+                    ChatMessage.user(build_location_repair_prompt(text, location.raw)),
+                ],
+                Location,
+                model=self.settings.llm.model_for("extract"),
+                purpose="extract_location_repair",
+            )
+        except LLMError as exc:
+            log.warning("pipeline.location_repair_failed", error=str(exc))
+            return parsed
+        if not any((repaired.city, repaired.region, repaired.country)):
+            return parsed
+        raw = repaired.raw or location.raw
+        normalised_text = " ".join(text.casefold().split())
+        normalised_raw = " ".join((raw or "").casefold().split())
+        if not normalised_raw or normalised_raw not in normalised_text:
+            log.warning(
+                "pipeline.location_repair_rejected",
+                raw=raw,
+                city=repaired.city,
+                country=repaired.country,
+            )
+            return parsed
+        if repaired.raw != raw:
+            repaired = repaired.model_copy(update={"raw": raw})
+        return parsed.model_copy(update={"location": repaired})
 
     async def rank(
         self, parsed: ParsedQuery, candidates: list[tuple[SearchHit, PageContent | None]]
@@ -584,10 +622,8 @@ def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuer
     duplicate_markers: list[Callable[[str], bool]] = []
     if explicit_area is not None:
         area_token = f"{explicit_area:g}"
-        duplicate_markers.append(
-            lambda value: area_token in value
-            and any(unit in value for unit in ("m²", "m2", "square", "area"))
-        )
+        area_pattern = re.compile(rf"(?<![\d.]){re.escape(area_token)}(?![\d.])")
+        duplicate_markers.append(lambda value: bool(area_pattern.search(value)))
     if suburb_match:
         duplicate_markers.append(
             lambda value: any(
@@ -596,7 +632,15 @@ def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuer
             )
         )
     if metro_match:
-        duplicate_markers.append(lambda value: "metro" in value or "метро" in value)
+        minute_token = metro_match.group(1)
+        duplicate_markers.append(
+            lambda value: "metro" in value
+            or "метро" in value
+            or (
+                minute_token in value
+                and any(unit in value for unit in ("minute", "хв", "мин"))
+            )
+        )
     if buildable_positive and not buildable_negative:
         duplicate_markers.append(
             lambda value: any(
@@ -611,12 +655,14 @@ def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuer
                     "застрой",
                 )
             )
+            or set(value.split()) in ({"true"}, {"yes"})
         )
     if building_optional:
         duplicate_markers.append(
             lambda value: any(
                 marker in value for marker in ("house", "building", "дом", "будин", "casa")
             )
+            or any(marker in value for marker in ("with or without", "або без", "или без"))
         )
     if duplicate_markers:
         criteria = [
