@@ -57,13 +57,23 @@ and reports them to a user in chat.
 
 Checked by execution in this session:
 
-- Full pipeline: query extraction → SearXNG → page fetch → LLM rank → Supabase persist.
+- The bot's own pipeline modules: query extraction, ranking, budget handling, persistence
+  wiring. **Not** SearXNG itself — see below.
 - Budget near-miss handling (`bot/services/budget.py`), currency-safe by refusing to
   compare across currencies rather than applying a stale rate.
 - Browser fallback for portals that block plain HTTP (`bot/services/parser/routing.py`),
   with a start-up preflight so a missing `playwright install` fails at boot, not mid-search.
 - 61 modules import cleanly; ruff clean; all three requirement sets resolve together;
   `.env.example` validates through the real `Settings`.
+
+### Cannot run from a clone at all
+
+**SearXNG.** The vendored `searxng/searx/data` package — engine, currency and locale
+tables — was matched by an unanchored `data/` rule in `.gitignore` and never committed,
+so `from searx.data import ENGINE_TRAITS` fails and the search engine does not start.
+The bot's tests stayed green throughout, because they never start it. The rule is now
+anchored to the repository root and guarded by a test, but **the files still have to be
+restored** from a machine that has them or from upstream.
 
 ### Written, never run against reality
 

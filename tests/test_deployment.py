@@ -9,6 +9,9 @@ identity behind every listing fetch.
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 from bot.config import FacebookSettings, ParserSettings, Settings
 from bot.main import deployment_warnings
 
@@ -68,3 +71,46 @@ def test_facebook_owns_the_profile_and_cdp_settings() -> None:
 
     assert "profile_dir" in facebook
     assert "cdp_url" in facebook
+
+
+# --- the vendored SearXNG must survive a clone ------------------------------
+
+
+def test_the_runtime_ignore_rule_does_not_swallow_searxng() -> None:
+    """`data/` unanchored matches a directory of that name at any depth.
+
+    It did exactly that to `searxng/searx/data`, the vendored engine, currency
+    and locale tables. Without them `from searx.data import ENGINE_TRAITS`
+    fails and SearXNG cannot start at all, so every clone of this repository
+    had no working search engine while the bot's own tests stayed green.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        ["git", "check-ignore", "-v", "searxng/searx/data/engines.json"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0, (
+        f"the vendored SearXNG data package is gitignored by: {result.stdout.strip()}"
+    )
+
+
+def test_the_bots_own_runtime_directory_is_still_ignored() -> None:
+    """The rule still has to do its actual job: keep ./data out of the repo.
+
+    That is where the Chrome profile and the live-view token file live, both
+    of which are credentials.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        ["git", "check-ignore", "data/facebook_profile/Cookies"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, "./data is no longer ignored — session cookies could be committed"

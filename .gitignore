@@ -21,7 +21,11 @@ htmlcov/
 
 # Runtime
 *.log
-data/
+# Anchored to the repository root on purpose. An unanchored `data/` matches a
+# directory of that name at ANY depth, which silently swallowed the vendored
+# searxng/searx/data package -- SearXNG cannot import without it, so the whole
+# search engine was missing from every clone. See tests/test_deployment.py.
+/data/
 
 # Browser profiles and debug artefacts — these hold live session cookies
 # and screenshots of group members, and must never reach the repo.
