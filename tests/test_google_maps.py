@@ -73,6 +73,26 @@ async def test_create_poll_and_download_csv():
     assert calls[0].url.path == "/api/v1/jobs"
     assert calls[-1].url.path == "/api/v1/jobs/job-1/download"
     assert calls[0].content and b"terreno urbanizable" in calls[0].content
+    assert b'"email":false' in calls[0].content
+
+
+@pytest.mark.asyncio
+async def test_email_extraction_can_be_enabled_explicitly():
+    source, calls = await _source_with_responses(
+        [
+            httpx.Response(201, json={"id": "job-1"}),
+            httpx.Response(200, json={"Status": "ok"}),
+            httpx.Response(200, text="title,address,website\nAgency,Address,https://agency.example\n"),
+        ],
+        extract_emails=True,
+    )
+    try:
+        result = await source.search(QUERY)
+    finally:
+        await source.aclose()
+
+    assert not result.failed
+    assert b'"email":true' in calls[0].content
 
 
 @pytest.mark.asyncio

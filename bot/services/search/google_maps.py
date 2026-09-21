@@ -50,7 +50,7 @@ class GoogleMapsSource:
             "fast_mode": False,
             "radius": self.settings.radius_meters,
             "depth": self.settings.depth,
-            "email": True,
+            "email": self.settings.extract_emails,
             "max_time": int(self.settings.timeout_seconds),
         }
         try:

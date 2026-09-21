@@ -443,6 +443,10 @@ class GoogleMapsSettings(_Base):
     timeout_seconds: float = Field(default=120.0, gt=0)
     poll_seconds: float = Field(default=2.0, gt=0)
     max_results: int = Field(default=30, ge=1, le=200)
+    extract_emails: bool = Field(
+        default=False,
+        description="Ask the sidecar to crawl listing websites for emails; slower when enabled",
+    )
 
 
 class FacebookSettings(_Base):
