@@ -73,7 +73,7 @@ class PageFetcher:
         except _FetchFailure as exc:
             log.debug("parser.fetch.failed", url=url, error=str(exc), status=exc.status)
             return PageContent(url=url, error=str(exc), status=exc.status)
-        except Exception as exc:  # noqa: BLE001 - documented never to raise: one failed page
+        except Exception as exc:
             log.warning("parser.fetch.unexpected", url=url, error=str(exc), exc_info=True)
             return PageContent(url=url, error=f"unexpected error: {type(exc).__name__}")
 

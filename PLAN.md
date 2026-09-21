@@ -246,13 +246,13 @@ Not a blocker to building; a blocker to *auto-posting*.
 
 ---
 
-## 4. Testing — currently zero
+## 4. Testing — 191 passing
 
-There was no test framework in this repo at all until Stage 0. There are now 34 tests
-covering session classification, the recovery watcher's invariants, group access in both
-languages, and fetcher routing -- run with `make test`. Everything below T.2 is still
-outstanding, and the gap that matters most is fixtures taken from real markup (T.3),
-which Stage 1 is what produces.
+The suite now covers session classification, the recovery watcher's invariants, group
+access in both languages, fetcher routing, recent Facebook post extraction, the Maps
+sidecar contract and Scrapling fallback routing. `make test` is the offline gate. The
+remaining gap that matters most is fixtures taken from real Facebook markup (T.3), which
+Stage 1 is what produces.
 
 | # | Task | Stage |
 |---|---|---|
@@ -262,6 +262,9 @@ which Stage 1 is what produces.
 | T.4 | Every selector gets a fixture test; a Facebook markup change must fail a test, not a user's search. | 4 |
 | T.5 | ✅ State-machine tests: exactly-one-alert, timeout, restart-mid-incident, job-abort-on-flip. | 2 |
 | T.6 | ✅ Gate tests: expired/invalidated token, PIN scoping, wrong PIN, rate limit, WebSocket auth, token file mode, and no public bind of 6080/5900/9222. | 3 |
+| T.7 | ✅ Facebook recent-feed fallback, post permalink scope and cross-source URL deduplication. | 4 / integrations |
+| T.8 | ✅ Google Maps sidecar create/poll/download, malformed responses, aliases and deduplication. | integrations |
+| T.9 | ✅ Scrapling extraction limits, timeout handling, optional dependency and routing escalation. | integrations |
 
 **Rule:** anything that touches Facebook markup is written test-first against a saved
 fixture. The live account is for discovering reality, not for regression testing.
@@ -324,3 +327,56 @@ with joining and commenting as the following increment.
 | 2FA off on a dedicated bot account | Removes the code-entry branch; buys nothing against checkpoints, which is fine because the human-takeover path handles those. |
 | Playwright owned in-house, no OpenCLI | No daemon, no extension, no third-party release cycle in the core of the product. |
 | No CAPTCHA/2FA/anti-detect tooling, ever | Stated non-goal; the human-takeover flow is the answer. |
+
+## 9. External integrations audit — 2026-09-21
+
+This section records what is actually connected in the current branch. A green unit
+test is not treated as proof that an external service is reachable.
+
+| Integration | Current status | Evidence | Required follow-up |
+|---|---|---|---|
+| Ollama / OpenAI-compatible LLM | **Working locally** | `/api/tags` answers; bot starts with `openai_compatible` and the configured local model | Send one real Telegram search and record extraction + ranking latency; add a timeout/fallback metric |
+| SearXNG | **Working locally** | `GET /healthz` answers and a real JSON request returned 10 rows; the first raw title was unrelated, confirming that ranking/query quality must be measured rather than trusting result order | Keep the health/JSON smoke check; record one ranked Telegram search and refine query wording or blocked domains if the ranker cannot suppress this noise |
+| Facebook Playwright session | **Partially working** | Browser opens and the bot reaches Facebook group search; screenshot showed an empty in-group search and an irrelevant discovered group; offline tests now cover recent-post fallback, permalink scope, discovered-group location filtering and post links; `scripts/facebook_probe.py` now holds the session lock and saves JSON plus DOM artifacts for the live run | Run Stage 1 against one known Madrid/Spain group; verify ten real post permalinks and location filtering, then turn the saved DOM into selector fixtures |
+| Scrapling | **Installed and connected** | `scrapling[fetchers]` imports; `https://example.com` smoke fetch succeeds; routing uses it after an HTTP failure; 7 offline fallback tests pass; the live three-portal probe got Fotocasa usable (3,409 chars, price + area), Idealista blocked (403), and Habitaclia thin/404 on the attempted listing URL | Keep Fotocasa on the HTTP/Scrapling route; treat Idealista as blocked even with browser fallback; replace the Habitaclia URL with a verified listing/search URL before enabling it |
+| Google Maps Scraper Kit | **Adapter + live-smoke tested** | `GoogleMapsSource` creates/polls `/api/v1/jobs`; 6 offline tests cover CSV, status errors, aliases and deduplication; the kit's pinned `v1.15.0` image failed to download its Playwright 1.57 driver, while the multi-arch image labelled `v1.18.1` (currently also published as `latest`) completed a Madrid depth-1 job with 20 places and a 384,508-byte CSV; the repeatable `scripts/maps_probe.py --lat 40.4168 --lon -3.7038 --depth 1` smoke returned 3 hits; email crawling is now opt-in because it serialises extra website visits; the kit is still a separate checkout, outside this repository's main Compose file | Pin `gosom/google-maps-scraper:v1.18.1` in the kit (or make the image tag configurable), then add that sidecar to the deployment profile; keep one job at a time and document the first-run browser download. Do not ship `v1.15.0` unchanged |
+| ScrapeGraphAI | **Not connected** | No package, import, setting, or runtime call exists | Evaluate only behind an explicit feature flag on pages Scrapling cannot structure; do not run a second ranker for every result |
+| Supabase | **Intentionally disabled locally** | Startup reports `supabase.disabled`; local fallback works | Configure credentials only when persistent cross-request deduplication is required |
+
+### Implementation sequence
+
+1. **P0 — Facebook correctness.** Run one real Madrid request with debug logging of the
+   parsed location, group query, post terms, group titles and every returned post URL.
+   Reject a discovered group without a location signal; never send a group link when a
+   concrete post was found.
+2. **P0 — Facebook fixtures.** ✅ The recent-post extractor, permalink parser and
+   empty-search fallback now have deterministic offline tests. Save real group/feed DOM
+   from the next live run and add the selector fixtures.
+3. **P1 — Maps end-to-end.** ✅ The sidecar was smoke-tested with the repeatable
+   `scripts/maps_probe.py` command at depth 1 and the adapter contract remains covered
+   offline. Before enabling it in deployment,
+   replace the broken `v1.15.0` image pin with `v1.18.1`, whose Playwright bundle is
+   available, and keep the existing source-failure note so a Maps outage cannot hide
+   Facebook or web results.
+4. **P1 — Web extraction.** ✅ The three-portal probe is recorded: Fotocasa returned
+   usable listing text through HTTP/Scrapling; Idealista returned 403 in both HTTP and
+   browser routes; the tested Habitaclia URL returned 404 and its home page was too thin.
+   Keep Fotocasa as the first portal route, and add verified listing URLs before making
+   Idealista or Habitaclia production sources.
+5. **P2 — One evaluator and deduplication.** ✅ The pipeline now merges Facebook, SearXNG,
+   and Maps hits before ranking, preserves source engines in the result, and renders them
+   in Telegram. It sends one card per canonical URL. Identity-key merging (name + address +
+   phone) remains open for Maps rows that have no website.
+6. **P2 — ScrapeGraphAI trial.** Add it only as an opt-in extractor for failed/ambiguous
+   pages, using the same `StructuredResult` schema and the existing Ollama endpoint. A
+   successful trial must show better field completeness without increasing duplicate or
+   hallucinated results.
+
+### Exit criteria for the integration work
+
+- A Madrid request produces post permalinks, not only group links.
+- At least one result has price, area, seller/contact status and a criterion verdict;
+  unknown fields are explicitly marked as unknown.
+- The same listing found by Facebook and the web is sent once with both sources retained.
+- Maps sidecar failure is reported as a source failure while other sources continue.
+- Every external integration has one live smoke command and one offline regression test.

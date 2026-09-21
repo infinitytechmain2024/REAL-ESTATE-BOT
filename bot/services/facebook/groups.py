@@ -155,6 +155,17 @@ async def check_access(page: Page, group_url: str) -> GroupAccess:
     return GroupAccess.UNKNOWN_ERROR
 
 
+async def join_group(page: Page) -> bool:
+    """Click a normal public Join button; never handle challenges or questions."""
+    for signal in JOIN_SIGNALS:
+        button = page.get_by_role("button", name=signal, exact=True)
+        if await button.count():
+            await button.first.click()
+            await page.wait_for_timeout(1000)
+            return True
+    return False
+
+
 async def search_posts(
     page: Page, group_url: str, query: str, *, max_posts: int
 ) -> list[GroupPost]:
@@ -213,6 +224,36 @@ async def search_posts(
     return posts
 
 
+async def read_recent_posts(
+    page: Page, group_url: str, *, max_posts: int
+) -> list[GroupPost]:
+    """Read the newest visible feed posts when in-group keyword search misses."""
+    posts: list[GroupPost] = []
+    seen_urls: set[str] = set()
+    stagnant_rounds = 0
+    while len(posts) < max_posts and stagnant_rounds < 2:
+        before = len(posts)
+        articles = page.locator("div[role='article']")
+        for index in range(await articles.count()):
+            if len(posts) >= max_posts:
+                break
+            try:
+                post = await _extract_post(articles.nth(index), group_url)
+            except RuntimeError:
+                continue
+            if post is None or post.post_url in seen_urls:
+                continue
+            seen_urls.add(post.post_url)
+            posts.append(post)
+        if len(posts) >= max_posts:
+            break
+        await page.mouse.wheel(0, 1800)
+        await page.wait_for_timeout(1000)
+        stagnant_rounds = stagnant_rounds + 1 if len(posts) == before else 0
+    log.info("facebook.group.recent_posts", group_url=group_url, found=len(posts))
+    return posts
+
+
 async def _extract_post(article: Locator, group_url: str) -> GroupPost | None:
     """Read only a post's message, author and permalink, never comments/UI text."""
     links = article.locator(POST_LINKS)
@@ -223,6 +264,13 @@ async def _extract_post(article: Locator, group_url: str) -> GroupPost | None:
     canonical = _group_and_post(urljoin("https://www.facebook.com/", href or ""))
     if canonical is None or canonical[1] is None:
         raise RuntimeError("Facebook post has no usable permalink")
+    # A feed can contain a recommended or cross-posted article whose permalink
+    # belongs to another group.  Keep the source scoped to the group we opened;
+    # otherwise a valid-looking Facebook URL leaks an unrelated result into the
+    # user's search.
+    expected_group = _group_and_post(urljoin("https://www.facebook.com/", group_url))
+    if expected_group is not None and canonical[0] != expected_group[0]:
+        return None
 
     message = article.locator(MESSAGE_SELECTOR).first
     if not await message.count():

@@ -33,12 +33,13 @@ from bot.services.db import SupabaseRepository
 from bot.services.facebook import FacebookSession, FacebookSource, TokenStore, build_gate_app
 from bot.services.facebook.discovery import FacebookPublicSource
 from bot.services.facebook.recheck import GroupRechecker
+from bot.services.facebook.store import FacebookGroupStore
 from bot.services.facebook.watchdog import FacebookWatchdog
 from bot.services.llm import LLMManager
 from bot.services.parser import Fetcher, build_fetcher
 from bot.services.pipeline import ResearchPipeline
 from bot.services.retention import RetentionPurger
-from bot.services.search import QueryBuilder, SearXNGClient
+from bot.services.search import GoogleMapsSource, QueryBuilder, SearXNGClient
 from bot.services.stt import STTManager
 
 log = get_logger(__name__)
@@ -79,6 +80,8 @@ class Services:
     retention_task: asyncio.Task[None] | None = None
     """Expires stored rows past SUPABASE_RETENTION_DAYS -- see COMPLIANCE.md."""
 
+    google_maps_source: GoogleMapsSource | None = None
+
     facebook_rechecker: GroupRechecker | None = None
     facebook_recheck_task: asyncio.Task[None] | None = None
     """Rechecks the configured group list and alerts the operator when a group
@@ -102,6 +105,8 @@ class Services:
             ("fetcher", self.fetcher.aclose),
             ("repo", self.repo.aclose),
         ]
+        if self.google_maps_source is not None:
+            closers.append(("google_maps", self.google_maps_source.aclose))
         if self.facebook_gate_runner is not None:
             closers.append(("facebook_gate_runner", self.facebook_gate_runner.cleanup))
         if self.facebook_session is not None:
@@ -109,7 +114,7 @@ class Services:
         for name, closer in closers:
             try:
                 await closer()
-            except Exception:  # noqa: BLE001 - one bad closer must not strand the rest
+            except Exception:
                 log.warning("shutdown.close_failed", service=name, exc_info=True)
 
 
@@ -149,6 +154,9 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
     await fetcher.preflight()
 
     query_builder = QueryBuilder(settings.searxng)
+    google_maps_source = (
+        GoogleMapsSource(settings.google_maps) if settings.google_maps.enabled else None
+    )
     public_facebook = FacebookPublicSource(settings.facebook, search, query_builder)
     pipeline = ResearchPipeline(
         settings=settings,
@@ -161,17 +169,25 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
         if settings.facebook.public_search_enabled
         else {},
     )
+    if google_maps_source is not None:
+        pipeline.sources["google_maps"] = google_maps_source.search
 
-    # Not started here: launching a real browser is deferred to first use
-    # (the /facebook admin command), so a bot run with FACEBOOK_ENABLED=true
-    # but nobody touching the feature yet does not open a window for no
-    # reason.
+    # In local mode the browser is deferred until a job or the admin command.
+    # In VM/CDP mode Chrome is already supervised by the entrypoint, so this
+    # only attaches to that existing process and lets the watchdog observe it
+    # while the bot is idle; it never launches a second browser.
     facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
     if facebook_session is not None:
+        if settings.facebook.cdp_url:
+            await facebook_session.start()
         # Native Facebook reading is the primary source when the operator has
         # enabled the browser. It discovers public groups in Facebook itself;
         # the indexed source remains a separate, no-login fallback.
-        native_facebook = FacebookSource(settings.facebook, facebook_session)
+        native_facebook = FacebookSource(
+            settings.facebook,
+            facebook_session,
+            FacebookGroupStore(settings.facebook.group_store_path),
+        )
         pipeline.sources["facebook"] = native_facebook.search
     facebook_token_store = (
         TokenStore(settings.facebook.token_store_path) if settings.facebook.enabled else None
@@ -223,6 +239,7 @@ async def build_services(settings: Settings, bot: Bot) -> Services:
         facebook_rechecker=rechecker,
         facebook_recheck_task=recheck_task,
         retention_task=retention_task,
+        google_maps_source=google_maps_source,
     )
 
 

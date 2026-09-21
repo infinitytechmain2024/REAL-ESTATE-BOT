@@ -75,14 +75,20 @@ async def test_background_loop_can_be_cancelled():
 
 
 @pytest.mark.parametrize(
-    "enabled, admins, public_search",
-    [(True, ["1"], True), (True, [], True), (False, [], True), (False, [], False)],
+    "enabled, admins, public_search, cdp_url",
+    [
+        (True, ["1"], True, None),
+        (True, [], True, "http://127.0.0.1:9222"),
+        (False, [], True, None),
+        (False, [], False, None),
+    ],
 )
 async def test_services_start_and_stop_watchdog_without_browser(
     monkeypatch,
     enabled,
     admins,
     public_search,
+    cdp_url,
 ):
     from unittest.mock import AsyncMock, Mock
 
@@ -115,6 +121,7 @@ async def test_services_start_and_stop_watchdog_without_browser(
                 enabled=enabled,
                 admin_telegram_ids=admins,
                 public_search_enabled=public_search,
+                cdp_url=cdp_url,
             ),
             parser=ParserSettings(enabled=False),
         ),
@@ -129,7 +136,10 @@ async def test_services_start_and_stop_watchdog_without_browser(
             "startup.facebook_no_admins",
             detail="Facebook alerts have no recipients",
         )
-    main.FacebookSession.start.assert_not_awaited()
+    if cdp_url:
+        main.FacebookSession.start.assert_awaited_once()
+    else:
+        main.FacebookSession.start.assert_not_awaited()
     await services.aclose()
     assert task is None or task.cancelled()
 

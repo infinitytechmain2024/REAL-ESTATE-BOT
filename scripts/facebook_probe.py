@@ -40,43 +40,51 @@ async def main() -> int:
     await session.start()
     try:
         page = session.page
-        print("-> checking session state...")
-        state = await session.probe_state()
-        print(f"   session: {state.value}")
-        if state == SessionState.LOGIN_NEEDED:
-            print("   Not logged in. Log in by hand in the opened browser window, then re-run.")
-            return 1
-        if state == SessionState.HUMAN_REQUIRED:
-            print("   Facebook wants verification (checkpoint / unrecognised page).")
-            print("   Resolve it by hand in the opened browser window, then re-run.")
-            return 1
+        # The probe is a first-class Facebook reader, so it follows the same
+        # single-owner rule as the bot source. In particular, a status check
+        # must not race a navigation or leave the shared page in another tab.
+        async with session.lock:
+            print("-> checking session state...")
+            state = await session.probe_state()
+            print(f"   session: {state.value}")
+            if state == SessionState.LOGIN_NEEDED:
+                print("   Not logged in. Log in by hand in the opened browser window, then re-run.")
+                return 1
+            if state == SessionState.HUMAN_REQUIRED:
+                print("   Facebook wants verification (checkpoint / unrecognised page).")
+                print("   Resolve it by hand in the opened browser window, then re-run.")
+                return 1
 
-        print(f"-> opening group: {group_url}")
-        access = await check_access(page, group_url)
-        print(f"   access: {access.value}")
-        if access != GroupAccess.ACCESSIBLE:
-            print(
-                "   Not accessible -- nothing to read. This is exactly the case the admin "
-                "queue needs to surface once it exists."
-            )
-            return 1
+            print(f"-> opening group: {group_url}")
+            access = await check_access(page, group_url)
+            print(f"   access: {access.value}")
+            if access != GroupAccess.ACCESSIBLE:
+                print(
+                    "   Not accessible -- nothing to read. This is exactly the case the admin "
+                    "queue needs to surface once it exists."
+                )
+                return 1
 
-        print(f"-> searching group for: {query!r}")
-        posts = await search_posts(page, group_url, query, max_posts=settings.max_posts_per_group)
-        print(f"   found {len(posts)} post(s)")
+            print(f"-> searching group for: {query!r}")
+            posts = await search_posts(page, group_url, query, max_posts=settings.max_posts_per_group)
+            print(f"   found {len(posts)} post(s)")
 
-        out = Path(__file__).resolve().parent.parent / "data" / "facebook_probe_output.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps([p.model_dump() for p in posts], ensure_ascii=False, indent=2))
-        print(f"-> wrote {out}")
+            data_dir = Path(__file__).resolve().parent.parent / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            out = data_dir / "facebook_probe_output.json"
+            out.write_text(json.dumps([p.model_dump() for p in posts], ensure_ascii=False, indent=2))
+            dom = data_dir / "facebook_probe_dom.html"
+            dom.write_text(await page.content(), encoding="utf-8")
+            print(f"-> wrote {out}")
+            print(f"-> wrote {dom}")
 
-        for post in posts:
-            print(f"   - {post.post_url}")
-            print(f"     {post.text[:120]!r}")
+            for post in posts:
+                print(f"   - {post.post_url}")
+                print(f"     {post.text[:120]!r}")
 
-        print()
-        print("Now open a few of those post_url values by hand and confirm the text matches.")
-        return 0
+            print()
+            print("Now open a few of those post_url values by hand and confirm the text matches.")
+            return 0
     finally:
         await session.stop()
 

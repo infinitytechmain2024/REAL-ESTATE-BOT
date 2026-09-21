@@ -4,7 +4,7 @@ import pytest
 
 from bot.config import FacebookSettings
 from bot.models.enums import Mode
-from bot.models.query import ParsedQuery
+from bot.models.query import Location, ParsedQuery
 from bot.models.result import StructuredResult
 from bot.services.facebook import client
 from bot.services.facebook.browser import SessionState
@@ -62,18 +62,26 @@ async def test_failed_group_read_is_not_no_matches(monkeypatch, access_state):
     assert result.failed is True
 
 
-async def test_read_exception_aborts_without_half_extracted_hits(monkeypatch):
-    session = FakeSession([SessionState.HEALTHY])
+async def test_read_exception_skips_one_group_and_reads_the_next(monkeypatch):
+    session = FakeSession([SessionState.HEALTHY] * 4)
     session.page = FakePage()
     monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
-    posts = AsyncMock(side_effect=RuntimeError("browser disconnected"))
+    groups = ["first", "second"]
+    async def posts_for(_page, group_url, _term, **_kwargs):
+        if group_url == "first":
+            raise RuntimeError("selector changed in first group")
+        return [GroupPost(group_url="second", post_url="second/posts/1", text="Land")]
+
+    posts = AsyncMock(side_effect=posts_for)
     monkeypatch.setattr(client, "search_posts", posts)
-    source = client.FacebookSource(
-        FacebookSettings(enabled=True, group_urls=["first", "second"]), session
-    )
+    source = client.FacebookSource(FacebookSettings(enabled=True, group_urls=groups), session)
     result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
-    assert result.failed and result.hits == []
-    assert posts.await_count == 1
+    assert result.failed is False
+    assert [hit.url for hit in result.hits] == ["second/posts/1"]
+    # Location-first planning sends two short local terms instead of the old
+    # full-query variants; the failed group stops after its first failed term.
+    assert posts.await_count == 3
+    assert {call.args[1] for call in posts.await_args_list} == {"first", "second"}
 
 
 async def test_missing_search_box_is_a_failed_read():
@@ -119,6 +127,48 @@ async def test_no_configured_groups_are_discovered_and_read(monkeypatch):
     result = await source.search(ParsedQuery(mode=Mode.LAND, keywords=["land"]))
     assert result.hits[0].author == "Author"
     assert [(group.title, group.access) for group in result.groups] == [("Public land", "accessible")]
+
+
+async def test_discovered_groups_are_location_filtered_and_return_post_links(monkeypatch):
+    session = FakeSession([SessionState.HEALTHY] * 3)
+    session.page = FakePage()
+    monkeypatch.setattr(
+        client,
+        "discover_groups",
+        AsyncMock(
+            return_value=[
+                ("https://facebook.com/groups/vinnytsia", "Bazar Vinnytsia объявления"),
+                ("https://facebook.com/groups/madrid", "Terrenos Madrid y alrededores"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(client, "check_access", AsyncMock(return_value=GroupAccess.ACCESSIBLE))
+    monkeypatch.setattr(client, "read_recent_posts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        client,
+        "search_posts",
+        AsyncMock(
+            return_value=[
+                GroupPost(
+                    group_url="https://facebook.com/groups/madrid",
+                    post_url="https://facebook.com/groups/madrid/posts/42/",
+                    text="Terreno urbanizable en Madrid",
+                )
+            ]
+        ),
+    )
+    source = client.FacebookSource(FacebookSettings(enabled=True), session)
+
+    result = await source.search(
+        ParsedQuery(
+            mode=Mode.LAND,
+            location=Location(city="Madrid", country="Spain"),
+            keywords=["terreno"],
+        )
+    )
+
+    assert [group.url for group in result.groups] == ["https://facebook.com/groups/madrid"]
+    assert [hit.url for hit in result.hits] == ["https://facebook.com/groups/madrid/posts/42/"]
 
 
 async def test_browser_started_for_a_healthy_job_stays_available(monkeypatch):

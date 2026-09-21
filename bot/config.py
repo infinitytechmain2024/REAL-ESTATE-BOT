@@ -146,6 +146,18 @@ class LLMSettings(_Base):
     model_rank: str | None = Field(
         default=None, description="Stronger model for ranking/structuring; defaults to `model`"
     )
+    model_fast: str | None = Field(
+        default=None,
+        description="Fast local model for extraction; falls back to MODEL_EXTRACT then MODEL",
+    )
+    model_strong: str | None = Field(
+        default=None,
+        description="Stronger local model for ranking; falls back to MODEL_RANK then MODEL",
+    )
+    model_long: str | None = Field(
+        default=None,
+        description="Long-context local model for detailed briefings; falls back to MODEL_RANK",
+    )
 
     base_url: str | None = Field(
         default=None,
@@ -171,6 +183,33 @@ class LLMSettings(_Base):
     @property
     def rank_model(self) -> str:
         return self.model_rank or self.model
+
+    @property
+    def fast_model(self) -> str:
+        return self.model_fast or self.extract_model
+
+    @property
+    def strong_model(self) -> str:
+        return self.model_strong or self.rank_model
+
+    @property
+    def long_model(self) -> str:
+        return self.model_long or self.strong_model
+
+    def model_for(self, purpose: str, *, content_chars: int = 0) -> str:
+        """Choose a model from the pool for a pipeline task.
+
+        Routing is deliberately deterministic: it keeps browser and search
+        behaviour code-controlled while allowing a local Ollama pool to use
+        the smallest suitable model for each stage.
+        """
+        if purpose == "extract":
+            return self.fast_model
+        if purpose == "rank":
+            return self.strong_model
+        if purpose == "details":
+            return self.long_model if content_chars > 6000 else self.strong_model
+        return self.model
 
 
 class STTSettings(_Base):
@@ -266,6 +305,10 @@ class ParserSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PARSER_"})
 
     enabled: bool = Field(default=True, description="Set false to rank on snippets alone")
+    scrapling_enabled: bool = Field(
+        default=False,
+        description="Use Scrapling as an adaptive HTTP fallback when the regular fetcher fails",
+    )
     max_pages: int = Field(default=8, ge=1, le=50, description="Hits to actually fetch")
     concurrency: int = Field(default=5, ge=1, le=20)
     timeout_seconds: float = Field(default=15.0, gt=0)
@@ -386,6 +429,26 @@ class PipelineSettings(_Base):
     )
 
 
+class GoogleMapsSettings(_Base):
+    """Optional local Google Maps Scraper Kit sidecar."""
+
+    model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "GOOGLE_MAPS_"})
+
+    enabled: bool = Field(default=False, description="Query a local Maps Scraper Kit sidecar")
+    base_url: str = Field(default="http://127.0.0.1:8080")
+    latitude: float | None = None
+    longitude: float | None = None
+    radius_meters: int = Field(default=10_000, ge=100, le=100_000)
+    depth: int = Field(default=5, ge=1, le=20)
+    timeout_seconds: float = Field(default=120.0, gt=0)
+    poll_seconds: float = Field(default=2.0, gt=0)
+    max_results: int = Field(default=30, ge=1, le=200)
+    extract_emails: bool = Field(
+        default=False,
+        description="Ask the sidecar to crawl listing websites for emails; slower when enabled",
+    )
+
+
 class FacebookSettings(_Base):
     """Facebook group scraping: the shared, operator-controlled browser session.
 
@@ -407,6 +470,16 @@ class FacebookSettings(_Base):
         description="Discover public group posts through web search; requires no Facebook login",
     )
     max_discovered_groups: int = Field(default=3, ge=1, le=10)
+    group_activity_days: int = Field(
+        default=30, ge=1, le=365, description="Skip groups without a post this recent"
+    )
+    group_store_path: str = Field(
+        default="./data/facebook_groups.sqlite3", description="Local discovered-group registry"
+    )
+    auto_join_groups: bool = Field(
+        default=True,
+        description="Join an active public group when Facebook presents a normal Join button",
+    )
 
     watchdog_interval_seconds: float = Field(default=60.0, gt=0)
 
@@ -435,7 +508,12 @@ class FacebookSettings(_Base):
         description="Group URLs for the logged-in browser reader, comma-separated. "
         "Public web-search discovery does not require this list.",
     )
-    max_posts_per_group: int = Field(default=20, ge=1, le=200)
+    max_posts_per_group: int = Field(
+        default=10,
+        ge=1,
+        le=200,
+        description="Recent posts inspected per group before criterion ranking",
+    )
     max_search_terms: int = Field(
         default=3,
         ge=1,
@@ -533,6 +611,7 @@ class Settings(_Base):
     parser: ParserSettings = Field(default_factory=ParserSettings)
     supabase: SupabaseSettings = Field(default_factory=SupabaseSettings)
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
+    google_maps: GoogleMapsSettings = Field(default_factory=GoogleMapsSettings)
     facebook: FacebookSettings = Field(default_factory=FacebookSettings)
 
     @field_validator("log_level")

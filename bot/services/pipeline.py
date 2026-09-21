@@ -43,6 +43,7 @@ from bot.prompts import (
     build_rank_prompt,
 )
 from bot.services.budget import BudgetMatch, split_by_fit
+from bot.services.facts import extract_listing_facts
 from bot.services.llm import ChatMessage
 from bot.utils.text import plural_ru, truncate
 
@@ -195,7 +196,7 @@ class ResearchPipeline:
             if result.failed:
                 failed_sources.append(name)
                 unpersisted_urls.update(hit.url for hit in result.hits)
-        hits = list({hit.url_hash: hit for hit in hits}.values())
+        hits = _merge_hits(hits)
         log.info("pipeline.hits", user_id=user_id, hits=len(hits), queries=len(queries))
 
         if not hits:
@@ -229,8 +230,16 @@ class ResearchPipeline:
             # The search worked; only the ranking failed. Sending unranked hits
             # is a much better outcome than sending nothing.
             log.warning("pipeline.rank.degraded", user_id=user_id, error=str(exc))
-            structured = _fallback_results(fresh_hits, limit=self.settings.pipeline.max_results_to_user)
+            structured = _fallback_results(
+                fresh_hits, query=parsed, limit=self.settings.pipeline.max_results_to_user
+            )
             degraded = True
+
+        source_by_url = {hit.url: list(dict.fromkeys(hit.engines)) for hit in fresh_hits}
+        structured = [
+            result.model_copy(update={"sources": source_by_url.get(result.url, result.sources)})
+            for result in structured
+        ]
 
         # In the degraded path the scores are placeholders, not judgements, so
         # applying the relevance threshold to them would discard everything for
@@ -299,7 +308,7 @@ class ResearchPipeline:
         parsed = await self.llm.chat_structured(
             [ChatMessage.system(EXTRACT_SYSTEM), ChatMessage.user(build_extract_prompt(text, mode))],
             ParsedQuery,
-            model=self.settings.llm.extract_model,
+            model=self.settings.llm.model_for("extract"),
             purpose="extract",
         )
         # The user picked the mode with a button; the model does not get to
@@ -322,17 +331,18 @@ class ResearchPipeline:
         ranked = await self.llm.chat_structured(
             [ChatMessage.system(RANK_SYSTEM), ChatMessage.user(prompt)],
             RankedResults,
-            model=self.settings.llm.rank_model,
+            model=self.settings.llm.model_for("rank"),
             purpose="rank",
         )
 
         # Models occasionally return a rewritten or hallucinated URL. Anything
         # that is not one of the URLs we supplied is dropped rather than sent.
         allowed = {hit.url for hit, _ in candidates}
+        sources_by_url = {hit.url: list(dict.fromkeys(hit.engines)) for hit, _ in candidates}
         kept: list[StructuredResult] = []
         for result in ranked.results:
             if result.url in allowed:
-                kept.append(result)
+                kept.append(result.model_copy(update={"sources": sources_by_url.get(result.url, [])}))
             else:
                 log.warning("pipeline.rank.unknown_url", url=result.url)
 
@@ -365,7 +375,7 @@ class ResearchPipeline:
                 ChatMessage.system(DETAILS_SYSTEM),
                 ChatMessage.user(build_details_prompt(parsed, result.url, result.title, content)),
             ],
-            model=self.settings.llm.rank_model,
+            model=self.settings.llm.model_for("details", content_chars=len(content)),
             purpose="details",
         )
         return response.text.strip()
@@ -495,13 +505,45 @@ class ResearchPipeline:
         return stored
 
 
-def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredResult]:
+def _merge_hits(hits: list[SearchHit]) -> list[SearchHit]:
+    """Merge source hits while retaining provenance and the richest content."""
+    merged: dict[str, SearchHit] = {}
+    for hit in hits:
+        existing = merged.get(hit.url_hash)
+        if existing is None:
+            merged[hit.url_hash] = hit
+            continue
+        existing.engines = list(dict.fromkeys([*existing.engines, *hit.engines]))
+        existing.score = max(existing.score, hit.score)
+        if len(hit.snippet) > len(existing.snippet):
+            existing.snippet = hit.snippet
+        if not existing.title and hit.title:
+            existing.title = hit.title
+        if existing.content is None and hit.content:
+            existing.content = hit.content
+        if existing.author is None and hit.author:
+            existing.author = hit.author
+        if existing.published_at is None and hit.published_at is not None:
+            existing.published_at = hit.published_at
+    return list(merged.values())
+
+
+def _fallback_results(
+    hits: list[SearchHit], *, query: ParsedQuery, limit: int
+) -> list[StructuredResult]:
     """Raw hits dressed as results, for when the ranker is unavailable.
 
     The score is a placeholder: nothing has judged these. The caller skips the
     relevance threshold in this path, and the summary is the engine's own
     snippet -- honest, if unpolished.
     """
+    missing = []
+    if query.area_min is not None:
+        missing.append(f"площадь от {query.area_min:g} м² не проверена")
+    if query.metro_drive_minutes is not None:
+        missing.append("расстояние до метро не проверено")
+    if query.buildable_required:
+        missing.append("назначение под застройку не проверено")
     return [
         StructuredResult(
             url=hit.url,
@@ -509,6 +551,9 @@ def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredRe
             summary=hit.snippet or "Описание недоступно — откройте ссылку, чтобы посмотреть.",
             score=50,
             language=None,
+            seller=hit.author,
+            missing_criteria=missing,
+            **extract_listing_facts(hit.content or hit.snippet),
         )
         for hit in hits[:limit]
     ]

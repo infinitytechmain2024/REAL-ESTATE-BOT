@@ -141,7 +141,9 @@ async def run_research(
 
 async def _send_results(message, status, outcome, settings: Settings, mode: Mode) -> None:  # type: ignore[no-untyped-def]
     """Send each result as its own message, then the closing summary."""
-    if outcome.source_groups:
+    # Group links are diagnostics only. When posts were found, send the post
+    # permalinks as the actual results instead of making the user open a group.
+    if outcome.source_groups and not outcome.results:
         access_labels = {
             "accessible": "Доступна для чтения",
             "membership_required": "Нужно вступить в группу",
