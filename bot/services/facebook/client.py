@@ -11,7 +11,7 @@ from bot.config import FacebookSettings
 from bot.logging_conf import get_logger
 from bot.models.query import ParsedQuery
 from bot.models.result import SearchHit
-from bot.services.facebook.activity import is_recent
+from bot.services.facebook.activity import age_days
 from bot.services.facebook.browser import FacebookSession, SessionState
 from bot.services.facebook.groups import (
     GroupAccess,
@@ -137,30 +137,34 @@ class FacebookSource:
                         # reading and allow completed hits from other groups to save.
                         continue
 
-                    # Read the newest posts first. In-group search is literal and
-                    # often returns nothing for a natural-language request; the
-                    # ranker can evaluate the recent feed against every criterion.
+                    # Search the group in each language first: those posts
+                    # were matched against the request, while the feed is only
+                    # whatever is newest. Reading the feed first spent the whole
+                    # budget before a single search ran, in any group with
+                    # max_posts_per_group visible posts -- which is all of them.
+                    # The feed then fills whatever room is left, because in-group
+                    # search is literal and a natural request often misses.
+                    budget = self.settings.max_posts_per_group
                     found: dict[str, GroupPost] = {}
                     try:
-                        for post in await read_recent_posts(
-                            self.session.page,
-                            group_url,
-                            max_posts=self.settings.max_posts_per_group,
-                        ):
-                            found.setdefault(post.post_url, post)
                         for term in terms:
-                            if len(found) >= self.settings.max_posts_per_group:
+                            if len(found) >= budget:
                                 break
                             posts = await search_posts(
                                 self.session.page,
                                 group_url,
                                 term,
-                                max_posts=self.settings.max_posts_per_group,
+                                max_posts=budget - len(found),
                             )
                             for post in posts:
                                 found.setdefault(post.post_url, post)
-                            if len(found) >= self.settings.max_posts_per_group:
-                                break
+                        if len(found) < budget:
+                            for post in await read_recent_posts(
+                                self.session.page,
+                                group_url,
+                                max_posts=budget - len(found),
+                            ):
+                                found.setdefault(post.post_url, post)
                     except Exception:
                         # A selector failure or an empty unrecognised layout is
                         # local to this group. Do not abandon the remaining
@@ -171,11 +175,19 @@ class FacebookSource:
                             group.access = GroupAccess.UNKNOWN_ERROR.value
                             log.exception("facebook.source.group_read_failed", group_url=group_url)
                             continue
+                    # The freshest post we can date decides, not whichever one
+                    # the feed listed first -- a pinned rules post is often the
+                    # oldest thing in the group.
+                    ages = [
+                        age
+                        for age in (age_days(post.posted_at_text) for post in found.values())
+                        if age is not None
+                    ]
+                    newest = min(ages, default=None)
                     latest = next(iter(found.values()), None)
-                    active = latest is not None and (
-                        latest.posted_at_text is None
-                        or is_recent(latest.posted_at_text, max_age_days=self.settings.group_activity_days)
-                    )
+                    # Recorded as active, and asked to join, only on a date we
+                    # could actually read: both outlive this search.
+                    active = newest is not None and newest <= self.settings.group_activity_days
                     membership = "accessible"
                     if active and self.settings.auto_join_groups and await join_group(self.session.page):
                         membership = "join_requested"
@@ -188,8 +200,18 @@ class FacebookSource:
                             membership_state=membership,
                             active=active,
                         )
-                    if not active:
-                        log.info("facebook.source.group_inactive", group_url=group_url)
+                    # Dropping posts already read needs positive evidence that
+                    # they are old. A stamp in a language the parser does not
+                    # know is not that evidence -- it used to be, and on a
+                    # Spanish-language account it discarded every group.
+                    if newest is not None and newest > self.settings.group_activity_days:
+                        log.info(
+                            "facebook.source.group_inactive",
+                            group_url=group_url,
+                            newest_days=round(newest, 1),
+                        )
+                        continue
+                    if not found:
                         continue
                     hits.extend(_post_to_hit(post) for post in found.values())
 
