@@ -571,18 +571,10 @@ def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuer
         updates["object_type"] = "land plot"
 
     location = parsed.location
-    madrid_match = re.search(
-        r"(?:пригород\w*\s+мадрид\w*|madrid\s+suburbs?)", text, re.IGNORECASE
+    suburb_match = re.search(
+        r"пригород\w*|передміст\w*|suburb\w*|outskirt\w*|suburbio\w*|perifer\w*",
+        lowered,
     )
-    if re.search(r"мадрид|madrid", lowered):
-        location = location.model_copy(
-            update={
-                "city": "Madrid",
-                "country": "Spain",
-                "raw": location.raw or (madrid_match.group(0) if madrid_match else "Madrid"),
-            }
-        )
-        updates["location"] = location
 
     if location.country and location.country.casefold() in {"spain", "españa"}:
         languages = ["es", "en", *parsed.languages]
@@ -596,8 +588,13 @@ def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuer
             lambda value: area_token in value
             and any(unit in value for unit in ("m²", "m2", "square", "area"))
         )
-    if re.search(r"пригород\w*\s+мадрид\w*|madrid\s+suburbs?", lowered):
-        duplicate_markers.append(lambda value: "madrid" in value or "мадрид" in value)
+    if suburb_match:
+        duplicate_markers.append(
+            lambda value: any(
+                marker in value
+                for marker in ("suburb", "outskirt", "пригород", "передміст", "suburbio", "perifer")
+            )
+        )
     if metro_match:
         duplicate_markers.append(lambda value: "metro" in value or "метро" in value)
     if buildable_positive and not buildable_negative:
@@ -638,8 +635,12 @@ def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuer
 
     if explicit_area is not None:
         set_criterion("area_min", f"{explicit_area:g} m²", "required")
-    if re.search(r"пригород\w*\s+мадрид\w*|madrid\s+suburbs?", lowered):
-        set_criterion("location", "Madrid suburbs", "required")
+    if suburb_match:
+        location_value = (
+            f"{location.city} suburbs" if location.city else (location.raw or "")
+        )
+        if location_value:
+            set_criterion("location", location_value, "required")
     if metro_match:
         set_criterion(
             "metro_drive_minutes", f"{int(metro_match.group(1))} minutes by car", "required"
