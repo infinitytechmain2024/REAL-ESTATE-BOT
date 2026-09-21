@@ -16,7 +16,7 @@ httpx[http2]==0.28.1
 trafilatura==2.0.0
 
 # Adaptive HTTP fallback for listing sites whose markup or TLS fingerprint changes.
-scrapling==0.4.8
+scrapling[fetchers]==0.4.8
 curl-cffi>=0.15.0
 
 # Supabase (PostgREST) client.

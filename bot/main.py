@@ -114,7 +114,7 @@ class Services:
         for name, closer in closers:
             try:
                 await closer()
-            except Exception:
+            except Exception:  # noqa: BLE001 - one bad closer must not strand the rest
                 log.warning("shutdown.close_failed", service=name, exc_info=True)
 
 
