@@ -146,6 +146,18 @@ class LLMSettings(_Base):
     model_rank: str | None = Field(
         default=None, description="Stronger model for ranking/structuring; defaults to `model`"
     )
+    model_fast: str | None = Field(
+        default=None,
+        description="Fast local model for extraction; falls back to MODEL_EXTRACT then MODEL",
+    )
+    model_strong: str | None = Field(
+        default=None,
+        description="Stronger local model for ranking; falls back to MODEL_RANK then MODEL",
+    )
+    model_long: str | None = Field(
+        default=None,
+        description="Long-context local model for detailed briefings; falls back to MODEL_RANK",
+    )
 
     base_url: str | None = Field(
         default=None,
@@ -171,6 +183,33 @@ class LLMSettings(_Base):
     @property
     def rank_model(self) -> str:
         return self.model_rank or self.model
+
+    @property
+    def fast_model(self) -> str:
+        return self.model_fast or self.extract_model
+
+    @property
+    def strong_model(self) -> str:
+        return self.model_strong or self.rank_model
+
+    @property
+    def long_model(self) -> str:
+        return self.model_long or self.strong_model
+
+    def model_for(self, purpose: str, *, content_chars: int = 0) -> str:
+        """Choose a model from the pool for a pipeline task.
+
+        Routing is deliberately deterministic: it keeps browser and search
+        behaviour code-controlled while allowing a local Ollama pool to use
+        the smallest suitable model for each stage.
+        """
+        if purpose == "extract":
+            return self.fast_model
+        if purpose == "rank":
+            return self.strong_model
+        if purpose == "details":
+            return self.long_model if content_chars > 6000 else self.strong_model
+        return self.model
 
 
 class STTSettings(_Base):

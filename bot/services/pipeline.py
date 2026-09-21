@@ -299,7 +299,7 @@ class ResearchPipeline:
         parsed = await self.llm.chat_structured(
             [ChatMessage.system(EXTRACT_SYSTEM), ChatMessage.user(build_extract_prompt(text, mode))],
             ParsedQuery,
-            model=self.settings.llm.extract_model,
+            model=self.settings.llm.model_for("extract"),
             purpose="extract",
         )
         # The user picked the mode with a button; the model does not get to
@@ -322,7 +322,7 @@ class ResearchPipeline:
         ranked = await self.llm.chat_structured(
             [ChatMessage.system(RANK_SYSTEM), ChatMessage.user(prompt)],
             RankedResults,
-            model=self.settings.llm.rank_model,
+            model=self.settings.llm.model_for("rank"),
             purpose="rank",
         )
 
@@ -365,7 +365,7 @@ class ResearchPipeline:
                 ChatMessage.system(DETAILS_SYSTEM),
                 ChatMessage.user(build_details_prompt(parsed, result.url, result.title, content)),
             ],
-            model=self.settings.llm.rank_model,
+            model=self.settings.llm.model_for("details", content_chars=len(content)),
             purpose="details",
         )
         return response.text.strip()
