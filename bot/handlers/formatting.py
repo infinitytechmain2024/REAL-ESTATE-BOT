@@ -135,14 +135,29 @@ def format_summary(
     duplicates: int,
     degraded: bool,
     alternatives: int = 0,
+    pages_read: int = 0,
+    ranked: int = 0,
+    low_confidence: bool = False,
 ) -> str:
     """The closing message after all results have been sent."""
     if sent == 0:
-        parts = ["😕 По этому запросу ничего подходящего не нашлось."]
-        if duplicates:
-            parts.append(f"Пропущено ранее показанных: {duplicates}.")
-        parts.append("Попробуйте уточнить локацию, бюджет или тип объекта.")
-        return "\n".join(parts)
+        return _format_empty(
+            hits=hits, duplicates=duplicates, pages_read=pages_read, ranked=ranked
+        )
+
+    if low_confidence:
+        # These were sent *because* nothing cleared the bar, so the confident
+        # "✅ Готово" below would contradict the warning shown just before them.
+        results_noun = plural_ru(sent, "вариант", "варианта", "вариантов")
+        return "\n".join(
+            [
+                f"🤔 Показано {sent} {results_noun} с низкой уверенностью. "
+                f"Всего просмотрено ссылок: {hits}.",
+                "Ни один не прошёл порог релевантности — это лучшее из того, "
+                "что нашлось, а не подтверждённые совпадения.",
+                f"Отправьте следующий запрос в режиме «{mode.title}» или смените режим.",
+            ]
+        )
 
     # Phrased as separate clauses on purpose: "из N найденных ссылок" needs the
     # adjective to agree with the numeral too, which no simple helper gets right.
@@ -171,4 +186,64 @@ def format_summary(
             "без фильтрации и с описаниями из поисковой выдачи."
         )
     parts.append(f"Отправьте следующий запрос в режиме «{mode.title}» или смените режим.")
+    return "\n".join(parts)
+
+
+def _format_empty(*, hits: int, duplicates: int, pages_read: int, ranked: int) -> str:
+    """Why the run came back empty, and what would actually change that.
+
+    An empty answer used to end with "уточните локацию, бюджет или тип
+    объекта" whatever had happened. That is the right advice for exactly one
+    of the four ways a run comes back empty, and misleading for the other
+    three: when the engines returned nothing, when every page refused to be
+    read, or when the user has simply seen it all already, rewording the
+    request changes nothing. So each case says what it was and what helps.
+    """
+    if hits == 0:
+        return (
+            "😕 Поиск не вернул ни одной ссылки.\n"
+            "Это не про формулировку запроса — так отвечают поисковые движки, "
+            "когда они недоступны или временно ограничили доступ.\n"
+            "Попробуйте повторить через несколько минут."
+        )
+
+    if duplicates >= hits:
+        # The pipeline stops before ranking when nothing survives de-duplication,
+        # so this is the only case where "you have seen it all" is true. A few
+        # duplicates alongside fresh hits is not, and saying so would be wrong.
+        return (
+            f"😕 Нашлось {plural_ru(hits, 'ссылка', 'ссылки', 'ссылок')}: {hits}, "
+            "и все уже показывались вам раньше.\n"
+            "Новых объектов по этому запросу пока нет."
+        )
+
+    parts = [f"😕 Просмотрено ссылок: {hits}, ничего подходящего среди них не нашлось."]
+
+    if pages_read == 0:
+        # The usual cause, and the one the user cannot guess: the listing
+        # portals refused to be read, so the ranker judged everything on a
+        # one-line snippet from the search engine.
+        parts.append(
+            "Ни одну страницу не удалось прочитать целиком — крупные порталы "
+            "закрыты от автоматического чтения, и оценивать пришлось по одним "
+            "заголовкам из выдачи."
+        )
+        parts.append(
+            "Это лечится настройкой парсера (PARSER_STEALTH_ENABLED), а не "
+            "переформулировкой запроса."
+        )
+    elif ranked:
+        parts.append(
+            f"Страниц прочитано: {pages_read}. Подходящих по смыслу не оказалось "
+            "ни одной — попробуйте расширить район поиска или смягчить требования."
+        )
+    else:
+        parts.append(
+            f"Страниц прочитано: {pages_read}, но ни одна не относится к запросу.\n"
+            "Попробуйте уточнить локацию или тип объекта."
+        )
+
+    if duplicates:
+        parts.append(f"Ещё {duplicates} пропущено — они уже показывались раньше.")
+
     return "\n".join(parts)

@@ -80,6 +80,20 @@ class PipelineOutcome(BaseModel):
     degraded: bool = False
     """True when ranking fell back to raw search hits."""
 
+    pages_read: int = 0
+    """Candidates whose page text we actually got. The rest reached the ranker
+    with only a search snippet, which is the usual reason a run with plenty of
+    hits still scores nothing highly."""
+
+    ranked_count: int = 0
+    """How many candidates the ranker returned at all, before the score
+    threshold. Separates "the LLM saw nothing worth sending" from "everything
+    it found sat just under PIPELINE_MIN_SCORE"."""
+
+    low_confidence: bool = False
+    """True when nothing cleared the threshold and the best few were sent
+    anyway, labelled as such."""
+
     @property
     def is_empty(self) -> bool:
         return not self.results
@@ -187,11 +201,27 @@ class ResearchPipeline:
         # In the degraded path the scores are placeholders, not judgements, so
         # applying the relevance threshold to them would discard everything for
         # anyone who raised PIPELINE_MIN_SCORE.
-        relevant = (
-            structured
-            if degraded
-            else [r for r in structured if r.score >= self.settings.pipeline.min_score]
-        )
+        low_confidence = False
+        if degraded:
+            relevant = structured
+        else:
+            relevant = [r for r in structured if r.score >= self.settings.pipeline.min_score]
+            room = self.settings.pipeline.low_confidence_results
+            if not relevant and structured and room:
+                # The ranker read the candidates and scored them -- just under
+                # the bar. Returning "ничего не нашлось" here is a lie the user
+                # cannot act on: refining a query does not help when the pages
+                # were unreadable and the model was hedging on snippets. Send
+                # the best few and say plainly how sure we are.
+                relevant = structured[:room]
+                low_confidence = True
+                log.info(
+                    "pipeline.low_confidence",
+                    user_id=user_id,
+                    best_score=structured[0].score,
+                    min_score=self.settings.pipeline.min_score,
+                )
+
         keep, verdicts, exact_count = self._select(relevant, parsed)
         log.info(
             "pipeline.ranked",
@@ -234,6 +264,9 @@ class ResearchPipeline:
             exact_count=exact_count,
             duplicates_skipped=duplicates,
             degraded=degraded,
+            pages_read=sum(1 for _, page in candidates if page is not None and page.ok),
+            ranked_count=len(structured),
+            low_confidence=low_confidence and bool(stored),
         )
 
     # -- stages ------------------------------------------------------------

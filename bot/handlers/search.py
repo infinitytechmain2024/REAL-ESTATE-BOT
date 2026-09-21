@@ -151,11 +151,22 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
                 hits=outcome.hits_found,
                 duplicates=outcome.duplicates_skipped,
                 degraded=outcome.degraded,
+                pages_read=outcome.pages_read,
+                ranked=outcome.ranked_count,
             ),
         )
         return
 
-    if outcome.only_alternatives:
+    if outcome.low_confidence:
+        # Nothing cleared the relevance bar. These are the best of what was
+        # found, and saying so is the difference between a hedge the user can
+        # judge and a claim they would act on.
+        await _safe_edit(
+            status,
+            "🤔 Уверенных совпадений нет. Вот ближайшее из найденного — "
+            "проверьте сами, прежде чем рассчитывать на это:",
+        )
+    elif outcome.only_alternatives:
         # Nothing matched the budget. Say so explicitly and name the gap before
         # the results arrive, so they are not mistaken for matches.
         await _safe_edit(status, format_alternatives_notice(outcome.parsed, outcome.alternatives))
@@ -201,6 +212,7 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
             duplicates=outcome.duplicates_skipped,
             degraded=outcome.degraded,
             alternatives=len(outcome.alternatives),
+            low_confidence=outcome.low_confidence,
         ),
         reply_markup=mode_switch_keyboard(mode),
     )

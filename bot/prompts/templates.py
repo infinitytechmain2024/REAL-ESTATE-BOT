@@ -37,8 +37,17 @@ Rules:
   sotkas (x100). If the user gave a range, fill both bounds.
 - `languages` must list the local language of the target country first, then
   "en", then the language the user wrote in. These drive multilingual search.
+- `keywords` go into a search engine, so write them in the local language of
+  the target country, or in English -- NOT in the language the user wrote in,
+  unless the two happen to be the same. "для забудови" for a plot near Madrid
+  finds nothing; "suelo urbanizable" finds what the user meant. Translate the
+  intent, do not transliterate the words.
 - `keywords` are the terms worth keeping verbatim in a search query. Do not
-  pad them with generic words like "buy" or "property".
+  pad them with generic words like "buy" or "property". Qualitative conditions
+  belong here ("buildable", "near metro"), not in `object_type`.
+- Bounds are independent. "from 2000 m2" fills `area_min` and leaves
+  `area_max` null; "up to 300k" fills `budget_max` and leaves `budget_min`
+  null. Never invent the other end of a range to make it look complete.
 - `mode` is given to you; keep it unless the text plainly contradicts it.
 """
 

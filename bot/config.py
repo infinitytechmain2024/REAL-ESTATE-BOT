@@ -355,6 +355,15 @@ class PipelineSettings(_Base):
         default=True, description="Never show a user the same url_hash twice"
     )
 
+    low_confidence_results: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="When nothing clears `min_score`, send this many of the best-scoring "
+        "results anyway, labelled as uncertain. 0 keeps the old behaviour of sending "
+        "nothing at all",
+    )
+
     include_alternatives: bool = Field(
         default=True,
         description="When a result matches everything except the budget, offer it as a "

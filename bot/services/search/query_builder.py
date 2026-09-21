@@ -86,14 +86,25 @@ class QueryBuilder:
             # carries the most weight when hits are merged.
             for phrase_index, phrase in enumerate(phrasings):
                 weight = 1.0 / (1 + 0.25 * lang_index + 0.2 * phrase_index)
-                parts = [phrase, location, query.object_type or "", constraint]
+                # `object_type` comes back from the extractor in English. Glued
+                # onto a Spanish or Greek template it makes a half-translated
+                # string that matches neither language's pages -- "terreno en
+                # venta Madrid land plot" is a worse query than either half.
+                object_type = query.object_type if language == "en" else None
+                parts = [phrase, location, object_type or "", constraint]
                 add(" ".join(p for p in parts if p), language, weight)
 
         # A keyword-led query catches wording the templates cannot anticipate
         # ("seafront", "with planning permission", a named district).
+        #
+        # It goes out with no language filter on purpose. The keywords are the
+        # one part of the query we did not write, so we cannot vouch for what
+        # language they are in: tagging them with `languages[0]` told SearXNG
+        # to keep only Spanish pages for a phrase the user wrote in Ukrainian,
+        # which reliably returned nothing and burned a query slot.
         if query.keywords:
             keywords = " ".join(query.keywords[:5])
-            add(f"{keywords} {location}".strip(), languages[0], 1.1)
+            add(f"{keywords} {location}".strip(), "all", 1.1)
 
         built.sort(key=lambda q: q.weight, reverse=True)
         return built[: self.settings.max_queries]
@@ -122,9 +133,14 @@ class QueryBuilder:
     def _constraint_terms(self, query: ParsedQuery) -> str:
         """Budget and area as search-friendly text.
 
-        Only the upper bounds are used: engines match these as literal tokens,
-        and "up to 300000 EUR" is a phrase that appears on listing pages while
-        a range rarely is.
+        Engines match these as literal tokens, so what goes in is the number as
+        a listing page would print it, not a relational phrase: "300 000 EUR"
+        appears on pages, "up to 300000 EUR" does not.
+
+        Every bound the user gave is represented. A lower bound alone used to
+        be dropped here, which quietly threw away the whole of a request like
+        "plots from 2000 m2" -- the area was the most specific thing the user
+        said, and none of the queries carried it.
         """
         parts: list[str] = []
         if query.budget_max:
@@ -134,4 +150,6 @@ class QueryBuilder:
             parts.append(f"{int(query.area_min)}-{int(query.area_max)} m2")
         elif query.area_max:
             parts.append(f"{int(query.area_max)} m2")
+        elif query.area_min:
+            parts.append(f"{int(query.area_min)} m2")
         return " ".join(parts)
