@@ -120,17 +120,27 @@ class FacebookSource:
                     # The same post surfaces under more than one phrasing, so
                     # collect by permalink and report each one once.
                     found: dict[str, GroupPost] = {}
-                    for term in terms:
-                        posts = await search_posts(
-                            self.session.page,
-                            group_url,
-                            term,
-                            max_posts=self.settings.max_posts_per_group,
-                        )
-                        for post in posts:
-                            found.setdefault(post.post_url, post)
-                        if len(found) >= self.settings.max_posts_per_group:
-                            break
+                    try:
+                        for term in terms:
+                            posts = await search_posts(
+                                self.session.page,
+                                group_url,
+                                term,
+                                max_posts=self.settings.max_posts_per_group,
+                            )
+                            for post in posts:
+                                found.setdefault(post.post_url, post)
+                            if len(found) >= self.settings.max_posts_per_group:
+                                break
+                    except Exception:
+                        # A selector failure or an empty unrecognised layout is
+                        # local to this group. Do not abandon the remaining
+                        # discovered groups unless the shared session flipped.
+                        if await self.session.observe_state() != SessionState.HEALTHY:
+                            return SourceSearchResult(hits=hits, failed=True, groups=groups)
+                        group.access = GroupAccess.UNKNOWN_ERROR.value
+                        log.exception("facebook.source.group_read_failed", group_url=group_url)
+                        continue
                     latest = next(iter(found.values()), None)
                     active = latest is not None and (
                         latest.posted_at_text is None
