@@ -45,23 +45,34 @@ class ScraplingFetcher:
 
     async def fetch(self, url: str) -> PageContent:
         try:
-            response = await self._fetcher.get(
-                url,
-                headers={"User-Agent": self.settings.user_agent},
+            response = await asyncio.wait_for(
+                self._fetcher.get(
+                    url,
+                    headers={"User-Agent": self.settings.user_agent},
+                    timeout=self.settings.timeout_seconds,
+                ),
                 timeout=self.settings.timeout_seconds,
             )
-            body = response.body
+            body = getattr(response, "body", b"")
+            if body is None:
+                body = b""
             if isinstance(body, bytes):
                 body = body.decode(getattr(response, "encoding", None) or "utf-8", errors="replace")
+            elif not isinstance(body, str):
+                body = str(body)
+            status = getattr(response, "status", None)
             if len(body.encode("utf-8")) > self.settings.max_bytes:
-                return PageContent(url=url, error="page exceeded the size limit", status=response.status)
+                return PageContent(url=url, error="page exceeded the size limit", status=status)
             return extract_text(
                 body,
                 url=url,
-                final_url=str(getattr(response, "url", url)),
+                final_url=str(getattr(response, "url", None) or url),
                 max_chars=self.settings.max_chars,
-            ).model_copy(update={"status": response.status})
+            ).model_copy(update={"status": status})
+        except TimeoutError:
+            error = f"scrapling timed out after {self.settings.timeout_seconds:g}s"
+            log.debug("parser.scrapling.failed", url=url, error=error)
+            return PageContent(url=url, error=error)
         except Exception as exc:  # noqa: BLE001 - a fallback must never abort a batch
             log.debug("parser.scrapling.failed", url=url, error=str(exc))
             return PageContent(url=url, error=f"scrapling failed: {type(exc).__name__}")
-
