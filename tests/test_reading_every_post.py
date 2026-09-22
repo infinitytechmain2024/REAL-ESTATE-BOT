@@ -142,7 +142,13 @@ async def test_the_source_reads_without_a_post_limit(monkeypatch) -> None:
     monkeypatch.setattr(client, "read_recent_posts", fake_recent)
     monkeypatch.setattr(client, "search_posts", AsyncMock(return_value=[]))
     source = client.FacebookSource(
-        FacebookSettings(enabled=True, group_urls=[GROUP], auto_join_groups=False), session
+        FacebookSettings(
+            enabled=True,
+            group_urls=[GROUP],
+            auto_join_groups=False,
+            max_posts_per_group=0,
+        ),
+        session,
     )
 
     result = await source.search(_query())
