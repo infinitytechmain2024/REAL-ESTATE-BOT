@@ -1,0 +1,164 @@
+# Deploy to the VPS.
+#
+# This workflow copies no files. It tells the VPS to pull, and the VPS pulls --
+# which is the whole safety property, so it is worth stating why.
+#
+# The obvious shape for this is rsync from the runner's checkout
+# (easingthemes/ssh-deploy and friends), and with `--delete` it is a live
+# grenade here: `.env`, data/facebook_profile and data/facebook_gate_token.json
+# live only on the VPS, because .gitignore keeps them out of the repo. A
+# checkout does not contain them, so `--delete` would remove them on arrival --
+# every API key gone, and with the Chrome profile gone, the Facebook checkpoint
+# has to be cleared by hand again. A `git fetch` + `git reset --hard` on the
+# host cannot do that: it only touches tracked files, and those three are
+# untracked. There is deliberately no `git clean` below for the same reason.
+#
+# The second thing rsync does not do is start anything. Copying files leaves
+# the old container running the old image; the deploy is `docker compose up -d
+# --build`, and that has to happen on the host that has the Docker daemon.
+#
+# No third-party actions, and not even actions/checkout -- the runner never
+# needs the code. The one credential in play is a root SSH key, and the list of
+# things that get to see it is this file.
+
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  # Deploy a branch that is not main, or re-run a deploy without a new commit.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or tag to deploy
+        required: false
+        default: main
+
+# Two deploys at once would race over the same working tree and the same
+# container. Queue instead: never cancel a deploy in flight, or the VPS is left
+# mid-`docker compose up`.
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45   # a cold build installs Chrome; that is genuinely slow
+
+    env:
+      DEPLOY_REF: ${{ inputs.ref || github.ref_name }}
+      APP_DIR: ${{ vars.APP_DIR || '/root/REAL-ESTATE-BOT' }}
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+
+    steps:
+      - name: Validate the ref
+        # It is interpolated into a remote command below. Collaborator-supplied
+        # and so not really hostile input, but a ref is a known shape and
+        # checking it costs one `case`.
+        run: |
+          case "$DEPLOY_REF" in
+            ''|*[!A-Za-z0-9._/-]*)
+              echo "refusing to deploy unusual ref: $DEPLOY_REF" >&2
+              exit 1 ;;
+          esac
+          echo "deploying $DEPLOY_REF to $SSH_HOST"
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+
+          # Pin the host key if SSH_HOST_KEY is set (get its value by running
+          # `ssh-keyscan -p 22 YOUR_VPS_IP` once, from a machine you trust).
+          # Without it we trust whatever answers on the first connection, which
+          # is the usual trade-off and not nothing -- worth pinning eventually.
+          if [ -n "${SSH_HOST_KEY:-}" ]; then
+            printf '%s\n' "$SSH_HOST_KEY" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Pull and restart on the VPS
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" \
+              -o BatchMode=yes -o ConnectTimeout=15 \
+              "$SSH_USER@$SSH_HOST" \
+              "APP_DIR='$APP_DIR' DEPLOY_REF='$DEPLOY_REF' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          cd "$APP_DIR"
+
+          # Tracked files only. .env and data/ are untracked, so nothing here
+          # can touch them -- see the note at the top of this workflow.
+          git fetch --prune origin
+          git reset --hard HEAD
+          git checkout -B "$DEPLOY_REF" "origin/$DEPLOY_REF"
+          echo "now at: $(git log --oneline -1)"
+
+          # Fail before rebuilding rather than after: a container that starts
+          # without keys just crash-loops, and the reason scrolls past in logs.
+          if [ ! -f .env ]; then
+            echo "no .env on the VPS -- run: python3 scripts/setup_env.py" >&2
+            exit 1
+          fi
+
+          # The container runs as uid 10001 and the bind mount overrides the
+          # ownership set at build time, so Chrome cannot write its profile
+          # unless the host directory belongs to that uid. Idempotent; matters
+          # on the very first deploy.
+          mkdir -p data
+          [ "$(stat -c %u data)" = 10001 ] || chown -R 10001:10001 data
+
+          docker compose up -d --build
+
+          # Each build leaves the previous image behind, and this one carries a
+          # full Chrome. On a 50 GB disk that fills up faster than it sounds.
+          docker image prune -f --filter 'until=168h' >/dev/null || true
+          REMOTE
+
+      - name: Wait for the container to report healthy
+        # `docker compose up -d` returns as soon as the container is started,
+        # which says nothing about whether the bot came up. The Dockerfile's
+        # HEALTHCHECK polls SearXNG, and a live SearXNG means the entrypoint
+        # got far enough to have started the bot too.
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" \
+              -o BatchMode=yes -o ConnectTimeout=15 \
+              "$SSH_USER@$SSH_HOST" \
+              "APP_DIR='$APP_DIR' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$APP_DIR"
+
+          cid="$(docker compose ps -q bot)"
+          if [ -z "$cid" ]; then
+            echo "the bot container is not running" >&2
+            docker compose ps >&2
+            exit 1
+          fi
+
+          # start_period in the Dockerfile is 40s; allow well past it, because
+          # a first run also has to warm SearXNG's engine list.
+          for _ in $(seq 1 40); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)"
+            case "$status" in
+              healthy) echo "healthy"; exit 0 ;;
+              unhealthy) break ;;
+            esac
+            sleep 10
+          done
+
+          echo "container did not become healthy -- last 60 log lines:" >&2
+          docker compose logs --tail=60 bot >&2
+          exit 1
+          REMOTE

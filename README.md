@@ -413,6 +413,45 @@ docker compose exec bot python scripts/gate_probe.py
 что окно Chrome видно и на нажатия реагирует. Сделайте это **до** того, как
 понадобится, а не после.
 
+### Автодеплой через GitHub Actions
+
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) — push в `main`
+выкатывается сам. Файлы при этом никуда не копируются: workflow заходит по SSH
+и запускает на VPS `git fetch` + `git reset --hard` + `docker compose up -d
+--build`, после чего ждёт, пока контейнер не станет `healthy`.
+
+Копирование файлов (rsync/scp из чекаута раннера) здесь делать нельзя, и
+особенно с `--delete`: `.env`, `data/facebook_profile` и
+`data/facebook_gate_token.json` лежат только на VPS, в репозитории их нет.
+`--delete` снесёт их при первом же деплое — вместе с ключами и залогиненной
+сессией Facebook, то есть checkpoint придётся проходить заново. `git reset
+--hard` так не может: он трогает только отслеживаемые файлы, а эти три —
+неотслеживаемые. `git clean` в workflow поэтому отсутствует намеренно.
+
+Разово на VPS (клон должен уметь `git fetch` сам по себе):
+
+```sh
+ssh-keygen -t ed25519 -C vps-deploy -f ~/.ssh/id_ed25519 -N ""
+cat ~/.ssh/id_ed25519.pub     # -> Settings -> Deploy keys, без права записи
+git clone git@github.com:infinitytechmain2024/REAL-ESTATE-BOT.git /root/REAL-ESTATE-BOT
+```
+
+Секреты репозитория (Settings → Secrets and variables → Actions):
+
+| | |
+|---|---|
+| `SSH_HOST` | IP машины |
+| `SSH_USER` | `root` |
+| `SSH_PORT` | `22` |
+| `SSH_KEY` | приватный ключ, которым заходят на VPS |
+| `SSH_HOST_KEY` | необязательно; вывод `ssh-keyscan -p 22 <IP>`, чтобы не доверять первому ответившему |
+
+Путь клона по умолчанию — `/root/REAL-ESTATE-BOT`; другой задаётся переменной
+`APP_DIR` (Variables, не Secrets).
+
+Ветку, отличную от `main`, можно выкатить вручную: Actions → Deploy to VPS →
+Run workflow → указать ветку.
+
 ### Лимиты ресурсов
 
 `docker-compose.yml` ограничивает контейнер: `mem_limit`, `cpus` и `shm_size`.
