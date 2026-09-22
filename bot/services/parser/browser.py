@@ -7,9 +7,13 @@ gets through where an HTTP client does not, at maybe twenty times the cost per
 page, so this fetcher is deliberately the exception and not the default: see
 :class:`~bot.services.parser.routing.RoutingFetcher` for when it is used.
 
-Playwright ships in ``requirements.txt`` for the Facebook module, but the
-browser binary is a separate download, so neither is assumed here. Importing
-this module without either is fine, and so is constructing the fetcher;
+Playwright ships in ``requirements.txt`` for the Facebook module, but a
+browser binary is a separate matter: either ``PARSER_BROWSER_BINARY`` names an
+installed one (the Docker image points it at the same Brave the Facebook
+session uses, which is why that image needs no ``playwright install``), or
+Playwright's own Chromium has been downloaded. Neither is assumed here.
+Importing this module without either is fine, and so is constructing the
+fetcher;
 :func:`~bot.services.parser.routing.build_fetcher` is what refuses to start,
 at boot, with a :class:`ConfigurationError` naming the fix. Once running, a
 fetch never raises -- a dead browser is one failed page, not a failed request.
@@ -72,6 +76,11 @@ class BrowserFetcher:
             self._playwright = await async_playwright().start()
 
             launch: dict[str, Any] = {"headless": self.settings.browser_headless}
+            if self.settings.browser_binary:
+                # An installed browser (Brave in the image) instead of
+                # Playwright's bundled Chromium, which is never downloaded
+                # there. Nothing here depends on it being Brave.
+                launch["executable_path"] = self.settings.browser_binary
             if self.settings.browser_proxy_url:
                 # Residential/mobile egress. Datacenter IPs are the single
                 # biggest tell for the protections this fetcher exists to get
@@ -91,24 +100,34 @@ class BrowserFetcher:
                 "browser.started",
                 headless=self.settings.browser_headless,
                 proxied=bool(self.settings.browser_proxy_url),
+                binary=self.settings.browser_binary or "playwright-chromium",
             )
             return self._context
 
     async def preflight(self) -> None:
         """Launch the browser once so a broken install fails at start-up.
 
-        Raises :class:`ConfigurationError` when Playwright is absent or its
-        browser binary was never downloaded. The context is kept warm rather
-        than closed, so this costs start-up time, not an extra launch.
+        Raises :class:`ConfigurationError` when Playwright is absent, or when
+        the browser it was told to launch is not there -- a bad
+        ``PARSER_BROWSER_BINARY`` path, or no bundled Chromium when that
+        setting is unset. The context is kept warm rather than closed, so this
+        costs start-up time, not an extra launch.
         """
         try:
             await self._ensure_context()
         except ConfigurationError:
             raise
         except Exception as exc:
+            fix = (
+                f"PARSER_BROWSER_BINARY points at {self.settings.browser_binary!r}; "
+                f"check that path exists in this container"
+                if self.settings.browser_binary
+                else "run `playwright install chromium`, or set PARSER_BROWSER_BINARY "
+                "to an installed browser"
+            )
             raise ConfigurationError(
-                f"PARSER_BROWSER_ENABLED is on but Chromium will not launch "
-                f"({type(exc).__name__}: {exc}). Run `playwright install chromium`, "
+                f"PARSER_BROWSER_ENABLED is on but the browser will not launch "
+                f"({type(exc).__name__}: {exc}). {fix}, "
                 f"or set PARSER_BROWSER_ENABLED=false."
             ) from exc
 

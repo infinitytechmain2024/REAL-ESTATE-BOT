@@ -34,6 +34,7 @@ import contextlib
 import random
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
@@ -97,14 +98,21 @@ class FacebookSession:
     for the process lifetime; :attr:`page` hands out the single page every
     caller shares (see :attr:`lock` for why there is only one).
 
-    In local-dev mode this launches real Google Chrome
-    (``channel="chrome"``), not the Playwright-bundled Chromium build: a real
-    Chrome binary carries a normal browser fingerprint, which is a strictly
-    better starting point for an automated Facebook session than a build
-    anti-bot systems can fingerprint as a test browser. In CDP-attach mode
-    the already-running Chrome is whatever binary the VM's supervisor
-    launched -- make that real Chrome too, for the same reason; this class
-    has no control over it once attached.
+    Which browser gets launched is
+    :attr:`FacebookSettings.browser_binary`: a path, because Playwright has
+    no ``channel`` for Brave and ``executable_path`` is the only way to name
+    it. The Docker image points it at Brave; unset, this falls back to
+    ``channel="chrome"``, which is what a developer laptop has installed.
+
+    Either way it is a real, installed browser rather than the
+    Playwright-bundled Chromium, and the reason is worth keeping in view: the
+    bundled build is what anti-bot systems fingerprint as a test browser.
+    Brave is not free of that problem -- it is rarer than Chrome and
+    randomises fingerprints per session unless Shields are off for
+    facebook.com -- which is why the binary is configurable rather than
+    compiled in. In CDP-attach mode none of this applies: the browser is
+    whatever the supervisor launched (see ``docker/entrypoint.sh``) and this
+    class has no control over it once attached.
     """
 
     def __init__(self, settings: FacebookSettings) -> None:
@@ -137,18 +145,26 @@ class FacebookSession:
         else:
             profile_dir = Path(self.settings.profile_dir).expanduser().resolve()
             profile_dir.mkdir(parents=True, exist_ok=True)
+            # executable_path and channel are mutually exclusive in
+            # Playwright; pass exactly one.
+            browser_kwargs: dict[str, Any] = (
+                {"executable_path": self.settings.browser_binary}
+                if self.settings.browser_binary
+                else {"channel": "chrome"}
+            )
             self._context = await self._playwright.chromium.launch_persistent_context(
                 str(profile_dir),
                 headless=self.settings.headless,
-                channel="chrome",
                 viewport={"width": 1280, "height": 900},
                 locale="en-US",
+                **browser_kwargs,
             )
             self._owns_context = True
             log.info(
                 "facebook.session.started_persistent",
                 profile_dir=str(profile_dir),
                 headless=self.settings.headless,
+                browser=self.settings.browser_binary or "chrome",
             )
 
         self._page = (

@@ -16,12 +16,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      # google-chrome-stable (needed only when FACEBOOK_ENABLED=true) is only
-      # published for amd64 -- Google does not ship an arm64 build. Pin the
-      # platform so this still builds on Apple Silicon; Docker Desktop then runs
-      # it under Rosetta (fast, enable "Use Rosetta for x86/amd64 emulation" in
-      # Settings > General) or QEMU (slower, the default). On an amd64 host this
-      # line is a no-op.
+      # Pinned to amd64 so this still builds on Apple Silicon; Docker Desktop
+      # then runs it under Rosetta (fast, enable "Use Rosetta for x86/amd64
+      # emulation" in Settings > General) or QEMU (slower, the default). On an
+      # amd64 host this line is a no-op.
+      #
+      # This pin used to be a hard requirement: google-chrome-stable is
+      # published for amd64 only. The image ships Brave now, which may well
+      # have an arm64 build -- that could not be checked from where this was
+      # written (the Brave apt host was unreachable), so the pin stays until
+      # someone confirms `apt-get install brave-browser` on an arm64 host.
+      # If it works, both lines here can go, and the VPS stops needing to be
+      # x86_64 at all.
       platforms:
         - linux/amd64
     platform: linux/amd64

@@ -58,9 +58,11 @@ class RoutingFetcher:
 
         Importing Playwright is no longer evidence of anything -- it ships in
         requirements.txt for the Facebook module, so it is always present even
-        when ``playwright install chromium`` was never run. The browser binary
-        is what is actually missing in that case, and without this the first
-        person to search would be the one to find out.
+        when no browser was ever provided for it. A browser binary is what is
+        actually missing in that case: either ``PARSER_BROWSER_BINARY`` names
+        one that is not there, or it is unset and ``playwright install
+        chromium`` was never run. Without this check the first person to
+        search would be the one to find out.
         """
         if self._browser is None:
             return

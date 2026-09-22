@@ -249,10 +249,19 @@ class ParserSettings(_Base):
     # -- browser fallback --------------------------------------------------
     # Large listing portals answer a plain HTTP client with 403 however polite
     # its headers are. These control the Playwright fetcher that gets past
-    # that; it is off by default because it needs Chromium in the image.
+    # that; it is off by default because it costs a browser launch per blocked
+    # page, not because the binary is missing -- the image ships one now.
 
     browser_enabled: bool = Field(
-        default=False, description="Use Playwright for blocked pages (needs `playwright install`)"
+        default=False,
+        description="Use Playwright for blocked pages. Needs a browser binary: either "
+        "browser_binary below, or `playwright install chromium` for the bundled one",
+    )
+    browser_binary: str | None = Field(
+        default=None,
+        description="Path to the browser this fetcher launches, e.g. /usr/bin/brave-browser. "
+        "The Docker image sets this, which is why the image does not need "
+        "`playwright install chromium`. Unset falls back to Playwright's bundled Chromium.",
     )
     browser_domains: CsvList = Field(
         default_factory=list,
@@ -364,6 +373,14 @@ class FacebookSettings(_Base):
     headless: bool = Field(
         default=False,
         description="Keep false: a visible window is what the operator takes over during recovery",
+    )
+    browser_binary: str | None = Field(
+        default=None,
+        description="Path to the browser Playwright launches, e.g. /usr/bin/brave-browser. "
+        "The Docker image sets this to Brave. Left unset the code falls back to "
+        'channel="chrome", which is what a developer laptop has; there is no Playwright '
+        "channel for Brave, so a path is the only way to name it. Ignored when cdp_url is "
+        "set -- then the binary is whatever the supervisor already launched.",
     )
     nav_timeout_seconds: float = Field(default=30.0, gt=0)
     cdp_url: str | None = Field(

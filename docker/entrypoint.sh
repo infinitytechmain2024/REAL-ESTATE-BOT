@@ -51,20 +51,25 @@ sys.exit(0 if sock.connect_ex(('127.0.0.1', ${SEARXNG_PORT})) == 0 else 1)
     sleep 1
 done
 
-# --- Facebook browser stack: supervised Chrome + virtual display + remote viewer ---
+# --- Facebook browser stack: supervised browser + virtual display + remote viewer ---
 #
-# Only started when FACEBOOK_ENABLED=true. Xvfb gives Chrome somewhere to
-# render without a real screen. Chrome itself is launched here, not by
+# Only started when FACEBOOK_ENABLED=true. Xvfb gives the browser somewhere to
+# render without a real screen. The browser itself is launched here, not by
 # Playwright: FACEBOOK_CDP_URL tells the bot to attach to this already-running
-# Chrome over CDP instead of launching a second one (see
+# browser over CDP instead of launching a second one (see
 # bot/services/facebook/browser.py), so there is exactly one browser process
 # and one profile -- the noVNC view below and the bot's own automation are
 # always looking at the same window. x11vnc serves that display over VNC on
 # loopback only; websockify fronts it with noVNC's browser-based client, also
 # loopback only.
 #
-# None of Xvfb, x11vnc, websockify, or Chrome's remote-debugging port is ever
-# exposed publicly. The only thing meant to leave this container is the bot's
+# Which browser is FACEBOOK_BROWSER_BINARY, set to Brave in the Dockerfile.
+# It is read here and in the bot, so the two cannot disagree about what is
+# running; override it in .env to put a different browser under the same
+# supervision, and nothing else in this file changes.
+#
+# None of Xvfb, x11vnc, websockify, or the browser's remote-debugging port is
+# ever exposed publicly. The only thing meant to leave this container is the bot's
 # own token-gated proxy (bot/services/facebook/gate.py, FACEBOOK_GATE_PORT,
 # default 8090) -- point a Tailscale Funnel at that port (see the README's
 # "Tailscale Funnel setup" section), never at 6080 or the CDP port directly.
@@ -91,16 +96,24 @@ if [[ "${FACEBOOK_ENABLED:-false}" == "true" ]]; then
     : "${FACEBOOK_CDP_PORT:=9222}"
     mkdir -p "${FACEBOOK_PROFILE_DIR}"
 
-    echo "entrypoint: starting Chrome on ${DISPLAY}, CDP on 127.0.0.1:${FACEBOOK_CDP_PORT}" >&2
-    google-chrome-stable \
+    : "${FACEBOOK_BROWSER_BINARY:=/usr/bin/brave-browser}"
+    if ! command -v "${FACEBOOK_BROWSER_BINARY}" >/dev/null 2>&1; then
+        # Worth its own line: without it the failure surfaces later as a CDP
+        # connection refused, which reads like a networking problem and is not.
+        echo "entrypoint: FACEBOOK_BROWSER_BINARY=${FACEBOOK_BROWSER_BINARY} not found" >&2
+        exit 1
+    fi
+
+    echo "entrypoint: starting ${FACEBOOK_BROWSER_BINARY} on ${DISPLAY}, CDP on 127.0.0.1:${FACEBOOK_CDP_PORT}" >&2
+    "${FACEBOOK_BROWSER_BINARY}" \
         --remote-debugging-port="${FACEBOOK_CDP_PORT}" \
         --remote-debugging-address=127.0.0.1 \
         --user-data-dir="${FACEBOOK_PROFILE_DIR}" \
         --no-first-run --no-default-browser-check \
         --window-size=1280,900 \
         about:blank &
-    chrome_pid=$!
-    extra_pids+=("${chrome_pid}")
+    browser_pid=$!
+    extra_pids+=("${browser_pid}")
 
     echo "entrypoint: starting x11vnc on 127.0.0.1:5900 (display ${DISPLAY})" >&2
     x11vnc -display "${DISPLAY}" -rfbport 5900 -localhost -forever -shared -nopw -quiet &
@@ -112,8 +125,8 @@ if [[ "${FACEBOOK_ENABLED:-false}" == "true" ]]; then
     novnc_pid=$!
     extra_pids+=("${novnc_pid}")
 
-    # Tell the bot how to reach the Chrome just started, unless the operator
-    # already set FACEBOOK_CDP_URL explicitly (e.g. pointing at a Chrome
+    # Tell the bot how to reach the browser just started, unless the operator
+    # already set FACEBOOK_CDP_URL explicitly (e.g. pointing at a browser
     # supervised outside this container).
     : "${FACEBOOK_CDP_URL:=http://127.0.0.1:${FACEBOOK_CDP_PORT}}"
     export FACEBOOK_CDP_URL

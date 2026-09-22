@@ -24,17 +24,35 @@ RUN apt-get update \
 
 # --- Facebook browser stack (only used when FACEBOOK_ENABLED=true) -------
 #
-# A real, visible Google Chrome -- not just Playwright's bundled Chromium --
-# rendering into a virtual framebuffer (Xvfb), viewable remotely over VNC
-# through noVNC's browser-based client. This is what the operator connects to
-# for login/verification once the bot has no physical screen; see
-# docker/entrypoint.sh and bot/handlers/facebook_admin.py.
+# A real, visible browser rendering into a virtual framebuffer (Xvfb),
+# viewable remotely over VNC through noVNC's browser-based client. This is
+# what the operator connects to for login/verification once the bot has no
+# physical screen; see docker/entrypoint.sh and bot/handlers/facebook_admin.py.
+#
+# Brave rather than Google Chrome, and one system browser rather than two.
+# Brave is Chromium underneath, so Playwright drives it through
+# `executable_path` (there is no `channel="brave"`), and the same binary also
+# serves the parser's fallback fetcher -- which is what lets this image skip
+# `playwright install chromium` entirely. Before this, the image shipped
+# Chrome for Facebook and nothing at all for the parser, so
+# PARSER_BROWSER_ENABLED=true failed at start-up with "run playwright install
+# chromium" on a machine where running it was never part of the build.
+#
+# The trade-off is real and worth stating: Chrome was chosen originally
+# because a very common browser is the least interesting thing an anti-bot
+# system can see, and Brave is both rarer and, by default, randomises
+# fingerprints per session ("farbling") and blocks social embeds. Turn
+# Shields off for facebook.com once, in the live view, during the same manual
+# login that clears the first checkpoint -- it is one click in the address
+# bar, and it sticks with the profile. If Facebook still proves sticky, set
+# FACEBOOK_BROWSER_BINARY to a Chrome you install yourself; nothing below is
+# load-bearing for that.
 #
 # Deliberately NOT built or run-tested against a real container here -- there
-# is no Docker available in this environment. Verify with `docker compose up
-# --build` on the actual deployment host before relying on it; the package
-# names below are standard, long-standing Debian packages, but "should exist"
-# is not "confirmed working."
+# is no Docker available in this environment, and the Brave apt host is
+# blocked from it, so the repository layout below could not be checked either.
+# Verify with `docker compose up --build` on the actual deployment host before
+# relying on it.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         xvfb \
@@ -43,15 +61,21 @@ RUN apt-get update \
         websockify \
         fonts-liberation \
         fonts-noto-color-emoji \
-        wget \
-        gnupg \
-    && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
-        | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
-        > /etc/apt/sources.list.d/google-chrome.list \
+        ca-certificates \
+    && curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg \
+        -o /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" \
+        > /etc/apt/sources.list.d/brave-browser-release.list \
     && apt-get update \
-    && apt-get install --no-install-recommends -y google-chrome-stable \
+    && apt-get install --no-install-recommends -y brave-browser \
     && rm -rf /var/lib/apt/lists/*
+
+# Both browser users read these, so the binary is named in exactly one place.
+# Unset them and the code falls back to what works on a developer laptop:
+# `channel="chrome"` for Facebook, Playwright's bundled Chromium for the
+# parser. Override them to run a different browser without touching code.
+ENV FACEBOOK_BROWSER_BINARY=/usr/bin/brave-browser \
+    PARSER_BROWSER_BINARY=/usr/bin/brave-browser
 
 # Dependencies first so a code change does not invalidate the layer.
 COPY requirements.txt ./
