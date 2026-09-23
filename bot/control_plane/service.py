@@ -11,7 +11,7 @@ from bot.control_plane.store import ControlPlaneStore
 from bot.control_plane.stt import Transcriber
 
 log = logging.getLogger(__name__)
-CommandSink = Callable[[CommandEnvelope], Awaitable[None]]
+CommandSink = Callable[[CommandEnvelope], Awaitable[object]]
 STATE_CHANGING = frozenset({"run", "pause", "resume", "cancel"})
 
 
@@ -46,9 +46,11 @@ class ControlPlane:
             confirmed = await self.store.consume_confirmation(message, token)
             if confirmed is None:
                 return Reply("Confirmation is invalid, expired, or belongs to another operator.")
-            command, arguments = confirmed
-            await self.command_sink(CommandEnvelope(command, arguments, message.chat_id, message.user_id or 0, message.message_id))
-            return Reply(f"Confirmed: /{command}. The request was recorded; no collector is started by this service.")
+            command, arguments, confirmation_id = confirmed
+            receipt = await self.command_sink(CommandEnvelope(command, arguments, message.chat_id, message.user_id or 0, message.message_id, confirmation_id))
+            command_id = getattr(receipt, "command_id", None)
+            suffix = f" Queue id: {command_id}." if command_id else ""
+            return Reply(f"Confirmed: /{command}. Safely queued for bounded orchestration.{suffix}")
         if not text.startswith("/"):
             return Reply("Send /help for control-plane commands. State-changing commands require confirmation.")
         command_line = text[1:].split(maxsplit=1)

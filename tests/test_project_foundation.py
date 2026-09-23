@@ -32,6 +32,7 @@ def test_migration_script_is_safe_and_tracks_the_orchestration_migration() -> No
     assert script.stat().st_mode & 0o111
     assert "003_orchestration.sql" in text
     assert "004_telegram_control_plane.sql" in text
+    assert "005_orchestra_dispatcher.sql" in text
     assert "pg_advisory_xact_lock" in text
     assert "schema_migrations" in text
     assert "Refusing changed already-applied migration" in text

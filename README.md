@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`004_telegram_control_plane.sql` in order. It records SHA-256 checksums in
+`005_orchestra_dispatcher.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -35,8 +35,10 @@ It accepts messages from every Telegram user and chat, records each inbound
 message with a unique `(chat_id, message_id)` idempotency key, and uses local
 multilingual faster-whisper for voice notes. `/run`, `/pause`, `/resume`, and
 `/cancel` require a short-lived `confirm <token>` response. A confirmed command
-is logged only: this service intentionally cannot launch a collector, browser,
-or shell command.
+is durably queued for the Main Orchestra. The dispatcher validates a tiny
+command grammar, selects a bounded acquisition plan, and writes the plan plus
+audit records to PostgreSQL. It never launches a collector, browser, shell,
+or unrestricted agent process itself.
 
 After setting `TELEGRAM_TOKEN`, apply migrations before starting it:
 
@@ -45,6 +47,27 @@ After setting `TELEGRAM_TOKEN`, apply migrations before starting it:
 docker compose up -d --build telegram
 docker compose logs -f telegram
 ```
+
+### Main Orchestra dispatcher
+
+The dispatcher runs inside the Telegram service and claims confirmed commands
+from a PostgreSQL inbox with an expiring lease. A restart requeues only an
+expired claim, and each Telegram confirmation message has a unique idempotency
+key. It supports:
+
+- `/run facebook-group(s) <https-url> [...]`: queues a 1–20 group Facebook
+  batch using the dedicated connector.
+- `/run website|instagram|tiktok <https-url>` and `/run facebook <https-url>`:
+  queues a single Agent Reach-compatible run limited to five pages and 120
+  seconds.
+- `/pause source:<uuid>`, `/resume source:<uuid>`, and
+  `/cancel batch:<uuid>|run:<uuid>|command:<uuid>|all`.
+
+An active, platform-matched browser profile must already be provisioned in
+PostgreSQL. The dispatcher creates plans only; an operator-controlled one-shot
+collector or Agent Reach invocation claims execution later. This is deliberate:
+the Telegram bot cannot turn untrusted chat input into Docker, shell, or
+browser launches.
 
 ### Future Supabase integration
 

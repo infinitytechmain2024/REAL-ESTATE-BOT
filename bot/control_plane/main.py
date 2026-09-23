@@ -13,10 +13,9 @@ from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import PostgresControlPlaneStore
 from bot.control_plane.stt import FasterWhisperTranscriber
-
-
-async def _record_command(envelope: CommandEnvelope) -> None:
-    logging.getLogger(__name__).info("telegram.control.command_confirmed", extra={"command": envelope.command, "chat_id": envelope.chat_id, "user_id": envelope.user_id})
+from bot.orchestra.dispatcher import OrchestraDispatcher
+from bot.orchestra.models import ConfirmedCommand
+from bot.orchestra.store import PostgresOrchestraStore
 
 
 def _incoming(message: Message) -> IncomingMessage:
@@ -28,7 +27,25 @@ async def run() -> None:
     settings = ControlPlaneSettings.from_env()
     store = PostgresControlPlaneStore(settings.database_url)
     await store.connect()
-    control = ControlPlane(settings, store, FasterWhisperTranscriber(model=settings.stt_model, device=settings.stt_device, compute_type=settings.stt_compute_type), _record_command)
+    orchestra_store = PostgresOrchestraStore(settings.database_url)
+    await orchestra_store.connect()
+    bot = Bot(settings.telegram_token)
+
+    async def notify(chat_id: int, text: str) -> None:
+        await bot.send_message(chat_id, text)
+
+    orchestra = OrchestraDispatcher(
+        orchestra_store,
+        lease_seconds=settings.orchestra_command_lease_seconds,
+        poll_seconds=settings.orchestra_poll_seconds,
+        notifier=notify,
+    )
+
+    async def enqueue(envelope: CommandEnvelope) -> object:
+        logging.getLogger(__name__).info("telegram.control.command_confirmed", extra={"command": envelope.command, "chat_id": envelope.chat_id, "user_id": envelope.user_id})
+        return await orchestra.enqueue(ConfirmedCommand(envelope.command, envelope.arguments, envelope.chat_id, envelope.user_id, envelope.message_id, envelope.confirmation_id))
+
+    control = ControlPlane(settings, store, FasterWhisperTranscriber(model=settings.stt_model, device=settings.stt_device, compute_type=settings.stt_compute_type), enqueue)
     router = Router(name="control-plane")
 
     @router.message(lambda message: bool(message.voice))
@@ -48,12 +65,15 @@ async def run() -> None:
 
     # Replies intentionally use Telegram's plain-text default: transcribed
     # speech is untrusted user content and must not be parsed as HTML.
-    bot = Bot(settings.telegram_token)
-    dispatcher = Dispatcher()
-    dispatcher.include_router(router)
+    telegram_dispatcher = Dispatcher()
+    telegram_dispatcher.include_router(router)
+    dispatcher_task = asyncio.create_task(orchestra.run_forever(), name="orchestra-dispatcher")
     try:
-        await dispatcher.start_polling(bot, allowed_updates=["message"])
+        await telegram_dispatcher.start_polling(bot, allowed_updates=["message"])
     finally:
+        orchestra.stop()
+        await dispatcher_task
+        await orchestra_store.close()
         await store.close()
         await bot.session.close()
 

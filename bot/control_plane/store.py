@@ -13,7 +13,7 @@ class ControlPlaneStore(Protocol):
     async def claim_message(self, message: IncomingMessage) -> bool: ...
     async def save_transcript(self, message: IncomingMessage, transcript: TranscriptResult) -> None: ...
     async def create_confirmation(self, message: IncomingMessage, command: str, arguments: str, *, ttl_seconds: int) -> str: ...
-    async def consume_confirmation(self, message: IncomingMessage, token: str) -> tuple[str, str] | None: ...
+    async def consume_confirmation(self, message: IncomingMessage, token: str) -> tuple[str, str, str | None] | None: ...
 
 
 class MemoryControlPlaneStore:
@@ -39,14 +39,14 @@ class MemoryControlPlaneStore:
         self.confirmations[token] = (message.chat_id, message.user_id or 0, command, arguments, datetime.now(UTC) + timedelta(seconds=ttl_seconds))
         return token
 
-    async def consume_confirmation(self, message: IncomingMessage, token: str) -> tuple[str, str] | None:
+    async def consume_confirmation(self, message: IncomingMessage, token: str) -> tuple[str, str, str | None] | None:
         pending = self.confirmations.pop(token, None)
         if pending is None:
             return None
         chat_id, user_id, command, arguments, expires_at = pending
         if (chat_id, user_id) != (message.chat_id, message.user_id) or datetime.now(UTC) >= expires_at:
             return None
-        return command, arguments
+        return command, arguments, None
 
 
 class PostgresControlPlaneStore:
@@ -99,12 +99,12 @@ class PostgresControlPlaneStore:
         )
         return token
 
-    async def consume_confirmation(self, message: IncomingMessage, token: str) -> tuple[str, str] | None:
+    async def consume_confirmation(self, message: IncomingMessage, token: str) -> tuple[str, str, str | None] | None:
         row = await self._pool().fetchrow(  # type: ignore[attr-defined]
             """update public.telegram_command_confirmations set state='confirmed', confirmed_at=now()
                where token=$1 and telegram_chat_id=$2 and telegram_user_id=$3
                  and state='pending' and expires_at > now()
-               returning command, arguments""",
+               returning id, command, arguments""",
             token, message.chat_id, message.user_id,
         )
-        return (row["command"], row["arguments"]) if row else None
+        return (row["command"], row["arguments"], str(row["id"])) if row else None

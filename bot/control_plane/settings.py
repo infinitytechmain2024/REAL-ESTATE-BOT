@@ -15,6 +15,8 @@ class ControlPlaneSettings:
     stt_compute_type: str = "int8"
     max_voice_mb: float = 20.0
     confirmation_ttl_seconds: int = 300
+    orchestra_command_lease_seconds: int = 30
+    orchestra_poll_seconds: float = 1.0
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
@@ -32,4 +34,6 @@ class ControlPlaneSettings:
             stt_compute_type=os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "int8"),
             max_voice_mb=float(os.environ.get("TELEGRAM_MAX_VOICE_MB", "20")),
             confirmation_ttl_seconds=int(os.environ.get("TELEGRAM_CONFIRMATION_TTL_SECONDS", "300")),
+            orchestra_command_lease_seconds=int(os.environ.get("ORCHESTRA_COMMAND_LEASE_SECONDS", "30")),
+            orchestra_poll_seconds=float(os.environ.get("ORCHESTRA_POLL_SECONDS", "1")),
         )

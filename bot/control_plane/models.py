@@ -35,11 +35,11 @@ class Reply:
 
 @dataclass(frozen=True, slots=True)
 class CommandEnvelope:
-    """A confirmed request for the future Orchestra command consumer."""
+    """A confirmed request for the durable Orchestra command consumer."""
 
     command: str
     arguments: str
     chat_id: int
     user_id: int
     message_id: int
-
+    confirmation_id: str | None = None

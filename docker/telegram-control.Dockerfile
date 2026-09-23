@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y ffmpeg \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot/control_plane/ ./bot/control_plane/
+COPY bot/orchestra/ ./bot/orchestra/
 RUN mkdir -p /models && chown -R appuser:appuser /app /models
 USER appuser
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
