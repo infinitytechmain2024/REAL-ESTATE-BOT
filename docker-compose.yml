@@ -1,6 +1,7 @@
 # Hostinger VPS foundation. Only Caddy has a host-facing port; PostgreSQL and
-# Redis are isolated on the internal Docker network. Future services join that
-# network and use DATABASE_URL / REDIS_URL rather than published ports.
+# Redis are isolated on the internal Docker network. Services that must make
+# outbound requests join the separate egress network as well; neither database
+# nor Redis ever join an egress-capable network or publish a host port.
 name: real-estate-monitor
 
 services:
@@ -79,7 +80,9 @@ services:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
     volumes:
       - whisper_models:/models
-    networks: [backend]
+    # `backend` reaches PostgreSQL/Redis; `egress` is required for Telegram's
+    # long polling API. It does not publish a host port.
+    networks: [backend, egress]
     security_opt: [no-new-privileges:true]
     read_only: true
     tmpfs: [/tmp]
@@ -108,7 +111,9 @@ services:
     volumes:
       - browser_profiles:/profiles
       - browser_screenshots:/screenshots
-    networks: [backend]
+    # Chromium needs outbound HTTPS while the session API remains reachable
+    # only by services on the private backend network.
+    networks: [backend, egress]
     security_opt: [no-new-privileges:true]
     shm_size: 1gb
 
@@ -175,6 +180,9 @@ volumes:
 networks:
   backend:
     internal: true
+  # An ordinary bridge network with no published ports. Only services that
+  # need outbound HTTPS may join it; PostgreSQL and Redis remain backend-only.
+  egress:
   # Caddy alone joins this network so its loopback-published gateway port can
   # accept host traffic while databases remain unreachable from it.
   edge:

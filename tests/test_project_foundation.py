@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -46,3 +47,25 @@ def test_gateway_and_hardening_notes_keep_internal_services_private() -> None:
     assert "6379" not in compose.split("  caddy:", 1)[0]
     assert "Chrome CDP" in hardening
     assert "Tailscale" in hardening
+
+
+def test_only_outbound_clients_join_the_egress_network() -> None:
+    """Database/cache stay internal while Telegram and Chromium can reach HTTPS."""
+    result = subprocess.run(
+        ["docker", "compose", "--env-file", ".env.example", "config", "--format", "json"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+
+    assert rendered["networks"]["backend"]["internal"] is True
+    assert "internal" not in rendered["networks"]["egress"]
+    assert set(rendered["services"]["postgres"]["networks"]) == {"backend"}
+    assert set(rendered["services"]["redis"]["networks"]) == {"backend"}
+    assert set(rendered["services"]["telegram"]["networks"]) == {"backend", "egress"}
+    assert set(rendered["services"]["browser"]["networks"]) == {"backend", "egress"}
+    assert "ports" not in rendered["services"]["telegram"]
+    assert "ports" not in rendered["services"]["browser"]
