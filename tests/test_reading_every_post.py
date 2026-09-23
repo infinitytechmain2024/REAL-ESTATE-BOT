@@ -219,6 +219,9 @@ def test_nothing_reads_the_screen_instead_of_the_page() -> None:
     offenders = [
         path.relative_to(root.parent).as_posix()
         for path in root.rglob("*.py")
+        # The browser-session infrastructure may capture an operator-requested
+        # diagnostic screenshot. Collectors still must read posts from the DOM.
+        if "browser_session" not in path.parts
         if ".screenshot(" in path.read_text(encoding="utf-8")
     ]
 
