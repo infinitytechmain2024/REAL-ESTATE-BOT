@@ -6,7 +6,7 @@ One user message goes in, a list of stored, ranked results comes out::
       -> transcribe (voice only)
       -> LLM: extract ParsedQuery
       -> QueryBuilder: search strings
-      -> SearXNG: hits, merged and de-duplicated
+      -> SearXNG, and every extra source at once: hits, merged and de-duplicated
       -> Supabase: drop hits this user has already seen
       -> fetch and extract the most promising pages
       -> LLM: rank, filter and summarise
@@ -21,6 +21,7 @@ the request at all aborts the run, because there is nothing to search for.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -188,13 +189,17 @@ class ResearchPipeline:
             f"🔎 Ищу: {described}\n"
             f"Поисковых запросов: {len(queries)}"
         )
-        hits = await self.search.search_many(queries)
+        # Concurrently: a browser walking several groups takes far longer than
+        # the whole SearXNG fan-out, and neither should wait on the other.
+        hits, *source_results = await asyncio.gather(
+            self.search.search_many(queries),
+            *(self._read_source(name, source, parsed) for name, source in self.sources.items()),
+        )
         failed_sources: list[str] = []
         source_notes: list[str] = []
         source_groups: dict[str, SourceGroup] = {}
         unpersisted_urls: set[str] = set()
-        for name, search_source in self.sources.items():
-            result = await search_source(parsed)
+        for name, result in zip(self.sources, source_results, strict=True):
             hits.extend(result.hits)
             source_groups.update({group.url: group for group in result.groups})
             source_notes.extend(note for note in result.notes if note not in source_notes)
@@ -468,6 +473,30 @@ class ResearchPipeline:
                 chosen += [result for result, _ in alternatives[:room]]
 
         return chosen, verdicts, min(len(matches), limit)
+
+    async def _read_source(
+        self,
+        name: str,
+        search_source: Callable[[ParsedQuery], Awaitable[SourceSearchResult]],
+        parsed: ParsedQuery,
+    ) -> SourceSearchResult:
+        """Read one extra source, or report it failed -- never raise, never hang.
+
+        The Facebook reader drives one shared browser against a session that
+        can be logged out, on a checkpoint or mid-takeover at any moment, and
+        its selectors read markup Facebook changes without notice. Breaking is
+        the expected case for it, and the expected case has to cost the user
+        nothing but that source's results: the search is answered from the web
+        and the source is named in ``failed_sources`` like any other outage.
+        """
+        timeout = self.settings.pipeline.source_timeout_seconds
+        try:
+            return await asyncio.wait_for(search_source(parsed), timeout=timeout)
+        except TimeoutError:
+            log.warning("pipeline.source.timed_out", source=name, timeout_seconds=timeout)
+        except Exception as exc:  # noqa: BLE001 - one source failing is not a failed search
+            log.warning("pipeline.source.failed", source=name, error=str(exc), exc_info=True)
+        return SourceSearchResult(failed=True)
 
     async def _drop_seen(self, user_id: int, hits: list[SearchHit]) -> tuple[list[SearchHit], int]:
         """Remove hits this user was already shown, if we can tell."""

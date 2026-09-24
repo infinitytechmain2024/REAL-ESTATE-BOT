@@ -422,6 +422,14 @@ class PipelineSettings(_Base):
     skip_seen_results: bool = Field(
         default=True, description="Never show a user the same url_hash twice"
     )
+    source_timeout_seconds: float = Field(
+        default=900.0,
+        gt=0,
+        description="Give up on an extra source (Facebook groups, Google Maps) after this long, "
+        "mark it failed and answer from what the others found. Generous on purpose: reading "
+        "each group is already bounded by FACEBOOK_GROUP_READ_SECONDS, so this only catches a "
+        "wedged browser, not a slow one.",
+    )
 
     include_alternatives: bool = Field(
         default=True,
