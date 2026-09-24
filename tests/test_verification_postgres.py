@@ -186,3 +186,61 @@ async def test_a_sensitive_challenge_quarantines_and_tells_the_owner(db) -> None
     assert (await states(pool, ids))["profile"] == "quarantined"
     assert not notifier.links(OPERATOR) and notifier.sent[0][0] == OWNER
     assert await pool.fetchval("select sensitive from verification_jobs") is True
+
+
+@pytest.mark.asyncio
+async def test_resume_requests_a_launch_that_the_runner_starts_and_reports(db) -> None:
+    from bot.facebook_collector.runner import CollectorRunner, PostgresLaunchStore
+
+    pool, store = db
+    ids = await challenged(pool)
+    service, notifier = service_for(store, Recovery(True))
+    await service.tick()
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
+    await service.claim(session)
+    await service.solve(session)
+    await service.resume(session)
+    row = await pool.fetchrow("select batch_id::text, state, notify_telegram_id, requested_by from collector_launch_requests")
+    assert tuple(row) == (ids["batch"], "pending", OPERATOR, f"telegram:{OPERATOR}")
+
+    ran: list[str] = []
+
+    async def run(batch_id: str) -> str:
+        # The collector's own claim and finish, without a browser.
+        collector = PostgresCollectorStore(pool)
+        plan = await collector.load_plan(batch_id)
+        await collector.finish_batch(plan, await collector.start(plan), "succeeded")
+        ran.append(batch_id)
+        return "succeeded"
+
+    launches = PostgresLaunchStore(pool)
+    assert await launches.recover_interrupted() == 0
+    runner = CollectorRunner(launches, run)
+    assert await runner.step() is True and await runner.step() is False
+    assert ran == [ids["batch"]]
+    assert await pool.fetchval("select state from acquisition_batches where id=$1::uuid", ids["batch"]) == "succeeded"
+    assert tuple(await pool.fetchrow("select state, result from collector_launch_requests")) == ("finished", "succeeded")
+
+    before = len(notifier.sent)
+    await service.tick()
+    await service.tick()
+    assert [(c, t) for c, t, _ in notifier.sent[before:]] == [(OPERATOR, f"Batch {ids['batch']} finished: the remaining groups were read.")]
+    assert await pool.fetchval("select notified_state from collector_launch_requests") == "finished"
+
+
+@pytest.mark.asyncio
+async def test_one_open_launch_per_batch_and_interrupted_runs_are_closed(db) -> None:
+    import asyncpg
+
+    from bot.facebook_collector.runner import PostgresLaunchStore
+
+    pool, _ = db
+    ids = await challenged(pool)
+    await pool.execute("insert into collector_launch_requests(batch_id, requested_by) values($1::uuid, 'test')", ids["batch"])
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await pool.execute("insert into collector_launch_requests(batch_id, requested_by) values($1::uuid, 'test')", ids["batch"])
+    launches = PostgresLaunchStore(pool)
+    launch = await launches.claim()
+    assert launch is not None and launch.batch_id == ids["batch"] and await launches.claim() is None
+    assert await launches.recover_interrupted() == 1
+    assert tuple(await pool.fetchrow("select state, error from collector_launch_requests")) == ("failed", "runner_restarted")

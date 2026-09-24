@@ -69,3 +69,18 @@ class Recovery:
     kind: str | None = None
     sensitive: bool = False
     reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Launch:
+    """Automatic collector restart after a resume (migration 012)."""
+
+    id: str
+    batch_id: str
+    state: str
+    notify_user_id: int | None
+    result: str | None = None
+    error: str | None = None
+    job_id: str | None = None
+    # Still pending after the grace time: the runner may not be running.
+    stale: bool = False

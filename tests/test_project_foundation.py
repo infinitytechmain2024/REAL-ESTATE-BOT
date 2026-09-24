@@ -39,6 +39,7 @@ def test_migration_script_is_safe_and_tracks_the_orchestration_migration() -> No
     assert "009_verification_flow.sql" in text
     assert "010_verification_telegram_identity.sql" in text
     assert "011_operator_access_requests.sql" in text
+    assert "012_collector_launch_requests.sql" in text
     assert "pg_advisory_xact_lock" in text
     assert "schema_migrations" in text
     assert "Refusing changed already-applied migration" in text

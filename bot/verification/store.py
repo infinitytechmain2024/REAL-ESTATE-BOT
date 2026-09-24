@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from .models import OPEN_STATES, AccessToken, Event, Job, PageSession
+from .models import OPEN_STATES, AccessToken, Event, Job, Launch, PageSession
 
 
 class VerificationStore(Protocol):
@@ -27,7 +27,9 @@ class VerificationStore(Protocol):
     async def claim(self, job_id: str, user_id: int, actor: str) -> bool: ...
     async def mark_solved(self, job_id: str, actor: str) -> None: ...
     async def confirm_recovery(self, job_id: str, actor: str) -> bool: ...
-    async def resume(self, job_id: str, actor: str) -> str | None: ...
+    async def resume(self, job_id: str, actor: str, notify_user_id: int | None = None) -> str | None: ...
+    async def launch_updates(self, stale_seconds: int) -> list[Launch]: ...
+    async def mark_launch_notified(self, launch_id: str, state: str) -> None: ...
     async def cancel(self, job_id: str, actor: str) -> bool: ...
     async def fail(self, job_id: str, actor: str) -> bool: ...
     async def sensitive_stop(self, job_id: str, kind: str, actor: str) -> None: ...
@@ -201,7 +203,7 @@ class PostgresVerificationStore:
             )
             return True
 
-    async def resume(self, job_id: str, actor: str) -> str | None:
+    async def resume(self, job_id: str, actor: str, notify_user_id: int | None = None) -> str | None:
         job = await self.get_job(job_id)
         if job is None or job.state != "verified" or job.resumed_at is not None:
             raise ValueError("only a verified, not yet resumed job can resume its run")
@@ -221,10 +223,32 @@ class PostgresVerificationStore:
                 await conn.execute(
                     """update public.monitoring_sources set state = 'active' where state = 'human_verification_required'
                           and id in (select source_id from public.acquisition_batch_items where batch_id = $1::uuid)""", b)
-                await conn.execute(
+                requeued = await conn.execute(
                     "update public.acquisition_batches set state = 'queued' where id = $1::uuid and state = 'human_verification_required'", b)
+                # facebook-runner starts it; the same transaction, so a queued
+                # batch never waits on a request that was not written.
+                if requeued.endswith(" 1"):
+                    await conn.execute(
+                        """insert into public.collector_launch_requests(batch_id, verification_job_id, requested_by, notify_telegram_id)
+                           values ($1::uuid, $2::uuid, $3, $4) on conflict do nothing""", b, job_id, actor, notify_user_id)
             await conn.execute("update public.verification_jobs set resumed_at = now() where id = $1::uuid", job_id)
         return job.batch_id
+
+    async def launch_updates(self, stale_seconds: int) -> list[Launch]:
+        rows = await self._pool().fetch(
+            """select id::text as id, batch_id::text as batch_id, state, notify_telegram_id, result, error,
+                      verification_job_id::text as job_id,
+                      state = 'pending' and requested_at < now() - make_interval(secs => $1) as stale
+                 from public.collector_launch_requests
+                where (state <> 'pending' and state is distinct from notified_state)
+                   or (state = 'pending' and notified_state is null and requested_at < now() - make_interval(secs => $1))
+                order by requested_at""", stale_seconds)
+        return [Launch(r["id"], r["batch_id"], r["state"], r["notify_telegram_id"], r["result"], r["error"], r["job_id"], r["stale"])
+                for r in rows]
+
+    async def mark_launch_notified(self, launch_id: str, state: str) -> None:
+        await self._pool().execute(
+            "update public.collector_launch_requests set notified_state = $2 where id = $1::uuid", launch_id, state)
 
     async def cancel(self, job_id: str, actor: str) -> bool:
         job = await self.get_job(job_id)
@@ -349,6 +373,13 @@ class _Session:
     revoked: bool = False
 
 
+@dataclass
+class _Launch:
+    record: Launch
+    requested_at: datetime
+    notified_state: str | None = None
+
+
 class MemoryVerificationStore:
     """Test double. ``world`` holds the states the Postgres store would change."""
 
@@ -359,6 +390,7 @@ class MemoryVerificationStore:
         self.log: dict[str, list[Event]] = {}
         self.world: dict[str, str] = {}
         self.roles: dict[int, str] = {}
+        self.launches: dict[str, _Launch] = {}
 
     async def approved_roles(self) -> dict[int, str]:
         return dict(self.roles)
@@ -442,15 +474,36 @@ class MemoryVerificationStore:
         self.world[f"source:{job.source_id}"] = "active"
         return True
 
-    async def resume(self, job_id: str, actor: str) -> str | None:
+    async def resume(self, job_id: str, actor: str, notify_user_id: int | None = None) -> str | None:
         job = self.jobs[job_id]
         if job.state != "verified" or job.resumed_at is not None:
             raise ValueError("only a verified, not yet resumed job can resume its run")
         if job.batch_id:
             self.world[f"batch:{job.batch_id}"] = "queued"
             self.world[f"item:{job.batch_id}"] = "queued"
+            launch_id = str(uuid.uuid4())
+            self.launches[launch_id] = _Launch(Launch(launch_id, job.batch_id, "pending", notify_user_id, job_id=job_id), datetime.now(UTC))
         self.jobs[job_id] = replace(job, resumed_at=datetime.now(UTC))
         return job.batch_id
+
+    async def launch_updates(self, stale_seconds: int) -> list[Launch]:
+        cutoff = datetime.now(UTC) - timedelta(seconds=stale_seconds)
+        out = []
+        for item in self.launches.values():
+            launch = item.record
+            if launch.state != "pending" and launch.state != item.notified_state:
+                out.append(launch)
+            elif launch.state == "pending" and item.notified_state is None and item.requested_at < cutoff:
+                out.append(replace(launch, stale=True))
+        return out
+
+    async def mark_launch_notified(self, launch_id: str, state: str) -> None:
+        self.launches[launch_id].notified_state = state
+
+    def set_launch(self, launch_id: str, state: str, result: str | None = None, error: str | None = None) -> None:
+        """Test helper: what facebook-runner would write."""
+        item = self.launches[launch_id]
+        item.record = replace(item.record, state=state, result=result, error=error)
 
     def _revoke(self, job_id: str) -> None:
         for token in self.tokens.values():
