@@ -41,8 +41,7 @@ playwright==1.63.0
 structlog==26.1.0
 python-dotenv==1.2.1
 
-# Open Telegram control plane: durable Telegram-update idempotency and
-# local multilingual transcription.
+# Open Telegram control plane: durable Telegram-update idempotency. Voice
+# notes are transcribed by OpenRouter over httpx (above); no local model.
 asyncpg==0.31.0
-faster-whisper==1.2.1
 redis==5.2.1

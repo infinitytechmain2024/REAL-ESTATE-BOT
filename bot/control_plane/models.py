@@ -26,6 +26,21 @@ class TranscriptResult:
     language: str | None
     confidence: float | None
     model: str
+    provider: str = "openrouter"
+    # Exactly what the provider billed, as returned; None when it did not say.
+    cost_usd: float | None = None
+    audio_seconds: float | None = None
+    request_status: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptionFailure:
+    """Audit record for a transcription that produced no usable transcript."""
+
+    error_code: str
+    model: str | None
+    provider: str | None = None
+    request_status: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

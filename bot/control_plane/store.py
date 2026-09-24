@@ -6,12 +6,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from bot.control_plane.models import IncomingMessage, TranscriptResult
+from bot.control_plane.models import IncomingMessage, TranscriptionFailure, TranscriptResult
 
 
 class ControlPlaneStore(Protocol):
     async def claim_message(self, message: IncomingMessage) -> bool: ...
     async def save_transcript(self, message: IncomingMessage, transcript: TranscriptResult) -> None: ...
+    async def record_transcription_failure(self, message: IncomingMessage, failure: TranscriptionFailure) -> None: ...
     async def create_confirmation(self, message: IncomingMessage, command: str, arguments: str, *, ttl_seconds: int) -> str: ...
     async def consume_confirmation(self, message: IncomingMessage, token: str) -> tuple[str, str, str | None] | None: ...
 
@@ -22,6 +23,7 @@ class MemoryControlPlaneStore:
     def __init__(self) -> None:
         self.messages: set[tuple[int, int]] = set()
         self.transcripts: dict[tuple[int, int], TranscriptResult] = {}
+        self.failures: dict[tuple[int, int], TranscriptionFailure] = {}
         self.confirmations: dict[str, tuple[int, int, str, str, datetime]] = {}
 
     async def claim_message(self, message: IncomingMessage) -> bool:
@@ -33,6 +35,9 @@ class MemoryControlPlaneStore:
 
     async def save_transcript(self, message: IncomingMessage, transcript: TranscriptResult) -> None:
         self.transcripts[(message.chat_id, message.message_id)] = transcript
+
+    async def record_transcription_failure(self, message: IncomingMessage, failure: TranscriptionFailure) -> None:
+        self.failures[(message.chat_id, message.message_id)] = failure
 
     async def create_confirmation(self, message: IncomingMessage, command: str, arguments: str, *, ttl_seconds: int) -> str:
         token = uuid.uuid4().hex[:10]
@@ -83,10 +88,23 @@ class PostgresControlPlaneStore:
         await self._pool().execute(  # type: ignore[attr-defined]
             """update public.telegram_inbound_messages
                set transcript=$3, detected_language=$4, transcription_confidence=$5,
-                   transcription_model=$6, processing_state='processed', processed_at=now()
+                   transcription_model=$6, transcription_provider=$7, transcription_cost_usd=$8,
+                   transcription_audio_seconds=$9, transcription_request_status=$10,
+                   processing_state='processed', processed_at=now()
                where telegram_chat_id=$1 and telegram_message_id=$2""",
             message.chat_id, message.message_id, transcript.text, transcript.language,
-            transcript.confidence, transcript.model,
+            transcript.confidence, transcript.model, transcript.provider, transcript.cost_usd,
+            transcript.audio_seconds, transcript.request_status,
+        )
+
+    async def record_transcription_failure(self, message: IncomingMessage, failure: TranscriptionFailure) -> None:
+        await self._pool().execute(  # type: ignore[attr-defined]
+            """update public.telegram_inbound_messages
+               set transcription_model=$3, transcription_provider=$4, transcription_request_status=$5,
+                   error_code=$6, processing_state='failed', processed_at=now()
+               where telegram_chat_id=$1 and telegram_message_id=$2""",
+            message.chat_id, message.message_id, failure.model, failure.provider,
+            failure.request_status, failure.error_code,
         )
 
     async def create_confirmation(self, message: IncomingMessage, command: str, arguments: str, *, ttl_seconds: int) -> str:
