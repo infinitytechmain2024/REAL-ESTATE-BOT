@@ -15,10 +15,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from collections.abc import Collection
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
+from bot.operators import OperatorSet
 from bot.telegram_webapp import verify_init_data
 
 from .browser import BrowserUnavailable, LiveBrowser, RecoveryChecker
@@ -53,7 +55,9 @@ class ActionRefused(RuntimeError):
 @dataclass(frozen=True)
 class FlowConfig:
     public_url: str
-    operator_ids: frozenset[int]
+    # Everyone who handles verification: .env owners plus approved helpers and
+    # operators (an OperatorSet, refreshed from the database on every tick).
+    operator_ids: Collection[int]
     owner_id: int
     # Verifies the Mini App signature; never shown or logged.
     bot_token: str = field(repr=False)
@@ -80,6 +84,9 @@ class VerificationService:
     # --- detection and notification -------------------------------------------------
 
     async def tick(self) -> None:
+        # Approvals and revocations made in Telegram take effect here within one tick.
+        if isinstance(self.config.operator_ids, OperatorSet):
+            self.config.operator_ids.replace_approved(await self.store.approved_roles())
         for job in await self.store.expire_due("verification:expiry"):
             await self._expired(job)
         for job in await self.store.unannounced_jobs():

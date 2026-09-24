@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
+from bot.control_plane.access import AccessDesk
 from bot.control_plane.live_view import LiveViewCoordinator, LiveViewUnavailable, is_session_id
 from bot.control_plane.models import (
     CommandEnvelope,
@@ -21,6 +22,7 @@ from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import ControlPlaneStore
 from bot.control_plane.stt import Transcriber, TranscriptionError
 from bot.control_plane.voice_commands import clean_transcript, spoken_command
+from bot.operators import OperatorSet
 
 log = logging.getLogger(__name__)
 CommandSink = Callable[[CommandEnvelope], Awaitable[object]]
@@ -42,14 +44,37 @@ class ControlPlane:
         transcriber: Transcriber | None,
         command_sink: CommandSink,
         live: LiveViewCoordinator | None = None,
+        access: AccessDesk | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
-        self.live = live
+        self.live, self.access = live, access
+        # Owners from .env plus operators they approved; shared and live.
+        self.operators = access.operators if access else OperatorSet(settings.operator_user_ids)
 
-    async def handle_callback(self, user_id: int | None, data: str) -> Reply:
-        """Inline-button presses: ``live:done:<id>`` and ``live:cancel:<id>``."""
+    def _is_operator(self, user_id: int | None) -> bool:
+        """Any access at all: helpers, operators and owners."""
+        return user_id is not None and user_id in self.operators
+
+    def _can_control(self, user_id: int | None) -> bool:
+        """Operators and owners; helpers only handle verification."""
+        return self.operators.can_control(user_id)
+
+    def _with_access_button(self, reply: Reply, user_id: int | None) -> Reply:
+        if self.access is None or user_id is None or self._is_operator(user_id):
+            return reply
+        return Reply(reply.text, (*reply.buttons, self.access.button()))
+
+    async def handle_callback(self, user_id: int | None, data: str, display_name: str | None = None, username: str | None = None) -> Reply:
+        """Inline buttons: ``live:done|cancel:<id>``, ``access:request``, ``access:approve|deny:<id>``."""
         kind, _, rest = data.partition(":")
-        action, _, session_id = rest.partition(":")
+        action, _, target = rest.partition(":")
+        if kind == "access" and self.access is not None:
+            if action == "request":
+                return await self.access.request(user_id, display_name, username)
+            if action in {"helper", "operator", "deny"}:
+                return await self.access.decide(user_id, target, None if action == "deny" else action)
+            return Reply("This button is no longer valid.")
+        session_id = target
         if kind != "live" or action not in {"done", "cancel"} or not is_session_id(session_id) or self.live is None:
             return Reply("This button is no longer valid.")
         try:
@@ -73,10 +98,10 @@ class ControlPlane:
             return Reply("Duplicate update ignored.")
         # Voice costs money per second, so it is limited to operators; text
         # commands such as /status stay open to everyone.
-        if message.user_id is None or message.user_id not in self.settings.operator_user_ids:
+        if not self._can_control(message.user_id):
             await self._voice_refused(message, "not_operator")
             identity = f" Your Telegram user ID is {message.user_id}." if message.user_id is not None else ""
-            return Reply(f"Voice messages are transcribed for operators only; please send text instead.{identity}")
+            return self._with_access_button(Reply(f"Voice messages are transcribed for operators only; please send text instead.{identity}"), message.user_id)
         if self.transcriber is None:
             await self._voice_refused(message, "stt_not_configured")
             return Reply("Voice transcription is not configured. Please send text.")
@@ -146,10 +171,24 @@ class ControlPlane:
         command = command_line[0].split("@", 1)[0].lower()
         arguments = command_line[1] if len(command_line) > 1 else ""
         if command in {"help", "start"}:
-            return Reply(
-                "Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
-                "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>."
-            )
+            role = self.operators.role(message.user_id)
+            if role == "helper":
+                text = ("You are a helper: when a Facebook login, CAPTCHA or checkpoint needs a person, you get a message "
+                        "with a button to open the browser. You can also send /login [facebook|instagram|tiktok] [profile-name].")
+            else:
+                text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
+                        "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>.")
+                if role == "owner":
+                    text += " Owners: /operators, /role <ID> helper|operator, /revoke <ID>."
+                elif role is None:
+                    text += "\n\nYou have no access yet; press the button to ask for it."
+            return self._with_access_button(Reply(text), message.user_id)
+        if command == "role":
+            return await self.access.set_role(message.user_id, arguments) if self.access else Reply("Unknown command. Send /help.")
+        if command == "operators":
+            return await self.access.list(message.user_id) if self.access else Reply("Unknown command. Send /help.")
+        if command == "revoke":
+            return await self.access.revoke(message.user_id, arguments) if self.access else Reply("Unknown command. Send /help.")
         if command == "login":
             if self.live is None:
                 return Reply("The live browser is not available in this service.")
@@ -176,8 +215,8 @@ class ControlPlane:
     async def _status(self, message: IncomingMessage) -> Reply:
         # /status is open to everyone, but queue sizes, sources and spend are
         # operational detail: only operators see them.
-        if message.user_id is None or message.user_id not in self.settings.operator_user_ids:
-            return Reply("Control plane is online. Detailed status is shown to operators only.")
+        if not self._can_control(message.user_id):
+            return self._with_access_button(Reply("Control plane is online. Detailed status is shown to operators only."), message.user_id)
         try:
             snapshot = await self.store.status_snapshot()
         except Exception as exc:  # noqa: BLE001 - a status read must never break the bot
@@ -186,11 +225,14 @@ class ControlPlane:
         return Reply(format_status(snapshot))
 
     def _operator_refusal(self, message: IncomingMessage) -> Reply | None:
-        if message.user_id is not None and message.user_id in self.settings.operator_user_ids:
+        if self._can_control(message.user_id):
             return None
         log.warning("telegram.control.not_operator", extra={"chat_id": message.chat_id, "user_id": message.user_id})
         identity = f" Your Telegram user ID is {message.user_id}." if message.user_id is not None else ""
-        return Reply(f"Only operators can run, pause, resume, or cancel acquisition; /status and /help are open to everyone.{identity}")
+        return self._with_access_button(
+            Reply(f"Only operators can run, pause, resume, or cancel acquisition; /status and /help are open to everyone.{identity}"),
+            message.user_id,
+        )
 
 
 def format_status(s: StatusSnapshot) -> str:

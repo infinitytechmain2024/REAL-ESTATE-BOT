@@ -5,7 +5,7 @@ WORKDIR /app
 RUN useradd --create-home --uid 10007 verifier
 COPY docker/requirements-verification.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY bot/__init__.py bot/telegram_webapp.py ./bot/
+COPY bot/__init__.py bot/telegram_webapp.py bot/operators.py ./bot/
 COPY bot/verification/ ./bot/verification/
 # The watchdog reuses the collector's Browser Session Manager client and its
 # challenge detector, nothing else from the collector.

@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 from aiohttp import web
 
+from bot.control_plane.access import AccessDesk, PostgresAccessStore
 from bot.control_plane.live_view import (
     BrowserLiveClient,
     LiveViewConfig,
@@ -26,6 +27,7 @@ from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import PostgresControlPlaneStore, PostgresLiveViewStore
 from bot.control_plane.stt import OpenRouterTranscriber
+from bot.operators import OperatorSet
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import ConfirmedCommand
 from bot.orchestra.store import PostgresOrchestraStore
@@ -59,9 +61,21 @@ async def run() -> None:
     async def notify(chat_id: int, text: str) -> None:
         await bot.send_message(chat_id, text)
 
+    async def send(chat_id: int, reply: Reply) -> None:
+        await bot.send_message(chat_id, reply.text, reply_markup=_markup(reply))
+
+    # Owners from .env plus the helpers/operators they approved, shared by every check.
+    operators = OperatorSet(settings.operator_user_ids)
+    access = AccessDesk(PostgresAccessStore(store), operators, notify=send)
+    try:
+        await access.load()
+    except Exception:
+        logging.getLogger(__name__).exception("telegram.control.operators_load_failed")
+
     orchestra = OrchestraDispatcher(
         orchestra_store,
-        operator_ids=settings.operator_user_ids,
+        # Helpers only verify; queued commands are re-checked against controllers.
+        operator_ids=operators.controllers,
         lease_seconds=settings.orchestra_command_lease_seconds,
         poll_seconds=settings.orchestra_poll_seconds,
         stale_batch_seconds=settings.orchestra_stale_batch_seconds,
@@ -84,8 +98,6 @@ async def run() -> None:
         )
     else:
         logging.getLogger(__name__).warning("telegram.control.stt_disabled", extra={"hint": "set OPENROUTER_API_KEY; voice messages are refused"})
-    async def send(chat_id: int, reply: Reply) -> None:
-        await bot.send_message(chat_id, reply.text, reply_markup=_markup(reply))
 
     browser = BrowserLiveClient(settings.browser_session_url, settings.browser_session_api_token)
     live = LiveViewCoordinator(
@@ -93,7 +105,7 @@ async def run() -> None:
         browser,
         LiveViewConfig(
             public_url=settings.live_view_public_url,
-            operator_ids=settings.operator_user_ids,
+            operator_ids=operators,
             open_minutes=settings.live_view_open_minutes,
             request_minutes=settings.live_view_request_minutes,
         ),
@@ -101,12 +113,16 @@ async def run() -> None:
     )
     if not live.enabled:
         logging.getLogger(__name__).warning("telegram.control.live_view_disabled", extra={"hint": "set LIVE_VIEW_PUBLIC_URL to an https:// origin"})
-    control = ControlPlane(settings, store, transcriber, enqueue, live)
+    control = ControlPlane(settings, store, transcriber, enqueue, live, access)
     router = Router(name="control-plane")
 
     @router.callback_query()
     async def button(query: CallbackQuery) -> None:
-        reply = await control.handle_callback(query.from_user.id if query.from_user else None, query.data or "")
+        user = query.from_user
+        reply = await control.handle_callback(
+            user.id if user else None, query.data or "",
+            user.full_name if user else None, user.username if user else None,
+        )
         await query.answer()
         if query.message is not None:
             await bot.send_message(query.message.chat.id, reply.text, reply_markup=_markup(reply))

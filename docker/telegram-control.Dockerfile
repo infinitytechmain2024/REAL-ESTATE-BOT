@@ -9,7 +9,7 @@ WORKDIR /app
 RUN useradd --create-home --uid 10001 appuser
 COPY docker/requirements-telegram-control.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY bot/__init__.py bot/telegram_webapp.py ./bot/
+COPY bot/__init__.py bot/telegram_webapp.py bot/operators.py ./bot/
 COPY bot/control_plane/ ./bot/control_plane/
 COPY bot/orchestra/ ./bot/orchestra/
 RUN chown -R appuser:appuser /app

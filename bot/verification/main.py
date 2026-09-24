@@ -13,6 +13,7 @@ from contextlib import suppress
 from aiohttp import web
 
 from bot.facebook_collector.browser import BrowserSessionClient
+from bot.operators import OperatorSet
 
 from .browser import BrowserLiveClient, RecoveryWatchdog
 from .service import FlowConfig, VerificationService
@@ -37,7 +38,7 @@ async def run() -> None:
         RecoveryWatchdog(BrowserSessionClient(settings.browser_session_url, settings.browser_session_api_token, timeout_seconds=120)),
         notifier,
         FlowConfig(
-            public_url=settings.public_url, operator_ids=settings.operator_ids, owner_id=settings.owner_id,
+            public_url=settings.public_url, operator_ids=OperatorSet(settings.operator_ids), owner_id=settings.owner_id,
             bot_token=settings.telegram_token, token_minutes=settings.token_minutes,
             session_minutes=settings.session_minutes, job_hours=settings.job_hours,
             renotify_minutes=settings.renotify_minutes, live_minutes=settings.live_minutes,

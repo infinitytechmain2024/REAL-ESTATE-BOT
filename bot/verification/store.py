@@ -34,6 +34,7 @@ class VerificationStore(Protocol):
     async def expire_due(self, actor: str) -> list[Job]: ...
     async def add_event(self, job_id: str, event: str, actor: str, detail: dict[str, Any] | None = None) -> None: ...
     async def events(self, job_id: str) -> list[Event]: ...
+    async def approved_roles(self) -> dict[int, str]: ...
 
 
 _JOB_SELECT = """
@@ -290,6 +291,11 @@ class PostgresVerificationStore:
             job_id, event, actor, json.dumps(detail or {}),
         )
 
+    async def approved_roles(self) -> dict[int, str]:
+        """People an owner approved in Telegram (migration 011); owners come from .env."""
+        rows = await self._pool().fetch("select telegram_user_id, role from public.telegram_operators where state = 'approved'")
+        return {r[0]: r[1] for r in rows}
+
     async def events(self, job_id: str) -> list[Event]:
         rows = await self._pool().fetch(
             "select event, actor, detail, occurred_at from public.verification_events where verification_job_id = $1::uuid order by id",
@@ -352,6 +358,10 @@ class MemoryVerificationStore:
         self.sessions: dict[str, _Session] = {}
         self.log: dict[str, list[Event]] = {}
         self.world: dict[str, str] = {}
+        self.roles: dict[int, str] = {}
+
+    async def approved_roles(self) -> dict[int, str]:
+        return dict(self.roles)
 
     def add_job(self, job: Job) -> Job:
         self.jobs[job.id] = job
