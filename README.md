@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`010_verification_telegram_identity.sql` in order. It records SHA-256 checksums in
+`011_operator_access_requests.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -59,6 +59,29 @@ After setting `TELEGRAM_TOKEN` and `TELEGRAM_OPERATOR_IDS`, apply migrations bef
 docker compose up -d --build telegram
 docker compose logs -f telegram
 ```
+
+### Access from Telegram: owners, operators and helpers
+
+`TELEGRAM_OPERATOR_IDS` in `.env` names the **owners**. Everyone else can ask:
+anyone without access sees a **Request access** button (on /help, /status or
+any refused command). Every owner then gets the request with the person's
+name, @username and ID and three buttons:
+
+- **Approve as helper** -- human verification only: the helper gets the
+  verification messages (log in, CAPTCHA, checkpoint), opens the browser,
+  presses Solved / Resume, and may use `/login`. Nothing else.
+- **Approve as operator** -- verification plus control of collection
+  (`/run`, `/pause`, `/resume`, `/cancel`, voice commands, detailed `/status`).
+- **Deny** -- the person may ask again after 24 hours.
+
+Approvals take effect immediately, survive restarts and are stored with who
+decided (migration `011_operator_access_requests.sql`); they are not written
+to `.env`. Owners manage them with `/operators`, `/role <ID> helper|operator`
+and `/revoke <ID>`; only owners can approve, change or revoke, and owners
+themselves can only be changed in `.env`. Administrative notices -- access
+requests, a verification marked Failed, an expired job, identity checks, new
+2FA and account restrictions -- go to owners only. Everyone who approves must
+remember that both roles open the browser logged into the Facebook account.
 
 ### Main Orchestra dispatcher
 
