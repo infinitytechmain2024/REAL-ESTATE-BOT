@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
+from bot.control_plane.live_view import LiveViewCoordinator, LiveViewUnavailable, is_session_id
 from bot.control_plane.models import (
     CommandEnvelope,
     IncomingMessage,
@@ -34,8 +35,27 @@ STATE_CHANGING = frozenset({"run", "pause", "resume", "cancel"})
 
 
 class ControlPlane:
-    def __init__(self, settings: ControlPlaneSettings, store: ControlPlaneStore, transcriber: Transcriber | None, command_sink: CommandSink) -> None:
+    def __init__(
+        self,
+        settings: ControlPlaneSettings,
+        store: ControlPlaneStore,
+        transcriber: Transcriber | None,
+        command_sink: CommandSink,
+        live: LiveViewCoordinator | None = None,
+    ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
+        self.live = live
+
+    async def handle_callback(self, user_id: int | None, data: str) -> Reply:
+        """Inline-button presses: ``live:done:<id>`` and ``live:cancel:<id>``."""
+        kind, _, rest = data.partition(":")
+        action, _, session_id = rest.partition(":")
+        if kind != "live" or action not in {"done", "cancel"} or not is_session_id(session_id) or self.live is None:
+            return Reply("This button is no longer valid.")
+        try:
+            return await self.live.finish(session_id, user_id, done=action == "done")
+        except LiveViewUnavailable as exc:
+            return Reply(f"Could not close the browser: {exc}.")
 
     async def handle_text(self, message: IncomingMessage) -> Reply | None:
         if not await self.store.claim_message(message):
@@ -126,7 +146,20 @@ class ControlPlane:
         command = command_line[0].split("@", 1)[0].lower()
         arguments = command_line[1] if len(command_line) > 1 else ""
         if command in {"help", "start"}:
-            return Reply("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>. Confirm changes with: confirm <token>.")
+            return Reply(
+                "Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
+                "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>."
+            )
+        if command == "login":
+            if self.live is None:
+                return Reply("The live browser is not available in this service.")
+            if message.chat_id != message.user_id:
+                # Telegram shows Mini App buttons in private chats only.
+                return Reply("Send /login in a private chat with the bot.")
+            parts = arguments.split()
+            platform = parts[0].lower() if parts else "facebook"
+            name = parts[1].lower() if len(parts) > 1 else f"{platform}-main"
+            return await self.live.login(message.user_id, platform, name)
         if command == "status":
             return await self._status(message)
         if command not in STATE_CHANGING:

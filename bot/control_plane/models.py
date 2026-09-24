@@ -69,8 +69,36 @@ class StatusSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class Button:
+    """An inline button: a Telegram Mini App (web_app_url) or a callback."""
+
+    text: str
+    web_app_url: str | None = None
+    callback_data: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Reply:
     text: str
+    buttons: tuple[Button, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LiveProfile:
+    id: str
+    name: str
+    platform: str
+    state: str
+
+
+@dataclass(frozen=True, slots=True)
+class LiveSession:
+    id: str
+    profile: LiveProfile
+    reason: str
+    state: str
+    expires_at: datetime
+    opened_by: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -21,6 +21,15 @@ class ControlPlaneSettings:
     stt_timeout_seconds: float = 60.0
     # Reused from the analysis pipeline; never logged or echoed.
     openrouter_api_key: str = field(default="", repr=False)
+    # Live browser for logins and checkpoints. Empty public URL disables it.
+    live_view_public_url: str = ""
+    live_view_open_minutes: int = 20
+    live_view_request_minutes: int = 60
+    live_view_poll_seconds: int = 60
+    live_view_port: int = 8081
+    browser_session_url: str = "http://browser:8090"
+    browser_session_api_token: str = field(default="", repr=False)
+    novnc_url: str = "http://browser:6080"
     confirmation_ttl_seconds: int = 300
     orchestra_command_lease_seconds: int = 30
     orchestra_poll_seconds: float = 1.0
@@ -46,6 +55,12 @@ class ControlPlaneSettings:
             stt_max_audio_seconds=_bounded_int("STT_MAX_AUDIO_SECONDS", 300, 1, 1800),
             stt_timeout_seconds=float(_bounded_int("STT_TIMEOUT_SECONDS", 60, 1, 300)),
             openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", "").strip(),
+            live_view_public_url=_public_url(os.environ.get("LIVE_VIEW_PUBLIC_URL", "")),
+            live_view_open_minutes=_bounded_int("LIVE_VIEW_OPEN_MINUTES", 20, 5, 60),
+            live_view_request_minutes=_bounded_int("LIVE_VIEW_REQUEST_MINUTES", 60, 10, 1440),
+            live_view_poll_seconds=_bounded_int("LIVE_VIEW_POLL_SECONDS", 60, 10, 3600),
+            browser_session_url=os.environ.get("BROWSER_SESSION_URL", "").strip() or "http://browser:8090",
+            browser_session_api_token=os.environ.get("BROWSER_SESSION_API_TOKEN", "").strip(),
             confirmation_ttl_seconds=int(os.environ.get("TELEGRAM_CONFIRMATION_TTL_SECONDS", "300")),
             orchestra_command_lease_seconds=int(os.environ.get("ORCHESTRA_COMMAND_LEASE_SECONDS", "30")),
             orchestra_poll_seconds=float(os.environ.get("ORCHESTRA_POLL_SECONDS", "1")),
@@ -83,3 +98,13 @@ def _bounded_int(name: str, default: int, low: int, high: int) -> int:
     if not low <= value <= high:
         raise ValueError(f"{name} must be between {low} and {high}, got {value}")
     return value
+
+
+def _public_url(raw: str) -> str:
+    """HTTPS origin only: Telegram opens Mini Apps over HTTPS and nothing else."""
+    url = raw.strip().rstrip("/")
+    if not url:
+        return ""
+    if not url.startswith("https://") or "/" in url[len("https://"):] or "@" in url:
+        raise ValueError(f"LIVE_VIEW_PUBLIC_URL must look like https://host, got {raw!r}")
+    return url

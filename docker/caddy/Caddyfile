@@ -1,8 +1,7 @@
-# The gateway is intentionally inert until an authenticated application route
-# exists. Its health endpoint is safe to expose through a local reverse proxy.
+# Internal health site on :8080 (loopback-published), plus one public HTTPS
+# site that serves only the operator live browser under /live/*.
 {
     admin off
-    auto_https off
 }
 
 :8080 {
@@ -13,4 +12,23 @@
     # reverse_proxy /api/* telegram:8080
 
     respond "Real Estate Monitor gateway" 404
+}
+
+# LIVE_VIEW_DOMAIN: e.g. 203-0-113-7.sslip.io (a name that resolves to this
+# VPS). Caddy obtains its certificate automatically. With the default
+# `localhost` it uses a local certificate and nothing is public.
+{$LIVE_VIEW_DOMAIN:localhost} {
+    # Access itself is decided by the gate: a Telegram-signed operator identity.
+    handle /live/* {
+        reverse_proxy telegram:8081
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        -Server
+    }
+    handle {
+        respond 404
+    }
 }

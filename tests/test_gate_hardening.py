@@ -85,7 +85,14 @@ def test_compose_publishes_nothing_beyond_loopback() -> None:
     published = re.findall(r'^\s*-\s*"([^"]+:\d+)"', compose, flags=re.MULTILINE)
 
     assert published, "no port mappings found; has the compose file changed shape?"
+    # The single, explicit exception: Caddy's HTTPS for the operator live view,
+    # published only when an operator sets LIVE_VIEW_BIND on purpose. Its
+    # default must stay loopback, and it may never carry any other port.
+    opt_in = "${LIVE_VIEW_BIND:-127.0.0.1}:"
     for mapping in published:
+        if mapping.startswith(opt_in):
+            assert mapping in {f"{opt_in}80:80", f"{opt_in}443:443"}, f"{mapping} uses the live-view opt-in"
+            continue
         assert mapping.startswith("127.0.0.1:"), f"{mapping} is reachable from outside the host"
 
 

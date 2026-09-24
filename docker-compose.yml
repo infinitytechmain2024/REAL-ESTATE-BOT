@@ -52,6 +52,12 @@ services:
     ports:
       # Keep this loopback-only until a DNS name and TLS policy are configured.
       - "127.0.0.1:${CADDY_HTTP_PORT:-8080}:8080"
+      # Public HTTPS for the operator live browser (/live/* only; everything
+      # else is 404). Loopback until LIVE_VIEW_BIND=0.0.0.0 is set on purpose.
+      - "${LIVE_VIEW_BIND:-127.0.0.1}:80:80"
+      - "${LIVE_VIEW_BIND:-127.0.0.1}:443:443"
+    environment:
+      LIVE_VIEW_DOMAIN: ${LIVE_VIEW_DOMAIN:-localhost}
     volumes:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -93,8 +99,17 @@ services:
       STT_MAX_AUDIO_BYTES: ${STT_MAX_AUDIO_BYTES:-20971520}
       STT_MAX_AUDIO_SECONDS: ${STT_MAX_AUDIO_SECONDS:-300}
       STT_TIMEOUT_SECONDS: ${STT_TIMEOUT_SECONDS:-60}
-    # `backend` reaches PostgreSQL/Redis; `egress` is required for Telegram's
-    # long polling API and OpenRouter. It does not publish a host port.
+      # Live browser for Facebook logins/checkpoints (bot/control_plane/live_view.py).
+      # Empty LIVE_VIEW_PUBLIC_URL keeps the feature off.
+      LIVE_VIEW_PUBLIC_URL: ${LIVE_VIEW_PUBLIC_URL:-}
+      LIVE_VIEW_OPEN_MINUTES: ${LIVE_VIEW_OPEN_MINUTES:-20}
+      LIVE_VIEW_REQUEST_MINUTES: ${LIVE_VIEW_REQUEST_MINUTES:-60}
+      LIVE_VIEW_POLL_SECONDS: ${LIVE_VIEW_POLL_SECONDS:-60}
+      BROWSER_SESSION_URL: http://browser:8090
+      BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
+    # `backend` reaches PostgreSQL/Redis, the browser API and Caddy; `egress`
+    # is required for Telegram's long polling API and OpenRouter. It publishes
+    # no host port: the live-view gate on :8081 is reached only through Caddy.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
     read_only: true
