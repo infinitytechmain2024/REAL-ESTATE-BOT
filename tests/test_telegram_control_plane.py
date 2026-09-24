@@ -27,6 +27,7 @@ def settings() -> ControlPlaneSettings:
         telegram_token="123:test",
         database_url="postgresql://example",
         confirmation_ttl_seconds=300,
+        operator_user_ids=frozenset({11}),
     )
 
 
@@ -146,3 +147,46 @@ async def test_state_change_without_sending_user_is_rejected_safely() -> None:
     )
     response = await control.handle_text(message(12, "/run group-a", user_id=None, chat_id=-100123))
     assert response and "require a Telegram user identity" in response.text
+
+
+@pytest.mark.asyncio
+async def test_non_operators_can_read_status_but_not_change_state() -> None:
+    store = MemoryControlPlaneStore()
+    received: list[CommandEnvelope] = []
+
+    async def sink(command: CommandEnvelope) -> None:
+        received.append(command)
+
+    control = ControlPlane(settings(), store, FakeTranscriber(TranscriptResult("", None, None, "small")), sink)
+    status = await control.handle_text(message(20, "/status", user_id=999))
+    assert status and "online" in status.text
+    for number, command in enumerate(("/run website https://example.org", "/pause all", "/resume all", "/cancel all", "confirm 0123456789")):
+        refused = await control.handle_text(message(21 + number, command, user_id=999))
+        assert refused and "Only operators" in refused.text and "user ID is 999" in refused.text
+    assert store.confirmations == {} and received == []
+
+
+@pytest.mark.asyncio
+async def test_a_removed_operator_cannot_use_an_already_issued_token() -> None:
+    store = MemoryControlPlaneStore()
+    transcriber = FakeTranscriber(TranscriptResult("", None, None, "small"))
+    prompt = await ControlPlane(settings(), store, transcriber, lambda _: None).handle_text(message(30, "/cancel all"))
+    assert prompt and "Confirmation required" in prompt.text
+    token = prompt.text.split("confirm ")[1].split()[0]
+
+    demoted = ControlPlaneSettings(telegram_token="123:test", database_url="postgresql://example")
+    refused = await ControlPlane(demoted, store, transcriber, lambda _: None).handle_text(message(31, f"confirm {token}"))
+    assert refused and "Only operators" in refused.text
+    assert token in store.confirmations
+
+
+def test_operator_ids_are_parsed_strictly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_TOKEN", "123:test")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("TELEGRAM_OPERATOR_IDS", "123, 456 789")
+    assert ControlPlaneSettings.from_env().operator_user_ids == frozenset({123, 456, 789})
+    monkeypatch.setenv("TELEGRAM_OPERATOR_IDS", "")
+    assert ControlPlaneSettings.from_env().operator_user_ids == frozenset()
+    monkeypatch.setenv("TELEGRAM_OPERATOR_IDS", "@owner")
+    with pytest.raises(ValueError, match="numeric"):
+        ControlPlaneSettings.from_env()

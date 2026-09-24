@@ -54,7 +54,7 @@ async def store() -> AsyncIterator[PostgresOrchestraStore]:
 
 class Operator:
     def __init__(self, store: PostgresOrchestraStore) -> None:
-        self.dispatcher = OrchestraDispatcher(store, notifier=self._notify)
+        self.dispatcher = OrchestraDispatcher(store, operator_ids=frozenset({42}), notifier=self._notify)
         self.notices: list[str] = []
         self.message_id = 0
 

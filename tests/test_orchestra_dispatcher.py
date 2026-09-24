@@ -54,6 +54,9 @@ class FakeStore:
         self.completed.append((item.id, state, result, error_code))
 
 
+OPERATORS = frozenset({20})
+
+
 def claimed(command: str, arguments: str) -> ClaimedCommand:
     return ClaimedCommand("cmd-1", command, arguments, 10, 20)
 
@@ -89,7 +92,7 @@ async def test_confirmed_run_creates_a_bounded_queued_plan() -> None:
     async def notify(_chat_id: int, text: str) -> None:
         notices.append(text)
 
-    dispatcher = OrchestraDispatcher(store, notifier=notify)  # type: ignore[arg-type]
+    dispatcher = OrchestraDispatcher(store, operator_ids=OPERATORS, notifier=notify)  # type: ignore[arg-type]
     assert await dispatcher.process_once()
     request, actor = store.requests[0]
     assert actor == "telegram:20"
@@ -108,7 +111,7 @@ async def test_confirmed_run_creates_a_bounded_queued_plan() -> None:
 ])
 async def test_lifecycle_commands_are_dispatched(command: str, arguments: str, expected: tuple[str, str, str]) -> None:
     store = FakeStore([claimed(command, arguments)])
-    dispatcher = OrchestraDispatcher(store)  # type: ignore[arg-type]
+    dispatcher = OrchestraDispatcher(store, operator_ids=OPERATORS)  # type: ignore[arg-type]
     await dispatcher.process_once()
     assert store.lifecycle == [expected]
     assert store.completed[0][1] is CommandState.FINISHED
@@ -117,7 +120,7 @@ async def test_lifecycle_commands_are_dispatched(command: str, arguments: str, e
 @pytest.mark.asyncio
 async def test_invalid_command_is_auditable_failure_not_a_browser_action() -> None:
     store = FakeStore([claimed("run", "website http://bad.example")])
-    dispatcher = OrchestraDispatcher(store)  # type: ignore[arg-type]
+    dispatcher = OrchestraDispatcher(store, operator_ids=OPERATORS)  # type: ignore[arg-type]
     await dispatcher.process_once()
     assert not store.requests
     assert store.completed[0][1] is CommandState.FAILED
@@ -127,7 +130,7 @@ async def test_invalid_command_is_auditable_failure_not_a_browser_action() -> No
 @pytest.mark.asyncio
 async def test_expired_leases_are_reclaimed_before_the_next_claim() -> None:
     store = FakeStore([])
-    dispatcher = OrchestraDispatcher(store)  # type: ignore[arg-type]
+    dispatcher = OrchestraDispatcher(store, operator_ids=OPERATORS)  # type: ignore[arg-type]
     assert not await dispatcher.process_once()
     assert store.reclaimed == 1
 
@@ -144,7 +147,7 @@ async def test_a_lost_claim_is_reported_without_recording_a_failure() -> None:
         notices.append(text)
 
     store.plan_run = plan_run  # type: ignore[method-assign]
-    assert await OrchestraDispatcher(store, notifier=notify).process_once()  # type: ignore[arg-type]
+    assert await OrchestraDispatcher(store, operator_ids=OPERATORS, notifier=notify).process_once()  # type: ignore[arg-type]
     assert store.completed == []
     assert "nothing was planned" in notices[-1]
 
@@ -153,7 +156,7 @@ async def test_a_lost_claim_is_reported_without_recording_a_failure() -> None:
 async def test_the_dispatch_loop_survives_database_errors() -> None:
     store = FakeStore([claimed("pause", "source:source-id")])
     failures = 2
-    dispatcher = OrchestraDispatcher(store, poll_seconds=0.1)  # type: ignore[arg-type]
+    dispatcher = OrchestraDispatcher(store, operator_ids=OPERATORS, poll_seconds=0.1)  # type: ignore[arg-type]
 
     async def flaky_reclaim() -> int:
         nonlocal failures
@@ -167,3 +170,17 @@ async def test_the_dispatch_loop_survives_database_errors() -> None:
     store.reclaim_expired = flaky_reclaim  # type: ignore[method-assign]
     await asyncio.wait_for(dispatcher.run_forever(), timeout=5)
     assert store.lifecycle == [("pause", "source", "source-id")]
+
+
+@pytest.mark.asyncio
+async def test_commands_from_non_operators_are_rejected_before_dispatch() -> None:
+    store = FakeStore([ClaimedCommand("cmd-1", "cancel", "all", 10, 999)])
+    notices: list[str] = []
+
+    async def notify(_chat_id: int, text: str) -> None:
+        notices.append(text)
+
+    assert await OrchestraDispatcher(store, operator_ids=OPERATORS, notifier=notify).process_once()  # type: ignore[arg-type]
+    assert store.lifecycle == [] and store.requests == []
+    assert store.completed[0][1] is CommandState.FAILED and store.completed[0][3] == "not_operator"
+    assert "only operators" in notices[-1]

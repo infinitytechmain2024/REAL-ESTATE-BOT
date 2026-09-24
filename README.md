@@ -33,14 +33,19 @@ is enabled. See [VPS hardening notes](docs/VPS_HARDENING.md) before deployment.
 The `telegram` Compose service receives only text and voice control messages.
 It accepts messages from every Telegram user and chat, records each inbound
 message with a unique `(chat_id, message_id)` idempotency key, and uses local
-multilingual faster-whisper for voice notes. `/run`, `/pause`, `/resume`, and
-`/cancel` require a short-lived `confirm <token>` response. A confirmed command
+multilingual faster-whisper for voice notes. Anyone can use `/status` and
+`/help`, but only the Telegram user IDs in `TELEGRAM_OPERATOR_IDS` can use
+`/run`, `/pause`, `/resume`, `/cancel`, or `confirm`. Everyone else is told
+their own user ID, which is how an operator finds the value to add. An empty
+list refuses every state change. The dispatcher checks the list again before
+acting, so commands queued by someone who is no longer an operator are rejected.
+Operator commands also require a short-lived `confirm <token>` response. A confirmed command
 is durably queued for the Main Orchestra. The dispatcher validates a tiny
 command grammar, selects a bounded acquisition plan, and writes the plan plus
 audit records to PostgreSQL. It never launches a collector, browser, shell,
 or unrestricted agent process itself.
 
-After setting `TELEGRAM_TOKEN`, apply migrations before starting it:
+After setting `TELEGRAM_TOKEN` and `TELEGRAM_OPERATOR_IDS`, apply migrations before starting it:
 
 ```sh
 ./scripts/apply_migrations.sh

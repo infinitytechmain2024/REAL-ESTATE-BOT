@@ -78,6 +78,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
       REDIS_URL: ${REDIS_URL:?set REDIS_URL in .env}
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
+      # Empty is allowed but refuses every state-changing command.
+      TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}
     volumes:
       - whisper_models:/models
     # `backend` reaches PostgreSQL/Redis; `egress` is required for Telegram's

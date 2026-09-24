@@ -36,6 +36,7 @@ async def run() -> None:
 
     orchestra = OrchestraDispatcher(
         orchestra_store,
+        operator_ids=settings.operator_user_ids,
         lease_seconds=settings.orchestra_command_lease_seconds,
         poll_seconds=settings.orchestra_poll_seconds,
         notifier=notify,
@@ -45,6 +46,8 @@ async def run() -> None:
         logging.getLogger(__name__).info("telegram.control.command_confirmed", extra={"command": envelope.command, "chat_id": envelope.chat_id, "user_id": envelope.user_id})
         return await orchestra.enqueue(ConfirmedCommand(envelope.command, envelope.arguments, envelope.chat_id, envelope.user_id, envelope.message_id, envelope.confirmation_id))
 
+    if not settings.operator_user_ids:
+        logging.getLogger(__name__).warning("telegram.control.no_operators", extra={"hint": "set TELEGRAM_OPERATOR_IDS; state-changing commands are refused"})
     control = ControlPlane(settings, store, FasterWhisperTranscriber(model=settings.stt_model, device=settings.stt_device, compute_type=settings.stt_compute_type), enqueue)
     router = Router(name="control-plane")
 

@@ -1,4 +1,7 @@
-"""Safe command routing, deduplication and confirmation for an open bot."""
+"""Safe command routing, deduplication and confirmation for an open bot.
+
+Anyone may read status; only allowlisted operators may change acquisition state.
+"""
 
 from __future__ import annotations
 
@@ -42,6 +45,10 @@ class ControlPlane:
     async def _handle_command(self, message: IncomingMessage, raw: str) -> Reply:
         text = raw.strip()
         if text.lower().startswith("confirm "):
+            # Re-checked at confirmation so removing an operator also voids
+            # the tokens they were already issued.
+            if (refusal := self._operator_refusal(message)) is not None:
+                return refusal
             token = text.split(maxsplit=1)[1].strip()
             confirmed = await self.store.consume_confirmation(message, token)
             if confirmed is None:
@@ -66,5 +73,14 @@ class ControlPlane:
         # tokens must stay bound to a concrete Telegram identity.
         if message.user_id is None:
             return Reply("State-changing commands require a Telegram user identity.")
+        if (refusal := self._operator_refusal(message)) is not None:
+            return refusal
         token = await self.store.create_confirmation(message, command, arguments, ttl_seconds=self.settings.confirmation_ttl_seconds)
         return Reply(f"Confirmation required for /{command}. Reply exactly: confirm {token} (expires in {self.settings.confirmation_ttl_seconds // 60} minutes).")
+
+    def _operator_refusal(self, message: IncomingMessage) -> Reply | None:
+        if message.user_id is not None and message.user_id in self.settings.operator_user_ids:
+            return None
+        log.warning("telegram.control.not_operator", extra={"chat_id": message.chat_id, "user_id": message.user_id})
+        identity = f" Your Telegram user ID is {message.user_id}." if message.user_id is not None else ""
+        return Reply(f"Only operators can run, pause, resume, or cancel acquisition; /status and /help are open to everyone.{identity}")

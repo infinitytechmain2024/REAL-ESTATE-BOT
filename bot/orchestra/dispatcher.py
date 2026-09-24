@@ -18,11 +18,11 @@ MAX_BACKOFF_SECONDS = 30.0
 
 
 class OrchestraDispatcher:
-    def __init__(self, store: PostgresOrchestraStore, *, lease_seconds: int = 30, poll_seconds: float = 1.0, notifier: Notifier | None = None) -> None:
+    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, notifier: Notifier | None = None) -> None:
         if not 10 <= lease_seconds <= 300 or not 0.1 <= poll_seconds <= 30:
             raise ValueError("unsafe dispatcher settings")
         self.store, self.lease_seconds, self.poll_seconds = store, lease_seconds, poll_seconds
-        self.notifier = notifier
+        self.notifier, self.operator_ids = notifier, operator_ids
         self._stop = asyncio.Event()
 
     async def enqueue(self, command: ConfirmedCommand) -> CommandReceipt:
@@ -33,6 +33,13 @@ class OrchestraDispatcher:
         item = await self.store.claim_next(lease_seconds=self.lease_seconds)
         if item is None:
             return False
+        if item.user_id not in self.operator_ids:
+            # Defence in depth: also rejects commands queued before the
+            # allowlist existed or by an operator who has since been removed.
+            log.warning("orchestra.not_operator", extra={"command_id": item.id, "user_id": item.user_id})
+            await self._fail(item, "not_operator", f"telegram user {item.user_id} is not an operator")
+            await self._notify(item.chat_id, f"Orchestra: request {item.id} was rejected; only operators can change acquisition state.")
+            return True
         await self._notify(item.chat_id, f"Orchestra: processing {item.command} request {item.id}.")
         try:
             result = await self._dispatch(item)
