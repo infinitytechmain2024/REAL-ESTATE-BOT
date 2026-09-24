@@ -223,6 +223,29 @@ services:
     read_only: true
     tmpfs: [/tmp]
 
+  analysis-pipeline:
+    # One-shot, DB-backed analysis worker. It only receives bounded evidence
+    # selected by deterministic filters before OpenRouter is called.
+    profiles: [analysis]
+    build:
+      context: .
+      dockerfile: docker/analysis-pipeline.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_ANALYSIS_MODEL: ${OPENROUTER_ANALYSIS_MODEL:-openai/gpt-4o-mini}
+      OPENROUTER_ANALYSIS_TIMEOUT_SECONDS: ${OPENROUTER_ANALYSIS_TIMEOUT_SECONDS:-30}
+      ANALYSIS_BATCH_SIZE: ${ANALYSIS_BATCH_SIZE:-10}
+      ANALYSIS_TELEGRAM_CHAT_ID: ${ANALYSIS_TELEGRAM_CHAT_ID:-}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
 volumes:
   postgres_data:
   redis_data:

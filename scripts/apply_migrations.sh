@@ -13,7 +13,7 @@ if [[ ! -f "$env_file" ]]; then
 fi
 
 compose=(docker compose --env-file "$env_file")
-for required in 001_init.sql 002_facebook.sql 003_orchestration.sql 004_telegram_control_plane.sql 005_orchestra_dispatcher.sql 006_openrouter_transcription.sql 007_live_view_sessions.sql; do
+for required in 001_init.sql 002_facebook.sql 003_orchestration.sql 004_telegram_control_plane.sql 005_orchestra_dispatcher.sql 006_openrouter_transcription.sql 007_live_view_sessions.sql 008_analysis_pipeline.sql; do
   [[ -f "bot/services/db/migrations/$required" ]] || {
     echo "Required migration is missing: $required" >&2
     exit 2
@@ -35,7 +35,8 @@ for migration_path in bot/services/db/migrations/001_init.sql \
                       bot/services/db/migrations/004_telegram_control_plane.sql \
                       bot/services/db/migrations/005_orchestra_dispatcher.sql \
                       bot/services/db/migrations/006_openrouter_transcription.sql \
-                      bot/services/db/migrations/007_live_view_sessions.sql; do
+                      bot/services/db/migrations/007_live_view_sessions.sql \
+                      bot/services/db/migrations/008_analysis_pipeline.sql; do
   migration="$(basename "$migration_path")"
   digest="$(checksum "$migration_path")"
   existing="$("${compose[@]}" exec -T postgres sh -ec \
