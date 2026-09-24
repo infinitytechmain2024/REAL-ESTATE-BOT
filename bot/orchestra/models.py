@@ -9,6 +9,7 @@ from enum import StrEnum
 class AcquisitionMethod(StrEnum):
     FACEBOOK_CONNECTOR = "facebook_connector"
     AGENT_REACH = "agent_ridge"
+    SCRAPLING = "scrapling"
 
 
 class CommandState(StrEnum):

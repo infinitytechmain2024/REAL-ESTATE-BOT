@@ -11,7 +11,7 @@ class CommandValidationError(ValueError):
     """The command is safe to reject without creating work."""
 
 
-_REACH_PLATFORMS = frozenset({"website", "instagram", "tiktok"})
+_REACH_PLATFORMS = frozenset({"instagram", "tiktok"})
 
 
 def _https_url(raw: str, *, platform: str) -> str:
@@ -44,13 +44,18 @@ def parse_run(arguments: str) -> RunRequest:
             targets=tuple(_https_url(target, platform="facebook") for target in raw_targets),
             vertical="both", method=AcquisitionMethod.FACEBOOK_CONNECTOR,
         )
-    if scope not in _REACH_PLATFORMS | {"facebook"} or len(raw_targets) != 1:
+    if scope not in _REACH_PLATFORMS | {"facebook", "website"} or len(raw_targets) != 1:
         raise CommandValidationError("use one explicit target for website, instagram, tiktok, or facebook fallback")
     if scope == "facebook":
         return RunRequest(
             platform="facebook", source_kind="website",
             targets=(_https_url(raw_targets[0], platform="facebook"),),
             vertical="both", method=AcquisitionMethod.AGENT_REACH,
+        )
+    if scope == "website":
+        return RunRequest(
+            platform="website", source_kind="website",
+            targets=(_https_url(raw_targets[0], platform="website"),), vertical="both", method=AcquisitionMethod.SCRAPLING,
         )
     return RunRequest(
         platform=scope, source_kind="website" if scope == "website" else "account",

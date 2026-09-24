@@ -145,7 +145,9 @@ class PostgresOrchestraStore:
         """
         async with self._pool().acquire() as conn, conn.transaction():
             await _set_actor(conn, actor)
-            profile_id = await self._ready_profile(conn, request.platform)
+            profile_id = None
+            if request.method.value != "scrapling":
+                profile_id = await self._ready_profile(conn, request.platform)
             source_ids = [await self._source(conn, request, target) for target in request.targets]
             if request.method.value == "facebook_connector":
                 batch_id = await conn.fetchval(
@@ -160,13 +162,20 @@ class PostgresOrchestraStore:
                     )
                 await conn.execute("update acquisition_batches set state='queued' where id=$1", batch_id)
                 result = {"status": "queued", "method": request.method.value, "batch_id": str(batch_id), "source_ids": source_ids, "max_groups": len(source_ids), "max_posts_per_group": 20, "browser_profile_id": profile_id}
-            else:
+            elif request.method.value == "agent_ridge":
                 run_id = await conn.fetchval(
                     """insert into acquisition_runs(source_id, browser_profile_id, acquisition_method, state, max_pages, max_runtime_seconds, allowed_skills)
                        values($1,$2,'agent_ridge','queued',5,120,'[\"read_public_page\",\"extract_public_text\"]'::jsonb) returning id""",
                     source_ids[0], profile_id,
                 )
                 result = {"status": "queued", "method": request.method.value, "run_id": str(run_id), "source_ids": source_ids, "max_pages": 5, "max_runtime_seconds": 120, "browser_profile_id": profile_id}
+            else:
+                run_id = await conn.fetchval(
+                    """insert into acquisition_runs(source_id, acquisition_method, state, max_pages, max_runtime_seconds, allowed_skills)
+                       values($1,'scrapling','queued',1,45,'[\"http_get\",\"scrapling_parse\"]'::jsonb) returning id""",
+                    source_ids[0],
+                )
+                result = {"status": "queued", "method": request.method.value, "run_id": str(run_id), "source_ids": source_ids, "max_pages": 1, "max_runtime_seconds": 45, "browser_profile_id": None}
             await _finish(conn, item, CommandState.FINISHED, result)
             return result
 

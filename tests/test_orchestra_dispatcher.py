@@ -73,7 +73,7 @@ def test_dedicated_collector_is_selected_only_for_facebook_groups() -> None:
     assert facebook.method.value == "facebook_connector"
     assert facebook.source_kind == "group"
     assert len(facebook.targets) == 2
-    assert website.method.value == "agent_ridge"
+    assert website.method.value == "scrapling"
     assert fallback.method.value == "agent_ridge"
 
 

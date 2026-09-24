@@ -5,6 +5,7 @@ WORKDIR /app
 RUN useradd --create-home --uid 10004 reach
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+COPY bot/acquisition/ ./bot/acquisition/
 COPY bot/agent_reach/ ./bot/agent_reach/
 # Reuse the narrow authenticated Browser Session Manager HTTP client. The
 # container command below remains the Agent Reach adapter, never the collector.

@@ -62,9 +62,11 @@ key. It supports:
 
 - `/run facebook-group(s) <https-url> [...]`: queues a 1–20 group Facebook
   batch using the dedicated connector.
-- `/run website|instagram|tiktok <https-url>` and `/run facebook <https-url>`:
-  queues a single Agent Reach-compatible run limited to five pages and 120
-  seconds.
+- `/run website <https-url>`: queues one HTTP-first Scrapling run limited to
+  one explicit page and 45 seconds. It has no browser profile or browser API
+  access.
+- `/run instagram|tiktok <https-url>` and `/run facebook <https-url>`: queue
+  a single Agent Reach-compatible run limited to five pages and 120 seconds.
 - `/pause source:<uuid>`, `/resume source:<uuid>`, and
   `/cancel batch:<uuid>|run:<uuid>|command:<uuid>|all`.
 
@@ -155,7 +157,7 @@ with no progress for `ORCHESTRA_STALE_BATCH_SECONDS` (900 by default), skips
 its remaining groups, and returns the profile to `ready`.
 
 This service is intentionally not a daemon and contains no Agent Ridge,
-Scrapling, analysis, or human-verification UI.
+analysis, or human-verification UI.
 
 ### Controlled Agent Reach adapter
 
@@ -180,6 +182,25 @@ AGENT_REACH_TASK_JSON='{"task_id":"task-1","platform":"website","targets":["http
 The JSON result is normalized for the later analysis pipeline. A future
 upstream integration must expose a read-only adapter compatible with this
 policy; flipping an environment variable cannot enable it.
+
+### Scrapling website connector
+
+The `scrapling-connector` Compose profile is the lightweight choice for a
+single ordinary public website. `/run website <https-url>` creates its bounded
+database run; an operator starts it explicitly with:
+
+```sh
+SCRAPLING_RUN_ID=<queued-run-uuid> docker compose --profile scrapling run --rm scrapling-connector
+```
+
+It makes exactly one HTTPS GET for the requested page, follows at most three
+validated HTTPS redirects, blocks local/private DNS and redirect targets,
+enforces a 20-second request / 45-second total budget and a 1.5 MB response
+cap, then uses `scrapling.Selector` only to parse the already-downloaded HTML.
+It does **not** use Scrapling fetchers, spiders, stealth tooling, browser
+features, link discovery, challenge bypassing, or browser profiles. Its output
+uses the same normalized public-page structure as controlled Agent Reach and
+is persisted as a normalized `collected_posts` record for later analysis.
 
 ---
 

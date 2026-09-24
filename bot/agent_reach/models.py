@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from enum import StrEnum
+
+from bot.acquisition.models import NormalizedPage
 
 
 class ReachPlatform(StrEnum):
@@ -36,18 +38,6 @@ class ReachTask:
     browser_profile_name: str
     browser_profile_state: str = "ready"
     allowed_skills: tuple[ReachSkill, ...] = (ReachSkill.READ_PUBLIC_PAGE, ReachSkill.EXTRACT_PUBLIC_TEXT)
-
-
-@dataclass(frozen=True)
-class NormalizedPage:
-    canonical_url: str
-    title: str
-    text: str
-    platform: str
-    source_type: str = "public_page"
-
-    def as_dict(self) -> dict[str, str]:
-        return asdict(self)
 
 
 @dataclass(frozen=True)

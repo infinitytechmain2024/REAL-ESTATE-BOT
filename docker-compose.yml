@@ -183,6 +183,29 @@ services:
     read_only: true
     tmpfs: [/tmp]
 
+  scrapling-connector:
+    # One-shot HTTP-first public website reader. It has no browser profile,
+    # browser API token, shell tool, or crawler capability.
+    profiles: [scrapling]
+    build:
+      context: .
+      dockerfile: docker/scrapling-connector.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      SCRAPLING_RUN_ID: ${SCRAPLING_RUN_ID:-}
+      SCRAPLING_CONNECTOR_MAX_RUNTIME_SECONDS: ${SCRAPLING_CONNECTOR_MAX_RUNTIME_SECONDS:-45}
+      SCRAPLING_CONNECTOR_REQUEST_TIMEOUT_SECONDS: ${SCRAPLING_CONNECTOR_REQUEST_TIMEOUT_SECONDS:-20}
+      SCRAPLING_CONNECTOR_MAX_CONTENT_BYTES: ${SCRAPLING_CONNECTOR_MAX_CONTENT_BYTES:-1500000}
+      SCRAPLING_CONNECTOR_MAX_CONTENT_CHARS: ${SCRAPLING_CONNECTOR_MAX_CONTENT_CHARS:-120000}
+      SCRAPLING_CONNECTOR_USER_AGENT: ${SCRAPLING_CONNECTOR_USER_AGENT:-RealEstateResearchBot/0.1}
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
 volumes:
   postgres_data:
   redis_data:
