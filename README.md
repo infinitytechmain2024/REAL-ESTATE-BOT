@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`006_openrouter_transcription.sql` in order. It records SHA-256 checksums in
+`007_live_view_sessions.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -114,10 +114,45 @@ A group counts as inaccessible only when no posts were read and the page says
 so; joined private groups are read normally. Each snapshot waits (bounded) for
 Facebook's feed to render and scrolls it three times before extracting posts.
 
-#### Logging a profile in, and clearing checkpoints
+#### Logging a profile in, and clearing checkpoints, from Telegram
 
 A new profile is logged out, and a checkpoint puts it in
-`human_verification_required`. Both are fixed by hand in the real browser:
+`human_verification_required`. Both are fixed by a human in the real browser,
+and the bot brings that browser to the operator's phone:
+
+- `/login` (or `/login facebook <profile-name>`) in a private chat with the
+  bot creates the profile if needed and answers with three buttons.
+- When a collector hits a checkpoint, the bot sends the same message to every
+  operator on its own, within `LIVE_VIEW_POLL_SECONDS`. A request nobody opens
+  lapses after `LIVE_VIEW_REQUEST_MINUTES` and is sent again.
+- **Open browser** is a Telegram Mini App. Telegram signs the operator's
+  identity into it; the gate (`bot/control_plane/live_view.py`) checks that
+  signature and `TELEGRAM_OPERATOR_IDS`, then has the browser service open the
+  profile under the collectors' lease and start noVNC with a one-time
+  password. Only that operator's session gets through; a forwarded message
+  opens nothing. The window closes after `LIVE_VIEW_OPEN_MINUTES`.
+- Log in, enter the SMS or authenticator code, or pass the check by hand, then
+  press **Done, I am logged in**: the window closes, the login is saved in the
+  profile, the profile becomes `ready`, open `facebook_challenge` jobs are
+  resolved and held sources become `active`. **Close** leaves everything as it
+  was. The bot never types, clicks or solves anything in that window.
+
+There is one virtual display, so the window refuses to open while a collector
+is running. Every session is recorded in `live_view_sessions` (migration 007).
+
+It needs a public HTTPS name for the VPS. No domain purchase is needed:
+`<ip-with-dashes>.sslip.io` resolves to the IP. In `.env`:
+
+```sh
+LIVE_VIEW_DOMAIN=203-0-113-7.sslip.io
+LIVE_VIEW_PUBLIC_URL=https://203-0-113-7.sslip.io
+LIVE_VIEW_BIND=0.0.0.0     # publish Caddy's 80/443; loopback by default
+```
+
+Ports 80 and 443 must be open in the VPS firewall. Caddy obtains the
+certificate and serves only `/live/*`; everything else is 404.
+
+The terminal route below still works when Telegram is not an option:
 
 ```sh
 bash scripts/browser_login.sh facebook facebook-main

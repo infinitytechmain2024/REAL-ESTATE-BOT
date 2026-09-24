@@ -330,6 +330,16 @@ class BrowserSessionManager:
     def _touch(self, profile_id: str) -> None:
         self._last_used[profile_id] = time.monotonic()
 
+    def touch(self, handle: SessionHandle) -> None:
+        """Keep a session a human is driving from being released as idle."""
+        owned = self._sessions.get(handle.profile_id)
+        if not owned or owned[0].token != handle.token:
+            raise PermissionError("session token does not own this profile")
+        self._touch(handle.profile_id)
+
+    def active_profiles(self) -> frozenset[str]:
+        return frozenset(self._sessions)
+
     async def _renew_forever(self, handle: SessionHandle) -> None:
         try:
             while True:

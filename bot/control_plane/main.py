@@ -6,12 +6,25 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher, Router
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    WebAppInfo,
+)
+from aiohttp import web
 
-from bot.control_plane.models import CommandEnvelope, IncomingMessage
+from bot.control_plane.live_view import (
+    BrowserLiveClient,
+    LiveViewConfig,
+    LiveViewCoordinator,
+    create_gate_app,
+)
+from bot.control_plane.models import CommandEnvelope, IncomingMessage, Reply
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
-from bot.control_plane.store import PostgresControlPlaneStore
+from bot.control_plane.store import PostgresControlPlaneStore, PostgresLiveViewStore
 from bot.control_plane.stt import OpenRouterTranscriber
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import ConfirmedCommand
@@ -20,6 +33,18 @@ from bot.orchestra.store import PostgresOrchestraStore
 
 def _incoming(message: Message) -> IncomingMessage:
     return IncomingMessage(chat_id=message.chat.id, user_id=message.from_user.id if message.from_user else None, message_id=message.message_id, text=message.text, voice_file_id=message.voice.file_id if message.voice else None, voice_size=message.voice.file_size if message.voice else None, voice_duration_seconds=message.voice.duration if message.voice else None)
+
+
+def _markup(reply: Reply) -> InlineKeyboardMarkup | None:
+    if not reply.buttons:
+        return None
+    rows = [
+        [InlineKeyboardButton(text=b.text, web_app=WebAppInfo(url=b.web_app_url))]
+        if b.web_app_url
+        else [InlineKeyboardButton(text=b.text, callback_data=b.callback_data)]
+        for b in reply.buttons
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def run() -> None:
@@ -59,8 +84,32 @@ async def run() -> None:
         )
     else:
         logging.getLogger(__name__).warning("telegram.control.stt_disabled", extra={"hint": "set OPENROUTER_API_KEY; voice messages are refused"})
-    control = ControlPlane(settings, store, transcriber, enqueue)
+    async def send(chat_id: int, reply: Reply) -> None:
+        await bot.send_message(chat_id, reply.text, reply_markup=_markup(reply))
+
+    browser = BrowserLiveClient(settings.browser_session_url, settings.browser_session_api_token)
+    live = LiveViewCoordinator(
+        PostgresLiveViewStore(store),
+        browser,
+        LiveViewConfig(
+            public_url=settings.live_view_public_url,
+            operator_ids=settings.operator_user_ids,
+            open_minutes=settings.live_view_open_minutes,
+            request_minutes=settings.live_view_request_minutes,
+        ),
+        notifier=send,
+    )
+    if not live.enabled:
+        logging.getLogger(__name__).warning("telegram.control.live_view_disabled", extra={"hint": "set LIVE_VIEW_PUBLIC_URL to an https:// origin"})
+    control = ControlPlane(settings, store, transcriber, enqueue, live)
     router = Router(name="control-plane")
+
+    @router.callback_query()
+    async def button(query: CallbackQuery) -> None:
+        reply = await control.handle_callback(query.from_user.id if query.from_user else None, query.data or "")
+        await query.answer()
+        if query.message is not None:
+            await bot.send_message(query.message.chat.id, reply.text, reply_markup=_markup(reply))
 
     @router.message(lambda message: bool(message.voice))
     async def voice(message: Message) -> None:
@@ -74,22 +123,32 @@ async def run() -> None:
 
         reply = await control.handle_voice(_incoming(message), download)
         if reply:
-            await message.answer(reply.text)
+            await message.answer(reply.text, reply_markup=_markup(reply))
 
     @router.message()
     async def text(message: Message) -> None:
         reply = await control.handle_text(_incoming(message))
         if reply:
-            await message.answer(reply.text)
+            await message.answer(reply.text, reply_markup=_markup(reply))
 
     # Replies intentionally use Telegram's plain-text default: transcribed
     # speech is untrusted user content and must not be parsed as HTML.
     telegram_dispatcher = Dispatcher()
     telegram_dispatcher.include_router(router)
     dispatcher_task = asyncio.create_task(orchestra.run_forever(), name="orchestra-dispatcher")
+    # The gate listens on the private Docker network; Caddy is its only public front.
+    gate = web.AppRunner(create_gate_app(live, settings.telegram_token, settings.novnc_url))
+    await gate.setup()
+    await web.TCPSite(gate, "0.0.0.0", settings.live_view_port).start()
+    watcher_stop = asyncio.Event()
+    watcher_task = asyncio.create_task(live.run_forever(settings.live_view_poll_seconds, watcher_stop), name="live-view-watcher")
     try:
-        await telegram_dispatcher.start_polling(bot, allowed_updates=["message"])
+        await telegram_dispatcher.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
+        watcher_stop.set()
+        await watcher_task
+        await gate.cleanup()
+        await browser.aclose()
         orchestra.stop()
         await dispatcher_task
         await orchestra_store.close()

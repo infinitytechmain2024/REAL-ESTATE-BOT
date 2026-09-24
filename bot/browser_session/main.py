@@ -7,13 +7,15 @@ from pathlib import Path
 import redis.asyncio as redis
 from aiohttp import web
 
+from .live import LiveViewController, LiveViewError
 from .manager import BrowserSessionManager, ProfileUnavailableError, SessionBusyError
 from .models import BrowserProfileStatus, ProfileRequest, SessionHandle
 from .settings import BrowserSessionSettings
 
 
-def create_app(manager: BrowserSessionManager, token: str) -> web.Application:
+def create_app(manager: BrowserSessionManager, token: str, live: LiveViewController | None = None) -> web.Application:
     app = web.Application()
+    live = live or LiveViewController(manager)
 
     @web.middleware
     async def auth(request: web.Request, handler: web.Handler) -> web.StreamResponse:
@@ -65,12 +67,40 @@ def create_app(manager: BrowserSessionManager, token: str) -> web.Application:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         return web.json_response(result)
 
+    async def live_start(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            result = await live.start(
+                ProfileRequest(body["profile_id"], body.get("profile_name", body["profile_id"]), body["platform"]),
+                body["url"],
+                int(body.get("minutes", 20)),
+            )
+        except (LiveViewError, SessionBusyError) as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        except (KeyError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.json_response(result)
+
+    async def live_stop(request: web.Request) -> web.Response:
+        body = await request.json() if request.can_read_body else {}
+        return web.json_response({"closed": await live.stop(body.get("profile_id"))})
+
+    async def live_status(_: web.Request) -> web.Response:
+        return web.json_response(live.status())
+
+    async def shutdown(_: web.Application) -> None:
+        await live.stop()
+        await manager.close()
+
     app.router.add_get("/healthz", health)
+    app.router.add_post("/v1/live", live_start)
+    app.router.add_delete("/v1/live", live_stop)
+    app.router.add_get("/v1/live", live_status)
     app.router.add_post("/v1/sessions", acquire)
     app.router.add_delete("/v1/sessions", release)
     app.router.add_post("/v1/sessions/screenshot", screenshot)
     app.router.add_post("/v1/sessions/snapshot", snapshot)
-    app.on_shutdown.append(lambda _: manager.close())
+    app.on_shutdown.append(shutdown)
     return app
 
 
