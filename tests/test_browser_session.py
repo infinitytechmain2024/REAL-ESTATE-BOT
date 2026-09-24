@@ -54,15 +54,37 @@ class FakeRedis:
         return True
 
 
+class FakeMouse:
+    def __init__(self) -> None:
+        self.scrolls = 0
+
+    async def wheel(self, _x: int, _y: int) -> None:
+        self.scrolls += 1
+
+
 class FakePage:
     def __init__(self) -> None:
         self.url = ""
+        self.mouse = FakeMouse()
+        self.active_navigations = 0
+        self.max_parallel_navigations = 0
+        self.navigation_delay = 0.0
+
+    async def wait_for_selector(self, _selector: str, *, timeout: int) -> None:
+        return None
+
+    async def wait_for_timeout(self, _ms: int) -> None:
+        return None
 
     async def screenshot(self, *, path: str, full_page: bool) -> None:
         Path(path).write_bytes(b"fake-png")
 
     async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.active_navigations += 1
+        self.max_parallel_navigations = max(self.max_parallel_navigations, self.active_navigations)
+        await asyncio.sleep(self.navigation_delay)
         self.url = url
+        self.active_navigations -= 1
 
     async def evaluate(self, _: str) -> dict[str, object]:
         return {"url": self.url, "title": "Facebook", "text": "", "posts": []}
@@ -198,3 +220,69 @@ async def test_invalid_state_and_path_are_rejected(manager: BrowserSessionManage
         await manager.acquire(profile_request, persisted_state="quarantined")
     with pytest.raises(ValueError):
         await manager.acquire(ProfileRequest("../escape", "x", "facebook"))
+
+
+@pytest.mark.asyncio
+async def test_a_silent_caller_loses_the_profile_after_the_idle_window(tmp_path: Path, profile_request: ProfileRequest) -> None:
+    browsers: list[FakeBrowser] = []
+
+    async def launch(_: Path) -> FakeBrowser:
+        browsers.append(FakeBrowser())
+        return browsers[-1]
+
+    manager = BrowserSessionManager(
+        FakeRedis(), profile_root=tmp_path / "profiles", screenshot_root=tmp_path / "shots",
+        lease_seconds=30, renew_seconds=0.05, idle_seconds=0.15, launcher=launch,  # type: ignore[arg-type]
+    )
+    await manager.acquire(profile_request)
+    await asyncio.sleep(0.5)
+    assert browsers[0].closed
+    second = await manager.acquire(profile_request)
+    await manager.release(second)
+
+
+@pytest.mark.asyncio
+async def test_an_active_caller_keeps_its_session(tmp_path: Path, profile_request: ProfileRequest) -> None:
+    async def launch(_: Path) -> FakeBrowser:
+        return FakeBrowser()
+
+    manager = BrowserSessionManager(
+        FakeRedis(), profile_root=tmp_path / "profiles", screenshot_root=tmp_path / "shots",
+        lease_seconds=30, renew_seconds=0.05, idle_seconds=0.3, launcher=launch,  # type: ignore[arg-type]
+    )
+    handle = await manager.acquire(profile_request)
+    for _ in range(6):
+        await asyncio.sleep(0.1)
+        await manager.snapshot(handle, "https://www.facebook.com/groups/a", timeout_ms=1_000)
+    await manager.release(handle)
+
+
+@pytest.mark.asyncio
+async def test_snapshots_on_one_profile_never_navigate_in_parallel(manager: BrowserSessionManager, profile_request: ProfileRequest) -> None:
+    handle = await manager.acquire(profile_request)
+    page = manager._sessions[profile_request.profile_id][2].pages[0]
+    page.navigation_delay = 0.05
+    await asyncio.gather(*(
+        manager.snapshot(handle, f"https://www.facebook.com/groups/{n}", timeout_ms=1_000) for n in range(3)
+    ))
+    assert page.max_parallel_navigations == 1
+    await manager.release(handle)
+
+
+@pytest.mark.asyncio
+async def test_facebook_snapshots_wait_for_the_feed_and_tolerate_an_empty_one(manager: BrowserSessionManager, profile_request: ProfileRequest) -> None:
+    handle = await manager.acquire(profile_request)
+    page = manager._sessions[profile_request.profile_id][2].pages[0]
+    await manager.snapshot(handle, "https://www.facebook.com/groups/a", timeout_ms=1_000)
+    assert page.mouse.scrolls == 3
+
+    class TimeoutError(Exception):
+        pass
+
+    async def no_feed(_selector: str, *, timeout: int) -> None:
+        raise TimeoutError("no articles")
+
+    page.wait_for_selector = no_feed
+    assert (await manager.snapshot(handle, "https://www.facebook.com/groups/b", timeout_ms=1_000))["url"].endswith("/b")
+    assert page.mouse.scrolls == 3
+    await manager.release(handle)

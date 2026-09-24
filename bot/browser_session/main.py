@@ -82,6 +82,7 @@ def run() -> None:
         screenshot_root=settings.screenshot_root,
         lease_seconds=settings.lease_seconds,
         renew_seconds=settings.lease_renew_seconds,
+        idle_seconds=settings.idle_seconds,
     )
     web.run_app(create_app(manager, settings.api_token), host=settings.api_host, port=settings.api_port)
 

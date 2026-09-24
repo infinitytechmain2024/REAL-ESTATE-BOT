@@ -7,6 +7,12 @@ from typing import Any
 
 import aiohttp
 
+# The Browser Session Manager caps navigation at 60 s, then may wait up to
+# ~15 s for Facebook's feed to render and extract it. The HTTP request for a
+# snapshot must outlive both, or the client gives up while the page still loads.
+MAX_NAVIGATION_SECONDS = 60
+SNAPSHOT_OVERHEAD_SECONDS = 25
+
 
 @dataclass(frozen=True)
 class BrowserLease:
@@ -30,7 +36,7 @@ class BrowserSessionClient:
     async def snapshot(self, lease: BrowserLease, url: str, timeout_ms: int) -> dict[str, Any]:
         return await self._request("POST", "/v1/sessions/snapshot", {
             "profile_id": lease.profile_id, "session_token": lease.token, "url": url, "timeout_ms": timeout_ms,
-        })
+        }, timeout_seconds=timeout_ms / 1000 + SNAPSHOT_OVERHEAD_SECONDS)
 
     async def screenshot(self, lease: BrowserLease) -> bytes:
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
@@ -52,8 +58,8 @@ class BrowserSessionClient:
         except aiohttp.ClientError:
             return False
 
-    async def _request(self, method: str, path: str, payload: dict[str, Any] | None, *, authenticated: bool = True) -> dict[str, Any]:
-        timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+    async def _request(self, method: str, path: str, payload: dict[str, Any] | None, *, authenticated: bool = True, timeout_seconds: float | None = None) -> dict[str, Any]:
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds or self.timeout_seconds)
         headers = self.headers if authenticated else None
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session, session.request(method, f"{self.base_url}{path}", json=payload) as response:
             response.raise_for_status()

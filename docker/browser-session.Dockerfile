@@ -2,6 +2,11 @@ FROM mcr.microsoft.com/playwright/python:v1.63.0-noble
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 DISPLAY=:99
 WORKDIR /app
+# x11vnc and noVNC run only during an operator login session
+# (bot/browser_session/interactive.py); nothing listens otherwise.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y x11vnc novnc websockify \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 10002 browseruser \
     && mkdir -p /profiles /screenshots \
     && chown -R browseruser:browseruser /app /profiles /screenshots

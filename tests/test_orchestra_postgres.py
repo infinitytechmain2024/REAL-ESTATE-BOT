@@ -148,3 +148,33 @@ async def test_lifecycle_changes_are_attributed_to_the_telegram_user(store: Post
         "select distinct actor from orchestration_audit_log where entity_type in ('monitoring_sources', 'orchestration_commands')"
     )
     assert {row["actor"] for row in actors} <= {"telegram:42", "orchestra:dispatcher"}
+
+
+@pytest.mark.asyncio
+async def test_a_batch_whose_collector_died_is_failed_and_frees_the_profile(store: PostgresOrchestraStore) -> None:
+    operator, pool = Operator(store), _pool(store)
+    await operator.send("run", f"facebook-groups {GROUP} {GROUP}/two")
+    batch_id = await pool.fetchval("select id from acquisition_batches")
+    collector = PostgresCollectorStore(pool)
+    plan = await collector.load_plan(str(batch_id))
+    batch_run = await collector.start(plan)
+    await collector.start_item(plan.items[0], batch_run, plan.browser_profile_id, max_runtime_seconds=30)
+
+    assert await store.reap_stale_batches(stale_seconds=600) == []
+    # Simulate ten minutes of silence (the trigger stamps updated_at, so disable it).
+    await pool.execute(
+        """alter table batch_runs disable trigger user; alter table acquisition_batch_items disable trigger user;
+           alter table acquisition_runs disable trigger user;
+           update batch_runs set updated_at = now() - interval '11 minutes';
+           update acquisition_batch_items set updated_at = now() - interval '11 minutes';
+           update acquisition_runs set updated_at = now() - interval '11 minutes';
+           alter table batch_runs enable trigger user; alter table acquisition_batch_items enable trigger user;
+           alter table acquisition_runs enable trigger user;"""
+    )
+    assert await store.reap_stale_batches(stale_seconds=600) == [str(batch_id)]
+    assert await pool.fetchval("select state from acquisition_batches") == "failed"
+    assert await pool.fetchval("select state from batch_runs") == "failed"
+    assert await pool.fetchval("select state from acquisition_batch_items where sequence_no = 1") == "failed"
+    assert await pool.fetchval("select state from acquisition_batch_items where sequence_no = 2") == "skipped"
+    assert await pool.fetchval("select state from browser_profiles") == "ready"
+    assert "queued Facebook batch" in await operator.send("run", "facebook-groups https://www.facebook.com/groups/next")

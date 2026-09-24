@@ -27,6 +27,7 @@ class FakeStore:
         self.requests: list[object] = []
         self.lifecycle: list[tuple[str, str, str]] = []
         self.reclaimed = 0
+        self.reaped: list[int] = []
 
     async def enqueue(self, command: ConfirmedCommand) -> CommandReceipt:
         return CommandReceipt("command-1", CommandState.QUEUED)
@@ -34,6 +35,10 @@ class FakeStore:
     async def reclaim_expired(self) -> int:
         self.reclaimed += 1
         return 0
+
+    async def reap_stale_batches(self, *, stale_seconds: int) -> list[str]:
+        self.reaped.append(stale_seconds)
+        return []
 
     async def claim_next(self, *, lease_seconds: int) -> ClaimedCommand | None:
         return self.items.pop(0) if self.items else None
@@ -184,3 +189,12 @@ async def test_commands_from_non_operators_are_rejected_before_dispatch() -> Non
     assert store.lifecycle == [] and store.requests == []
     assert store.completed[0][1] is CommandState.FAILED and store.completed[0][3] == "not_operator"
     assert "only operators" in notices[-1]
+
+
+@pytest.mark.asyncio
+async def test_stale_batches_are_reaped_at_most_once_a_minute() -> None:
+    store = FakeStore([])
+    dispatcher = OrchestraDispatcher(store, operator_ids=OPERATORS, stale_batch_seconds=600)  # type: ignore[arg-type]
+    for _ in range(3):
+        await dispatcher.process_once()
+    assert store.reaped == [600]

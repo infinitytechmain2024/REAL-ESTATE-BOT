@@ -39,6 +39,7 @@ async def run() -> None:
         operator_ids=settings.operator_user_ids,
         lease_seconds=settings.orchestra_command_lease_seconds,
         poll_seconds=settings.orchestra_poll_seconds,
+        stale_batch_seconds=settings.orchestra_stale_batch_seconds,
         notifier=notify,
     )
 

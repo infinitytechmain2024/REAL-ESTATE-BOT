@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
+from aiohttp import web
 
-from bot.facebook_collector.browser import BrowserLease
+from bot.browser_session.main import create_app
+from bot.browser_session.manager import BrowserSessionManager
+from bot.facebook_collector.browser import (
+    MAX_NAVIGATION_SECONDS,
+    SNAPSHOT_OVERHEAD_SECONDS,
+    BrowserLease,
+    BrowserSessionClient,
+)
 from bot.facebook_collector.challenges import detect_challenge
 from bot.facebook_collector.collector import FacebookBatchCollector
 from bot.facebook_collector.models import (
@@ -18,7 +27,12 @@ from bot.facebook_collector.models import (
     GroupRead,
     GroupState,
 )
-from bot.facebook_collector.reader import FacebookGroupReader, canonical_post_url
+from bot.facebook_collector.reader import (
+    FacebookGroupReader,
+    canonical_post_url,
+    navigation_timeout_ms,
+)
+from bot.facebook_collector.settings import FacebookCollectorSettings
 
 
 @dataclass
@@ -157,3 +171,103 @@ async def test_operator_cancellation_stops_before_the_next_group_and_frees_the_p
     assert reader.urls == ["https://www.facebook.com/groups/1"]
     assert store.events[-1] == ("batch_finish", "cancelled", "operator_cancelled")
     assert browser.events[-1] == ("release", "profile", "READY")
+
+
+@pytest.mark.asyncio
+async def test_a_joined_private_group_with_posts_is_active_not_inaccessible() -> None:
+    class Browser:
+        def __init__(self, posts: list[dict[str, str]]) -> None:
+            self.posts = posts
+
+        async def snapshot(self, *_: object) -> dict[str, object]:
+            return {"url": "https://www.facebook.com/groups/a", "text": "Private group · 12K members", "posts": self.posts}
+
+    lease, url = BrowserLease("p", "t"), "https://www.facebook.com/groups/a"
+    member = await FacebookGroupReader(Browser([{"url": f"{url}/posts/1", "text": "flat"}]), max_posts=20, timeout_seconds=90).read(lease, url)  # type: ignore[arg-type]
+    outsider = await FacebookGroupReader(Browser([]), max_posts=20, timeout_seconds=90).read(lease, url)  # type: ignore[arg-type]
+    assert member.state is GroupState.ACTIVE and len(member.posts) == 1
+    assert outsider.state is GroupState.INACCESSIBLE
+
+
+def test_navigation_budget_fits_the_manager_cap_and_the_group_timeout() -> None:
+    for group_timeout in (35, 60, 90, 600):
+        navigation = navigation_timeout_ms(group_timeout) / 1000
+        assert 5 <= navigation <= MAX_NAVIGATION_SECONDS
+        assert navigation + SNAPSHOT_OVERHEAD_SECONDS <= group_timeout
+
+
+def test_collector_tunables_are_read_from_prefixed_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("BROWSER_SESSION_API_TOKEN", "t" * 32)
+    monkeypatch.setenv("FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS", "50")
+    monkeypatch.setenv("FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP", "5")
+    settings = FacebookCollectorSettings(_env_file=None)  # type: ignore[call-arg]
+    assert (settings.group_timeout_seconds, settings.max_posts_per_group) == (50, 5)
+    assert settings.database_url == "postgresql://example"
+
+
+@pytest.mark.asyncio
+async def test_default_settings_read_a_group_through_the_real_session_api(tmp_path: Path) -> None:
+    """The reader, HTTP client and aiohttp app together, with only Chromium faked."""
+    class Page:
+        url = ""
+
+        class mouse:
+            @staticmethod
+            async def wheel(_x: int, _y: int) -> None:
+                return None
+
+        async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+            assert timeout <= 60_000
+            self.url = url
+
+        async def wait_for_selector(self, _selector: str, *, timeout: int) -> None:
+            return None
+
+        async def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+        async def evaluate(self, _script: str) -> dict[str, object]:
+            return {"url": self.url, "title": "Group", "text": "Private group", "posts": [{"url": f"{self.url}/posts/7/", "text": "flat for sale"}]}
+
+    class Context:
+        def __init__(self) -> None:
+            self.pages = [Page()]
+
+        async def close(self) -> None:
+            return None
+
+    class Redis:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+
+        async def set(self, name: str, value: str, *, nx: bool, ex: int) -> bool:
+            return self.values.setdefault(name, value) == value
+
+        async def get(self, name: str) -> str | None:
+            return self.values.get(name)
+
+        async def eval(self, *_: object) -> int:
+            return 1
+
+        async def ping(self) -> bool:
+            return True
+
+    async def launch(_: Path) -> Context:
+        return Context()
+
+    manager = BrowserSessionManager(Redis(), profile_root=tmp_path / "p", screenshot_root=tmp_path / "s", launcher=launch)  # type: ignore[arg-type]
+    runner = web.AppRunner(create_app(manager, "t" * 32))
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+    try:
+        client = BrowserSessionClient(f"http://127.0.0.1:{port}", "t" * 32)
+        lease = await client.acquire("fb-profile", "fb", "ready")
+        result = await FacebookGroupReader(client, max_posts=15, timeout_seconds=90).read(lease, "https://www.facebook.com/groups/a")
+        await client.release(lease)
+    finally:
+        await runner.cleanup()
+    assert result.state is GroupState.ACTIVE
+    assert [post.canonical_url for post in result.posts] == ["https://www.facebook.com/groups/a/posts/7"]

@@ -215,6 +215,58 @@ class PostgresOrchestraStore:
             return result
 
 
+    async def reap_stale_batches(self, *, stale_seconds: int) -> list[str]:
+        """Fail batches whose collector stopped reporting, and free their profile.
+
+        A live collector touches its batch run or items at least once per
+        group (at most ~2 minutes apart), so silence for ``stale_seconds`` means
+        the worker died. A challenge is always recorded before the collector
+        exits, so a profile still ``in_use`` here was not challenged.
+        """
+        async with self._pool().acquire() as conn, conn.transaction():
+            await _set_actor(conn, DISPATCHER_ACTOR)
+            stale = await conn.fetch(
+                """select r.id, r.batch_id, r.browser_profile_id
+                     from batch_runs r
+                    where r.state = 'running'
+                      and greatest(
+                            r.updated_at,
+                            coalesce((select max(i.updated_at) from acquisition_batch_items i where i.batch_id = r.batch_id), r.updated_at),
+                            coalesce((select max(a.updated_at) from acquisition_runs a where a.batch_run_id = r.id), r.updated_at)
+                          ) < now() - ($1 * interval '1 second')
+                    for update of r skip locked""",
+                stale_seconds,
+            )
+            for row in stale:
+                await conn.execute(
+                    "update acquisition_runs set state='failed', finished_at=now(), error_code='collector_lost' where batch_run_id=$1 and state='running'",
+                    row["id"],
+                )
+                await conn.execute(
+                    "update acquisition_batch_items set state='failed', finished_at=now(), last_error_code='collector_lost' where batch_id=$1 and state='running'",
+                    row["batch_id"],
+                )
+                await conn.execute(
+                    "update acquisition_batch_items set state='skipped', last_error_code='collector_lost' where batch_id=$1 and state='queued'",
+                    row["batch_id"],
+                )
+                await conn.execute(
+                    "update batch_runs set state='failed', finished_at=now(), stop_reason='collector_lost' where id=$1 and state='running'",
+                    row["id"],
+                )
+                await conn.execute(
+                    "update acquisition_batches set state='failed', finished_at=now() where id=$1 and state='running'",
+                    row["batch_id"],
+                )
+                if row["browser_profile_id"] is not None:
+                    await conn.execute(
+                        """update browser_profiles set state='ready' where id=$1 and state='in_use'
+                             and not exists (select 1 from batch_runs other where other.browser_profile_id=$1 and other.state='running')""",
+                        row["browser_profile_id"],
+                    )
+            return [str(row["batch_id"]) for row in stale]
+
+
 async def _set_actor(conn: asyncpg.Connection[asyncpg.Record], actor: str) -> None:
     """Attribute every audit row written by this transaction."""
     await conn.execute("select set_config('app.actor', $1, true)", actor)

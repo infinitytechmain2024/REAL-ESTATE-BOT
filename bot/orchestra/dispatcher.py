@@ -15,12 +15,15 @@ from .store import PostgresOrchestraStore
 log = logging.getLogger(__name__)
 Notifier = Callable[[int, str], Awaitable[None]]
 MAX_BACKOFF_SECONDS = 30.0
+REAP_INTERVAL_SECONDS = 60.0
 
 
 class OrchestraDispatcher:
-    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, notifier: Notifier | None = None) -> None:
-        if not 10 <= lease_seconds <= 300 or not 0.1 <= poll_seconds <= 30:
+    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, stale_batch_seconds: int = 900, notifier: Notifier | None = None) -> None:
+        if not 10 <= lease_seconds <= 300 or not 0.1 <= poll_seconds <= 30 or not 300 <= stale_batch_seconds <= 86_400:
             raise ValueError("unsafe dispatcher settings")
+        self.stale_batch_seconds = stale_batch_seconds
+        self._last_reap = float("-inf")
         self.store, self.lease_seconds, self.poll_seconds = store, lease_seconds, poll_seconds
         self.notifier, self.operator_ids = notifier, operator_ids
         self._stop = asyncio.Event()
@@ -28,7 +31,16 @@ class OrchestraDispatcher:
     async def enqueue(self, command: ConfirmedCommand) -> CommandReceipt:
         return await self.store.enqueue(command)
 
+    async def reap_if_due(self) -> None:
+        now = asyncio.get_running_loop().time()
+        if now - self._last_reap < REAP_INTERVAL_SECONDS:
+            return
+        self._last_reap = now
+        for batch_id in await self.store.reap_stale_batches(stale_seconds=self.stale_batch_seconds):
+            log.warning("orchestra.stale_batch_failed", extra={"batch_id": batch_id})
+
     async def process_once(self) -> bool:
+        await self.reap_if_due()
         await self.store.reclaim_expired()
         item = await self.store.claim_next(lease_seconds=self.lease_seconds)
         if item is None:

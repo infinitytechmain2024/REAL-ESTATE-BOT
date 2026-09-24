@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import ipaddress
+import logging
 import os
 import socket
 import time
@@ -15,6 +16,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .models import BrowserProfileStatus, ProfileRequest, ProfileStatus, SessionHandle
+
+log = logging.getLogger(__name__)
+MAX_NAVIGATION_MS = 60_000
+# Facebook renders its feed after DOMContentLoaded. These bound the extra time
+# a snapshot may spend waiting for posts; callers budget for them (see the
+# collector's SNAPSHOT_OVERHEAD_SECONDS).
+FEED_WAIT_MS = 10_000
+FEED_SCROLLS = 3
+FEED_SCROLL_PAUSE_MS = 1_500
 
 
 class RedisLease(Protocol):
@@ -80,17 +90,27 @@ class BrowserSessionManager:
         screenshot_root: Path,
         lease_seconds: int = 120,
         renew_seconds: int = 30,
+        idle_seconds: int = 300,
         launcher: BrowserLauncher | None = None,
         state_changed: Callable[[str, BrowserProfileStatus], Awaitable[None]] | None = None,
     ) -> None:
         if renew_seconds >= lease_seconds:
             raise ValueError("renew_seconds must be shorter than lease_seconds")
+        if idle_seconds <= renew_seconds:
+            raise ValueError("idle_seconds must be longer than renew_seconds")
         self.redis, self.profile_root, self.screenshot_root = redis, profile_root, screenshot_root
-        self.lease_seconds, self.renew_seconds = lease_seconds, renew_seconds
+        self.lease_seconds, self.renew_seconds, self.idle_seconds = lease_seconds, renew_seconds, idle_seconds
         self.launcher = launcher or self._playwright_launcher
         self.state_changed = state_changed
         self._sessions: dict[str, tuple[SessionHandle, int, Any, asyncio.Task[None]]] = {}
         self._platforms: dict[str, str] = {}
+        # A crashed caller never releases; renewal stops once a session has
+        # been idle this long, so the profile cannot stay locked indefinitely.
+        self._last_used: dict[str, float] = {}
+        # One navigation at a time per profile: a caller that gave up on a slow
+        # snapshot must not have its page reused mid-load by the next request.
+        self._page_locks: dict[str, asyncio.Lock] = {}
+        self._background: set[asyncio.Task[None]] = set()  # keep idle releases alive until done
         self._closing = False
 
     @staticmethod
@@ -138,6 +158,8 @@ class BrowserSessionManager:
             renewal = asyncio.create_task(self._renew_forever(handle), name=f"browser-lease-{request.profile_id}")
             self._sessions[request.profile_id] = (handle, fd, browser, renewal)
             self._platforms[request.profile_id] = request.platform
+            self._last_used[request.profile_id] = time.monotonic()
+            self._page_locks[request.profile_id] = asyncio.Lock()
             await self._report(request.profile_id, BrowserProfileStatus.IN_USE)
             return handle
         except BaseException:
@@ -152,6 +174,8 @@ class BrowserSessionManager:
             raise PermissionError("session token does not own this profile")
         _, fd, browser, renewal = self._sessions.pop(handle.profile_id)
         self._platforms.pop(handle.profile_id, None)
+        self._last_used.pop(handle.profile_id, None)
+        self._page_locks.pop(handle.profile_id, None)
         renewal.cancel()
         with suppress(asyncio.CancelledError):
             await renewal
@@ -171,6 +195,7 @@ class BrowserSessionManager:
         owned = self._sessions.get(handle.profile_id)
         if not owned or owned[0].token != handle.token:
             raise PermissionError("session token does not own this profile")
+        self._touch(handle.profile_id)
         browser = owned[2]
         pages = getattr(browser, "pages", [])
         page = pages[0] if pages else await browser.new_page()
@@ -219,12 +244,38 @@ class BrowserSessionManager:
                 raise ValueError("website hostname resolves to a non-public address")
         if platform not in {*approved_hosts, "website"}:
             raise ValueError("snapshot profile platform is unsupported")
-        if not 1_000 <= timeout_ms <= 60_000:
-            raise ValueError("timeout_ms must be between 1000 and 60000")
-        browser = owned[2]
-        pages = getattr(browser, "pages", [])
-        page = pages[0] if pages else await browser.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        if not 1_000 <= timeout_ms <= MAX_NAVIGATION_MS:
+            raise ValueError(f"timeout_ms must be between 1000 and {MAX_NAVIGATION_MS}")
+        self._touch(handle.profile_id)
+        async with self._page_locks[handle.profile_id]:
+            browser = owned[2]
+            pages = getattr(browser, "pages", [])
+            page = pages[0] if pages else await browser.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            if platform == "facebook":
+                await self._settle_feed(page)
+            self._touch(handle.profile_id)
+            return await self._extract(page)
+
+    @staticmethod
+    async def _settle_feed(page: Any) -> None:
+        """Give Facebook's client-rendered feed a bounded chance to appear.
+
+        No posts after the wait is a normal outcome (empty, private, or
+        challenge page), so a timeout here is not an error.
+        """
+        try:
+            await page.wait_for_selector('[role="article"]', timeout=FEED_WAIT_MS)
+        except Exception as exc:
+            if type(exc).__name__ != "TimeoutError":
+                raise
+            return
+        for _ in range(FEED_SCROLLS):
+            await page.mouse.wheel(0, 2_500)
+            await page.wait_for_timeout(FEED_SCROLL_PAUSE_MS)
+
+    @staticmethod
+    async def _extract(page: Any) -> dict[str, Any]:
         # Keep the payload small and evidence-focused.  Facebook's markup is
         # volatile, so the collector treats this as a candidate feed, not truth.
         return await page.evaluate(
@@ -268,10 +319,22 @@ class BrowserSessionManager:
         for handle, *_ in list(self._sessions.values()):
             await self.release(handle)
 
+    def _touch(self, profile_id: str) -> None:
+        self._last_used[profile_id] = time.monotonic()
+
     async def _renew_forever(self, handle: SessionHandle) -> None:
         try:
             while True:
                 await asyncio.sleep(self.renew_seconds)
+                idle = time.monotonic() - self._last_used.get(handle.profile_id, 0.0)
+                if idle > self.idle_seconds:
+                    # The caller has gone quiet (crashed or killed). Release
+                    # from a separate task: release() awaits this one.
+                    log.warning("browser_session.idle_release", extra={"profile_id": handle.profile_id, "idle_seconds": int(idle)})
+                    task = asyncio.get_running_loop().create_task(self._release_idle(handle))
+                    self._background.add(task)
+                    task.add_done_callback(self._background.discard)
+                    return
                 extended = await self.redis.eval(
                     _RENEW_SCRIPT, 1, self._key(handle.profile_id), handle.token, self.lease_seconds
                 )
@@ -281,6 +344,10 @@ class BrowserSessionManager:
                     return
         except asyncio.CancelledError:
             raise
+
+    async def _release_idle(self, handle: SessionHandle) -> None:
+        with suppress(PermissionError):
+            await self.release(handle, next_state=BrowserProfileStatus.READY)
 
     async def _report(self, profile_id: str, state: BrowserProfileStatus) -> None:
         if self.state_changed:

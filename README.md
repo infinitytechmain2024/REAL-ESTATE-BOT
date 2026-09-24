@@ -101,11 +101,50 @@ inserts a short randomized pause between groups. It stops immediately on
 checkpoint/login/CAPTCHA/account-warning signals, opens a verification job,
 and releases the browser in `VERIFICATION_REQUIRED` state.
 
-After `003` is applied and a batch/profile exist, run exactly one batch:
+A group counts as inaccessible only when no posts were read and the page says
+so; joined private groups are read normally. Each snapshot waits (bounded) for
+Facebook's feed to render and scrolls it three times before extracting posts.
+
+#### Logging a profile in, and clearing checkpoints
+
+A new profile is logged out, and a checkpoint puts it in
+`human_verification_required`. Both are fixed by hand in the real browser:
+
+```sh
+bash scripts/browser_login.sh facebook facebook-main
+```
+
+The script creates the `browser_profiles` row if needed and refuses a profile a
+collector is using. It then opens Chromium on the profile under the same
+lease and lock collectors use, and starts noVNC for that session only, with a
+one-time password printed in the terminal. noVNC is never published on the
+host; the script prints an SSH tunnel to the browser container's Docker bridge
+address, which only the VPS itself can reach:
+
+```sh
+ssh -N -L 6090:<browser-container-ip>:6080 <user>@<vps-host>   # on your own computer
+# then open http://localhost:6090/vnc.html
+```
+
+Log in or clear the checkpoint, press Ctrl+C in the script, and confirm. The
+profile becomes `ready`; open `facebook_challenge` verification jobs are
+resolved and sources held for verification become `active` again. Batches that
+a checkpoint stopped stay as they are; cancel them and `/run` again.
+
+#### Running a batch
+
+After a profile is `ready` and `/run facebook-groups ...` has queued a batch,
+run exactly one batch:
 
 ```sh
 FACEBOOK_BATCH_ID=<queued-batch-uuid> docker compose --profile collector up --build facebook-collector
 ```
+
+If the collector dies mid-batch, nothing stays locked for long. The Browser
+Session Manager closes a session that makes no request for
+`BROWSER_IDLE_SECONDS` (300 by default). The dispatcher fails a running batch
+with no progress for `ORCHESTRA_STALE_BATCH_SECONDS` (900 by default), skips
+its remaining groups, and returns the profile to `ready`.
 
 This service is intentionally not a daemon and contains no Agent Ridge,
 Scrapling, analysis, or human-verification UI.

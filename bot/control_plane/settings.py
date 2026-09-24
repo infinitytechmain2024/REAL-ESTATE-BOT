@@ -17,6 +17,7 @@ class ControlPlaneSettings:
     confirmation_ttl_seconds: int = 300
     orchestra_command_lease_seconds: int = 30
     orchestra_poll_seconds: float = 1.0
+    orchestra_stale_batch_seconds: int = 900
     # Telegram user IDs allowed to run, pause, resume, or cancel acquisition.
     # Empty means nobody: state changes fail closed until an operator is named.
     operator_user_ids: frozenset[int] = frozenset()
@@ -39,6 +40,7 @@ class ControlPlaneSettings:
             confirmation_ttl_seconds=int(os.environ.get("TELEGRAM_CONFIRMATION_TTL_SECONDS", "300")),
             orchestra_command_lease_seconds=int(os.environ.get("ORCHESTRA_COMMAND_LEASE_SECONDS", "30")),
             orchestra_poll_seconds=float(os.environ.get("ORCHESTRA_POLL_SECONDS", "1")),
+            orchestra_stale_batch_seconds=int(os.environ.get("ORCHESTRA_STALE_BATCH_SECONDS", "900")),
             operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_OPERATOR_IDS", "")),
         )
 
