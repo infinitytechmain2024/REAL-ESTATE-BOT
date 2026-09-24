@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`007_live_view_sessions.sql` in order. It records SHA-256 checksums in
+`008_analysis_pipeline.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -90,6 +90,21 @@ PostgreSQL. The dispatcher creates plans only; an operator-controlled one-shot
 collector or Agent Reach invocation claims execution later. This is deliberate:
 the Telegram bot cannot turn untrusted chat input into Docker, shell, or
 browser launches.
+
+### Bounded analysis pipeline
+
+The one-shot `analysis-pipeline` worker reads only normalised posts, rejects
+stale/spam/irrelevant evidence deterministically, then requests strict JSON
+from OpenRouter with the same `OPENROUTER_API_KEY`. It stores the model,
+prompt version, language, confidence and a stable finding key (migration
+`008_analysis_pipeline.sql`). Optionally set `ANALYSIS_TELEGRAM_CHAT_ID` to
+send an idempotent digest to one chat.
+
+```sh
+docker compose --env-file .env --profile analysis run --rm analysis-pipeline
+```
+
+It never browses, follows links, or sends raw post text as instructions.
 
 ### Future Supabase integration
 
