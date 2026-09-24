@@ -1,11 +1,11 @@
-"""The verification page, served only to ``tailscale serve`` on 127.0.0.1.
+"""The verification page, opened as a Telegram Mini App under /verify.
 
-Every request must carry the Tailscale identity header that ``tailscale
-serve`` adds for tailnet users; the service binds to loopback inside the
-Tailscale container's network namespace, so nothing else can reach it to
-forge that header. On top of it: a single-use Telegram link, then a
-short, HttpOnly, SameSite=Strict session cookie bound to job, user,
-profile and Tailscale login, and a CSRF token on every button.
+Caddy serves it over HTTPS; the service itself has no host port. Access is
+layered: Telegram's signature on the Mini App says which user pressed the
+button (checked before anything else), that user must be an operator, the
+single-use link must have been sent to that very user, and the page session
+it becomes is an HttpOnly, Secure, SameSite=Strict cookie bound to job, user
+and profile. Every button carries a CSRF token.
 """
 
 from __future__ import annotations
@@ -13,27 +13,31 @@ from __future__ import annotations
 import asyncio
 import hmac
 import html
+import json
 import logging
+import secrets
 import uuid
 from collections.abc import Awaitable, Callable
 from urllib.parse import quote
 
 from aiohttp import ClientError, ClientSession, ClientWSTimeout, WSMsgType, web
 
+from bot.telegram_webapp import TELEGRAM_WEB_APP_JS
+
 from .service import AccessDenied, ActionRefused, VerificationService
 
 log = logging.getLogger(__name__)
-LOGIN_HEADER = "Tailscale-User-Login"
+PREFIX = "/verify"
 COOKIE = "verification_session"
 ACTIONS = ("claim", "view", "solve", "resume", "cancel", "fail")
 
-_PAGE_HEADERS = {
+_BASE_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
-    # Our pages carry no scripts at all; the noVNC viewer is framed from our own origin.
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
 }
+# Job pages carry no script at all; the noVNC viewer is framed from our own origin.
+_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; frame-ancestors 'self' https://web.telegram.org; base-uri 'none'"
 
 _STYLE = """body{font-family:system-ui,sans-serif;max-width:60em;margin:1em auto;padding:0 1em;color:#1b1b1b}
 h1{font-size:1.3em}dt{font-weight:600}dd{margin:0 0 .5em}form{display:inline-block;margin:.25em .5em .25em 0}
@@ -42,20 +46,20 @@ button{font-size:1em;padding:.5em 1em}.msg{padding:.6em;background:#eef;border-r
 table{border-collapse:collapse;font-size:.9em}td{padding:.2em .6em;border-bottom:1px solid #ddd}"""
 
 
-def _page(title: str, body: str, status: int = 200) -> web.Response:
+def _html(title: str, body: str, *, status: int = 200, csp: str = _PAGE_CSP, head: str = "") -> web.Response:
     return web.Response(
         text=f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
-        f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head><body>{body}</body></html>",
-        content_type="text/html", status=status, headers=_PAGE_HEADERS,
+        f"<title>{html.escape(title)}</title><style>{_STYLE}</style>{head}</head><body>{body}</body></html>",
+        content_type="text/html", status=status, headers={**_BASE_HEADERS, "Content-Security-Policy": csp},
     )
 
 
 def _denied(message: str, status: int = 403) -> web.Response:
-    return _page("Not allowed", f"<h1>Not allowed</h1><p>{html.escape(message)}</p>", status)
+    return _html("Not allowed", f"<h1>Not allowed</h1><p>{html.escape(message)}</p>", status=status)
 
 
 def _viewer(job_id: str, password: str) -> str:
-    return (f"/jobs/{job_id}/live/vnc.html?path={quote(f'jobs/{job_id}/live/websockify')}"
+    return (f"{PREFIX}/jobs/{job_id}/live/vnc.html?path={quote(f'verify/jobs/{job_id}/live/websockify')}"
             f"&password={quote(password)}&autoconnect=true&resize=scale&reconnect=true")
 
 
@@ -63,9 +67,7 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
     backend = novnc_url.rstrip("/")
 
     @web.middleware
-    async def guard(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
-        if request.path == "/healthz":
-            return await handler(request)
+    async def known_ids(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
         job_id = request.match_info.get("job")
         if job_id is not None:
             try:
@@ -73,29 +75,43 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
                     raise ValueError
             except ValueError:
                 return _denied("Unknown job.", 404)
-        try:
-            service.check_login(request.headers.get(LOGIN_HEADER))
-        except AccessDenied as exc:
-            log.warning("verification.denied_login", extra={"login": request.headers.get(LOGIN_HEADER), "path": request.path[:60]})
-            return _denied(str(exc))
         return await handler(request)
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
-    async def open_link(request: web.Request) -> web.StreamResponse:
+    async def opener(request: web.Request) -> web.Response:
+        """The Mini App's first page: hands Telegram's signed initData to /auth."""
+        token = request.match_info["token"]
+        nonce = secrets.token_urlsafe(16)
+        script = f"""<script nonce="{nonce}">
+const tg = window.Telegram && window.Telegram.WebApp;
+const say = (t) => document.getElementById('m').textContent = t;
+if (!tg || !tg.initData) {{ say('Open this page from the button in the Telegram bot.'); }}
+else {{
+  tg.ready(); tg.expand();
+  fetch({json.dumps(f"{PREFIX}/v/{token}/auth")}, {{method: 'POST', headers: {{'Content-Type': 'text/plain'}}, body: tg.initData, credentials: 'same-origin'}})
+    .then(r => r.json().then(j => [r.ok, j]))
+    .then(([ok, j]) => ok ? location.replace(j.next) : say(j.error || 'Not allowed.'))
+    .catch(() => say('The server did not answer. Try again in a moment.'));
+}}
+</script>"""
+        csp = f"default-src 'none'; script-src 'nonce-{nonce}' https://telegram.org; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self' https://web.telegram.org; base-uri 'none'"
+        return _html("Verification", f"<p id='m'>Checking who you are&hellip;</p>{script}", csp=csp,
+                     head=f"<script src='{TELEGRAM_WEB_APP_JS}'></script>")
+
+    async def auth(request: web.Request) -> web.Response:
         try:
-            opened = await service.open(request.match_info["token"], request.headers.get(LOGIN_HEADER))
+            opened = await service.open(request.match_info["token"], (await request.text())[:4096])
         except AccessDenied as exc:
-            return _denied(str(exc))
-        response = web.HTTPSeeOther(f"/jobs/{opened.session.job_id}")
-        response.set_cookie(COOKIE, opened.cookie, path="/", httponly=True, secure=True, samesite="Strict",
+            return web.json_response({"error": str(exc)}, status=403, headers=_BASE_HEADERS)
+        response = web.json_response({"next": f"{PREFIX}/jobs/{opened.session.job_id}"}, headers=_BASE_HEADERS)
+        response.set_cookie(COOKIE, opened.cookie, path=f"{PREFIX}/", httponly=True, secure=True, samesite="Strict",
                             max_age=service.config.session_minutes * 60)
-        response.headers.update(_PAGE_HEADERS)
-        raise response
+        return response
 
     async def _session(request: web.Request) -> object:
-        return await service.session(request.cookies.get(COOKIE), request.match_info["job"], request.headers.get(LOGIN_HEADER))
+        return await service.session(request.cookies.get(COOKIE), request.match_info["job"])
 
     async def job_page(request: web.Request) -> web.Response:
         try:
@@ -105,9 +121,8 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
             return _denied(str(exc))
         me = session.user_id  # type: ignore[attr-defined]
         owner = me == service.config.owner_id
-        buttons = []
         if job.sensitive:
-            allowed = ("cancel", "fail") if owner and job.is_open else ()
+            allowed: tuple[str, ...] = ("cancel", "fail") if owner and job.is_open else ()
         elif job.state == "requested":
             allowed = ("claim", "cancel")
         elif job.state == "active" and job.claimed_by == me:
@@ -119,9 +134,10 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
         labels = {"claim": "Claim", "view": "Open live browser", "solve": "Solved", "resume": "Resume the run",
                   "cancel": "Cancel", "fail": "Failed"}
         csrf = html.escape(session.csrf_token)  # type: ignore[attr-defined]
-        for action in allowed:
-            buttons.append(f"<form method='post' action='/jobs/{job.id}/{action}'><input type='hidden' name='csrf' value='{csrf}'>"
-                           f"<button type='submit'>{labels[action]}</button></form>")
+        buttons = "".join(
+            f"<form method='post' action='{PREFIX}/jobs/{job.id}/{action}'><input type='hidden' name='csrf' value='{csrf}'>"
+            f"<button type='submit'>{labels[action]}</button></form>" for action in allowed
+        )
         message = request.query.get("m", "")
         rows = "".join(
             f"<tr><td>{e.occurred_at:%H:%M:%S}</td><td>{html.escape(e.event)}</td><td>{html.escape(e.actor)}</td></tr>" for e in events[-15:]
@@ -130,7 +146,7 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
         requested_live = request.query.get("live", "")
         # Only this job's own viewer may be framed; anything else is ignored.
         if (job.state == "active" and job.claimed_by == me and service.live_open(job.id)
-                and requested_live.startswith(f"/jobs/{job.id}/live/vnc.html?")):
+                and requested_live.startswith(f"{PREFIX}/jobs/{job.id}/live/vnc.html?")):
             live = f"<iframe src='{html.escape(requested_live)}' title='Live browser'></iframe>"
         warning = ("<p class='warn'>This is about the account itself (identity, new 2FA or a restriction). Nothing is automated "
                    "and no live browser is offered. Handle it on the account directly, then close the job.</p>") if job.sensitive else ""
@@ -141,10 +157,10 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
             f"<dt>Challenge</dt><dd>{html.escape(job.challenge_kind or 'unknown')}</dd>"
             f"<dt>Page</dt><dd>{html.escape(job.source_url)}</dd>"
             f"<dt>Claimed by</dt><dd>{job.claimed_by or 'nobody'}</dd></dl>"
-            + "".join(buttons) + live
+            + buttons + live
             + f"<h2>Audit</h2><table>{rows}</table>"
         )
-        return _page("Verification", body)
+        return _html("Verification", body)
 
     async def act(request: web.Request) -> web.StreamResponse:
         action = request.match_info["action"]
@@ -183,7 +199,7 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
                 message = "Marked failed. The profile is quarantined and the owner was told."
         except (ActionRefused, AccessDenied) as exc:
             message = str(exc)
-        raise web.HTTPSeeOther(f"/jobs/{job_id}?m={quote(message)}{query}")
+        raise web.HTTPSeeOther(f"{PREFIX}/jobs/{job_id}?m={quote(message)}{query}")
 
     async def live_proxy(request: web.Request) -> web.StreamResponse:
         try:
@@ -238,10 +254,11 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
                     await ws_server.close()
         return ws_server
 
-    app = web.Application(middlewares=[guard], client_max_size=16 * 1024)
+    app = web.Application(middlewares=[known_ids], client_max_size=16 * 1024)
     app.router.add_get("/healthz", health)
-    app.router.add_get("/v/{token}", open_link)
-    app.router.add_get("/jobs/{job}", job_page)
-    app.router.add_post("/jobs/{job}/{action}", act)
-    app.router.add_get("/jobs/{job}/live/{path:.+}", live_proxy)
+    app.router.add_get(f"{PREFIX}/v/{{token}}", opener)
+    app.router.add_post(f"{PREFIX}/v/{{token}}/auth", auth)
+    app.router.add_get(f"{PREFIX}/jobs/{{job}}", job_page)
+    app.router.add_post(f"{PREFIX}/jobs/{{job}}/{{action}}", act)
+    app.router.add_get(f"{PREFIX}/jobs/{{job}}/live/{{path:.+}}", live_proxy)
     return app

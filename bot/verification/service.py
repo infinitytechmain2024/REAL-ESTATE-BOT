@@ -16,8 +16,10 @@ import asyncio
 import logging
 import secrets
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+from bot.telegram_webapp import verify_init_data
 
 from .browser import BrowserUnavailable, LiveBrowser, RecoveryChecker
 from .classify import SENSITIVE_KINDS, classify
@@ -53,7 +55,8 @@ class FlowConfig:
     public_url: str
     operator_ids: frozenset[int]
     owner_id: int
-    tailscale_logins: frozenset[str]
+    # Verifies the Mini App signature; never shown or logged.
+    bot_token: str = field(repr=False)
     token_minutes: int = 15
     session_minutes: int = 30
     job_hours: int = 24
@@ -100,7 +103,7 @@ class VerificationService:
         text = (
             f"{'Reminder: ' if reminder else ''}{job.platform.capitalize()} showed {what} on profile {job.profile_name} "
             f"while reading {job.source_url}. Collection on that profile is stopped.\n\n"
-            f"Open the private verification page (Tailscale only). The link works once and expires in "
+            f"Open the verification page from the button below. It works for you only, once, and expires in "
             f"{self.config.token_minutes} minutes; the job expires {self._expiry_text(job)}."
         )
         for user_id in recipients:
@@ -108,7 +111,7 @@ class VerificationService:
             await self.store.issue_token(job.id, user_id, job.profile_id, sha, self.config.token_minutes * 60)
             await self.store.add_event(job.id, "token_issued", "verification", {"user_id": user_id, "reminder": reminder})
             try:
-                await self.notifier.send(user_id, text, ("Open verification page", f"{self.config.public_url}/v/{secret}"))
+                await self.notifier.send(user_id, text, ("Open verification page", self._link(secret)))
                 await self.store.add_event(job.id, "notified", "verification", {"user_id": user_id, "reminder": reminder})
             except Exception as exc:  # noqa: BLE001 - one unreachable operator must not stop the others
                 log.warning("verification.notify_failed", extra={"user_id": user_id, "error": type(exc).__name__})
@@ -130,7 +133,7 @@ class VerificationService:
             secret, sha = new_secret()
             await self.store.issue_token(job.id, self.config.owner_id, job.profile_id, sha, self.config.token_minutes * 60)
             await self.store.add_event(job.id, "token_issued", "verification", {"user_id": self.config.owner_id, "owner": True})
-            button = ("Close verification job", f"{self.config.public_url}/v/{secret}")
+            button = ("Close verification job", self._link(secret))
         with suppress(Exception):
             await self.notifier.send(self.config.owner_id, text, button)
             await self.store.add_event(job.id, "notified", "verification", {"user_id": self.config.owner_id, "owner": True})
@@ -141,50 +144,56 @@ class VerificationService:
         with suppress(Exception):
             await self.notifier.send(self.config.owner_id, f"Verification job {job.id} for profile {job.profile_name} expired unsolved; its run stays stopped.")
 
+    def _link(self, secret: str) -> str:
+        return f"{self.config.public_url}/verify/v/{secret}"
+
     @staticmethod
     def _expiry_text(job: Job) -> str:
         return f"at {job.expires_at:%Y-%m-%d %H:%M} UTC" if job.expires_at else "later"
 
     # --- access -----------------------------------------------------------------------
 
-    def check_login(self, login: str | None) -> str:
-        """The Tailscale identity that ``tailscale serve`` put on the request."""
-        normalized = (login or "").strip().lower()
-        if not normalized or normalized not in self.config.tailscale_logins:
-            raise AccessDenied("This page is only for approved Tailscale users.")
-        return normalized
+    def telegram_user(self, init_data: str | None) -> int:
+        """The operator Telegram signed into the Mini App; checked before anything else."""
+        user_id = verify_init_data(init_data or "", self.config.bot_token)
+        if user_id is None:
+            raise AccessDenied("Open this page from the button in the Telegram bot.")
+        if user_id not in self.config.operator_ids:
+            raise AccessDenied("Only operators can open verification jobs.")
+        return user_id
 
-    async def open(self, token: str, login: str | None) -> Opened:
-        tailscale_login = self.check_login(login)
+    async def open(self, token: str, init_data: str | None) -> Opened:
+        user_id = self.telegram_user(init_data)
         if not looks_like_secret(token):
             raise AccessDenied("This link is invalid.")
-        record = await self.store.consume_token(digest(token), tailscale_login)
+        identity = f"telegram:{user_id}"
+        record = await self.store.consume_token(digest(token), user_id, identity)
         if record is None:
-            raise AccessDenied("This link was already used or has expired. Wait for a new message.")
+            raise AccessDenied("This link was already used, has expired, or was sent to someone else. Wait for a new message.")
         job = await self.store.get_job(record.job_id)
         # Bound to job, user and profile: all three must still match.
         # Sensitive jobs open for the owner alone (to close them), never for anyone else.
         owner_only = job is not None and job.sensitive and record.user_id != self.config.owner_id
         if job is None or not job.is_open or owner_only or record.user_id not in self.config.operator_ids or job.profile_id != record.profile_id:
-            await self.store.add_event(record.job_id, "access_denied", tailscale_login, {"user_id": record.user_id, "reason": "binding"})
+            await self.store.add_event(record.job_id, "access_denied", identity, {"user_id": record.user_id, "reason": "binding"})
             raise AccessDenied("This verification is no longer open.")
         cookie, cookie_sha = new_secret()
-        session = await self.store.create_session(record, tailscale_login, cookie_sha, secrets.token_urlsafe(24), self.config.session_minutes * 60)
+        session = await self.store.create_session(record, identity, cookie_sha, secrets.token_urlsafe(24), self.config.session_minutes * 60)
         await self.store.add_event(job.id, "opened", self._actor(session), {})
         return Opened(session, cookie)
 
-    async def session(self, cookie: str | None, job_id: str, login: str | None) -> PageSession:
-        tailscale_login = self.check_login(login)
+    async def session(self, cookie: str | None, job_id: str) -> PageSession:
         if not cookie or not looks_like_secret(cookie):
-            raise AccessDenied("Open this page from the Telegram link.")
+            raise AccessDenied("Open this page from the button in the Telegram bot.")
         session = await self.store.get_session(digest(cookie))
-        if session is None or session.job_id != job_id or session.tailscale_login != tailscale_login or session.user_id not in self.config.operator_ids:
+        # Re-checked on every request: removing an operator ends their session.
+        if session is None or session.job_id != job_id or session.user_id not in self.config.operator_ids:
             raise AccessDenied("This page session is not valid. Use a new Telegram link.")
         return session
 
     @staticmethod
     def _actor(session: PageSession) -> str:
-        return f"telegram:{session.user_id}/tailscale:{session.tailscale_login}"
+        return f"telegram:{session.user_id}"
 
     async def page(self, session: PageSession) -> tuple[Job, list[Any]]:
         job = await self.store.get_job(session.job_id)

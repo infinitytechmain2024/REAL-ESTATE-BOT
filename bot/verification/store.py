@@ -21,8 +21,8 @@ class VerificationStore(Protocol):
     async def mark_announced(self, job_id: str, profile_id: str | None, kind: str, sensitive: bool, ttl_seconds: int) -> Job: ...
     async def get_job(self, job_id: str) -> Job | None: ...
     async def issue_token(self, job_id: str, user_id: int, profile_id: str, token_sha256: str, ttl_seconds: int) -> None: ...
-    async def consume_token(self, token_sha256: str, login: str) -> AccessToken | None: ...
-    async def create_session(self, token: AccessToken, login: str, cookie_sha256: str, csrf: str, ttl_seconds: int) -> PageSession: ...
+    async def consume_token(self, token_sha256: str, user_id: int, identity: str) -> AccessToken | None: ...
+    async def create_session(self, token: AccessToken, identity: str, cookie_sha256: str, csrf: str, ttl_seconds: int) -> PageSession: ...
     async def get_session(self, cookie_sha256: str) -> PageSession | None: ...
     async def claim(self, job_id: str, user_id: int, actor: str) -> bool: ...
     async def mark_solved(self, job_id: str, actor: str) -> None: ...
@@ -123,30 +123,32 @@ class PostgresVerificationStore:
             job_id, user_id, profile_id, token_sha256, ttl_seconds,
         )
 
-    async def consume_token(self, token_sha256: str, login: str) -> AccessToken | None:
-        # The single atomic statement is what makes a token single-use.
+    async def consume_token(self, token_sha256: str, user_id: int, identity: str) -> AccessToken | None:
+        # One atomic statement makes a token single-use; the user condition means
+        # nobody but its recipient can use it -- or burn it.
         row = await self._pool().fetchrow(
-            """update public.verification_access_tokens set used_at = now(), used_by_login = $2
-                where token_sha256 = $1 and used_at is null and revoked_at is null and expires_at > now()
+            """update public.verification_access_tokens set used_at = now(), used_by_identity = $3
+                where token_sha256 = $1 and telegram_user_id = $2
+                  and used_at is null and revoked_at is null and expires_at > now()
             returning id::text, verification_job_id::text, telegram_user_id, browser_profile_id::text""",
-            token_sha256, login,
+            token_sha256, user_id, identity,
         )
         return AccessToken(row[0], row[1], row[2], row[3]) if row else None
 
-    async def create_session(self, token: AccessToken, login: str, cookie_sha256: str, csrf: str, ttl_seconds: int) -> PageSession:
+    async def create_session(self, token: AccessToken, identity: str, cookie_sha256: str, csrf: str, ttl_seconds: int) -> PageSession:
         session_id = await self._pool().fetchval(
             """insert into public.verification_page_sessions
-                 (access_token_id, verification_job_id, telegram_user_id, browser_profile_id, tailscale_login,
+                 (access_token_id, verification_job_id, telegram_user_id, browser_profile_id, identity,
                   cookie_sha256, csrf_token, expires_at)
                values ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, now() + ($8 * interval '1 second'))
             returning id::text""",
-            token.id, token.job_id, token.user_id, token.profile_id, login, cookie_sha256, csrf, ttl_seconds,
+            token.id, token.job_id, token.user_id, token.profile_id, identity, cookie_sha256, csrf, ttl_seconds,
         )
-        return PageSession(session_id, token.job_id, token.user_id, token.profile_id, login, csrf)
+        return PageSession(session_id, token.job_id, token.user_id, token.profile_id, identity, csrf)
 
     async def get_session(self, cookie_sha256: str) -> PageSession | None:
         row = await self._pool().fetchrow(
-            """select id::text, verification_job_id::text, telegram_user_id, browser_profile_id::text, tailscale_login, csrf_token
+            """select id::text, verification_job_id::text, telegram_user_id, browser_profile_id::text, identity, csrf_token
                  from public.verification_page_sessions
                 where cookie_sha256 = $1 and revoked_at is null and expires_at > now()""",
             cookie_sha256,
@@ -391,15 +393,15 @@ class MemoryVerificationStore:
     async def issue_token(self, job_id: str, user_id: int, profile_id: str, token_sha256: str, ttl_seconds: int) -> None:
         self.tokens[token_sha256] = _Token(AccessToken(str(uuid.uuid4()), job_id, user_id, profile_id), token_sha256, datetime.now(UTC) + timedelta(seconds=ttl_seconds))
 
-    async def consume_token(self, token_sha256: str, login: str) -> AccessToken | None:
+    async def consume_token(self, token_sha256: str, user_id: int, identity: str) -> AccessToken | None:
         token = self.tokens.get(token_sha256)
-        if token is None or token.used_at or token.revoked or token.expires_at <= datetime.now(UTC):
+        if token is None or token.record.user_id != user_id or token.used_at or token.revoked or token.expires_at <= datetime.now(UTC):
             return None
         token.used_at = datetime.now(UTC)
         return token.record
 
-    async def create_session(self, token: AccessToken, login: str, cookie_sha256: str, csrf: str, ttl_seconds: int) -> PageSession:
-        record = PageSession(str(uuid.uuid4()), token.job_id, token.user_id, token.profile_id, login, csrf)
+    async def create_session(self, token: AccessToken, identity: str, cookie_sha256: str, csrf: str, ttl_seconds: int) -> PageSession:
+        record = PageSession(str(uuid.uuid4()), token.job_id, token.user_id, token.profile_id, identity, csrf)
         self.sessions[cookie_sha256] = _Session(record, datetime.now(UTC) + timedelta(seconds=ttl_seconds))
         return record
 

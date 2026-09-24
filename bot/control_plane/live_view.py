@@ -19,9 +19,6 @@ The bot never types, clicks or solves anything inside the window.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
-import json
 import logging
 import secrets
 import time
@@ -31,12 +28,13 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
-from urllib.parse import parse_qsl, quote
+from urllib.parse import quote
 
 import httpx
 from aiohttp import ClientError, ClientSession, ClientWSTimeout, WSMsgType, web
 
 from bot.control_plane.models import Button, LiveProfile, LiveSession, Reply
+from bot.telegram_webapp import verify_init_data
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +44,6 @@ START_URLS = {
     "tiktok": "https://www.tiktok.com/",
 }
 PROFILE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
-# initData is minted when the Mini App opens; older data is a replay.
-INIT_DATA_MAX_AGE_SECONDS = 600
 
 
 class LiveViewStore(Protocol):
@@ -75,33 +71,6 @@ def is_session_id(value: str) -> bool:
         return str(uuid.UUID(value)) == value
     except ValueError:
         return False
-
-
-def verify_init_data(init_data: str, bot_token: str, *, now: float | None = None, max_age: int = INIT_DATA_MAX_AGE_SECONDS) -> int | None:
-    """Return the Telegram user id Telegram signed into Mini App ``initData``.
-
-    https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
-    """
-    try:
-        pairs = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=True))
-    except ValueError:
-        return None
-    received = pairs.pop("hash", "")
-    if not received:
-        return None
-    check = "\n".join(f"{key}={pairs[key]}" for key in sorted(pairs))
-    secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    expected = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, received):
-        return None
-    try:
-        auth_date = int(pairs.get("auth_date", "0"))
-        user_id = int(json.loads(pairs.get("user", "{}"))["id"])
-    except (ValueError, KeyError, TypeError):
-        return None
-    if abs((time.time() if now is None else now) - auth_date) > max_age:
-        return None
-    return user_id
 
 
 class BrowserLiveClient:

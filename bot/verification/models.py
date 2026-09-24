@@ -49,7 +49,7 @@ class PageSession:
     job_id: str
     user_id: int
     profile_id: str
-    tailscale_login: str
+    identity: str  # "telegram:<id>", from the Mini App signature
     csrf_token: str
 
 
