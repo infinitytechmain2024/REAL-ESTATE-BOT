@@ -41,6 +41,7 @@ class FakeStore:
     events: list[tuple] = field(default_factory=list)
     posts: list[CollectedPost] = field(default_factory=list)
     cancelled_from: set[int] = field(default_factory=set)
+    diagnostics: list[dict[str, object]] = field(default_factory=list)
 
     async def load_plan(self, _: str) -> BatchPlan:
         return self.plan
@@ -58,8 +59,9 @@ class FakeStore:
     async def save_post(self, _source: str, _run: str, post: CollectedPost) -> None:
         self.posts.append(post)
 
-    async def finish_item(self, item: BatchItem, _run: str, state: str, group_state: GroupState, detail: str | None = None) -> None:
+    async def finish_item(self, item: BatchItem, _run: str, state: str, group_state: GroupState, detail: str | None = None, *, diagnostics: dict[str, object] | None = None) -> None:
         self.events.append(("finish", item.sequence_no, state, group_state, detail))
+        self.diagnostics.append(diagnostics or {})
 
     async def finish_batch(self, _plan: BatchPlan, _run: str, state: str, reason: str | None = None) -> None:
         self.events.append(("batch_finish", state, reason))
@@ -69,8 +71,15 @@ class FakeStore:
 
 
 class FakeBrowser:
-    def __init__(self) -> None:
+    def __init__(self, *, screenshot_error: Exception | None = None) -> None:
         self.events: list[tuple] = []
+        self.screenshot_error = screenshot_error
+
+    async def capture_screenshot(self, lease: BrowserLease) -> str:
+        self.events.append(("screenshot", lease.profile_id))
+        if self.screenshot_error:
+            raise self.screenshot_error
+        return f"{lease.profile_id}/shot.png"
 
     async def acquire(self, *args: str) -> BrowserLease:
         self.events.append(("acquire", args[0]))
@@ -230,6 +239,9 @@ async def test_default_settings_read_a_group_through_the_real_session_api(tmp_pa
         async def evaluate(self, _script: str) -> dict[str, object]:
             return {"url": self.url, "title": "Group", "text": "Private group", "posts": [{"url": f"{self.url}/posts/7/", "text": "flat for sale"}]}
 
+        async def screenshot(self, *, path: str, full_page: bool) -> None:
+            Path(path).write_bytes(b"png")
+
     class Context:
         def __init__(self) -> None:
             self.pages = [Page()]
@@ -266,8 +278,49 @@ async def test_default_settings_read_a_group_through_the_real_session_api(tmp_pa
         client = BrowserSessionClient(f"http://127.0.0.1:{port}", "t" * 32)
         lease = await client.acquire("fb-profile", "fb", "ready")
         result = await FacebookGroupReader(client, max_posts=15, timeout_seconds=90).read(lease, "https://www.facebook.com/groups/a")
+        screenshot = await client.capture_screenshot(lease)
         await client.release(lease)
     finally:
         await runner.cleanup()
     assert result.state is GroupState.ACTIVE
     assert [post.canonical_url for post in result.posts] == ["https://www.facebook.com/groups/a/posts/7"]
+    assert screenshot.startswith("fb-profile/") and screenshot.endswith(".png")
+    assert (tmp_path / "s" / screenshot).exists()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_group_is_screenshotted_and_explained_but_a_full_one_is_not() -> None:
+    empty = GroupRead(GroupState.INACTIVE, (), {}, {"articles": 0, "feed_present": True})
+    store, browser, reader = FakeStore(plan(2)), FakeBrowser(), FakeReader([posts(2), empty])
+    collector = FacebookBatchCollector(store, browser, reader, max_posts=10, item_timeout_seconds=10, pause_min_seconds=0, pause_max_seconds=0)
+    assert await collector.run("batch") == "succeeded"
+    assert [event for event in browser.events if event[0] == "screenshot"] == [("screenshot", "profile")]
+    assert "screenshot" not in store.diagnostics[0]
+    assert store.diagnostics[1] == {"articles": 0, "feed_present": True, "screenshot": "profile/shot.png"}
+
+
+@pytest.mark.asyncio
+async def test_failed_reads_record_the_error_and_a_failed_screenshot_never_fails_the_batch() -> None:
+    store, browser = FakeStore(plan(1)), FakeBrowser(screenshot_error=RuntimeError("browser gone"))
+    reader = FakeReader([RuntimeError("layout changed")])
+    collector = FacebookBatchCollector(store, browser, reader, max_posts=10, item_timeout_seconds=10, pause_min_seconds=0, pause_max_seconds=0)
+    assert await collector.run("batch") == "succeeded"
+    assert store.diagnostics[0] == {"error": "RuntimeError", "detail": "layout changed", "screenshot": None}
+
+
+@pytest.mark.asyncio
+async def test_reader_diagnostics_hold_counts_and_page_identity_but_no_content() -> None:
+    class Browser:
+        async def snapshot(self, *_: object) -> dict[str, object]:
+            return {
+                "url": "https://www.facebook.com/groups/a/?ref=bookmarks", "title": "Flats Madrid | Facebook", "text": "secret member text",
+                "diagnostics": {"articles": 4, "articles_with_post_link": 0, "feed_present": True, "feed_units": 6},
+                "posts": [{"url": None, "text": "secret post"}],
+            }
+
+    result = await FacebookGroupReader(Browser(), max_posts=20, timeout_seconds=90).read(BrowserLease("p", "t"), "https://www.facebook.com/groups/a")  # type: ignore[arg-type]
+    assert result.diagnostics == {
+        "articles": 4, "articles_with_post_link": 0, "feed_present": True, "feed_units": 6,
+        "candidates": 1, "posts_kept": 0, "final_url": "https://www.facebook.com/groups/a/", "title": "Flats Madrid | Facebook",
+    }
+    assert "secret" not in repr(result.diagnostics)

@@ -283,6 +283,14 @@ class BrowserSessionManager:
               url: location.href,
               title: document.title.slice(0, 500),
               text: (document.body?.innerText || '').slice(0, 120000),
+              // Counts only, no content: explains an empty result without storing it.
+              diagnostics: {
+                articles: document.querySelectorAll('[role="article"]').length,
+                articles_with_post_link: Array.from(document.querySelectorAll('[role="article"]')).filter((node) =>
+                  Array.from(node.querySelectorAll('a[href]')).some(a => /\\/(posts|permalink)\\//.test(a.href))).length,
+                feed_present: document.querySelector('[role="feed"]') !== null,
+                feed_units: document.querySelectorAll('[role="feed"] [aria-posinset]').length,
+              },
               posts: Array.from(document.querySelectorAll('[role="article"]')).slice(0, 20).map((node) => {
                 const link = Array.from(node.querySelectorAll('a[href]')).map(a => a.href)
                   .find(href => /\\/(posts|permalink)\\//.test(href)) || null;

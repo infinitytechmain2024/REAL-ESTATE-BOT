@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 import asyncpg
@@ -32,6 +33,7 @@ async def run_batch(batch_id: str) -> str:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     batch = os.environ.get("FACEBOOK_BATCH_ID")
     if not batch:
         raise SystemExit("FACEBOOK_BATCH_ID is required; this worker runs exactly one queued batch")

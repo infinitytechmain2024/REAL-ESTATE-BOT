@@ -46,6 +46,15 @@ class BrowserSessionClient:
             response.raise_for_status()
             return await response.read()
 
+    async def capture_screenshot(self, lease: BrowserLease) -> str:
+        """Save a screenshot in the browser's private volume; return its file name."""
+        timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout, headers=self.headers) as session, session.post(f"{self.base_url}/v1/sessions/screenshot", json={
+                "profile_id": lease.profile_id, "session_token": lease.token,
+            }) as response:
+            response.raise_for_status()
+            return response.headers.get("X-Screenshot-File", "")
+
     async def release(self, lease: BrowserLease, next_state: str = "READY") -> None:
         await self._request("DELETE", "/v1/sessions", {
             "profile_id": lease.profile_id, "session_token": lease.token, "next_state": next_state,

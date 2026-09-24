@@ -10,6 +10,7 @@ schema. Example::
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -84,7 +85,11 @@ async def test_cancelling_a_running_batch_stops_the_collector_and_frees_the_prof
     run_id = await collector.start_item(plan.items[0], batch_run, plan.browser_profile_id, max_runtime_seconds=30)
 
     assert "cancelled (1 affected)" in await operator.send("cancel", f"batch:{batch_id}")
-    await collector.finish_item(plan.items[0], run_id, "succeeded", GroupState.ACTIVE)
+    await collector.finish_item(plan.items[0], run_id, "succeeded", GroupState.INACTIVE, diagnostics={"articles": 0, "screenshot": "p/1.png"})
+    last_read = await pool.fetchval(
+        "select configuration->'facebook_last_read' from monitoring_sources where id=$1", plan.items[0].source_id
+    )
+    assert json.loads(last_read) == {"run_id": run_id, "state": "succeeded", "articles": 0, "screenshot": "p/1.png"}
     with pytest.raises(BatchCancelled):
         await collector.start_item(plan.items[1], batch_run, plan.browser_profile_id, max_runtime_seconds=30)
     await collector.finish_batch(plan, batch_run, "cancelled", "operator_cancelled")

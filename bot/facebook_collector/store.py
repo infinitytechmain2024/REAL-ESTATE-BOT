@@ -72,8 +72,12 @@ class PostgresCollectorStore:
             source_id, run_id, post.platform_post_id, post.canonical_url, post.body_text, post.published_at, content_hash,
         )
 
-    async def finish_item(self, item: BatchItem, run_id: str, state: str, group_state: GroupState, detail: str | None = None) -> None:
-        metadata = json.dumps({"facebook_group_state": group_state.value, "facebook_group_state_updated_at": "now"})
+    async def finish_item(self, item: BatchItem, run_id: str, state: str, group_state: GroupState, detail: str | None = None, *, diagnostics: dict[str, object] | None = None) -> None:
+        metadata = json.dumps({
+            "facebook_group_state": group_state.value, "facebook_group_state_updated_at": "now",
+            # Latest read only (overwritten each run): counts, final URL, title, screenshot name.
+            "facebook_last_read": {"run_id": run_id, "state": state, **(diagnostics or {})},
+        })
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("update acquisition_runs set state=$2, finished_at=now(), error_code=$3 where id=$1 and state='running'", run_id, state, detail)
             await conn.execute("update acquisition_batch_items set state=$2, finished_at=now(), last_error_code=$3 where id=$1 and state='running'", item.id, state, detail)

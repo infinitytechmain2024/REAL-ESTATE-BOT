@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -45,6 +45,8 @@ class GroupRead:
     state: GroupState
     posts: tuple[CollectedPost, ...]
     evidence: dict[str, object]
+    # Counts and page identity only; never post or member content.
+    diagnostics: dict[str, object] = field(default_factory=dict)
 
 
 class ChallengeDetected(RuntimeError):

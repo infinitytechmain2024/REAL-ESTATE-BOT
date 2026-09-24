@@ -52,7 +52,8 @@ def create_app(manager: BrowserSessionManager, token: str) -> web.Application:
             image = await manager.screenshot(handle(body))
         except PermissionError as exc:
             raise web.HTTPForbidden(text=str(exc)) from exc
-        return web.FileResponse(image)
+        # The name lets a caller record which private screenshot belongs to an event.
+        return web.FileResponse(image, headers={"X-Screenshot-File": f"{image.parent.name}/{image.name}"})
 
     async def snapshot(request: web.Request) -> web.Response:
         body = await request.json()

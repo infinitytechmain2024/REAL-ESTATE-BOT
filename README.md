@@ -140,6 +140,14 @@ run exactly one batch:
 FACEBOOK_BATCH_ID=<queued-batch-uuid> docker compose --profile collector up --build facebook-collector
 ```
 
+Each group's latest read is explained in
+`monitoring_sources.configuration->'facebook_last_read'` and in the collector's
+log: article counts, how many had a post link, whether a feed rendered, the
+final URL and page title, but no post content. A read that yields no posts or
+fails also saves a screenshot in the private `browser_screenshots` volume and
+records its file name there. Those screenshots show group content, so delete
+them once diagnosed.
+
 If the collector dies mid-batch, nothing stays locked for long. The Browser
 Session Manager closes a session that makes no request for
 `BROWSER_IDLE_SECONDS` (300 by default). The dispatcher fails a running batch

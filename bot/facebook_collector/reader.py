@@ -56,10 +56,28 @@ class FacebookGroupReader:
                     continue
                 seen.add(url)
                 posts.append(CollectedPost(_post_id(url), url, str(raw.get("text") or ""), raw.get("published_at")))
+        diagnostics = _diagnostics(snapshot, raw_posts, posts)
         if posts:
-            return GroupRead(GroupState.ACTIVE, tuple(posts), snapshot)
+            return GroupRead(GroupState.ACTIVE, tuple(posts), snapshot, diagnostics)
         text = str(snapshot.get("text", "")).lower()
         if any(signal in text for signal in _INACCESSIBLE_SIGNALS):
-            return GroupRead(GroupState.INACCESSIBLE, (), snapshot)
-        return GroupRead(GroupState.INACTIVE, (), snapshot)
+            return GroupRead(GroupState.INACCESSIBLE, (), snapshot, diagnostics)
+        return GroupRead(GroupState.INACTIVE, (), snapshot, diagnostics)
+
+
+def _diagnostics(snapshot: dict[str, object], raw_posts: object, posts: list[CollectedPost]) -> dict[str, object]:
+    """Explain a read without keeping its content: counts, final URL, title."""
+    page = snapshot.get("diagnostics")
+    counts = page if isinstance(page, dict) else {}
+    final = urlparse(str(snapshot.get("url", "")))
+    return {
+        "articles": counts.get("articles"),
+        "articles_with_post_link": counts.get("articles_with_post_link"),
+        "feed_present": counts.get("feed_present"),
+        "feed_units": counts.get("feed_units"),
+        "candidates": len(raw_posts) if isinstance(raw_posts, list) else 0,
+        "posts_kept": len(posts),
+        "final_url": urlunparse((final.scheme, final.netloc, final.path, "", "", "")),
+        "title": str(snapshot.get("title", ""))[:200],
+    }
 
