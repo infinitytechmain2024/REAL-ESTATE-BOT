@@ -10,8 +10,11 @@ RUN apt-get update \
 RUN useradd --create-home --uid 10002 browseruser \
     && mkdir -p /profiles /screenshots \
     && chown -R browseruser:browseruser /app /profiles /screenshots
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY docker/requirements-browser-session.txt ./requirements.txt
+# --ignore-installed: the Ubuntu base ships Debian-managed Python packages
+# (typing_extensions, ...) that pip cannot uninstall. Installing beside them
+# into /usr/local takes precedence without touching the system copies.
+RUN pip install --no-cache-dir --ignore-installed -r requirements.txt
 COPY bot/browser_session/ ./bot/browser_session/
 RUN chown -R browseruser:browseruser /app /profiles /screenshots
 USER browseruser
