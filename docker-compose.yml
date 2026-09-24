@@ -80,6 +80,14 @@ services:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
       # Empty is allowed but refuses every state-changing command.
       TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}
+      # Tunables read by bot/control_plane/settings.py; defaults match it.
+      TELEGRAM_CONFIRMATION_TTL_SECONDS: ${TELEGRAM_CONFIRMATION_TTL_SECONDS:-300}
+      TELEGRAM_MAX_VOICE_MB: ${TELEGRAM_MAX_VOICE_MB:-20}
+      ORCHESTRA_COMMAND_LEASE_SECONDS: ${ORCHESTRA_COMMAND_LEASE_SECONDS:-30}
+      ORCHESTRA_POLL_SECONDS: ${ORCHESTRA_POLL_SECONDS:-1}
+      FASTER_WHISPER_MODEL: ${FASTER_WHISPER_MODEL:-small}
+      FASTER_WHISPER_DEVICE: ${FASTER_WHISPER_DEVICE:-cpu}
+      FASTER_WHISPER_COMPUTE_TYPE: ${FASTER_WHISPER_COMPUTE_TYPE:-int8}
     volumes:
       - whisper_models:/models
     # `backend` reaches PostgreSQL/Redis; `egress` is required for Telegram's
