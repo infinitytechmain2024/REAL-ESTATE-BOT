@@ -8,7 +8,16 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import asyncpg
 
-from .models import ClaimedCommand, CommandReceipt, CommandState, ConfirmedCommand, RunRequest
+from .models import (
+    ClaimedCommand,
+    ClaimLost,
+    CommandReceipt,
+    CommandState,
+    ConfirmedCommand,
+    RunRequest,
+)
+
+DISPATCHER_ACTOR = "orchestra:dispatcher"
 
 
 class PostgresOrchestraStore:
@@ -32,33 +41,37 @@ class PostgresOrchestraStore:
 
     async def enqueue(self, item: ConfirmedCommand) -> CommandReceipt:
         key = f"telegram:{item.chat_id}:{item.message_id}:{item.command}"
-        row = await self._pool().fetchrow(
-            """insert into orchestration_commands
-                   (confirmation_id, telegram_chat_id, telegram_user_id, telegram_message_id, command, arguments, idempotency_key)
-               values ($1::uuid,$2,$3,$4,$5,$6,$7)
-               on conflict (idempotency_key) do update set idempotency_key=excluded.idempotency_key
-               returning id, state, (xmax <> 0) as duplicate""",
-            item.confirmation_id, item.chat_id, item.user_id, item.message_id, item.command, item.arguments, key,
-        )
+        async with self._pool().acquire() as conn, conn.transaction():
+            await _set_actor(conn, f"telegram:{item.user_id}")
+            row = await conn.fetchrow(
+                """insert into orchestration_commands
+                       (confirmation_id, telegram_chat_id, telegram_user_id, telegram_message_id, command, arguments, idempotency_key)
+                   values ($1::uuid,$2,$3,$4,$5,$6,$7)
+                   on conflict (idempotency_key) do update set idempotency_key=excluded.idempotency_key
+                   returning id, state, (xmax <> 0) as duplicate""",
+                item.confirmation_id, item.chat_id, item.user_id, item.message_id, item.command, item.arguments, key,
+            )
         assert row is not None
         return CommandReceipt(str(row["id"]), CommandState(row["state"]), bool(row["duplicate"]))
 
     async def reclaim_expired(self) -> int:
-        result = await self._pool().execute(
-            """update orchestration_commands
-                 set state=case when attempt_count >= 10 then 'failed' else 'queued' end,
-                     lease_expires_at=null,
-                     error_code=case when attempt_count >= 10 then 'lease_retry_exhausted' else error_code end,
-                     finished_at=case when attempt_count >= 10 then now() else finished_at end
-                 where state='running' and lease_expires_at < now()"""
-        )
-        return int(result.rsplit(" ", 1)[-1])
+        async with self._pool().acquire() as conn, conn.transaction():
+            await _set_actor(conn, DISPATCHER_ACTOR)
+            result = await conn.execute(
+                """update orchestration_commands
+                     set state=case when attempt_count >= 10 then 'failed' else 'queued' end,
+                         lease_expires_at=null,
+                         error_code=case when attempt_count >= 10 then 'lease_retry_exhausted' else error_code end,
+                         finished_at=case when attempt_count >= 10 then now() else finished_at end
+                     where state='running' and lease_expires_at < now()"""
+            )
+        return _affected(result)
 
     async def claim_next(self, *, lease_seconds: int) -> ClaimedCommand | None:
         async with self._pool().acquire() as conn, conn.transaction():
+            await _set_actor(conn, DISPATCHER_ACTOR)
             row = await conn.fetchrow(
-                """select id, command, arguments, telegram_chat_id, telegram_user_id
-                     from orchestration_commands where state='queued' and attempt_count < 10
+                """select id from orchestration_commands where state='queued' and attempt_count < 10
                      order by created_at for update skip locked limit 1"""
             )
             if row is None:
@@ -67,19 +80,20 @@ class PostgresOrchestraStore:
                 """update orchestration_commands
                      set state='running', attempt_count=attempt_count+1, started_at=coalesce(started_at, now()),
                          lease_expires_at=now() + ($2 * interval '1 second')
-                   where id=$1 returning id, command, arguments, telegram_chat_id, telegram_user_id""",
+                   where id=$1 returning id, command, arguments, telegram_chat_id, telegram_user_id, attempt_count""",
                 row["id"], lease_seconds,
             )
             assert updated is not None
-            return ClaimedCommand(str(updated["id"]), updated["command"], updated["arguments"], updated["telegram_chat_id"], updated["telegram_user_id"])
+            return ClaimedCommand(
+                str(updated["id"]), updated["command"], updated["arguments"],
+                updated["telegram_chat_id"], updated["telegram_user_id"], updated["attempt_count"],
+            )
 
-    async def complete(self, command_id: str, state: CommandState, result: dict[str, Any], *, error_code: str | None = None, error_detail: str | None = None) -> None:
-        await self._pool().execute(
-            """update orchestration_commands set state=$2, result=$3::jsonb, error_code=$4, error_detail=$5,
-                   lease_expires_at=null, finished_at=case when $2 in ('finished','needs_verification','failed','cancelled') then now() else null end
-               where id=$1 and state='running'""",
-            command_id, state.value, json.dumps(result), error_code, error_detail,
-        )
+    async def complete(self, item: ClaimedCommand, state: CommandState, result: dict[str, Any], *, error_code: str | None = None, error_detail: str | None = None) -> None:
+        """Record a failure outcome; a no-op when the claim was cancelled or reclaimed."""
+        async with self._pool().acquire() as conn, conn.transaction():
+            await _set_actor(conn, f"telegram:{item.user_id}")
+            await _finish(conn, item, state, result, error_code=error_code, error_detail=error_detail)
 
     async def _ready_profile(self, conn: asyncpg.Connection[asyncpg.Record], platform: str) -> str:
         profile = await conn.fetchval(
@@ -91,19 +105,46 @@ class PostgresOrchestraStore:
         return str(profile)
 
     async def _source(self, conn: asyncpg.Connection[asyncpg.Record], request: RunRequest, target: str) -> str:
+        """Create an active source, or reuse an existing one only while it may run.
+
+        Reusing a paused, disabled, retired, deleted, or verification-blocked
+        source would let ``/run`` silently override ``/pause`` or a challenge.
+        """
         source_id = await conn.fetchval(
             """insert into monitoring_sources(platform, source_kind, vertical, canonical_url, acquisition_method, state)
                values($1,$2,$3,$4,$5,'active')
-               on conflict(platform, canonical_url) do update set canonical_url=excluded.canonical_url
+               on conflict(platform, canonical_url) do nothing
                returning id""",
             request.platform, request.source_kind, request.vertical, target, request.method.value,
         )
-        return str(source_id)
+        if source_id is not None:
+            return str(source_id)
+        existing = await conn.fetchrow(
+            "select id, state, deleted_at from monitoring_sources where platform=$1 and canonical_url=$2 for update",
+            request.platform, target,
+        )
+        assert existing is not None
+        source_id, state = str(existing["id"]), existing["state"]
+        if existing["deleted_at"] is not None:
+            raise ValueError(f"source {source_id} is deleted and cannot be run")
+        if state == "paused":
+            raise ValueError(f"source {source_id} is paused; send /resume source:{source_id} first")
+        if state == "human_verification_required":
+            raise ValueError(f"source {source_id} is waiting for human verification")
+        if state == "draft":
+            await conn.execute("update monitoring_sources set state='active' where id=$1", source_id)
+        elif state != "active":
+            raise ValueError(f"source {source_id} is {state} and cannot be run")
+        return source_id
 
-    async def plan_run(self, request: RunRequest, *, actor: str) -> dict[str, Any]:
-        """Persist bounded work. Worker launch is intentionally outside this transaction."""
+    async def plan_run(self, request: RunRequest, item: ClaimedCommand, *, actor: str) -> dict[str, Any]:
+        """Persist bounded work and finish the command in one transaction.
+
+        A crash before commit leaves nothing behind, so a reclaimed retry cannot
+        create a duplicate batch or run. Worker launch stays outside this path.
+        """
         async with self._pool().acquire() as conn, conn.transaction():
-            await conn.execute("select set_config('app.actor', $1, true)", actor)
+            await _set_actor(conn, actor)
             profile_id = await self._ready_profile(conn, request.platform)
             source_ids = [await self._source(conn, request, target) for target in request.targets]
             if request.method.value == "facebook_connector":
@@ -118,37 +159,101 @@ class PostgresOrchestraStore:
                         batch_id, source_id, sequence_no,
                     )
                 await conn.execute("update acquisition_batches set state='queued' where id=$1", batch_id)
-                return {"status": "queued", "method": request.method.value, "batch_id": str(batch_id), "source_ids": source_ids, "max_groups": len(source_ids), "max_posts_per_group": 20, "browser_profile_id": profile_id}
-            source_id = source_ids[0]
-            run_id = await conn.fetchval(
-                """insert into acquisition_runs(source_id, browser_profile_id, acquisition_method, state, max_pages, max_runtime_seconds, allowed_skills)
-                   values($1,$2,'agent_ridge','queued',5,120,'[\"read_public_page\",\"extract_public_text\"]'::jsonb) returning id""",
-                source_id, profile_id,
-            )
-            return {"status": "queued", "method": request.method.value, "run_id": str(run_id), "source_ids": source_ids, "max_pages": 5, "max_runtime_seconds": 120, "browser_profile_id": profile_id}
+                result = {"status": "queued", "method": request.method.value, "batch_id": str(batch_id), "source_ids": source_ids, "max_groups": len(source_ids), "max_posts_per_group": 20, "browser_profile_id": profile_id}
+            else:
+                run_id = await conn.fetchval(
+                    """insert into acquisition_runs(source_id, browser_profile_id, acquisition_method, state, max_pages, max_runtime_seconds, allowed_skills)
+                       values($1,$2,'agent_ridge','queued',5,120,'[\"read_public_page\",\"extract_public_text\"]'::jsonb) returning id""",
+                    source_ids[0], profile_id,
+                )
+                result = {"status": "queued", "method": request.method.value, "run_id": str(run_id), "source_ids": source_ids, "max_pages": 5, "max_runtime_seconds": 120, "browser_profile_id": profile_id}
+            await _finish(conn, item, CommandState.FINISHED, result)
+            return result
 
-    async def apply_lifecycle(self, command: str, scope_kind: str, identifier: str) -> dict[str, Any]:
-        """Use only legal transitions; active workers see cancellation via durable run state."""
+    async def apply_lifecycle(self, item: ClaimedCommand, scope_kind: str, identifier: str, *, actor: str) -> dict[str, Any]:
+        """Use only legal transitions and finish the command in the same transaction.
+
+        Running work is never forced into a terminal state here: the Facebook
+        collector sees a cancelled batch before its next group and closes its own
+        running item, batch run, and browser profile.
+        """
+        command = item.command
         async with self._pool().acquire() as conn, conn.transaction():
+            await _set_actor(conn, actor)
             if scope_kind == "all":
                 if command == "pause":
-                    count = await conn.execute("update monitoring_sources set state='paused' where state='active'")
+                    affected = _affected(await conn.execute("update monitoring_sources set state='paused' where state='active'"))
                 elif command == "resume":
-                    count = await conn.execute("update monitoring_sources set state='active' where state='paused'")
+                    affected = _affected(await conn.execute("update monitoring_sources set state='active' where state='paused'"))
                 elif command == "cancel":
-                    count = await conn.execute("update acquisition_batches set state='cancelled' where state='queued'")
-                    await conn.execute("update acquisition_runs set state='cancelled' where state='queued'")
+                    affected = await _cancel_batches(conn, "state in ('planned','queued','running','human_verification_required')")
+                    affected += _affected(await conn.execute("update acquisition_runs set state='cancelled' where state in ('queued','awaiting_human_verification') and batch_item_id is null"))
+                    affected += _affected(await conn.execute("update orchestration_commands set state='cancelled', finished_at=now() where state='queued'"))
                 else:
                     raise ValueError("/run requires a run target, not a lifecycle scope")
-                return {"status": command + "d", "scope": "all", "affected": int(count.rsplit(" ", 1)[-1])}
-            table = {"source": "monitoring_sources", "batch": "acquisition_batches", "run": "acquisition_runs", "command": "orchestration_commands"}[scope_kind]
-            if command == "pause" and scope_kind == "source":
-                sql, target = f"update {table} set state='paused' where id=$1 and state='active'", "paused"
-            elif command == "resume" and scope_kind == "source":
-                sql, target = f"update {table} set state='active' where id=$1 and state='paused'", "resumed"
-            elif command == "cancel" and scope_kind in {"batch", "run", "command"}:
-                sql, target = f"update {table} set state='cancelled' where id=$1 and state in ('queued','running','paused')", "cancelled"
+                result = {"status": {"pause": "paused", "resume": "resumed", "cancel": "cancelled"}[command], "scope": "all", "affected": affected}
             else:
-                raise ValueError("pause/resume apply to sources; cancel applies to batches, runs, commands, or all")
-            result = await conn.execute(sql, identifier)
-            return {"status": target, "scope": f"{scope_kind}:{identifier}", "affected": int(result.rsplit(" ", 1)[-1])}
+                if command == "pause" and scope_kind == "source":
+                    sql, status = "update monitoring_sources set state='paused' where id=$1 and state='active'", "paused"
+                elif command == "resume" and scope_kind == "source":
+                    sql, status = "update monitoring_sources set state='active' where id=$1 and state='paused'", "resumed"
+                elif command == "cancel" and scope_kind == "batch":
+                    sql, status = "", "cancelled"
+                elif command == "cancel" and scope_kind == "run":
+                    # Running Facebook item runs are closed by the collector; cancel its batch instead.
+                    sql, status = "update acquisition_runs set state='cancelled' where id=$1 and state in ('queued','awaiting_human_verification')", "cancelled"
+                elif command == "cancel" and scope_kind == "command":
+                    sql, status = "update orchestration_commands set state='cancelled', finished_at=now() where id=$1 and state in ('queued','running','paused')", "cancelled"
+                else:
+                    raise ValueError("pause/resume apply to sources; cancel applies to batches, runs, commands, or all")
+                if scope_kind == "batch":
+                    affected = await _cancel_batches(conn, "id=$1 and state in ('planned','queued','running','human_verification_required')", identifier)
+                else:
+                    affected = _affected(await conn.execute(sql, identifier))
+                result = {"status": status if affected else "unchanged", "scope": f"{scope_kind}:{identifier}", "affected": affected}
+            await _finish(conn, item, CommandState.FINISHED, result)
+            return result
+
+
+async def _set_actor(conn: asyncpg.Connection[asyncpg.Record], actor: str) -> None:
+    """Attribute every audit row written by this transaction."""
+    await conn.execute("select set_config('app.actor', $1, true)", actor)
+
+
+def _affected(status: str) -> int:
+    return int(status.rsplit(" ", 1)[-1])
+
+
+async def _finish(conn: asyncpg.Connection[asyncpg.Record], item: ClaimedCommand, state: CommandState, result: dict[str, Any], *, error_code: str | None = None, error_detail: str | None = None) -> None:
+    """Finish only the exact claim this worker holds, else roll back its work."""
+    status = await conn.execute(
+        """update orchestration_commands set state=$3, result=$4::jsonb, error_code=$5, error_detail=$6,
+               lease_expires_at=null, finished_at=case when $3 in ('finished','needs_verification','failed','cancelled') then now() else null end
+           where id=$1 and attempt_count=$2 and state='running'""",
+        item.id, item.attempt, state.value, json.dumps(result), error_code, error_detail,
+    )
+    if _affected(status) != 1:
+        raise ClaimLost(item.id)
+
+
+async def _cancel_batches(conn: asyncpg.Connection[asyncpg.Record], condition: str, *args: object) -> int:
+    """Cancel batches plus their not-yet-running items and verification holds."""
+    batch_ids = [row["id"] for row in await conn.fetch(
+        f"update acquisition_batches set state='cancelled' where {condition} returning id", *args
+    )]
+    if not batch_ids:
+        return 0
+    await conn.execute(
+        "update acquisition_batch_items set state='cancelled' where batch_id = any($1::uuid[]) and state in ('queued','awaiting_human_verification')",
+        batch_ids,
+    )
+    await conn.execute(
+        """update acquisition_runs set state='cancelled' where state='awaiting_human_verification'
+             and batch_item_id in (select id from acquisition_batch_items where batch_id = any($1::uuid[]))""",
+        batch_ids,
+    )
+    await conn.execute(
+        "update batch_runs set state='cancelled' where batch_id = any($1::uuid[]) and state in ('queued','human_verification_required')",
+        batch_ids,
+    )
+    return len(batch_ids)

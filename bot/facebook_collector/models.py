@@ -54,3 +54,6 @@ class ChallengeDetected(RuntimeError):
         super().__init__(reason)
         self.reason, self.evidence = reason, evidence
 
+
+class BatchCancelled(RuntimeError):
+    """An operator cancelled the batch; stop before the next group."""

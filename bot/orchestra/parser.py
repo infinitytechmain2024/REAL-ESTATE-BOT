@@ -44,14 +44,14 @@ def parse_run(arguments: str) -> RunRequest:
             targets=tuple(_https_url(target, platform="facebook") for target in raw_targets),
             vertical="both", method=AcquisitionMethod.FACEBOOK_CONNECTOR,
         )
+    if scope not in _REACH_PLATFORMS | {"facebook"} or len(raw_targets) != 1:
+        raise CommandValidationError("use one explicit target for website, instagram, tiktok, or facebook fallback")
     if scope == "facebook":
         return RunRequest(
             platform="facebook", source_kind="website",
-            targets=tuple(_https_url(target, platform="facebook") for target in raw_targets),
+            targets=(_https_url(raw_targets[0], platform="facebook"),),
             vertical="both", method=AcquisitionMethod.AGENT_REACH,
         )
-    if scope not in _REACH_PLATFORMS or len(raw_targets) != 1:
-        raise CommandValidationError("use one explicit target for website, instagram, tiktok, or facebook fallback")
     return RunRequest(
         platform=scope, source_kind="website" if scope == "website" else "account",
         targets=(_https_url(raw_targets[0], platform=scope),), vertical="both", method=AcquisitionMethod.AGENT_REACH,

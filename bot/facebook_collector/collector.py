@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from .browser import BrowserLease, BrowserSessionClient
-from .models import BatchItem, BatchPlan, ChallengeDetected, GroupState
+from .models import BatchCancelled, BatchItem, BatchPlan, ChallengeDetected, GroupState
 from .reader import FacebookGroupReader
 
 
@@ -42,7 +42,11 @@ class FacebookBatchCollector:
             for index, item in enumerate(plan.items):
                 if index:
                     await self.sleep(random.uniform(self.pause_min_seconds, self.pause_max_seconds))
-                run_id = await self.store.start_item(item, batch_run, plan.browser_profile_id, max_runtime_seconds=self.item_timeout_seconds)
+                try:
+                    run_id = await self.store.start_item(item, batch_run, plan.browser_profile_id, max_runtime_seconds=self.item_timeout_seconds)
+                except BatchCancelled:
+                    await self.store.finish_batch(plan, batch_run, "cancelled", "operator_cancelled")
+                    return "cancelled"
                 try:
                     result = await asyncio.wait_for(self.reader.read(lease, item.canonical_url), timeout=self.item_timeout_seconds)
                     for post in result.posts[: self.max_posts]:

@@ -54,3 +54,8 @@ class ClaimedCommand:
     arguments: str
     chat_id: int
     user_id: int
+    attempt: int = 1
+
+
+class ClaimLost(RuntimeError):
+    """The command was cancelled or reclaimed; its planned work was rolled back."""

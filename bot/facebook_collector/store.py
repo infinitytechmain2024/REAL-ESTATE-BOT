@@ -7,7 +7,7 @@ import json
 
 import asyncpg
 
-from .models import BatchItem, BatchPlan, CollectedPost, GroupState
+from .models import BatchCancelled, BatchItem, BatchPlan, CollectedPost, GroupState
 
 
 class PostgresCollectorStore:
@@ -52,6 +52,8 @@ class PostgresCollectorStore:
         async with self.pool.acquire() as conn, conn.transaction():
             result = await conn.execute("update acquisition_batch_items set state='running', attempt_count=attempt_count+1, started_at=now() where id=$1 and state='queued'", item.id)
             if not result.endswith("1"):
+                if await conn.fetchval("select state from acquisition_batches where id=(select batch_id from acquisition_batch_items where id=$1)", item.id) == "cancelled":
+                    raise BatchCancelled(item.id)
                 raise ValueError("batch item could not be claimed")
             run_id = await conn.fetchval(
                 """insert into acquisition_runs(source_id,batch_item_id,batch_run_id,browser_profile_id,acquisition_method,state,max_pages,max_runtime_seconds,allowed_skills)
@@ -73,22 +75,27 @@ class PostgresCollectorStore:
     async def finish_item(self, item: BatchItem, run_id: str, state: str, group_state: GroupState, detail: str | None = None) -> None:
         metadata = json.dumps({"facebook_group_state": group_state.value, "facebook_group_state_updated_at": "now"})
         async with self.pool.acquire() as conn, conn.transaction():
-            await conn.execute("update acquisition_runs set state=$2, finished_at=now(), error_code=$3 where id=$1", run_id, state, detail)
-            await conn.execute("update acquisition_batch_items set state=$2, finished_at=now(), last_error_code=$3 where id=$1", item.id, state, detail)
+            await conn.execute("update acquisition_runs set state=$2, finished_at=now(), error_code=$3 where id=$1 and state='running'", run_id, state, detail)
+            await conn.execute("update acquisition_batch_items set state=$2, finished_at=now(), last_error_code=$3 where id=$1 and state='running'", item.id, state, detail)
             await conn.execute("update monitoring_sources set configuration=configuration || $2::jsonb where id=$1", item.source_id, metadata)
 
     async def finish_batch(self, plan: BatchPlan, batch_run_id: str, state: str, reason: str | None = None) -> None:
         async with self.pool.acquire() as conn, conn.transaction():
-            await conn.execute("update batch_runs set state=$2, finished_at=now(), stop_reason=$3 where id=$1", batch_run_id, state, reason)
-            await conn.execute("update acquisition_batches set state=$2, finished_at=now() where id=$1", plan.id, "succeeded" if state == "succeeded" else "failed")
+            # A batch cancelled mid-run stays cancelled; only the collector's own
+            # running rows are closed, and the profile is always handed back.
+            await conn.execute("update batch_runs set state=$2, finished_at=now(), stop_reason=$3 where id=$1 and state='running'", batch_run_id, state, reason)
+            await conn.execute(
+                "update acquisition_batches set state=$2, finished_at=now() where id=$1 and state='running'",
+                plan.id, state if state in {"succeeded", "cancelled"} else "failed",
+            )
             await conn.execute("update browser_profiles set state='ready' where id=$1 and state='in_use'", plan.browser_profile_id)
 
     async def challenge(self, plan: BatchPlan, batch_run_id: str, item: BatchItem, run_id: str, reason: str) -> None:
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("update acquisition_runs set state='awaiting_human_verification', stop_reason=$2 where id=$1", run_id, reason)
             await conn.execute("update acquisition_batch_items set state='awaiting_human_verification', last_error_code='facebook_challenge' where id=$1", item.id)
-            await conn.execute("update batch_runs set state='human_verification_required', stop_reason=$2 where id=$1", batch_run_id, reason)
-            await conn.execute("update acquisition_batches set state='human_verification_required' where id=$1", plan.id)
+            await conn.execute("update batch_runs set state='human_verification_required', stop_reason=$2 where id=$1 and state='running'", batch_run_id, reason)
+            await conn.execute("update acquisition_batches set state='human_verification_required' where id=$1 and state='running'", plan.id)
             await conn.execute("update monitoring_sources set state='human_verification_required' where id=$1 and state='active'", item.source_id)
             await conn.execute("update browser_profiles set state='human_verification_required' where id=$1 and state='in_use'", plan.browser_profile_id)
             await conn.execute(

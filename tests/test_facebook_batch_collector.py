@@ -10,6 +10,7 @@ from bot.facebook_collector.browser import BrowserLease
 from bot.facebook_collector.challenges import detect_challenge
 from bot.facebook_collector.collector import FacebookBatchCollector
 from bot.facebook_collector.models import (
+    BatchCancelled,
     BatchItem,
     BatchPlan,
     ChallengeDetected,
@@ -25,6 +26,7 @@ class FakeStore:
     plan: BatchPlan
     events: list[tuple] = field(default_factory=list)
     posts: list[CollectedPost] = field(default_factory=list)
+    cancelled_from: set[int] = field(default_factory=set)
 
     async def load_plan(self, _: str) -> BatchPlan:
         return self.plan
@@ -34,6 +36,8 @@ class FakeStore:
         return "batch-run"
 
     async def start_item(self, item: BatchItem, *_: str, **__: int) -> str:
+        if item.sequence_no in self.cancelled_from:
+            raise BatchCancelled(item.id)
         self.events.append(("start", item.sequence_no))
         return f"run-{item.sequence_no}"
 
@@ -143,3 +147,13 @@ async def test_inaccessible_and_failed_groups_are_reported_without_parallelism()
     finishes = [event for event in store.events if event[0] == "finish"]
     assert finishes[0][3] is GroupState.INACCESSIBLE
     assert finishes[1] == ("finish", 2, "failed", GroupState.UNKNOWN, "group_read_failed")
+
+
+@pytest.mark.asyncio
+async def test_operator_cancellation_stops_before_the_next_group_and_frees_the_profile() -> None:
+    store, browser, reader = FakeStore(plan(3), cancelled_from={2, 3}), FakeBrowser(), FakeReader([posts(1)])
+    collector = FacebookBatchCollector(store, browser, reader, max_posts=10, item_timeout_seconds=10, pause_min_seconds=0, pause_max_seconds=0)
+    assert await collector.run("batch") == "cancelled"
+    assert reader.urls == ["https://www.facebook.com/groups/1"]
+    assert store.events[-1] == ("batch_finish", "cancelled", "operator_cancelled")
+    assert browser.events[-1] == ("release", "profile", "READY")

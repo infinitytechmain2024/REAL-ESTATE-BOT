@@ -63,6 +63,14 @@ key. It supports:
 - `/pause source:<uuid>`, `/resume source:<uuid>`, and
   `/cancel batch:<uuid>|run:<uuid>|command:<uuid>|all`.
 
+Planning and completing a command happen in one transaction, so a crash never
+leaves a half-planned or duplicate batch. `/run` refuses a source that is
+paused, disabled, retired, deleted, or waiting for human verification.
+Cancelling a running Facebook batch stops the collector before its next group;
+the group in progress finishes and the browser profile is handed back. A
+running Agent Reach or Facebook item run is not cancelled directly: cancel its
+batch instead. Every change is audited with the Telegram user as the actor.
+
 An active, platform-matched browser profile must already be provisioned in
 PostgreSQL. The dispatcher creates plans only; an operator-controlled one-shot
 collector or Agent Reach invocation claims execution later. This is deliberate:
