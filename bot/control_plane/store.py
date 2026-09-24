@@ -6,7 +6,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from bot.control_plane.models import IncomingMessage, TranscriptionFailure, TranscriptResult
+from bot.control_plane.models import (
+    IncomingMessage,
+    StatusSnapshot,
+    TranscriptionFailure,
+    TranscriptResult,
+)
 
 
 class ControlPlaneStore(Protocol):
@@ -15,6 +20,7 @@ class ControlPlaneStore(Protocol):
     async def record_transcription_failure(self, message: IncomingMessage, failure: TranscriptionFailure) -> None: ...
     async def create_confirmation(self, message: IncomingMessage, command: str, arguments: str, *, ttl_seconds: int) -> str: ...
     async def consume_confirmation(self, message: IncomingMessage, token: str) -> tuple[str, str, str | None] | None: ...
+    async def status_snapshot(self) -> StatusSnapshot: ...
 
 
 class MemoryControlPlaneStore:
@@ -24,6 +30,7 @@ class MemoryControlPlaneStore:
         self.messages: set[tuple[int, int]] = set()
         self.transcripts: dict[tuple[int, int], TranscriptResult] = {}
         self.failures: dict[tuple[int, int], TranscriptionFailure] = {}
+        self.snapshot = StatusSnapshot()
         self.confirmations: dict[str, tuple[int, int, str, str, datetime]] = {}
 
     async def claim_message(self, message: IncomingMessage) -> bool:
@@ -52,6 +59,9 @@ class MemoryControlPlaneStore:
         if (chat_id, user_id) != (message.chat_id, message.user_id) or datetime.now(UTC) >= expires_at:
             return None
         return command, arguments, None
+
+    async def status_snapshot(self) -> StatusSnapshot:
+        return self.snapshot
 
 
 class PostgresControlPlaneStore:
@@ -126,3 +136,36 @@ class PostgresControlPlaneStore:
             token, message.chat_id, message.user_id,
         )
         return (row["command"], row["arguments"], str(row["id"])) if row else None
+
+    async def status_snapshot(self) -> StatusSnapshot:
+        row = await self._pool().fetchrow(STATUS_SQL)  # type: ignore[attr-defined]
+        return StatusSnapshot(**dict(row))
+
+
+# One round trip of counts only. Every table here comes from migrations
+# 003-006, which the control plane already requires.
+STATUS_SQL = """
+select
+  (select count(*) from public.orchestration_commands where state = 'queued')::int as commands_queued,
+  (select count(*) from public.orchestration_commands where state = 'running')::int as commands_running,
+  (select count(*) from public.acquisition_batches where state in ('planned', 'queued', 'running'))::int as batches_active,
+  (select count(*) from public.acquisition_batches where state = 'human_verification_required')::int as batches_need_verification,
+  (select max(finished_at) from public.acquisition_batches) as last_batch_finished_at,
+  (select count(*) from public.acquisition_runs where state = 'running')::int as runs_running,
+  (select count(*) from public.acquisition_runs where state = 'awaiting_human_verification')::int as runs_need_verification,
+  (select count(*) from public.monitoring_sources where deleted_at is null and state = 'active')::int as sources_active,
+  (select count(*) from public.monitoring_sources where deleted_at is null and state = 'paused')::int as sources_paused,
+  (select count(*) from public.monitoring_sources
+     where deleted_at is null and state = 'human_verification_required')::int as sources_need_verification,
+  (select count(*) from public.browser_profiles where deleted_at is null and state = 'ready')::int as profiles_ready,
+  (select count(*) from public.browser_profiles where deleted_at is null and state = 'in_use')::int as profiles_in_use,
+  (select count(*) from public.browser_profiles
+     where deleted_at is null and state in ('human_verification_required', 'quarantined'))::int as profiles_need_attention,
+  (select count(*) from public.verification_jobs where state in ('requested', 'active'))::int as verification_jobs_open,
+  (select count(*) from public.collected_posts where collected_at > now() - interval '24 hours')::int as posts_last_24h,
+  (select count(*) from public.telegram_inbound_messages
+     where message_kind = 'voice' and transcription_cost_usd is not null
+       and received_at > now() - interval '30 days')::int as voice_notes_30d,
+  (select sum(transcription_cost_usd) from public.telegram_inbound_messages
+     where received_at > now() - interval '30 days') as voice_cost_usd_30d
+"""

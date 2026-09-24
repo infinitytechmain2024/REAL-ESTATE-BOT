@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +43,29 @@ class TranscriptionFailure:
     model: str | None
     provider: str | None = None
     request_status: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StatusSnapshot:
+    """Counts behind /status; read in one query, no row content."""
+
+    commands_queued: int = 0
+    commands_running: int = 0
+    batches_active: int = 0
+    batches_need_verification: int = 0
+    last_batch_finished_at: datetime | None = None
+    runs_running: int = 0
+    runs_need_verification: int = 0
+    sources_active: int = 0
+    sources_paused: int = 0
+    sources_need_verification: int = 0
+    profiles_ready: int = 0
+    profiles_in_use: int = 0
+    profiles_need_attention: int = 0
+    verification_jobs_open: int = 0
+    posts_last_24h: int = 0
+    voice_notes_30d: int = 0
+    voice_cost_usd_30d: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 """Safe command routing, deduplication and confirmation for an open bot.
 
-Anyone may read status; only allowlisted operators may change acquisition state.
+Anyone may check the bot is online; only allowlisted operators see the
+detailed status or may change acquisition state.
 """
 
 from __future__ import annotations
@@ -8,7 +9,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
-from bot.control_plane.models import CommandEnvelope, IncomingMessage, Reply, TranscriptionFailure
+from bot.control_plane.models import (
+    CommandEnvelope,
+    IncomingMessage,
+    Reply,
+    StatusSnapshot,
+    TranscriptionFailure,
+)
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import ControlPlaneStore
 from bot.control_plane.stt import Transcriber, TranscriptionError
@@ -121,7 +128,7 @@ class ControlPlane:
         if command in {"help", "start"}:
             return Reply("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>. Confirm changes with: confirm <token>.")
         if command == "status":
-            return Reply("Control plane is online. Acquisition is not implemented in this service.")
+            return await self._status(message)
         if command not in STATE_CHANGING:
             return Reply("Unknown command. Send /help.")
         # Telegram channel posts may not have a sending user. Confirmation
@@ -133,9 +140,40 @@ class ControlPlane:
         token = await self.store.create_confirmation(message, command, arguments, ttl_seconds=self.settings.confirmation_ttl_seconds)
         return Reply(f"Confirmation required for /{command}. Reply exactly: confirm {token} (expires in {self.settings.confirmation_ttl_seconds // 60} minutes).")
 
+    async def _status(self, message: IncomingMessage) -> Reply:
+        # /status is open to everyone, but queue sizes, sources and spend are
+        # operational detail: only operators see them.
+        if message.user_id is None or message.user_id not in self.settings.operator_user_ids:
+            return Reply("Control plane is online. Detailed status is shown to operators only.")
+        try:
+            snapshot = await self.store.status_snapshot()
+        except Exception as exc:  # noqa: BLE001 - a status read must never break the bot
+            log.warning("telegram.control.status_failed", extra={"error": type(exc).__name__})
+            return Reply("Control plane is online, but the status query failed. Check the telegram service logs.")
+        return Reply(format_status(snapshot))
+
     def _operator_refusal(self, message: IncomingMessage) -> Reply | None:
         if message.user_id is not None and message.user_id in self.settings.operator_user_ids:
             return None
         log.warning("telegram.control.not_operator", extra={"chat_id": message.chat_id, "user_id": message.user_id})
         identity = f" Your Telegram user ID is {message.user_id}." if message.user_id is not None else ""
         return Reply(f"Only operators can run, pause, resume, or cancel acquisition; /status and /help are open to everyone.{identity}")
+
+
+def format_status(s: StatusSnapshot) -> str:
+    last = s.last_batch_finished_at.strftime("%Y-%m-%d %H:%M UTC") if s.last_batch_finished_at else "never"
+    cost = f"${s.voice_cost_usd_30d:.6f}" if s.voice_cost_usd_30d is not None else "$0"
+    attention = s.batches_need_verification + s.runs_need_verification + s.sources_need_verification + s.profiles_need_attention + s.verification_jobs_open
+    lines = [
+        "Control plane is online.",
+        f"Commands: {s.commands_queued} queued, {s.commands_running} running.",
+        f"Batches: {s.batches_active} active, {s.batches_need_verification} need verification; last finished {last}.",
+        f"Runs: {s.runs_running} running, {s.runs_need_verification} awaiting verification.",
+        f"Sources: {s.sources_active} active, {s.sources_paused} paused, {s.sources_need_verification} need verification.",
+        f"Browser profiles: {s.profiles_ready} ready, {s.profiles_in_use} in use, {s.profiles_need_attention} need attention.",
+        f"Posts collected (24h): {s.posts_last_24h}.",
+        f"Voice (30 days): {s.voice_notes_30d} notes, {cost}.",
+    ]
+    if attention:
+        lines.append(f"Needs a human: {attention} item(s) waiting for verification or attention.")
+    return "\n".join(lines)
