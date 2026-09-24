@@ -271,7 +271,9 @@ async def test_solved_is_confirmed_by_the_watchdog_then_the_run_resumes_once() -
     assert await service.resume(session) == job.batch_id
     assert watchdog.calls == 2  # checked again right before the run continues
     assert store.world[f"batch:{job.batch_id}"] == "queued" and store.world[f"item:{job.batch_id}"] == "queued"
-    assert f"FACEBOOK_BATCH_ID={job.batch_id}" in notifier.sent[-1][1]
+    assert "starts automatically" in notifier.sent[-1][1]
+    [launch] = store.launches.values()
+    assert (launch.record.batch_id, launch.record.state, launch.record.notify_user_id) == (job.batch_id, "pending", OPERATOR)
     with pytest.raises(ActionRefused, match="once"):
         await service.resume(session)
     assert events(store, job)[-4:] == ["view", "solve", "recovery_confirmed", "resume"]
@@ -498,3 +500,57 @@ def test_unsafe_settings_stop_startup(monkeypatch: pytest.MonkeyPatch, values: d
 
 def test_https_origin_strips_the_slash() -> None:
     assert https_origin(PUBLIC + "/") == PUBLIC
+
+
+async def resumed(service, store, notifier):
+    job = await announced(service, store)
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
+    await service.claim(session)
+    await service.solve(session)
+    await service.resume(session)
+    [launch_id] = store.launches
+    return job, launch_id
+
+
+@pytest.mark.asyncio
+async def test_the_restarted_batch_is_reported_once_per_state() -> None:
+    service, store, notifier, _ = flow(Recovery(True))
+    job, launch_id = await resumed(service, store, notifier)
+    before = len(notifier.sent)
+    await service.tick()
+    assert len(notifier.sent) == before  # pending and not yet stale: quiet
+
+    store.set_launch(launch_id, "running")
+    await service.tick()
+    await service.tick()
+    assert [(c, t) for c, t, _ in notifier.sent[before:]] == [(OPERATOR, f"Batch {job.batch_id} started again automatically.")]
+
+    store.set_launch(launch_id, "finished", result="succeeded")
+    await service.tick()
+    assert notifier.sent[-1][:2] == (OPERATOR, f"Batch {job.batch_id} finished: the remaining groups were read.")
+    assert len(notifier.sent) == before + 2
+    assert [e.detail.get("launch") for e in store.log[job.id] if e.actor == "verification:runner"] == ["running", "finished"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restart_also_tells_the_owner_with_the_manual_command() -> None:
+    service, store, notifier, _ = flow(Recovery(True))
+    job, launch_id = await resumed(service, store, notifier)
+    store.set_launch(launch_id, "failed", error="ValueError: no ready profile")
+    await service.tick()
+    sent = {c: t for c, t, _ in notifier.sent[-2:]}
+    assert set(sent) == {OWNER, OPERATOR}
+    assert f"FACEBOOK_BATCH_ID={job.batch_id}" in sent[OWNER] and "no ready profile" in sent[OWNER]
+
+
+@pytest.mark.asyncio
+async def test_a_launch_nobody_picks_up_is_reported_as_stale_once() -> None:
+    service, store, notifier, _ = flow(Recovery(True))
+    job, launch_id = await resumed(service, store, notifier)
+    store.launches[launch_id].requested_at -= timedelta(minutes=6)
+    before = len(notifier.sent)
+    await service.tick()
+    await service.tick()
+    stale = notifier.sent[before:]
+    assert {c for c, _, _ in stale} == {OWNER, OPERATOR} and len(stale) == 2
+    assert all("facebook-runner" in t and f"FACEBOOK_BATCH_ID={job.batch_id}" in t for _, t, _ in stale)

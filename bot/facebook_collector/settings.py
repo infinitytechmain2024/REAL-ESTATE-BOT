@@ -19,4 +19,6 @@ class FacebookCollectorSettings(BaseSettings):
     group_timeout_seconds: PositiveInt = Field(default=90, ge=35, le=600)
     pause_min_seconds: float = Field(default=4.0, ge=0, le=120)
     pause_max_seconds: float = Field(default=9.0, ge=0, le=120)
+    # facebook-runner: how often it looks for batches resumed after verification.
+    runner_poll_seconds: PositiveInt = Field(default=15, ge=5, le=300)
 

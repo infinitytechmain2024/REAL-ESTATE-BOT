@@ -176,6 +176,35 @@ services:
     read_only: true
     tmpfs: [/tmp]
 
+  facebook-runner:
+    # Same image and limits as facebook-collector, but long-running: it starts
+    # only batches that a verification Resume requeued (collector_launch_requests),
+    # one at a time. Batches queued by /run stay manual.
+    build:
+      context: .
+      dockerfile: docker/facebook-collector.Dockerfile
+    command: ["python", "-m", "bot.facebook_collector.runner"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      browser:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      BROWSER_SESSION_URL: http://browser:8090
+      BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
+      FACEBOOK_COLLECTOR_MAX_GROUPS: ${FACEBOOK_COLLECTOR_MAX_GROUPS:-20}
+      FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP: ${FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP:-15}
+      FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS: ${FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS:-90}
+      FACEBOOK_COLLECTOR_PAUSE_MIN_SECONDS: ${FACEBOOK_COLLECTOR_PAUSE_MIN_SECONDS:-4}
+      FACEBOOK_COLLECTOR_PAUSE_MAX_SECONDS: ${FACEBOOK_COLLECTOR_PAUSE_MAX_SECONDS:-9}
+      FACEBOOK_COLLECTOR_RUNNER_POLL_SECONDS: ${FACEBOOK_COLLECTOR_RUNNER_POLL_SECONDS:-15}
+    networks: [backend]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
   agent-reach:
     # Controlled, one-shot public-page reader. It is deliberately profile-gated
     # so upstream Agent Reach is never installed or invoked by this stack.

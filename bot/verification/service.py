@@ -25,7 +25,7 @@ from bot.telegram_webapp import verify_init_data
 
 from .browser import BrowserUnavailable, LiveBrowser, RecoveryChecker
 from .classify import SENSITIVE_KINDS, classify
-from .models import Job, PageSession
+from .models import Job, Launch, PageSession
 from .store import VerificationStore
 from .telegram import Notifier
 from .tokens import digest, looks_like_secret, new_secret
@@ -66,6 +66,9 @@ class FlowConfig:
     job_hours: int = 24
     renotify_minutes: int = 30
     live_minutes: int = 20
+    # A resumed batch not started by facebook-runner within this time is
+    # reported with the manual command.
+    launch_stale_minutes: int = 5
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,38 @@ class VerificationService:
             await self._announce(job)
         for job in await self.store.jobs_needing_reminder(self.config.renotify_minutes * 60):
             await self._send_links(job, reminder=True)
+        for launch in await self.store.launch_updates(self.config.launch_stale_minutes * 60):
+            await self._report_launch(launch)
+
+    async def _report_launch(self, launch: Launch) -> None:
+        manual = f"FACEBOOK_BATCH_ID={launch.batch_id} docker compose --profile collector up facebook-collector"
+        if launch.stale:
+            text = (f"Batch {launch.batch_id} has not started automatically after {self.config.launch_stale_minutes} minutes; "
+                    f"is facebook-runner running? Start it by hand on the VPS:\n{manual}")
+        elif launch.state == "running":
+            text = f"Batch {launch.batch_id} started again automatically."
+        elif launch.state == "finished":
+            text = {
+                "succeeded": f"Batch {launch.batch_id} finished: the remaining groups were read.",
+                "cancelled": f"Batch {launch.batch_id} was cancelled while it ran.",
+                "human_verification_required": f"Batch {launch.batch_id} stopped at a new challenge; a verification notice follows.",
+            }.get(launch.result or "", f"Batch {launch.batch_id} finished: {launch.result}.")
+        elif launch.state == "skipped":
+            text = f"Batch {launch.batch_id} was not restarted: {launch.error or 'it is no longer queued'}."
+        else:
+            text = f"Batch {launch.batch_id} failed after the restart ({launch.error or 'unknown error'}). Run it by hand after checking:\n{manual}"
+        recipients = {launch.notify_user_id} if launch.notify_user_id else set()
+        if launch.stale or launch.state in {"failed", "skipped"}:
+            recipients.add(self.config.owner_id)
+        # Mark first: a Telegram outage must not turn into a message on every tick.
+        await self.store.mark_launch_notified(launch.id, "stale" if launch.stale else launch.state)
+        if launch.job_id:
+            await self.store.add_event(launch.job_id, "resume", "verification:runner",
+                                       {"batch_id": launch.batch_id, "launch": "stale" if launch.stale else launch.state,
+                                        "result": launch.result, "error": launch.error})
+        for user_id in sorted(recipients):
+            with suppress(Exception):
+                await self.notifier.send(user_id, text)
 
     async def _announce(self, job: Job) -> None:
         kind, sensitive = classify(job.resolution_note)
@@ -286,12 +321,12 @@ class VerificationService:
             if not recovery.clear:
                 await self.store.add_event(job.id, "recovery_failed", "verification:watchdog", {"kind": recovery.kind, "reason": recovery.reason, "at": "resume"})
                 raise ActionRefused("The browser shows a challenge again; the run was not resumed.")
-            batch_id = await self.store.resume(job.id, actor)
+            batch_id = await self.store.resume(job.id, actor, session.user_id)
             await self.store.add_event(job.id, "resume", actor, {"batch_id": batch_id})
         with suppress(Exception):
             await self.notifier.send(session.user_id, (
                 f"Verification {job.id} solved and confirmed. Batch {batch_id} is queued again from the group that was "
-                f"challenged. Start it on the VPS:\nFACEBOOK_BATCH_ID={batch_id} docker compose --profile collector up facebook-collector"
+                f"challenged and starts automatically; you will get a message when it finishes."
             ) if batch_id else f"Verification {job.id} solved and confirmed; the profile is ready.")
         return batch_id
 

@@ -15,19 +15,23 @@ from .settings import FacebookCollectorSettings
 from .store import PostgresCollectorStore
 
 
+async def run_batch_with(pool: asyncpg.Pool[asyncpg.Record], settings: FacebookCollectorSettings, batch_id: str) -> str:
+    browser = BrowserSessionClient(settings.browser_url, settings.browser_token)
+    reader = FacebookGroupReader(browser, max_posts=settings.max_posts_per_group, timeout_seconds=settings.group_timeout_seconds)
+    collector = FacebookBatchCollector(
+        PostgresCollectorStore(pool), browser, reader, max_posts=settings.max_posts_per_group,
+        max_groups=settings.max_groups,
+        item_timeout_seconds=settings.group_timeout_seconds, pause_min_seconds=settings.pause_min_seconds,
+        pause_max_seconds=settings.pause_max_seconds,
+    )
+    return await collector.run(batch_id)
+
+
 async def run_batch(batch_id: str) -> str:
     settings = FacebookCollectorSettings()
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=2)
     try:
-        browser = BrowserSessionClient(settings.browser_url, settings.browser_token)
-        reader = FacebookGroupReader(browser, max_posts=settings.max_posts_per_group, timeout_seconds=settings.group_timeout_seconds)
-        collector = FacebookBatchCollector(
-            PostgresCollectorStore(pool), browser, reader, max_posts=settings.max_posts_per_group,
-            max_groups=settings.max_groups,
-            item_timeout_seconds=settings.group_timeout_seconds, pause_min_seconds=settings.pause_min_seconds,
-            pause_max_seconds=settings.pause_max_seconds,
-        )
-        return await collector.run(batch_id)
+        return await run_batch_with(pool, settings, batch_id)
     finally:
         await pool.close()
 

@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`011_operator_access_requests.sql` in order. It records SHA-256 checksums in
+`012_collector_launch_requests.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -244,7 +244,8 @@ the work.
    detector plus the flow's own classifier. Only a clean page marks the job
    `verified` and the profile `ready`. **Resume the run** checks once more,
    then requeues the stopped batch from the challenged group (the attempt is
-   kept as `stopped`) and replies with the collector command to start it.
+   kept as `stopped`), and `facebook-runner` starts it automatically; the
+   operator is told when it starts and how it ends (see *Running a batch*).
    Passwords and codes are typed into the server's browser only; the bot
    never sees them.
 6. Identity verification, new two-factor enrolment and account restrictions
@@ -289,8 +290,27 @@ Session Manager closes a session that makes no request for
 with no progress for `ORCHESTRA_STALE_BATCH_SECONDS` (900 by default), skips
 its remaining groups, and returns the profile to `ready`.
 
-This service is intentionally not a daemon and contains no Agent Ridge,
+This one-shot service is not a daemon and contains no Agent Ridge,
 analysis, or human-verification UI.
+
+#### Automatic restart after verification
+
+`facebook-runner` (default stack, same image and limits as
+`facebook-collector`) is the only long-running collector. It starts nothing on
+its own: a verification **Resume** writes a row to
+`collector_launch_requests` (migration `012_collector_launch_requests.sql`) in
+the same transaction that requeues the batch, and the runner claims that row
+and runs the batch, one at a time, through the same collector code. Batches
+queued by `/run` still wait for the manual command above.
+
+The operator who resumed hears when the batch starts and how it ends
+(finished, cancelled, a new challenge, failed or skipped); failures and skips
+also go to the owner. A request not picked up within 5 minutes (runner
+stopped) is reported with the manual command, which is safe to use: a batch
+can be claimed only once, so the runner then skips it. A runner restarted
+mid-batch marks its request `failed` with `runner_restarted`, and the
+dispatcher's stale-batch rule closes the batch. The runner polls every
+`FACEBOOK_COLLECTOR_RUNNER_POLL_SECONDS` (15 by default).
 
 ### Controlled Agent Reach adapter
 
