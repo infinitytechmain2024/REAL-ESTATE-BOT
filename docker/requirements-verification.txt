@@ -1,0 +1,5 @@
+# Verification page + watcher: HTTP server/client, PostgreSQL, Telegram Bot API.
+# Versions match requirements.txt.
+aiohttp==3.13.2
+asyncpg==0.31.0
+httpx==0.28.1

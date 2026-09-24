@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`008_analysis_pipeline.sql` in order. It records SHA-256 checksums in
+`009_verification_flow.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -189,6 +189,59 @@ Log in or clear the checkpoint, press Ctrl+C in the script, and confirm. The
 profile becomes `ready`; open `facebook_challenge` verification jobs are
 resolved and sources held for verification become `active` again. Batches that
 a checkpoint stopped stay as they are; cancel them and `/run` again.
+
+#### Human verification flow (Tailscale only)
+
+`bot/verification` handles the jobs a challenge creates, end to end:
+
+1. The collector stops on a checkpoint, CAPTCHA, login page or account
+   warning and opens a `verification_jobs` row, as before.
+2. Within `VERIFICATION_POLL_SECONDS` every operator gets a Telegram message
+   with a link to `https://<hostname>.<tailnet>.ts.net/v/<token>`. The token
+   is single-use, expires after `VERIFICATION_TOKEN_MINUTES`, and is bound to
+   that job, that Telegram user and that browser profile; only its SHA-256 is
+   stored. Unused links are renewed every `VERIFICATION_RENOTIFY_MINUTES`.
+3. The page is served by `tailscale serve` only: the service listens on
+   127.0.0.1 inside the Tailscale container, publishes no port, and requires
+   the Tailscale identity header to be in `VERIFICATION_TAILSCALE_LOGINS`.
+   Opening the link turns it into a 30-minute HttpOnly, Secure,
+   SameSite=Strict session bound to the same job, user, profile and Tailscale
+   login; every button carries a CSRF token.
+4. On the page: **Claim** (one operator holds the job), **Open live browser**
+   (the profile's own browser through noVNC, same lease as collectors),
+   **Solved**, **Cancel** (the stopped batch is cancelled) and **Failed** (the
+   batch fails, the profile is quarantined, the owner is told).
+5. **Solved** closes the window and a watchdog takes the profile's lease,
+   reloads the page that was challenged and checks it with the collector's
+   detector plus the flow's own classifier. Only a clean page marks the job
+   `verified` and the profile `ready`. **Resume the run** checks once more,
+   then requeues the stopped batch from the challenged group (the attempt is
+   kept as `stopped`) and replies with the collector command to start it.
+6. Identity verification, new two-factor enrolment and account restrictions
+   are never offered a browser: the profile is quarantined, links are
+   revoked, and only the owner gets a message plus a one-time link to close
+   the job.
+
+Every step is recorded in the append-only `verification_events` table
+(detected, notified, token_issued, opened, access_denied, claim, view, solve,
+recovery_confirmed, recovery_failed, resume, cancel, fail, sensitive_stop,
+expire), and state changes also land in `orchestration_audit_log` with the
+operator as actor. Unsolved jobs expire after `VERIFICATION_JOB_HOURS`.
+
+Setup: create an auth key in the Tailscale admin console, enable HTTPS
+certificates for the tailnet, set the `TS_AUTHKEY` and `VERIFICATION_*`
+values in `.env`, then:
+
+```sh
+./scripts/apply_migrations.sh
+docker compose --env-file .env --profile verification up -d --build tailscale verification
+docker compose --env-file .env logs --tail 30 verification
+```
+
+Install Tailscale on the phone that receives the Telegram messages and log in
+with an account listed in `VERIFICATION_TAILSCALE_LOGINS`. While the
+verification service handles a job, the Telegram `/login` watcher stays quiet
+about that profile, so each checkpoint produces one message.
 
 #### Running a batch
 

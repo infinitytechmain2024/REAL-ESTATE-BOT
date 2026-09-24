@@ -285,6 +285,10 @@ class PostgresLiveViewStore:
                                         -- a completed login never delays the next checkpoint.
                                         or (s.state in ('cancelled', 'expired')
                                             and s.closed_at > now() - ($1 * interval '1 second'))))
+                  -- The Tailscale verification service owns announced jobs; one message per checkpoint.
+                  and not exists (select 1 from public.verification_jobs vj
+                                   where vj.browser_profile_id = p.id and vj.state in ('requested', 'active')
+                                     and vj.notified_at is not null)
                 order by p.profile_name""",
             cooldown_seconds,
         )
