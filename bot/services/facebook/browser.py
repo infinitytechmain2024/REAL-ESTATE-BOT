@@ -53,25 +53,47 @@ LOGIN_FORM_SELECTOR = "form[data-testid='royal_login_form'], #login_form"
 LOGGED_IN_MARKER_SELECTOR = "[aria-label='Facebook'], div[role='navigation']"
 
 # URL path fragments that mean "not a normal logged-in page", checked
-# case-insensitively against the whole URL.
+# case-insensitively against the whole URL. Locale-independent, so this is
+# the first thing consulted.
 CHECKPOINT_PATH_FRAGMENTS = ("/checkpoint", "/login", "recover")
 
-# Visible-text signals for a challenge screen that doesn't necessarily show
-# up as a distinct URL (e.g. an inline "confirm it's you" panel on the home
-# page). English only for now -- the browser context is forced to en-US, so
-# this is what Facebook should show; it will need updating if that changes.
+# Structural challenge markers. Also locale-independent -- a checkpoint form
+# is a checkpoint form whatever language it renders in -- so these are
+# checked before any text, and are the only challenge signal that can be
+# trusted on a market or account whose language we have not anticipated.
+CHALLENGE_SELECTORS = (
+    "form[action*='checkpoint']",
+    "input[name='captcha_response']",
+    "[data-testid*='checkpoint']",
+)
+
+# Visible-text signals for a challenge screen that has neither a distinct URL
+# nor one of the selectors above (e.g. an inline "confirm it's you" panel).
+#
+# Text is the *last* resort on purpose. Facebook renders in the account's own
+# language, not the browser's, so a locale= on the context does not make this
+# reliable -- and in CDP-attach mode we do not even control the locale. Each
+# entry is a short, distinctive fragment rather than a full sentence, because
+# exact phrasing varies by rollout; short fragments degrade to a false
+# positive (a needless human check), long ones to a false negative (jobs
+# running against a challenge page, alerting nobody). Prefer the former.
 CHALLENGE_TEXT_SIGNALS = (
+    # English
     "confirm it's you",
-    "enter the characters you see",
+    "enter the characters",
     "we suspect automated behavior",
     "upload id",
     "try another way",
     "suspicious activity",
+    # Spanish -- the v1 target market
+    "confirma que eres t",  # "confirma que eres tú/tu", accent varies by rollout
+    "introduce los caracteres",
+    "comportamiento automatizado",
+    "actividad sospechosa",
+    "sube tu identificaci",  # "identificación"
+    "prueba otro m",  # "prueba otro método"
 )
 
-# Facebook's own logged-in session cookies. Their presence is a necessary
-# but not sufficient signal on its own -- paired with the logged-in marker
-# below, not used alone.
 _SESSION_COOKIE_NAMES = {"c_user", "xs"}
 
 
@@ -114,6 +136,9 @@ class FacebookSession:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._lock = asyncio.Lock()
+        # Separate from _lock on purpose: callers hold _lock around page use,
+        # and asyncio locks are not reentrant, so start() must not share it.
+        self._start_lock = asyncio.Lock()
         # True only when this instance launched the context itself and is
         # therefore responsible for closing it. False when CDP-attached to a
         # Chrome someone else supervises -- closing that context would close
@@ -121,8 +146,19 @@ class FacebookSession:
         self._owns_context = False
 
     async def start(self) -> None:
+        """Launch or attach. Idempotent, and safe against concurrent callers.
+
+        The admin handler calls this on every button tap; two taps arriving
+        together must not race into launching two browsers.
+        """
         if self._context is not None:
             return
+        async with self._start_lock:
+            if self._context is not None:  # another caller won the race
+                return
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
         self._playwright = await async_playwright().start()
 
         if self.settings.cdp_url:
@@ -180,34 +216,49 @@ class FacebookSession:
         return self._lock
 
     @property
+    def has_live_context(self) -> bool:
+        """Whether observation can run without starting a browser. Hold lock when checking."""
+        return self._context is not None and any(
+            not page.is_closed() for page in self._context.pages
+        )
+
+    @property
     def page(self) -> Page:
         if self._page is None:
             raise RuntimeError("FacebookSession.start() was not called")
         return self._page
 
-    async def check_state(self) -> SessionState:
-        """Is the session actually authenticated right now?
+    async def observe_state(self) -> SessionState:
+        """Classify the page as it is right now, without touching it.
 
-        Navigates home and classifies what comes back by URL, then by
-        visible challenge text, then by login-form vs. logged-in markers plus
-        session cookies. Observes only -- this never fills in or clicks a
-        challenge widget; that decision is deliberately left to a human, see
-        the module docstring and the CAPTCHA/checkpoint discussion in the
-        implementation plan.
+        Read-only on purpose, and that is the whole point of this method
+        existing separately from :meth:`probe_state`. The recovery watcher
+        polls while a human is typing a password or clearing a checkpoint in
+        this very browser -- in CDP-attach mode it is literally the same tab
+        they are looking at through noVNC. A poll that navigated would wipe
+        what they were doing every few seconds and read to them as Facebook
+        rejecting the login.
 
-        Cheap, and meant to run before every group job -- a session can
-        expire between runs without anything else telling us. It is *not*
-        yet wired to run continuously during a job's own navigation (e.g.
-        mid-way through reading a group); that is future work for whatever
-        module ends up running group jobs.
+        Classifies in order of how much the signal can be trusted: URL path,
+        then structural challenge markers, then the login form, then visible
+        text. Anything unrecognised is reported as needing a human rather
+        than guessed at -- never returns HEALTHY without positive evidence.
         """
-        page = self.page
-        await page.goto(FACEBOOK_HOME, wait_until="domcontentloaded")
+        page = self._current_page()
         url = page.url.lower()
 
         if any(fragment in url for fragment in CHECKPOINT_PATH_FRAGMENTS):
             log.warning("facebook.session.checkpoint_url", url=page.url)
             return SessionState.HUMAN_REQUIRED
+
+        for selector in CHALLENGE_SELECTORS:
+            with contextlib.suppress(Exception):
+                if await page.locator(selector).count() > 0:
+                    log.warning("facebook.session.challenge_element", selector=selector)
+                    return SessionState.HUMAN_REQUIRED
+
+        if await page.locator(LOGIN_FORM_SELECTOR).count() > 0:
+            return SessionState.LOGIN_NEEDED
 
         body_text = ""
         with contextlib.suppress(Exception):
@@ -216,10 +267,7 @@ class FacebookSession:
             log.warning("facebook.session.challenge_text", url=page.url)
             return SessionState.HUMAN_REQUIRED
 
-        if await page.locator(LOGIN_FORM_SELECTOR).count() > 0:
-            return SessionState.LOGIN_NEEDED
-
-        assert self._context is not None  # guaranteed: self.page succeeded above
+        assert self._context is not None  # guaranteed: _current_page() succeeded above
         cookies = await self._context.cookies()
         has_session_cookie = any(c["name"] in _SESSION_COOKIE_NAMES for c in cookies)
         if has_session_cookie and await page.locator(LOGGED_IN_MARKER_SELECTOR).count() > 0:
@@ -227,9 +275,36 @@ class FacebookSession:
 
         # None of the above matched confidently: an unrecognised layout, not
         # a confirmed good or bad state. Treat as needing a human rather than
-        # guessing.
+        # guessing -- a needless check costs a message, a wrong HEALTHY costs
+        # a run of jobs against a challenge page with no alert at all.
         log.warning("facebook.session.unknown_layout", url=page.url)
         return SessionState.HUMAN_REQUIRED
+
+    async def probe_state(self) -> SessionState:
+        """Navigate home, then classify. For checks between jobs.
+
+        Use this when nothing else is using the browser -- before starting a
+        group job, or on an explicit admin status request. Never during a
+        human's recovery: see :meth:`observe_state`.
+
+        Callers must hold :attr:`lock`; this moves the shared page.
+        """
+        await self._current_page().goto(FACEBOOK_HOME, wait_until="domcontentloaded")
+        return await self.observe_state()
+
+    def _current_page(self) -> Page:
+        """The shared page, re-acquired if the human closed the tab.
+
+        In CDP-attach mode the admin is driving a real browser and may well
+        close the tab we were holding. Re-acquiring beats raising at them.
+        """
+        if self._page is not None and not self._page.is_closed():
+            return self._page
+        if self._context is not None and self._context.pages:
+            self._page = self._context.pages[0]
+            log.info("facebook.session.page_reacquired")
+            return self._page
+        raise RuntimeError("FacebookSession.start() was not called, or the browser is gone")
 
     async def attempt_login(self) -> bool:
         """One automatic login attempt using the configured credentials.
@@ -257,7 +332,7 @@ class FacebookSession:
         await page.locator("button[name='login'], button[type='submit']").first.click()
         await page.wait_for_load_state("domcontentloaded")
 
-        state = await self.check_state()
+        state = await self.observe_state()
         log.info("facebook.session.auto_login_attempt", result=state.value)
         return state == SessionState.HEALTHY
 

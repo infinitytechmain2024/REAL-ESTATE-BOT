@@ -30,16 +30,16 @@ from bot.logging_conf import configure_logging, get_logger
 from bot.middlewares import LoggingContextMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.middlewares.throttling import SearchSlots
 from bot.services.db import SupabaseRepository
-from bot.services.facebook import (
-    FacebookSession,
-    FacebookSource,
-    TokenStore,
-    build_gate_app,
-)
+from bot.services.facebook import FacebookSession, FacebookSource, TokenStore, build_gate_app
+from bot.services.facebook.discovery import FacebookPublicSource
+from bot.services.facebook.recheck import GroupRechecker
+from bot.services.facebook.store import FacebookGroupStore
+from bot.services.facebook.watchdog import FacebookWatchdog
 from bot.services.llm import LLMManager
 from bot.services.parser import Fetcher, build_fetcher
 from bot.services.pipeline import ResearchPipeline
-from bot.services.search import QueryBuilder, SearXNGClient
+from bot.services.retention import RetentionPurger
+from bot.services.search import GoogleMapsSource, QueryBuilder, SearXNGClient
 from bot.services.stt import STTManager
 
 log = get_logger(__name__)
@@ -48,6 +48,7 @@ COMMANDS = [
     BotCommand(command="start", description="Начать и выбрать режим"),
     BotCommand(command="mode", description="Сменить режим поиска"),
     BotCommand(command="help", description="Как пользоваться ботом"),
+    BotCommand(command="forget", description="Удалить все мои данные"),
 ]
 
 
@@ -73,8 +74,30 @@ class Services:
     Runs whenever Facebook is enabled, independent of whether a public tunnel is pointed
     at it -- see bot/services/facebook/gate.py."""
 
+    facebook_watchdog: FacebookWatchdog | None = None
+    facebook_watchdog_task: asyncio.Task[None] | None = None
+
+    retention_task: asyncio.Task[None] | None = None
+    """Expires stored rows past SUPABASE_RETENTION_DAYS -- see COMPLIANCE.md."""
+
+    google_maps_source: GoogleMapsSource | None = None
+
+    facebook_rechecker: GroupRechecker | None = None
+    facebook_recheck_task: asyncio.Task[None] | None = None
+    """Rechecks the configured group list and alerts the operator when a group
+    stops being readable -- see bot/services/facebook/recheck.py."""
+
     async def aclose(self) -> None:
         """Close every service, letting each failure be logged not raised."""
+        for task in (
+            self.facebook_watchdog_task,
+            self.facebook_recheck_task,
+            self.retention_task,
+        ):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         closers: list[tuple[str, object]] = [
             ("llm", self.llm.aclose),
             ("stt", self.stt.aclose),
@@ -82,6 +105,8 @@ class Services:
             ("fetcher", self.fetcher.aclose),
             ("repo", self.repo.aclose),
         ]
+        if self.google_maps_source is not None:
+            closers.append(("google_maps", self.google_maps_source.aclose))
         if self.facebook_gate_runner is not None:
             closers.append(("facebook_gate_runner", self.facebook_gate_runner.cleanup))
         if self.facebook_session is not None:
@@ -93,7 +118,29 @@ class Services:
                 log.warning("shutdown.close_failed", service=name, exc_info=True)
 
 
-async def build_services(settings: Settings) -> Services:
+def deployment_warnings(settings: Settings) -> list[str]:
+    """Configuration that works, but that a deployment should probably not have.
+
+    Kept separate from validation on purpose: none of this is wrong enough to
+    refuse to start, and an operator mid-incident should not be locked out of
+    their own bot over a posture preference.
+    """
+    warnings: list[str] = []
+    if not settings.facebook.enabled:
+        return warnings
+
+    if settings.facebook.login_password is not None:
+        warnings.append(
+            "FACEBOOK_PASSWORD is set. The human-login path is the primary one, and with "
+            "2FA off on the bot account a stored password is most of what protects it -- "
+            "sitting on the same machine as a browser that is already logged in. Unset "
+            "both it and FACEBOOK_EMAIL unless the one automatic attempt is genuinely "
+            "wanted; the live-view button covers the rest."
+        )
+    return warnings
+
+
+async def build_services(settings: Settings, bot: Bot) -> Services:
     """Construct the service graph."""
     repo = SupabaseRepository(settings.supabase)
     await repo.connect()
@@ -106,37 +153,75 @@ async def build_services(settings: Settings) -> Services:
     # `playwright install` is a start-up error rather than a failed search.
     await fetcher.preflight()
 
-    # Built before the pipeline, which takes the group reader as one of its
-    # hit sources. Not *started* here: launching a real browser is deferred to
-    # first use -- the /facebook admin command, or the first search that
-    # actually reads groups -- so a bot run with FACEBOOK_ENABLED=true but
-    # nobody touching the feature yet does not open a window for no reason.
-    facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
-    # Two flags because these are two decisions. FACEBOOK_ENABLED gives the
-    # operator a session to log into and recover; FACEBOOK_SEARCH_ENABLED puts
-    # what it reads in front of users. The second is only worth making once
-    # the first has proven itself against a real group.
-    facebook_source = (
-        FacebookSource(settings.facebook, facebook_session)
-        if facebook_session is not None and settings.facebook.search_enabled
-        else None
+    query_builder = QueryBuilder(settings.searxng)
+    google_maps_source = (
+        GoogleMapsSource(settings.google_maps) if settings.google_maps.enabled else None
     )
-
+    public_facebook = FacebookPublicSource(settings.facebook, search, query_builder)
     pipeline = ResearchPipeline(
         settings=settings,
         llm=llm,
         search=search,
-        query_builder=QueryBuilder(settings.searxng),
+        query_builder=query_builder,
         fetcher=fetcher,
         repo=repo,
-        facebook=facebook_source,
+        sources={"facebook_public": public_facebook.search}
+        if settings.facebook.public_search_enabled
+        else {},
     )
+    if google_maps_source is not None:
+        pipeline.sources["google_maps"] = google_maps_source.search
+
+    # In local mode the browser is deferred until a job or the admin command.
+    # In VM/CDP mode Chrome is already supervised by the entrypoint, so this
+    # only attaches to that existing process and lets the watchdog observe it
+    # while the bot is idle; it never launches a second browser.
+    facebook_session = FacebookSession(settings.facebook) if settings.facebook.enabled else None
+    if facebook_session is not None:
+        if settings.facebook.cdp_url:
+            await facebook_session.start()
+        # Native Facebook reading is the primary source when the operator has
+        # enabled the browser. It discovers public groups in Facebook itself;
+        # the indexed source remains a separate, no-login fallback.
+        native_facebook = FacebookSource(
+            settings.facebook,
+            facebook_session,
+            FacebookGroupStore(settings.facebook.group_store_path),
+        )
+        pipeline.sources["facebook"] = native_facebook.search
     facebook_token_store = (
         TokenStore(settings.facebook.token_store_path) if settings.facebook.enabled else None
     )
     facebook_gate_runner = None
     if facebook_token_store is not None:
         facebook_gate_runner = await _start_facebook_gate(settings, facebook_token_store)
+
+    purger = RetentionPurger(settings, repo)
+    retention_task = (
+        asyncio.create_task(purger.run(), name="retention-purge") if purger.enabled else None
+    )
+    if settings.supabase.configured and not settings.supabase.retention_days:
+        log.warning(
+            "startup.retention_disabled",
+            detail="SUPABASE_RETENTION_DAYS=0: stored page text and contact details of "
+            "people who never used the bot are kept indefinitely (see COMPLIANCE.md)",
+        )
+
+    for warning in deployment_warnings(settings):
+        log.warning("startup.deployment_posture", detail=warning)
+
+    watchdog = None
+    watchdog_task = None
+    rechecker = None
+    recheck_task = None
+    if facebook_session is not None:
+        if not settings.facebook.admin_telegram_ids:
+            log.warning("startup.facebook_no_admins", detail="Facebook alerts have no recipients")
+        watchdog = FacebookWatchdog(facebook_session, facebook_token_store, settings, bot, repo)
+        watchdog_task = asyncio.create_task(watchdog.run(), name="facebook-watchdog")
+        if settings.facebook.group_urls:
+            rechecker = GroupRechecker(facebook_session, settings, bot, repo)
+            recheck_task = asyncio.create_task(rechecker.run(), name="facebook-group-recheck")
 
     return Services(
         llm=llm,
@@ -149,6 +234,12 @@ async def build_services(settings: Settings) -> Services:
         facebook_session=facebook_session,
         facebook_token_store=facebook_token_store,
         facebook_gate_runner=facebook_gate_runner,
+        facebook_watchdog=watchdog,
+        facebook_watchdog_task=watchdog_task,
+        facebook_rechecker=rechecker,
+        facebook_recheck_task=recheck_task,
+        retention_task=retention_task,
+        google_maps_source=google_maps_source,
     )
 
 
@@ -161,10 +252,18 @@ async def _start_facebook_gate(settings: Settings, token_store: TokenStore) -> w
     unused on localhost, and building it this way means turning a public tunnel on
     or off later needs no code change here.
     """
+    # The PIN cookie is the only thing separating a browser that passed the
+    # PIN from one merely holding the link, so it must not travel in clear
+    # once the gate is published. Loopback-only keeps it unmarked: there is no
+    # network to intercept, and not every client returns a Secure cookie over
+    # plain http.
+    public_base = settings.facebook.desktop_public_base or ""
     app = build_gate_app(
         token_store,
         novnc_internal_url=settings.facebook.novnc_internal_url,
         pin=settings.facebook.desktop_pin,
+        secure_cookie=public_base.lower().startswith("https://"),
+        cookie_max_age=settings.facebook.desktop_token_ttl_seconds,
     )
     runner = web.AppRunner(app)
     await runner.setup()
@@ -191,6 +290,7 @@ def build_dispatcher(settings: Settings, services: Services) -> Dispatcher:
         slots=services.slots,
         facebook_session=services.facebook_session,
         facebook_token_store=services.facebook_token_store,
+        facebook_watchdog=services.facebook_watchdog,
     )
 
     for observer in (dispatcher.message, dispatcher.callback_query):
@@ -293,7 +393,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    services = await build_services(settings)
+    services = await build_services(settings, bot)
     dispatcher = build_dispatcher(settings, services)
 
     runner = run_webhook if settings.telegram.mode == "webhook" else run_polling

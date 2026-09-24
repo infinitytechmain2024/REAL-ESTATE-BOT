@@ -1,24 +1,83 @@
-"""Reading a Facebook group: access classification and post/comment extraction.
+"""Read group access and posts using selectors checked against a live Russian UI.
 
-Nothing here is validated against a real group yet -- run
-``scripts/facebook_probe.py`` against a real, accessible group before
-trusting any of this. Facebook's markup varies by locale, account and
-rollout, so the selectors here are a documented starting point, not a
-contract. Log generously and compare a handful of results against the
-browser by hand before relying on this for anything.
+Callers own FacebookSession.lock throughout navigation and extraction.
+Unknown layouts fail visibly; reading never joins a group.
 """
 
 from __future__ import annotations
 
-import contextlib
+import time
 from enum import StrEnum
+from urllib.parse import quote, urljoin
 
 from playwright.async_api import Locator, Page
 from pydantic import BaseModel, Field
 
 from bot.logging_conf import get_logger
+from bot.services.facebook.discovery import _group_and_post
 
 log = get_logger(__name__)
+
+# Facebook uses the account's locale, independently of the browser locale.
+JOIN_SIGNALS = ("Join Group", "Join group", "Unirse al grupo", "Unirte al grupo",
+                "Присоединиться к группе")
+PENDING_SIGNALS = ("Pending", "Pendiente", "Отменить запрос")
+UNAVAILABLE_SIGNALS = ("isn't available", "no está disponible", "no esta disponible",
+                       "Этот контент сейчас недоступен")
+COMPOSER_SIGNALS = ("Write something", "Escribe algo", "Напишите что-нибудь")
+SEARCH_PLACEHOLDERS = ("Search this group", "Buscar en este grupo", "Поиск в этой группе")
+SEARCH_BUTTONS = ("Search this group", "Buscar en este grupo", "Поиск по этой группе")
+SEE_MORE_SIGNALS = ("See more", "Ver más", "Ver mas", "Ещё")
+SEE_LESS_SIGNALS = ("See less", "Ver menos", "Показать меньше")
+EMPTY_SIGNALS = ("No results found", "No se encontraron resultados", "Ничего не найдено")
+POST_LINKS = "a[href*='/posts/'], a[href*='/permalink/']"
+FEED_LINKS = "div[role='article'] a[href*='/posts/'], div[role='article'] a[href*='/permalink/']"
+MESSAGE_SELECTOR = "[data-ad-preview='message'], [data-ad-comet-preview='message']"
+MESSAGE_FALLBACK_SELECTOR = "[dir='auto']"
+
+
+async def discover_groups(page: Page, query: str, *, max_groups: int) -> list[tuple[str, str]]:
+    """Find public groups in Facebook's own group search, without joining."""
+    await page.goto(
+        "https://www.facebook.com/search/groups/?q=" + quote(query),
+        wait_until="domcontentloaded",
+    )
+    await page.wait_for_selector("div[role='main'] a[href*='/groups/']", timeout=15000)
+    found: dict[str, str] = {}
+    links = page.locator("div[role='main'] a[href*='/groups/']")
+    for index in range(await links.count()):
+        link = links.nth(index)
+        href = await link.get_attribute("href")
+        parsed = _group_and_post(urljoin("https://www.facebook.com/", href or ""))
+        if parsed is None or parsed[1] is not None:
+            continue
+        group_url, _ = parsed
+        title = (await link.inner_text()).strip()
+        if title and group_url not in found:
+            found[group_url] = title
+        if len(found) >= max_groups:
+            break
+    return list(found.items())
+
+# Structural: a login form is a login form in any language.
+LOGIN_FORM_SELECTOR = "#login_form, form[data-testid='royal_login_form']"
+
+
+async def _any_text(page: Page, signals: tuple[str, ...]) -> bool:
+    """Whether any localized variant of *signals* is visible on *page*."""
+    for signal in signals:
+        if await page.get_by_text(signal, exact=False).count() > 0:
+            return True
+    return False
+
+
+async def _first_placeholder(page: Page, signals: tuple[str, ...]) -> Locator | None:
+    """The first input whose placeholder matches any variant, or None."""
+    for signal in signals:
+        locator = page.get_by_placeholder(signal, exact=False)
+        if await locator.count() > 0:
+            return locator
+    return None
 
 
 class GroupAccess(StrEnum):
@@ -72,94 +131,214 @@ async def check_access(page: Page, group_url: str) -> GroupAccess:
 
     if response is not None and response.status in (404, 410):
         return GroupAccess.UNAVAILABLE
-    if "login" in page.url or await page.locator(
-        "#login_form, form[data-testid='royal_login_form']"
-    ).count():
-        return GroupAccess.LOGIN_REQUIRED
 
-    if await page.get_by_text("Join Group", exact=False).count() > 0:
-        return GroupAccess.MEMBERSHIP_REQUIRED
-    if await page.get_by_text("Pending", exact=False).count() > 0:
+    # React can render the group header before the feed. Allow a short bounded
+    # render window before treating a Join button as an actual access restriction.
+    for attempt in range(4):
+        if "login" in page.url or await page.locator(LOGIN_FORM_SELECTOR).count():
+            return GroupAccess.LOGIN_REQUIRED
+        if await _any_text(page, UNAVAILABLE_SIGNALS):
+            return GroupAccess.UNAVAILABLE
+        if (await page.locator(FEED_LINKS).count()
+                or await _first_placeholder(page, SEARCH_PLACEHOLDERS) is not None
+                or await _any_text(page, COMPOSER_SIGNALS)):
+            return GroupAccess.ACCESSIBLE
+        if attempt < 3:
+            await page.wait_for_timeout(1000)
+
+    # Membership and read access differ: public posts remain readable while a
+    # Join button or pending membership request is present.
+    if await _any_text(page, PENDING_SIGNALS):
         return GroupAccess.PENDING_APPROVAL
-    if await page.get_by_text("isn't available", exact=False).count() > 0:
-        return GroupAccess.UNAVAILABLE
-
-    # A post composer or the feed's own search box is the strongest signal of
-    # real membership; anything else is a guess and stays UNKNOWN_ERROR.
-    if await page.get_by_placeholder("Search this group", exact=False).count() > 0:
-        return GroupAccess.ACCESSIBLE
-    if await page.get_by_text("Write something", exact=False).count() > 0:
-        return GroupAccess.ACCESSIBLE
-
+    if await _any_text(page, JOIN_SIGNALS):
+        return GroupAccess.MEMBERSHIP_REQUIRED
     log.warning("facebook.group.unrecognised_layout", group_url=group_url, url=page.url)
     return GroupAccess.UNKNOWN_ERROR
 
 
-async def search_posts(
-    page: Page, group_url: str, query: str, *, max_posts: int
+async def join_group(page: Page) -> bool:
+    """Click a normal public Join button; never handle challenges or questions."""
+    for signal in JOIN_SIGNALS:
+        button = page.get_by_role("button", name=signal, exact=True)
+        if await button.count():
+            await button.first.click()
+            await page.wait_for_timeout(1000)
+            return True
+    return False
+
+
+#: Re-read this many already-seen cards each round. Facebook inserts posts as
+#: you scroll, and occasionally shifts the list; the overlap absorbs a small
+#: shift without re-extracting the whole feed, which would make reading a
+#: 300-post group quadratic in browser calls.
+_OVERLAP = 5
+
+_STAGNANT_ROUNDS = 3
+"""Scroll rounds that add nothing before the feed is called exhausted. Facebook
+loads lazily, so one empty round means very little."""
+
+
+async def _collect_posts(
+    page: Page,
+    group_url: str,
+    *,
+    max_posts: int | None,
+    deadline: float | None,
 ) -> list[GroupPost]:
-    """Search *query* inside an already-accessible group and read up to *max_posts*.
+    """Scroll a post list, extracting every card, until one of the ends.
 
-    This is the single riskiest piece of the whole project to get right --
-    the group's own search UI, how results paginate, and how much text a
-    post needs "See more" expanded before it is complete all vary. Treat the
-    first real run of this as a validation step, not a working feature.
+    The ends are: *max_posts* collected (``None`` means no limit -- read the
+    whole group), the wall-clock *deadline*, an explicit "no posts" state, or
+    the feed producing nothing new for several rounds.
+
+    A card that cannot be extracted is skipped, never fatal. Over hundreds of
+    posts a malformed one is a certainty, and one broken permalink must not
+    cost the group.
     """
-    search_box = page.get_by_placeholder("Search this group", exact=False)
-    if await search_box.count() == 0:
-        log.warning("facebook.group.no_search_box", group_url=group_url)
-        return []
-
-    await search_box.first.click()
-    await search_box.first.fill(query)
-    await page.keyboard.press("Enter")
-    await page.wait_for_load_state("networkidle")
-
     posts: list[GroupPost] = []
     seen_urls: set[str] = set()
     stagnant_rounds = 0
+    processed = 0
 
-    while len(posts) < max_posts and stagnant_rounds < 3:
+    def full() -> bool:
+        return max_posts is not None and len(posts) >= max_posts
+
+    def out_of_time() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    while not full() and not out_of_time() and stagnant_rounds < _STAGNANT_ROUNDS:
+        before = len(posts)
         articles = page.locator("div[role='article']")
         count = await articles.count()
-        for i in range(count):
-            if len(posts) >= max_posts:
+        for index in range(max(0, processed - _OVERLAP), count):
+            if full() or out_of_time():
                 break
-            post = await _extract_post(articles.nth(i), group_url)
+            try:
+                post = await _extract_post(articles.nth(index), group_url)
+            except RuntimeError:
+                continue
             if post is None or post.post_url in seen_urls:
                 continue
             seen_urls.add(post.post_url)
             posts.append(post)
+        processed = count
 
-        before = len(posts)
+        if full() or out_of_time() or await _any_text(page, EMPTY_SIGNALS):
+            break
         await page.mouse.wheel(0, 2000)
         await page.wait_for_timeout(1200)
         stagnant_rounds = stagnant_rounds + 1 if len(posts) == before else 0
+
+    if out_of_time():
+        log.info("facebook.group.read_budget_spent", group_url=group_url, posts=len(posts))
+    return posts
+
+
+async def search_posts(
+    page: Page,
+    group_url: str,
+    query: str,
+    *,
+    max_posts: int | None = None,
+    deadline: float | None = None,
+) -> list[GroupPost]:
+    """Search and collect real posts, ignoring people cards and UI text."""
+    search_box = await _first_placeholder(page, SEARCH_PLACEHOLDERS)
+    if search_box is None:
+        for name in SEARCH_BUTTONS:
+            button = page.get_by_role("button", name=name, exact=True)
+            if await button.count():
+                await button.first.click()
+                # The search input is inserted only after the button is opened.
+                await page.wait_for_selector("input[type='search']", timeout=10000)
+                search_box = await _first_placeholder(page, SEARCH_PLACEHOLDERS)
+                break
+    if search_box is None:
+        log.warning("facebook.group.no_search_box", group_url=group_url)
+        raise RuntimeError("Facebook group search box unavailable")
+
+    await search_box.first.click()
+    await search_box.first.fill(query)
+    await page.keyboard.press("Enter")
+    # A caller may already be on the group's search page (as happens after a
+    # failed extraction retry); in that case Facebook updates results in place
+    # and emits no navigation event.
+    if "/search" not in page.url:
+        await page.wait_for_url("**/search**", timeout=15000)
+    await page.wait_for_selector("div[role='article']", timeout=15000)
+
+    posts = await _collect_posts(page, group_url, max_posts=max_posts, deadline=deadline)
+
+    if not posts and not await _any_text(page, EMPTY_SIGNALS):
+        raise RuntimeError("Facebook search returned no readable posts or explicit empty state")
 
     log.info("facebook.group.search_posts", group_url=group_url, query=query, found=len(posts))
     return posts
 
 
+async def read_recent_posts(
+    page: Page,
+    group_url: str,
+    *,
+    max_posts: int | None = None,
+    deadline: float | None = None,
+) -> list[GroupPost]:
+    """Read the group's feed, newest first, as far as it will go."""
+    posts = await _collect_posts(page, group_url, max_posts=max_posts, deadline=deadline)
+    log.info("facebook.group.recent_posts", group_url=group_url, found=len(posts))
+    return posts
+
+
 async def _extract_post(article: Locator, group_url: str) -> GroupPost | None:
-    """Best-effort extraction of one feed article.
+    """Read only a post's message, author and permalink, never comments/UI text."""
+    links = article.locator(POST_LINKS)
+    if not await links.count():
+        return None  # People cards also have role=article in group search.
+    link = links.first
+    href = await link.get_attribute("href")
+    canonical = _group_and_post(urljoin("https://www.facebook.com/", href or ""))
+    if canonical is None or canonical[1] is None:
+        raise RuntimeError("Facebook post has no usable permalink")
+    # A feed can contain a recommended or cross-posted article whose permalink
+    # belongs to another group.  Keep the source scoped to the group we opened;
+    # otherwise a valid-looking Facebook URL leaks an unrelated result into the
+    # user's search.
+    expected_group = _group_and_post(urljoin("https://www.facebook.com/", group_url))
+    if expected_group is not None and canonical[0] != expected_group[0]:
+        return None
 
-    Returns ``None`` if it does not look like a real post (no permalink
-    found) rather than returning a half-populated, misleading record.
-    """
-    see_more = article.get_by_text("See more", exact=False)
-    if await see_more.count() > 0:
-        with contextlib.suppress(Exception):  # expanding text is an optimisation, not required
-            await see_more.first.click()
-
-    text = (await article.inner_text()).strip()
+    message = article.locator(MESSAGE_SELECTOR).first
+    if not await message.count():
+        # Feed cards sometimes omit the data-ad marker entirely. Their first
+        # non-empty dir=auto span is the post body; later spans are translation
+        # labels or nested comments.
+        candidate = article.locator(MESSAGE_FALLBACK_SELECTOR).first
+        candidate_text = (await candidate.inner_text()).strip()
+        if candidate_text and candidate_text not in SEE_MORE_SIGNALS + SEE_LESS_SIGNALS:
+            message = candidate
+    if not await message.count():
+        # A post permalink without a message is a broken extraction, whereas
+        # an article without a permalink was already filtered as a people card.
+        raise RuntimeError("Facebook post message unavailable")
+    for signal in SEE_MORE_SIGNALS:
+        more = message.get_by_text(signal, exact=True)
+        if await more.count():
+            await more.first.click()
+            break
+    text = (await message.inner_text()).strip()
+    for suffix in SEE_LESS_SIGNALS:
+        text = text.removesuffix(suffix).strip()
     if not text:
-        return None
+        raise RuntimeError("Facebook post message is empty")
 
-    link = article.locator(
-        "a[href*='/posts/'], a[href*='/permalink/'], a[href*='?story_fbid=']"
+    author = None
+    authors = article.locator("a[href*='/user/']")
+    for index in range(await authors.count()):
+        name = (await authors.nth(index).inner_text()).strip()
+        if name:
+            author = name
+            break
+    return GroupPost(
+        group_url=group_url, post_url=canonical[1], author=author, text=text,
+        posted_at_text=(await link.inner_text()).strip() or None,
     )
-    href = await link.first.get_attribute("href") if await link.count() > 0 else None
-    if not href:
-        return None
-
-    return GroupPost(group_url=group_url, post_url=href, text=text)

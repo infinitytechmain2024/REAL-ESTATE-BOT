@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from html import escape
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
@@ -140,18 +141,54 @@ async def run_research(
 
 async def _send_results(message, status, outcome, settings: Settings, mode: Mode) -> None:  # type: ignore[no-untyped-def]
     """Send each result as its own message, then the closing summary."""
+    # Group links are diagnostics only. When posts were found, send the post
+    # permalinks as the actual results instead of making the user open a group.
+    if outcome.source_groups and not outcome.results:
+        access_labels = {
+            "accessible": "Доступна для чтения",
+            "membership_required": "Нужно вступить в группу",
+            "pending_approval": "Ожидается одобрение вступления",
+            "login_required": "Нужен вход в Facebook",
+            "unavailable": "Группа недоступна",
+            "unknown_error": "Не удалось прочитать группу",
+        }
+        lines = ["Группы Facebook по вашему запросу:"]
+        for group in outcome.source_groups[:10]:
+            title = escape(group.title[:100])
+            label = access_labels.get(group.access, "Найдена; доступ к публикациям ещё не проверен")
+            lines.append(f'<a href="{escape(group.url, quote=True)}">{title}</a> — {label}')
+        await message.answer("\n\n".join(lines), disable_web_page_preview=True)
+
     total = len(outcome.results)
+    unavailable = ""
+    if outcome.failed_sources:
+        names = ", ".join(
+            "Facebook" if name.startswith("facebook") else name
+            for name in outcome.failed_sources
+        )
+        unavailable = f"⚠️ Источники недоступны: {names}. Попробуйте повторить поиск позже."
+
+    source_note = "\n".join(outcome.source_notes)
 
     if total == 0:
+        # An empty location is the difference between a search and a guess, and
+        # the user is the only one who can fix it. Say so instead of suggesting
+        # they "уточните локацию" when none was understood in the first place.
+        blind = (
+            "\n📍 Место в запросе я не распознал — без него поиск идёт вслепую. "
+            "Назовите город, регион или страну."
+            if outcome.parsed.location.is_empty()
+            else ""
+        )
         await _safe_edit(
             status,
-            format_summary(
+            (unavailable or format_summary(
                 mode=mode,
                 sent=0,
                 hits=outcome.hits_found,
                 duplicates=outcome.duplicates_skipped,
                 degraded=outcome.degraded,
-            ),
+            )) + blind + (f"\n{source_note}" if source_note else ""),
         )
         return
 
@@ -201,7 +238,8 @@ async def _send_results(message, status, outcome, settings: Settings, mode: Mode
             duplicates=outcome.duplicates_skipped,
             degraded=outcome.degraded,
             alternatives=len(outcome.alternatives),
-        ),
+        ) + (f"\n{unavailable}" if unavailable else "")
+        + (f"\n{source_note}" if source_note else ""),
         reply_markup=mode_switch_keyboard(mode),
     )
 

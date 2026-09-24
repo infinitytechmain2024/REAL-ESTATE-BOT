@@ -6,7 +6,7 @@ One user message goes in, a list of stored, ranked results comes out::
       -> transcribe (voice only)
       -> LLM: extract ParsedQuery
       -> QueryBuilder: search strings
-      -> SearXNG, and Facebook groups when enabled: hits, merged and de-duplicated
+      -> SearXNG, and every extra source at once: hits, merged and de-duplicated
       -> Supabase: drop hits this user has already seen
       -> fetch and extract the most promising pages
       -> LLM: rank, filter and summarise
@@ -22,8 +22,10 @@ the request at all aborts the run, because there is nothing to search for.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -33,23 +35,26 @@ from bot.config import Settings
 from bot.exceptions import LLMError
 from bot.logging_conf import get_logger
 from bot.models.enums import Mode
-from bot.models.query import ParsedQuery, SearchQuery
+from bot.models.query import Location, ParsedQuery, QueryCriterion, SearchQuery
 from bot.models.result import PageContent, SearchHit, StoredResult, StructuredResult
 from bot.prompts import (
     DETAILS_SYSTEM,
     EXTRACT_SYSTEM,
+    LOCATION_REPAIR_SYSTEM,
     RANK_SYSTEM,
     build_details_prompt,
     build_extract_prompt,
+    build_location_repair_prompt,
     build_rank_prompt,
 )
 from bot.services.budget import BudgetMatch, split_by_fit
+from bot.services.facts import extract_listing_facts
 from bot.services.llm import ChatMessage
+from bot.services.relevance import most_promising
 from bot.utils.text import plural_ru, truncate
 
 if TYPE_CHECKING:
     from bot.services.db import SupabaseRepository
-    from bot.services.facebook import FacebookSource
     from bot.services.llm import LLMManager
     from bot.services.parser import Fetcher
     from bot.services.search import QueryBuilder, SearXNGClient
@@ -67,6 +72,27 @@ class RankedResults(BaseModel):
     results: list[StructuredResult] = Field(default_factory=list)
 
 
+class SourceGroup(BaseModel):
+    """A discovered group, kept visible even if no matching posts can be read."""
+
+    url: str
+    title: str
+    access: str | None = None
+
+
+class SourceSearchResult(BaseModel):
+    """Completed hits plus whether any part of this source could not be read.
+
+    An aborted job may return earlier, fully extracted hits for display. A
+    failed result's hits must not be persisted as a successfully completed job.
+    """
+
+    hits: list[SearchHit] = Field(default_factory=list)
+    failed: bool = False
+    notes: list[str] = Field(default_factory=list)
+    groups: list[SourceGroup] = Field(default_factory=list)
+
+
 class PipelineOutcome(BaseModel):
     """Everything the handler needs to report on one request."""
 
@@ -79,6 +105,10 @@ class PipelineOutcome(BaseModel):
     exact_count: int = 0
     """How many of `results` are in budget. The rest are alternatives."""
     duplicates_skipped: int = 0
+    source_groups: list[SourceGroup] = Field(default_factory=list)
+    source_notes: list[str] = Field(default_factory=list)
+    failed_sources: list[str] = Field(default_factory=list)
+    """Unavailable sources, distinct from successful reads with no matches."""
     degraded: bool = False
     """True when ranking fell back to raw search hits."""
 
@@ -114,7 +144,7 @@ class ResearchPipeline:
         query_builder: QueryBuilder,
         fetcher: Fetcher,
         repo: SupabaseRepository,
-        facebook: FacebookSource | None = None,
+        sources: dict[str, Callable[[ParsedQuery], Awaitable[SourceSearchResult]]] | None = None,
     ) -> None:
         self.settings = settings
         self.llm = llm
@@ -122,10 +152,8 @@ class ResearchPipeline:
         self.query_builder = query_builder
         self.fetcher = fetcher
         self.repo = repo
-        # None whenever group reading is off, which is the default and also
-        # what every existing caller that does not pass it gets. The pipeline
-        # is then exactly what it was before this source existed.
-        self.facebook = facebook
+        # Opt-in only: production Facebook wiring waits for the live Stage 1 probe.
+        self.sources = sources or {}
 
     async def run(
         self,
@@ -157,31 +185,36 @@ class ResearchPipeline:
         )
 
         described = parsed.human_summary() or text
-        searching = f"🔎 Ищу: {described}\nПоисковых запросов: {len(queries)}"
-        if self.facebook is not None:
-            # Worth saying out loud: reading groups is the slow part of a run,
-            # and someone who knows why the wait got longer waits more happily.
-            searching += f"\nПлюс групп Facebook: {len(self.settings.facebook.group_urls)}"
-        await report(searching)
-
+        await report(
+            f"🔎 Ищу: {described}\n"
+            f"Поисковых запросов: {len(queries)}"
+        )
         # Concurrently: a browser walking several groups takes far longer than
-        # the whole SearXNG fan-out, and there is no reason for one to wait on
-        # the other.
-        web_hits, facebook_hits = await asyncio.gather(
+        # the whole SearXNG fan-out, and neither should wait on the other.
+        hits, *source_results = await asyncio.gather(
             self.search.search_many(queries),
-            self._facebook_hits(parsed),
+            *(self._read_source(name, source, parsed) for name, source in self.sources.items()),
         )
-        hits = _merge_sources(facebook_hits, web_hits)
-        log.info(
-            "pipeline.hits",
-            user_id=user_id,
-            hits=len(hits),
-            queries=len(queries),
-            facebook_hits=len(facebook_hits),
-        )
+        failed_sources: list[str] = []
+        source_notes: list[str] = []
+        source_groups: dict[str, SourceGroup] = {}
+        unpersisted_urls: set[str] = set()
+        for name, result in zip(self.sources, source_results, strict=True):
+            hits.extend(result.hits)
+            source_groups.update({group.url: group for group in result.groups})
+            source_notes.extend(note for note in result.notes if note not in source_notes)
+            if result.failed:
+                failed_sources.append(name)
+                unpersisted_urls.update(hit.url for hit in result.hits)
+        hits = _merge_hits(hits)
+        log.info("pipeline.hits", user_id=user_id, hits=len(hits), queries=len(queries))
 
         if not hits:
-            return PipelineOutcome(search_id=search_id, parsed=parsed, queries=queries)
+            return PipelineOutcome(
+                search_id=search_id, parsed=parsed, queries=queries, failed_sources=failed_sources,
+                source_notes=source_notes,
+                source_groups=list(source_groups.values()),
+            )
 
         fresh_hits, duplicates = await self._drop_seen(user_id, hits)
         if not fresh_hits:
@@ -191,11 +224,30 @@ class ResearchPipeline:
                 queries=queries,
                 hits_found=len(hits),
                 duplicates_skipped=duplicates,
+                failed_sources=failed_sources,
+                source_notes=source_notes,
+                source_groups=list(source_groups.values()),
             )
 
         noun = plural_ru(len(fresh_hits), "ссылка", "ссылки", "ссылок")
         await report(f"📄 Найдено {len(fresh_hits)} {noun}, изучаю содержимое…")
-        candidates = await self._collect_content(fresh_hits)
+        # Reading a whole group can produce hundreds of posts, and the ranking
+        # call is one prompt. Order them by what is countable in the text -- the
+        # place, the wording, an area, a price -- and judge the best of them.
+        # Nothing is dropped for being unreadable, only for being outranked.
+        promising = most_promising(
+            [(hit, None) for hit in fresh_hits],
+            parsed,
+            limit=self.settings.pipeline.max_candidates_to_rank,
+        )
+        if len(promising) < len(fresh_hits):
+            log.info(
+                "pipeline.candidates.trimmed",
+                user_id=user_id,
+                found=len(fresh_hits),
+                ranked=len(promising),
+            )
+        candidates = await self._collect_content([hit for hit, _ in promising])
 
         degraded = False
         try:
@@ -204,8 +256,16 @@ class ResearchPipeline:
             # The search worked; only the ranking failed. Sending unranked hits
             # is a much better outcome than sending nothing.
             log.warning("pipeline.rank.degraded", user_id=user_id, error=str(exc))
-            structured = _fallback_results(fresh_hits, limit=self.settings.pipeline.max_results_to_user)
+            structured = _fallback_results(
+                fresh_hits, query=parsed, limit=self.settings.pipeline.max_results_to_user
+            )
             degraded = True
+
+        source_by_url = {hit.url: list(dict.fromkeys(hit.engines)) for hit in fresh_hits}
+        structured = [
+            result.model_copy(update={"sources": source_by_url.get(result.url, result.sources)})
+            for result in structured
+        ]
 
         # In the degraded path the scores are placeholders, not judgements, so
         # applying the relevance threshold to them would discard everything for
@@ -232,6 +292,7 @@ class ResearchPipeline:
             user_id=user_id,
             mode=mode,
             search_id=search_id,
+            unpersisted_urls=unpersisted_urls,
         )
         # Persistence drops rows this user already has, which can shift the
         # boundary; recount rather than trusting the pre-save split.
@@ -257,6 +318,9 @@ class ResearchPipeline:
             exact_count=exact_count,
             duplicates_skipped=duplicates,
             degraded=degraded,
+            failed_sources=failed_sources,
+            source_notes=source_notes,
+            source_groups=list(source_groups.values()),
         )
 
     # -- stages ------------------------------------------------------------
@@ -270,12 +334,50 @@ class ResearchPipeline:
         parsed = await self.llm.chat_structured(
             [ChatMessage.system(EXTRACT_SYSTEM), ChatMessage.user(build_extract_prompt(text, mode))],
             ParsedQuery,
-            model=self.settings.llm.extract_model,
+            model=self.settings.llm.model_for("extract"),
             purpose="extract",
         )
+        parsed = await self._repair_location(text, parsed)
         # The user picked the mode with a button; the model does not get to
-        # overrule that.
+        # overrule that. Recover a few high-value constraints from the raw
+        # request when a local model omits them.
+        parsed = _recover_critical_query_fields(text, parsed)
         return parsed.model_copy(update={"mode": mode})
+
+    async def _repair_location(self, text: str, parsed: ParsedQuery) -> ParsedQuery:
+        """Retry only the place when the main extraction did not normalise it."""
+        location = parsed.location
+        if any((location.city, location.region, location.country)):
+            return parsed
+        try:
+            repaired = await self.llm.chat_structured(
+                [
+                    ChatMessage.system(LOCATION_REPAIR_SYSTEM),
+                    ChatMessage.user(build_location_repair_prompt(text, location.raw)),
+                ],
+                Location,
+                model=self.settings.llm.model_for("extract"),
+                purpose="extract_location_repair",
+            )
+        except LLMError as exc:
+            log.warning("pipeline.location_repair_failed", error=str(exc))
+            return parsed
+        if not any((repaired.city, repaired.region, repaired.country)):
+            return parsed
+        raw = repaired.raw or location.raw
+        normalised_text = " ".join(text.casefold().split())
+        normalised_raw = " ".join((raw or "").casefold().split())
+        if not normalised_raw or normalised_raw not in normalised_text:
+            log.warning(
+                "pipeline.location_repair_rejected",
+                raw=raw,
+                city=repaired.city,
+                country=repaired.country,
+            )
+            return parsed
+        if repaired.raw != raw:
+            repaired = repaired.model_copy(update={"raw": raw})
+        return parsed.model_copy(update={"location": repaired})
 
     async def rank(
         self, parsed: ParsedQuery, candidates: list[tuple[SearchHit, PageContent | None]]
@@ -293,17 +395,18 @@ class ResearchPipeline:
         ranked = await self.llm.chat_structured(
             [ChatMessage.system(RANK_SYSTEM), ChatMessage.user(prompt)],
             RankedResults,
-            model=self.settings.llm.rank_model,
+            model=self.settings.llm.model_for("rank"),
             purpose="rank",
         )
 
         # Models occasionally return a rewritten or hallucinated URL. Anything
         # that is not one of the URLs we supplied is dropped rather than sent.
         allowed = {hit.url for hit, _ in candidates}
+        sources_by_url = {hit.url: list(dict.fromkeys(hit.engines)) for hit, _ in candidates}
         kept: list[StructuredResult] = []
         for result in ranked.results:
             if result.url in allowed:
-                kept.append(result)
+                kept.append(result.model_copy(update={"sources": sources_by_url.get(result.url, [])}))
             else:
                 log.warning("pipeline.rank.unknown_url", url=result.url)
 
@@ -316,6 +419,11 @@ class ResearchPipeline:
         Re-fetches the page when the stored content is missing -- results saved
         before the parser ran, or truncated at storage time.
         """
+        if result.raw.get("source_kind") == "facebook_public":
+            return (
+                "Доступен только фрагмент публикации из веб-поиска. "
+                "Полный текст не проверен — откройте ссылку на Facebook."
+            )
         content = result.content or ""
         if not content:
             page = await self.fetcher.fetch(result.url)
@@ -331,7 +439,7 @@ class ResearchPipeline:
                 ChatMessage.system(DETAILS_SYSTEM),
                 ChatMessage.user(build_details_prompt(parsed, result.url, result.title, content)),
             ],
-            model=self.settings.llm.rank_model,
+            model=self.settings.llm.model_for("details", content_chars=len(content)),
             purpose="details",
         )
         return response.text.strip()
@@ -366,28 +474,29 @@ class ResearchPipeline:
 
         return chosen, verdicts, min(len(matches), limit)
 
-    async def _facebook_hits(self, parsed: ParsedQuery) -> list[SearchHit]:
-        """Read the configured groups, or return nothing at all.
+    async def _read_source(
+        self,
+        name: str,
+        search_source: Callable[[ParsedQuery], Awaitable[SourceSearchResult]],
+        parsed: ParsedQuery,
+    ) -> SourceSearchResult:
+        """Read one extra source, or report it failed -- never raise, never hang.
 
-        Never raises, and never holds the run open for long. This source is
-        driving one shared browser against a session that can be logged out,
-        sitting on a checkpoint, or mid-takeover by a human at any moment,
-        and the selectors it depends on are reading markup Facebook changes
-        without notice. Every one of those is a search answered from the web
-        alone -- which is the whole bot as it worked before this source
-        existed -- and not a failed search.
+        The Facebook reader drives one shared browser against a session that
+        can be logged out, on a checkpoint or mid-takeover at any moment, and
+        its selectors read markup Facebook changes without notice. Breaking is
+        the expected case for it, and the expected case has to cost the user
+        nothing but that source's results: the search is answered from the web
+        and the source is named in ``failed_sources`` like any other outage.
         """
-        if self.facebook is None:
-            return []
-
-        timeout = self.settings.facebook.search_timeout_seconds
+        timeout = self.settings.pipeline.source_timeout_seconds
         try:
-            return await asyncio.wait_for(self.facebook.search(parsed), timeout=timeout)
+            return await asyncio.wait_for(search_source(parsed), timeout=timeout)
         except TimeoutError:
-            log.warning("pipeline.facebook.timed_out", timeout_seconds=timeout)
+            log.warning("pipeline.source.timed_out", source=name, timeout_seconds=timeout)
         except Exception as exc:  # noqa: BLE001 - one source failing is not a failed search
-            log.warning("pipeline.facebook.failed", error=str(exc), exc_info=True)
-        return []
+            log.warning("pipeline.source.failed", source=name, error=str(exc), exc_info=True)
+        return SourceSearchResult(failed=True)
 
     async def _drop_seen(self, user_id: int, hits: list[SearchHit]) -> tuple[list[SearchHit], int]:
         """Remove hits this user was already shown, if we can tell."""
@@ -418,7 +527,12 @@ class ResearchPipeline:
             for hit in hits
             if hit.content
         }
-        to_fetch_hits = [hit for hit in hits if hit.url not in pre_read]
+        # Public Facebook discovery provides search snippets, not full posts.
+        # Fetching their URLs would often rank a login wall as listing content.
+        to_fetch_hits = [
+            hit for hit in hits
+            if hit.url not in pre_read and "facebook_public" not in hit.engines
+        ]
 
         fetched: dict[str, PageContent] = {}
         if self.settings.parser.enabled and to_fetch_hits:
@@ -437,6 +551,7 @@ class ResearchPipeline:
         user_id: int,
         mode: Mode,
         search_id: UUID | None,
+        unpersisted_urls: set[str] | None = None,
     ) -> list[StoredResult]:
         """Store the kept results, carrying their page text and budget verdict."""
         if not results:
@@ -445,6 +560,7 @@ class ResearchPipeline:
         content_by_url = {
             hit.url: page.text for hit, page in candidates if page is not None and page.ok
         }
+        public_post_urls = {hit.url for hit, _ in candidates if "facebook_public" in hit.engines}
         rows = []
         for result in results:
             verdict = verdicts.get(result.url) or BudgetMatch()
@@ -461,7 +577,15 @@ class ResearchPipeline:
                 )
             )
 
-        stored = await self.repo.save_results(rows)
+            if result.url in public_post_urls:
+                rows[-1].raw["source_kind"] = "facebook_public"
+
+        # Aborted source jobs may return completed hits for display, but must
+        # never commit a partial job. Their buttons remain absent (no row id).
+        unpersisted_urls = unpersisted_urls or set()
+        transient = [row for row in rows if row.url in unpersisted_urls]
+        persistable = [row for row in rows if row.url not in unpersisted_urls]
+        stored = (await self.repo.save_results(persistable) if persistable else []) + transient
         # save_results returns only the rows it accepted, and in its own order;
         # restore the ranking order so matches still precede alternatives.
         position = {row.url: index for index, row in enumerate(rows)}
@@ -469,36 +593,199 @@ class ResearchPipeline:
         return stored
 
 
-def _merge_sources(
-    facebook_hits: list[SearchHit], web_hits: list[SearchHit]
-) -> list[SearchHit]:
-    """One list, de-duplicated by ``url_hash``, Facebook's copy winning ties.
+def _recover_critical_query_fields(text: str, parsed: ParsedQuery) -> ParsedQuery:
+    """Fill critical fields a small/local model occasionally leaves empty.
 
-    Order here is not a ranking -- the LLM re-orders everything downstream.
-    It decides only which copy survives when the same URL arrives from both
-    sources, and there the group post is the one to keep: it carries the
-    post text the source already read, and the plain HTTP fetcher cannot
-    reach an authenticated Facebook page to recover it (see
-    :meth:`ResearchPipeline._collect_content`, which skips fetching any hit
-    that already has ``content``).
+    This is intentionally conservative: it recognises only unambiguous
+    phrases. Explicit values in the raw request win over the model because a
+    missing or misread hard constraint changes which listings are acceptable.
+    The LLM remains the source for the rest of the schema.
     """
-    seen: set[str] = set()
-    merged: list[SearchHit] = []
-    for hit in (*facebook_hits, *web_hits):
-        if hit.url_hash in seen:
+    lowered = text.casefold()
+    updates: dict[str, object] = {}
+
+    area_match = re.search(
+        r"(?:від|от|from|at\s+least)\s*(\d[\d\s]*(?:[.,]\d+)?)\s*"
+        r"(?:м(?:\s*2|²|\s+квадратн\w*)?|m(?:\s*2|²)|square\s+met(?:er|re)s?)\b",
+        lowered,
+    )
+    explicit_area: float | None = None
+    if area_match:
+        raw_area = area_match.group(1).replace(" ", "").replace(",", ".")
+        with suppress(ValueError):
+            explicit_area = float(raw_area)
+            updates["area_min"] = explicit_area
+
+    duration = r"(\d{1,3})\s*(?:хв(?:илин\w*)?|мин(?:ут\w*)?|minutes?)\b"
+    driving = r"(?:на\s+(?:машин\w*|авто(?:мобил\w*)?)|by\s+car|driv\w*)"
+    metro_match = re.search(
+        rf"(?:метро|metro).{{0,50}}?{duration}.{{0,24}}?{driving}", lowered
+    ) or re.search(rf"{duration}.{{0,24}}?{driving}.{{0,50}}?(?:метро|metro)", lowered)
+    if metro_match:
+        updates["metro_drive_minutes"] = int(metro_match.group(1))
+
+    buildable_negative = re.search(
+        r"(?:не\s+(?:для\s+)?застройк\w*|не\s+для\s+забудови|not\s+buildable|"
+        r"not\s+for\s+(?:construction|development)|no\s+urbanizable)",
+        lowered,
+    )
+    buildable_positive = re.search(
+        r"для\s+забудови|для\s+застройки|для\s+строительств\w*|"
+        r"buildable|for\s+(?:construction|development)|urbanizable|edificable",
+        lowered,
+    )
+    if buildable_negative:
+        updates["buildable_required"] = False
+    elif buildable_positive:
+        updates["buildable_required"] = True
+
+    building_optional = re.search(
+        r"з\s+будинками?\s+або\s+без|с\s+дом\w*\s+или\s+без|"
+        r"with\s+or\s+without\s+(?:a\s+)?house|con\s+o\s+sin\s+casa",
+        lowered,
+    )
+    if building_optional:
+        updates["building_required"] = None
+
+    land_request = re.search(
+        r"земельн\w*\s+(?:участк\w*|ділян\w*)|земельн\w*\s+ділян\w*|land\s+plots?",
+        lowered,
+    )
+    if parsed.object_type is None and land_request:
+        updates["object_type"] = "land plot"
+
+    location = parsed.location
+    suburb_match = re.search(
+        r"пригород\w*|передміст\w*|suburb\w*|outskirt\w*|suburbio\w*|perifer\w*",
+        lowered,
+    )
+
+    if location.country and location.country.casefold() in {"spain", "españa"}:
+        languages = ["es", "en", *parsed.languages]
+        updates["languages"] = list(dict.fromkeys(code.casefold() for code in languages if code))
+
+    criteria = list(parsed.criteria)
+    duplicate_markers: list[Callable[[str], bool]] = []
+    if explicit_area is not None:
+        area_token = f"{explicit_area:g}"
+        area_pattern = re.compile(rf"(?<![\d.]){re.escape(area_token)}(?![\d.])")
+        duplicate_markers.append(lambda value: bool(area_pattern.search(value)))
+    if suburb_match:
+        duplicate_markers.append(
+            lambda value: any(
+                marker in value
+                for marker in ("suburb", "outskirt", "пригород", "передміст", "suburbio", "perifer")
+            )
+        )
+    if metro_match:
+        minute_token = metro_match.group(1)
+        duplicate_markers.append(
+            lambda value: "metro" in value
+            or "метро" in value
+            or (
+                minute_token in value
+                and any(unit in value for unit in ("minute", "хв", "мин"))
+            )
+        )
+    if buildable_positive and not buildable_negative:
+        duplicate_markers.append(
+            lambda value: any(
+                marker in value
+                for marker in (
+                    "buildable",
+                    "development",
+                    "construction",
+                    "urbanizable",
+                    "edificable",
+                    "забудов",
+                    "застрой",
+                )
+            )
+            or set(value.split()) in ({"true"}, {"yes"})
+        )
+    if building_optional:
+        duplicate_markers.append(
+            lambda value: any(
+                marker in value for marker in ("house", "building", "дом", "будин", "casa")
+            )
+            or any(marker in value for marker in ("with or without", "або без", "или без"))
+        )
+    if duplicate_markers:
+        criteria = [
+            criterion
+            for criterion in criteria
+            if not any(
+                is_duplicate(f"{criterion.name} {criterion.value}".casefold())
+                for is_duplicate in duplicate_markers
+            )
+        ]
+
+    def set_criterion(name: str, value: str, importance: str) -> None:
+        nonlocal criteria
+        criteria = [criterion for criterion in criteria if criterion.name != name]
+        criteria.append(QueryCriterion(name=name, value=value, importance=importance))
+
+    if explicit_area is not None:
+        set_criterion("area_min", f"{explicit_area:g} m²", "required")
+    if suburb_match:
+        location_value = (
+            f"{location.city} suburbs" if location.city else (location.raw or "")
+        )
+        if location_value:
+            set_criterion("location", location_value, "required")
+    if metro_match:
+        set_criterion(
+            "metro_drive_minutes", f"{int(metro_match.group(1))} minutes by car", "required"
+        )
+    if buildable_positive and not buildable_negative:
+        set_criterion("buildable_required", "suitable for construction", "required")
+    if building_optional:
+        set_criterion("building", "with or without a house", "optional")
+    if criteria != parsed.criteria:
+        updates["criteria"] = criteria
+
+    return parsed.model_copy(update=updates) if updates else parsed
+
+
+def _merge_hits(hits: list[SearchHit]) -> list[SearchHit]:
+    """Merge source hits while retaining provenance and the richest content."""
+    merged: dict[str, SearchHit] = {}
+    for hit in hits:
+        existing = merged.get(hit.url_hash)
+        if existing is None:
+            merged[hit.url_hash] = hit
             continue
-        seen.add(hit.url_hash)
-        merged.append(hit)
-    return merged
+        existing.engines = list(dict.fromkeys([*existing.engines, *hit.engines]))
+        existing.score = max(existing.score, hit.score)
+        if len(hit.snippet) > len(existing.snippet):
+            existing.snippet = hit.snippet
+        if not existing.title and hit.title:
+            existing.title = hit.title
+        if existing.content is None and hit.content:
+            existing.content = hit.content
+        if existing.author is None and hit.author:
+            existing.author = hit.author
+        if existing.published_at is None and hit.published_at is not None:
+            existing.published_at = hit.published_at
+    return list(merged.values())
 
 
-def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredResult]:
+def _fallback_results(
+    hits: list[SearchHit], *, query: ParsedQuery, limit: int
+) -> list[StructuredResult]:
     """Raw hits dressed as results, for when the ranker is unavailable.
 
     The score is a placeholder: nothing has judged these. The caller skips the
     relevance threshold in this path, and the summary is the engine's own
     snippet -- honest, if unpolished.
     """
+    missing = []
+    if query.area_min is not None:
+        missing.append(f"площадь от {query.area_min:g} м² не проверена")
+    if query.metro_drive_minutes is not None:
+        missing.append("расстояние до метро не проверено")
+    if query.buildable_required:
+        missing.append("назначение под застройку не проверено")
     return [
         StructuredResult(
             url=hit.url,
@@ -506,6 +793,9 @@ def _fallback_results(hits: list[SearchHit], *, limit: int) -> list[StructuredRe
             summary=hit.snippet or "Описание недоступно — откройте ссылку, чтобы посмотреть.",
             score=50,
             language=None,
+            seller=hit.author,
+            missing_criteria=missing,
+            **extract_listing_facts(hit.content or hit.snippet),
         )
         for hit in hits[:limit]
     ]

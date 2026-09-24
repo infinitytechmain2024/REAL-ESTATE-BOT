@@ -1,0 +1,7 @@
+# Deliberately smaller than requirements.txt: this one-shot HTTP worker must
+# not inherit Playwright or Chromium tooling.
+asyncpg==0.31.0
+httpx==0.28.1
+pydantic==2.12.4
+pydantic-settings==2.13.1
+scrapling==0.4.8

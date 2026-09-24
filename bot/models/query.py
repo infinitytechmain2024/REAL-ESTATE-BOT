@@ -7,7 +7,9 @@ optional, because a user is allowed to say "land in Cyprus" and nothing else.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from bot.models.enums import Mode
 
@@ -31,6 +33,38 @@ class Location(BaseModel):
         return not any((self.country, self.region, self.city, self.raw))
 
 
+class QueryCriterion(BaseModel):
+    """A condition extracted from the request, with its importance explicit."""
+
+    name: str = Field(description="Short criterion name, e.g. area or metro distance")
+    value: str = Field(description="Value normalised from the user's wording")
+    importance: Literal["required", "preferred", "optional"] = Field(
+        description="Whether this condition is mandatory, desired, or merely allowed"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_local_model_shape(cls, value: object) -> object:
+        """Accept two harmless JSON variations emitted by smaller models."""
+        if not isinstance(value, dict):
+            return value
+        normalised = dict(value)
+        if "importance" not in normalised and normalised.get("type") in {
+            "required",
+            "preferred",
+            "optional",
+        }:
+            normalised["importance"] = normalised["type"]
+        if "name" not in normalised and normalised.get("value") is not None:
+            normalised["name"] = str(normalised["value"])
+        criterion_value = normalised.get("value")
+        if isinstance(criterion_value, bool):
+            normalised["value"] = str(criterion_value).lower()
+        elif criterion_value is not None and not isinstance(criterion_value, str):
+            normalised["value"] = str(criterion_value)
+        return normalised
+
+
 class ParsedQuery(BaseModel):
     """Structured intent extracted from the user's message.
 
@@ -50,6 +84,16 @@ class ParsedQuery(BaseModel):
     )
     area_min: float | None = Field(default=None, description="Minimum area, square metres")
     area_max: float | None = Field(default=None, description="Maximum area, square metres")
+    building_required: bool | None = Field(
+        default=None,
+        description="True only when a building is required; false means land without one; null means either",
+    )
+    metro_drive_minutes: int | None = Field(
+        default=None, description="Maximum driving minutes to the nearest metro station"
+    )
+    buildable_required: bool = Field(
+        default=False, description="The land must be suitable or permitted for construction"
+    )
     budget_min: float | None = Field(default=None, description="Minimum budget, in `currency`")
     budget_max: float | None = Field(default=None, description="Maximum budget, in `currency`")
     currency: str | None = Field(default=None, description="ISO-4217 code of the budget, e.g. EUR")
@@ -67,6 +111,10 @@ class ParsedQuery(BaseModel):
     )
     timeframe: str | None = Field(default=None, description="Recency constraint, if the user gave one")
     notes: str | None = Field(default=None, description="Anything else worth carrying into ranking")
+    criteria: list[QueryCriterion] = Field(
+        default_factory=list,
+        description="Every condition stated by the user, classified by importance",
+    )
 
     @field_validator("languages", "keywords", "exclude", mode="before")
     @classmethod

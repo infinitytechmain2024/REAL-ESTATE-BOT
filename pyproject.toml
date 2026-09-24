@@ -25,3 +25,11 @@ ignore = [
 
 # Package __init__ files re-export and import providers for their registration
 # side effects; those lines carry their own `# noqa: F401`.
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Every test here is async; opting in per-test would be pure ceremony.
+asyncio_mode = "auto"
+addopts = "-q"
+filterwarnings = ["error::RuntimeWarning"]

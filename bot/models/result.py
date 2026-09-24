@@ -113,7 +113,16 @@ class StructuredResult(BaseModel):
     contacts: list[str] = Field(
         default_factory=list, description="Phone numbers, e-mails or contact page URLs found"
     )
+    seller: str | None = Field(default=None, description="Seller or author name shown by the source")
+    criteria_match: bool = Field(default=False, description="Whether all hard request criteria are evidenced")
+    missing_criteria: list[str] = Field(
+        default_factory=list, description="Hard criteria not evidenced by this source"
+    )
     language: str | None = Field(default=None, description="ISO-639-1 code of the source page")
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Source engines or adapters that found this same result",
+    )
 
     @field_validator("score", mode="before")
     @classmethod

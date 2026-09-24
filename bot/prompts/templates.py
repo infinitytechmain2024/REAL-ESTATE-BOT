@@ -39,7 +39,27 @@ Rules:
   "en", then the language the user wrote in. These drive multilingual search.
 - `keywords` are the terms worth keeping verbatim in a search query. Do not
   pad them with generic words like "buy" or "property".
+- Extract hard constraints separately: minimum area, suburb/location, driving
+  time to metro, buildable/development use, and whether a building is optional.
+- Also return `criteria`: every condition the user actually stated, classified
+  as `required`, `preferred`, or `optional`. Missing information is not a
+  failure: never invent a criterion, and never make an unstated parameter
+  required. Wording such as "with or without a house" is `optional`.
 - `mode` is given to you; keep it unless the text plainly contradicts it.
+"""
+
+LOCATION_REPAIR_SYSTEM = """\
+You repair geographic location fields for real-estate search. Identify every
+place the user explicitly named using world knowledge. Translate inflected or
+non-Latin place names to their standard English names. Set city, region and
+country whenever they are knowable; never leave city null merely because the
+request uses Ukrainian, Russian, Greek or another grammatical form. Preserve
+only the exact geographic phrase in `raw`. Do not extract property constraints.
+
+Examples:
+- "ділянка біля Мюнхена" -> country Germany, city Munich, raw "біля Мюнхена"
+- "house near Λεμεσός" -> country Cyprus, city Limassol, raw "near Λεμεσός"
+- "land, at least 2 hectares" -> every location field null
 """
 
 RANK_SYSTEM = """\
@@ -49,7 +69,8 @@ You receive the user's structured request and a numbered list of candidate
 pages with whatever text could be extracted from each. Judge each candidate on
 whether it actually serves the request.
 
-Scoring (0-100) -- judge everything EXCEPT price:
+Scoring (0-100) -- judge every requested criterion, while treating price as a
+separate budget comparison:
   85-100  directly matches: the right kind of object/company, in the right
           location, with the right characteristics
   60-84   plausible match with one characteristic unverified or slightly off
@@ -73,6 +94,13 @@ To make that possible, `price_value` and `price_currency` matter:
   number here is quoted straight back to the user as a difference in euros.
 
 Rules:
+- Treat `area_min`, `metro_drive_minutes` and `buildable_required` as hard
+  criteria only when the extracted `criteria` marks them `required`. Set
+  `criteria_match` false and list each missing or contradicted required
+  criterion in `missing_criteria`. Preferred criteria affect ordering but do
+  not make a listing invalid. Optional criteria never penalise either form.
+- Return close alternatives when no exact matches exist, but label the missing
+  criteria instead of presenting them as exact matches.
 - Write `summary` in the SAME LANGUAGE the user wrote their request in.
 - Summaries are factual and specific: what the object/company is, where, and
   the numbers that appear on the page. Never write marketing copy and never
@@ -105,6 +133,16 @@ def build_extract_prompt(text: str, mode: Mode) -> str:
     )
 
 
+def build_location_repair_prompt(text: str, raw: str | None) -> str:
+    """Focused retry when the first extraction kept no normalised place."""
+    previous = raw or "(none)"
+    return (
+        f"User request:\n\"\"\"\n{text.strip()}\n\"\"\"\n\n"
+        f"The first extraction preserved this raw location: {previous}\n"
+        "Return the corrected location only."
+    )
+
+
 def build_rank_prompt(
     query: ParsedQuery,
     candidates: list[tuple[SearchHit, PageContent | None]],
@@ -134,6 +172,7 @@ def build_rank_prompt(
             f"### Candidate {index}\n"
             f"URL: {hit.url}\n"
             f"Title: {hit.title or '(none)'}\n"
+            f"Author/seller: {hit.author or '(not shown)'}\n"
             f"Search snippet: {hit.snippet or '(none)'}\n"
             f"Found by: {', '.join(hit.engines) or 'unknown'}\n"
             f"Extracted text:\n{body}\n"

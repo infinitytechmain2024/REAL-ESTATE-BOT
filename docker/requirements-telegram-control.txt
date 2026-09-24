@@ -1,0 +1,8 @@
+# Deliberately smaller than requirements.txt: the Telegram control plane needs
+# only the Bot API client, PostgreSQL and one HTTPS client for OpenRouter
+# transcription. No local speech model, Playwright, or Chromium tooling.
+# Versions match requirements.txt.
+aiogram==3.23.0
+aiohttp==3.13.2
+asyncpg==0.31.0
+httpx[http2]==0.28.1

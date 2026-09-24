@@ -2,10 +2,13 @@
 # Development and CI tooling. Deliberately not in the image: the Dockerfile
 # installs requirements.txt only, and nothing here runs in production.
 #
-#   pip install -r requirements-dev.txt
+#   pip install -r requirements-dev.txt && make test
 #
 # Installed for you by `make install`.
 # ---------------------------------------------------------------------------
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
 
 # Pinned on purpose, and pinned here rather than in the workflow: an unpinned
 # linter turns someone else's release into a red build on a branch nobody

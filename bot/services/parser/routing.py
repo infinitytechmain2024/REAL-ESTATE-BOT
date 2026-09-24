@@ -47,10 +47,12 @@ class RoutingFetcher:
         *,
         http: Fetcher,
         browser: Fetcher | None = None,
+        scrapling: Fetcher | None = None,
     ) -> None:
         self.settings = settings
         self._http = http
         self._browser = browser
+        self._scrapling = scrapling
         self._browser_domains = {d.lower().lstrip(".") for d in settings.browser_domains}
 
     async def preflight(self) -> None:
@@ -69,6 +71,8 @@ class RoutingFetcher:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+        if self._scrapling is not None:
+            await self._scrapling.aclose()
         if self._browser is not None:
             await self._browser.aclose()
 
@@ -97,6 +101,25 @@ class RoutingFetcher:
             log.info("parser.route.browser_first", count=len(direct))
             pages.update(await self._browser.fetch_many(sorted(direct)))
 
+        # Scrapling is an adaptive HTTP fallback.  It runs before Playwright,
+        # so a changed selector or TLS fingerprint does not cost a browser tab.
+        # Retry blocked, empty, or transport-failed pages.  A real 404/410 is
+        # an answer, not a reason to fetch the same dead URL through another
+        # client.  Keeping this distinction also avoids wasting adaptive
+        # fetcher capacity on permanently missing listings.
+        retry = [url for url, page in pages.items() if _needs_scrapling(page)]
+        if retry and self._scrapling is not None:
+            log.info("parser.route.scrapling", count=len(retry))
+            original = {url: pages[url] for url in retry}
+            recovered = await self._scrapling.fetch_many(retry)
+            for url, page in recovered.items():
+                # If an HTTP 403/429 was followed by a transport failure in
+                # Scrapling, retain the original block status so browser
+                # escalation still happens instead of silently stopping.
+                if not page.ok and original[url].blocked and page.status is None:
+                    page = page.model_copy(update={"status": original[url].status})
+                pages[url] = page
+
         retry = [url for url, page in pages.items() if page.blocked]
         if retry and self._browser is not None:
             log.info("parser.route.escalating", count=len(retry))
@@ -116,6 +139,15 @@ class RoutingFetcher:
         return pages.get(url) or PageContent(url=url, error="fetcher returned nothing")
 
 
+def _needs_scrapling(page: PageContent) -> bool:
+    """Whether an HTTP result can benefit from an adaptive retry."""
+    if page.ok:
+        return False
+    if page.blocked or page.status is None:
+        return True
+    return page.status < 400
+
+
 def build_fetcher(settings: ParserSettings) -> Fetcher:
     """The fetcher the pipeline should use for *settings*.
 
@@ -125,8 +157,19 @@ def build_fetcher(settings: ParserSettings) -> Fetcher:
     from bot.services.parser.fetcher import PageFetcher
 
     http = PageFetcher(settings)
+    scrapling = None
+    if settings.scrapling_enabled:
+        try:
+            from bot.services.parser.scrapling import ScraplingFetcher
+
+            scrapling = ScraplingFetcher(settings)
+        except RuntimeError as exc:
+            log.warning("parser.scrapling.unavailable", error=str(exc))
+
     if not settings.browser_enabled:
-        return http
+        if scrapling is None:
+            return http
+        return RoutingFetcher(settings, http=http, scrapling=scrapling)
 
     from bot.services.parser.browser import BrowserFetcher
 
@@ -135,4 +178,9 @@ def build_fetcher(settings: ParserSettings) -> Fetcher:
         domains=sorted(settings.browser_domains),
         proxied=bool(settings.browser_proxy_url),
     )
-    return RoutingFetcher(settings, http=http, browser=BrowserFetcher(settings))
+    return RoutingFetcher(
+        settings,
+        http=http,
+        browser=BrowserFetcher(settings),
+        scrapling=scrapling,
+    )
