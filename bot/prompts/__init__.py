@@ -9,17 +9,21 @@ only carry intent and domain rules.
 from bot.prompts.templates import (
     DETAILS_SYSTEM,
     EXTRACT_SYSTEM,
+    LOCATION_REPAIR_SYSTEM,
     RANK_SYSTEM,
     build_details_prompt,
     build_extract_prompt,
+    build_location_repair_prompt,
     build_rank_prompt,
 )
 
 __all__ = [
     "DETAILS_SYSTEM",
     "EXTRACT_SYSTEM",
+    "LOCATION_REPAIR_SYSTEM",
     "RANK_SYSTEM",
     "build_details_prompt",
     "build_extract_prompt",
+    "build_location_repair_prompt",
     "build_rank_prompt",
 ]

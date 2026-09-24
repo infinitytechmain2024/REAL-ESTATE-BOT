@@ -57,6 +57,17 @@ class SearXNGClient:
 
     async def search(self, query: SearchQuery) -> list[SearchHit]:
         """Run one query. Returns an empty list rather than raising on a miss."""
+        hits, _unresponsive = await self._search(query)
+        return hits
+
+    async def _search(self, query: SearchQuery) -> tuple[list[SearchHit], list[str]]:
+        """The hits, and the engines that did not answer.
+
+        An engine that is rate-limited or serving a CAPTCHA is reported by
+        SearXNG inside a perfectly successful 200, and its absence is
+        indistinguishable from a query nobody has an answer for -- unless the
+        caller looks, which is what the second element is for.
+        """
         params: dict[str, Any] = {
             "q": query.query,
             "format": "json",
@@ -77,14 +88,14 @@ class SearXNGClient:
             if hit is not None:
                 hits.append(hit)
 
-        unresponsive = payload.get("unresponsive_engines") or []
+        unresponsive = [
+            str(entry[0] if isinstance(entry, list | tuple) and entry else entry)
+            for entry in (payload.get("unresponsive_engines") or [])
+        ]
         log.info(
-            "searxng.query.done",
-            query=query.query,
-            hits=len(hits),
-            unresponsive=[e[0] if isinstance(e, list) else e for e in unresponsive],
+            "searxng.query.done", query=query.query, hits=len(hits), unresponsive=unresponsive
         )
-        return hits
+        return hits, unresponsive
 
     async def search_many(self, queries: list[SearchQuery]) -> list[SearchHit]:
         """Run *queries* concurrently and merge the results.
@@ -96,19 +107,40 @@ class SearXNGClient:
         if not queries:
             return []
 
+        silent: set[str] = set()
+
         async def one(query: SearchQuery) -> list[SearchHit]:
             async with self._semaphore:
                 try:
-                    return await self.search(query)
+                    hits, unresponsive = await self._search(query)
                 except SearchError as exc:
                     log.warning("searxng.query.failed", query=query.query, error=str(exc))
                     return []
+                silent.update(unresponsive)
+                return hits
 
         batches = await asyncio.gather(*(one(q) for q in queries))
         # Distinguish "nothing matched" from "the service is broken": an empty
         # result set is a valid answer, an unreachable instance is not.
-        if all(not batch for batch in batches) and not await self.health():
-            raise SearchError(f"SearXNG at {self.settings.url} is not responding")
+        if all(not batch for batch in batches):
+            if not await self.health():
+                raise SearchError(f"SearXNG at {self.settings.url} is not responding")
+            if silent:
+                # Every query came back empty and engines were refusing to
+                # answer. Reporting that as "nothing found" sends the user off
+                # to rewrite a request that was never searched: rate limits and
+                # CAPTCHAs arrive inside a 200 with an empty result list.
+                names = ", ".join(sorted(silent))
+                log.warning("searxng.engines.silent", engines=names, queries=len(queries))
+                raise SearchError(
+                    f"every query came back empty; engines not answering: {names}",
+                    # Engine names stay in the log: user_message carries no
+                    # provider names. What the user needs is the distinction.
+                    user_message=(
+                        "Поиск сейчас не отвечает — это сбой поиска, а не отсутствие "
+                        "объектов. Попробуйте ещё раз через минуту."
+                    ),
+                )
 
         weights = {q.query: q.weight for q in queries}
         return self.merge(

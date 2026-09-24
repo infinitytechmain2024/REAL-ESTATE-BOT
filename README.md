@@ -1,5 +1,209 @@
 # REAL-ESTATE-BOT
 
+## VPS foundation (PostgreSQL, Redis, Caddy)
+
+The Docker foundation starts the stateful services required by the monitoring
+orchestra. PostgreSQL and Redis are private to Docker; Caddy is the only
+gateway and binds to `127.0.0.1:8080` until a production domain and access
+policy are configured.
+
+```sh
+cp .env.example .env
+# Edit .env: at minimum replace POSTGRES_PASSWORD and REDIS_PASSWORD.
+docker compose --env-file .env config
+docker compose up -d postgres redis caddy
+docker compose ps
+curl -fsS http://127.0.0.1:8080/healthz
+./scripts/apply_migrations.sh
+```
+
+The migration script applies `001_init.sql` through
+`005_orchestra_dispatcher.sql` in order. It records SHA-256 checksums in
+`public.schema_migrations`, locks concurrent runs, and refuses an edited
+already-applied migration. Use `docker compose down` for a normal stop; never
+use `down -v` on a system containing needed data.
+
+Future Telegram, controlled workers, and persistent browser services are
+intentional disabled placeholders under the Compose `future` profile. Their
+implementation must have bounded permissions and own health checks before it
+is enabled. See [VPS hardening notes](docs/VPS_HARDENING.md) before deployment.
+
+### Open Telegram control plane
+
+The `telegram` Compose service receives only text and voice control messages.
+It accepts messages from every Telegram user and chat, records each inbound
+message with a unique `(chat_id, message_id)` idempotency key, and uses local
+multilingual faster-whisper for voice notes. Anyone can use `/status` and
+`/help`, but only the Telegram user IDs in `TELEGRAM_OPERATOR_IDS` can use
+`/run`, `/pause`, `/resume`, `/cancel`, or `confirm`. Everyone else is told
+their own user ID, which is how an operator finds the value to add. An empty
+list refuses every state change. The dispatcher checks the list again before
+acting, so commands queued by someone who is no longer an operator are rejected.
+Operator commands also require a short-lived `confirm <token>` response. A confirmed command
+is durably queued for the Main Orchestra. The dispatcher validates a tiny
+command grammar, selects a bounded acquisition plan, and writes the plan plus
+audit records to PostgreSQL. It never launches a collector, browser, shell,
+or unrestricted agent process itself.
+
+After setting `TELEGRAM_TOKEN` and `TELEGRAM_OPERATOR_IDS`, apply migrations before starting it:
+
+```sh
+./scripts/apply_migrations.sh
+docker compose up -d --build telegram
+docker compose logs -f telegram
+```
+
+### Main Orchestra dispatcher
+
+The dispatcher runs inside the Telegram service and claims confirmed commands
+from a PostgreSQL inbox with an expiring lease. A restart requeues only an
+expired claim, and each Telegram confirmation message has a unique idempotency
+key. It supports:
+
+- `/run facebook-group(s) <https-url> [...]`: queues a 1–20 group Facebook
+  batch using the dedicated connector.
+- `/run website <https-url>`: queues one HTTP-first Scrapling run limited to
+  one explicit page and 45 seconds. It has no browser profile or browser API
+  access.
+- `/run instagram|tiktok <https-url>` and `/run facebook <https-url>`: queue
+  a single Agent Reach-compatible run limited to five pages and 120 seconds.
+- `/pause source:<uuid>`, `/resume source:<uuid>`, and
+  `/cancel batch:<uuid>|run:<uuid>|command:<uuid>|all`.
+
+Planning and completing a command happen in one transaction, so a crash never
+leaves a half-planned or duplicate batch. `/run` refuses a source that is
+paused, disabled, retired, deleted, or waiting for human verification.
+Cancelling a running Facebook batch stops the collector before its next group;
+the group in progress finishes and the browser profile is handed back. A
+running Agent Reach or Facebook item run is not cancelled directly: cancel its
+batch instead. Every change is audited with the Telegram user as the actor.
+
+An active, platform-matched browser profile must already be provisioned in
+PostgreSQL. The dispatcher creates plans only; an operator-controlled one-shot
+collector or Agent Reach invocation claims execution later. This is deliberate:
+the Telegram bot cannot turn untrusted chat input into Docker, shell, or
+browser launches.
+
+### Future Supabase integration
+
+Supabase is not connected by the monitoring foundation or its Telegram control
+plane. The local Docker PostgreSQL database remains the primary database and
+the migration runner is the only supported schema path today. `.env.example`
+reserves `SUPABASE_URL`, `SUPABASE_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` for a
+future server-side integration. Never expose the service-role key to a client,
+browser, logs, or source control.
+
+### Dedicated Facebook batch collector
+
+The collector processes one already-queued `facebook_connector` batch at a
+time. Migration `003_orchestration.sql` is authoritative: it permits at most
+20 ordered groups per batch. The collector limits each group to 1–20 newest
+post candidates (15 by default), uses the Browser Session Manager lease, and
+inserts a short randomized pause between groups. It stops immediately on
+checkpoint/login/CAPTCHA/account-warning signals, opens a verification job,
+and releases the browser in `VERIFICATION_REQUIRED` state.
+
+A group counts as inaccessible only when no posts were read and the page says
+so; joined private groups are read normally. Each snapshot waits (bounded) for
+Facebook's feed to render and scrolls it three times before extracting posts.
+
+#### Logging a profile in, and clearing checkpoints
+
+A new profile is logged out, and a checkpoint puts it in
+`human_verification_required`. Both are fixed by hand in the real browser:
+
+```sh
+bash scripts/browser_login.sh facebook facebook-main
+```
+
+The script creates the `browser_profiles` row if needed and refuses a profile a
+collector is using. It then opens Chromium on the profile under the same
+lease and lock collectors use, and starts noVNC for that session only, with a
+one-time password printed in the terminal. noVNC is never published on the
+host; the script prints an SSH tunnel to the browser container's Docker bridge
+address, which only the VPS itself can reach:
+
+```sh
+ssh -N -L 6090:<browser-container-ip>:6080 <user>@<vps-host>   # on your own computer
+# then open http://localhost:6090/vnc.html
+```
+
+Log in or clear the checkpoint, press Ctrl+C in the script, and confirm. The
+profile becomes `ready`; open `facebook_challenge` verification jobs are
+resolved and sources held for verification become `active` again. Batches that
+a checkpoint stopped stay as they are; cancel them and `/run` again.
+
+#### Running a batch
+
+After a profile is `ready` and `/run facebook-groups ...` has queued a batch,
+run exactly one batch:
+
+```sh
+FACEBOOK_BATCH_ID=<queued-batch-uuid> docker compose --profile collector up --build facebook-collector
+```
+
+Each group's latest read is explained in
+`monitoring_sources.configuration->'facebook_last_read'` and in the collector's
+log: article counts, how many had a post link, whether a feed rendered, the
+final URL and page title, but no post content. A read that yields no posts or
+fails also saves a screenshot in the private `browser_screenshots` volume and
+records its file name there. Those screenshots show group content, so delete
+them once diagnosed.
+
+If the collector dies mid-batch, nothing stays locked for long. The Browser
+Session Manager closes a session that makes no request for
+`BROWSER_IDLE_SECONDS` (300 by default). The dispatcher fails a running batch
+with no progress for `ORCHESTRA_STALE_BATCH_SECONDS` (900 by default), skips
+its remaining groups, and returns the profile to `ready`.
+
+This service is intentionally not a daemon and contains no Agent Ridge,
+analysis, or human-verification UI.
+
+### Controlled Agent Reach adapter
+
+The `agent-reach` Compose profile is a strictly bounded public-page reader for
+future Orchestra fallback tasks. It uses an existing Browser Session Manager
+lease and can only take explicit HTTPS targets for `facebook`, `instagram`,
+`tiktok`, or `website`. It does not run Agent Reach's upstream CLI: that CLI
+can install or execute tools and manage a browser, neither of which is an
+acceptable privilege in this system. The adapter supports only
+`read_public_page` and `extract_public_text`, visits at most five explicit
+pages by default, has a 120-second total limit, never follows discovered
+links, and exits for CAPTCHA, checkpoint, login, account-warning, or unusual
+activity signals. It cannot join groups, send messages, or change accounts.
+
+After a browser profile is provisioned, run one explicit task:
+
+```sh
+AGENT_REACH_TASK_JSON='{"task_id":"task-1","platform":"website","targets":["https://example.org"],"browser_profile_id":"website-main","browser_profile_name":"website-main"}' \
+  docker compose --profile agent-reach run --rm agent-reach
+```
+
+The JSON result is normalized for the later analysis pipeline. A future
+upstream integration must expose a read-only adapter compatible with this
+policy; flipping an environment variable cannot enable it.
+
+### Scrapling website connector
+
+The `scrapling-connector` Compose profile is the lightweight choice for a
+single ordinary public website. `/run website <https-url>` creates its bounded
+database run; an operator starts it explicitly with:
+
+```sh
+SCRAPLING_RUN_ID=<queued-run-uuid> docker compose --profile scrapling run --rm scrapling-connector
+```
+
+It makes exactly one HTTPS GET for the requested page, follows at most three
+validated HTTPS redirects, blocks local/private DNS and redirect targets,
+enforces a 20-second request / 45-second total budget and a 1.5 MB response
+cap, then uses `scrapling.Selector` only to parse the already-downloaded HTML.
+It does **not** use Scrapling fetchers, spiders, stealth tooling, browser
+features, link discovery, challenge bypassing, or browser profiles. Its output
+uses the same normalized public-page structure as controlled Agent Reach and
+is persisted as a normalized `collected_posts` record for later analysis.
+
+---
+
 Telegram-бот, который ищет объекты недвижимости и потенциальных партнёров по
 открытым источникам: разбирает запрос через LLM, ищет в собственном инстансе
 SearXNG, читает найденные страницы, фильтрует результаты и присылает каждый
@@ -494,6 +698,26 @@ Wikidata. Первые четыре и Qwant с Mojeek в upstream выключ�
 Обновление снимка — по инструкции в `VENDOR.md`.
 
 ## Полезные команды
+
+## Browser session manager
+
+`browser` owns persistent, non-headless Chromium contexts for future controlled
+collectors. It is not a scraper and has no published host port. A caller on the
+private Docker network must use `Authorization: Bearer $BROWSER_SESSION_API_TOKEN`
+to acquire a profile, release its opaque session token, or request a screenshot.
+Redis leases and kernel filesystem locks ensure one live browser per profile;
+leases expire after a process crash. Profile data and screenshots are stored in
+private named Docker volumes with owner-only permissions.
+
+```sh
+docker compose up -d --build browser
+docker compose logs -f browser
+```
+
+Set `BROWSER_SESSION_API_TOKEN` to a unique long secret before starting it.
+The persisted states remain the migration-003 values (`ready`, `in_use`,
+`human_verification_required`, etc.); `LOCKED` and `COOLDOWN` are transient
+operational API conditions and are never written to the database.
 
 ```sh
 make help          # список целей

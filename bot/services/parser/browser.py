@@ -148,7 +148,7 @@ class BrowserFetcher:
         """Load one URL in a fresh tab. Never raises."""
         try:
             context = await self._ensure_context()
-        except Exception as exc:  # noqa: BLE001 - documented never to raise: one failed page
+        except Exception as exc:  # noqa: BLE001 - navigation failures are data
             log.warning("browser.start_failed", url=url, error=str(exc), exc_info=True)
             return PageContent(url=url, error=f"browser unavailable: {type(exc).__name__}")
 

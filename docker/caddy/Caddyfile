@@ -1,0 +1,16 @@
+# The gateway is intentionally inert until an authenticated application route
+# exists. Its health endpoint is safe to expose through a local reverse proxy.
+{
+    admin off
+    auto_https off
+}
+
+:8080 {
+    respond /healthz 200
+
+    # Future public API route (add authentication, rate limits and TLS before
+    # enabling):
+    # reverse_proxy /api/* telegram:8080
+
+    respond "Real Estate Monitor gateway" 404
+}

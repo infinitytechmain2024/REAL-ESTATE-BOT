@@ -1,111 +1,226 @@
-# Local development.
-#
-# The default `bot` service mirrors production: one container running both
-# SearXNG and the bot, exactly as Render will run it.
-#
-#   docker compose up --build
-#
-# The `searxng` profile instead runs SearXNG on its own, for when you want to
-# iterate on the bot with a plain `python -m bot.main` on the host:
-#
-#   docker compose --profile searxng-only up searxng
-#   SEARXNG_URL=http://127.0.0.1:8888 python -m bot.main
+# Hostinger VPS foundation. Only Caddy has a host-facing port; PostgreSQL and
+# Redis are isolated on the internal Docker network. Services that must make
+# outbound requests join the separate egress network as well; neither database
+# nor Redis ever join an egress-capable network or publish a host port.
+name: real-estate-monitor
 
 services:
-  bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      # google-chrome-stable (needed only when FACEBOOK_ENABLED=true) is only
-      # published for amd64 -- Google does not ship an arm64 build. Pin the
-      # platform so this still builds on Apple Silicon; Docker Desktop then runs
-      # it under Rosetta (fast, enable "Use Rosetta for x86/amd64 emulation" in
-      # Settings > General) or QEMU (slower, the default). On an amd64 host this
-      # line is a no-op.
-      platforms:
-        - linux/amd64
-    platform: linux/amd64
-    env_file: .env
-    environment:
-      ENVIRONMENT: docker
-      SEARXNG_URL: http://127.0.0.1:8888
-      SEARXNG_BIND_ADDRESS: 127.0.0.1
-      # Uncomment to let the cache service below be used.
-      # SEARXNG_VALKEY_URL: valkey://valkey:6379/0
-    # Resource ceiling. Nothing capped this before, so the container could
-    # grow into every last byte the host had -- and when a Linux box runs out
-    # of memory the OOM killer picks the largest process, which here is
-    # exactly the Chrome holding the logged-in Facebook session. Losing it
-    # means doing the whole verification again, so the point of these two
-    # lines is that the container hits a limit Docker enforces *before* the
-    # kernel starts shooting processes, with a slice of the host left over as
-    # spike buffer.
-    #
-    # Sized for a 4 vCPU / 16 GB VPS. On 2 vCPU / 8 GB use mem_limit: 6g and
-    # cpus: 1.5; on anything smaller, turn PARSER_BROWSER_ENABLED off -- the
-    # fallback Chromium is what pushes peak memory past the Facebook Chrome.
-    mem_limit: 11g
-    cpus: 3.0
-    # Chrome keeps shared memory between its processes in /dev/shm, which
-    # Docker mounts at 64 MB by default. That is nowhere near enough once a
-    # Facebook group is scrolling images, and the symptom is misleading: tabs
-    # die with "Target closed" at what look like random moments, with plenty
-    # of free RAM on the host. Not a leak -- a too-small mount.
-    shm_size: 2gb
-    volumes:
-      # Without this, the container filesystem (and with it the Facebook Chrome
-      # profile + the live-view token file) resets on every `docker compose up`
-      # after a `down` -- you would have to clear the login checkpoint again on
-      # every restart. Bind-mounting ./data keeps FACEBOOK_PROFILE_DIR and
-      # FACEBOOK_TOKEN_STORE_PATH (both default to ./data/... inside the
-      # container) on the host, surviving container recreation.
-      - ./data:/app/data
-    ports:
-      # Exposed only so you can curl the API while developing. Drop this
-      # mapping and SearXNG is unreachable from outside the container.
-      - "127.0.0.1:8888:8888"
-      # The token-gated proxy in front of the Facebook browser's noVNC view
-      # (bot/services/facebook/gate.py), only real when FACEBOOK_ENABLED=true.
-      # Loopback here on purpose -- on a VPS, a Tailscale Funnel pointed at this
-      # port is what makes the Telegram "Open Facebook" button work from
-      # anywhere, without publishing anything yourself (see the README's
-      # "Tailscale Funnel setup" section). Harmless when Facebook is disabled:
-      # nothing listens on 8090 and the mapping just sits idle. Never publish
-      # noVNC's own 6080 or Chrome's CDP port -- this gate is the only
-      # intended way in.
-      - "127.0.0.1:8090:8090"
+  postgres:
+    image: postgres:16-alpine
     restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-monitoring}
+      POSTGRES_USER: ${POSTGRES_USER:-monitoring_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./bot/services/db/migrations:/migrations:ro
+    networks: [backend]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8888/healthz"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    security_opt: [no-new-privileges:true]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    command: ["sh", "-ec", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis_data:/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    security_opt: [no-new-privileges:true]
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      # Keep this loopback-only until a DNS name and TLS policy are configured.
+      - "127.0.0.1:${CADDY_HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [backend, edge]
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 40s
+    security_opt: [no-new-privileges:true]
 
-  # Standalone SearXNG for host-side bot development.
-  searxng:
-    profiles: ["searxng-only"]
+  telegram:
     build:
       context: .
-      dockerfile: Dockerfile
-      # See the note on the bot service above -- same Dockerfile, same amd64-only
-      # Chrome dependency at build time.
-      platforms:
-        - linux/amd64
-    platform: linux/amd64
+      dockerfile: docker/telegram-control.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
-      SEARXNG_BIND_ADDRESS: 0.0.0.0
-      SEARXNG_SECRET: ${SEARXNG_SECRET:-dev-secret-change-me}
-    entrypoint: ["granian", "--interface", "wsgi", "--host", "0.0.0.0", "--port", "8888",
-                 "searxng.api_only:application"]
-    ports:
-      - "127.0.0.1:8888:8888"
-    restart: unless-stopped
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL in .env}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
+      # Empty is allowed but refuses every state-changing command.
+      TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}
+      # Tunables read by bot/control_plane/settings.py; defaults match it.
+      TELEGRAM_CONFIRMATION_TTL_SECONDS: ${TELEGRAM_CONFIRMATION_TTL_SECONDS:-300}
+      TELEGRAM_MAX_VOICE_MB: ${TELEGRAM_MAX_VOICE_MB:-20}
+      ORCHESTRA_COMMAND_LEASE_SECONDS: ${ORCHESTRA_COMMAND_LEASE_SECONDS:-30}
+      ORCHESTRA_POLL_SECONDS: ${ORCHESTRA_POLL_SECONDS:-1}
+      ORCHESTRA_STALE_BATCH_SECONDS: ${ORCHESTRA_STALE_BATCH_SECONDS:-900}
+      FASTER_WHISPER_MODEL: ${FASTER_WHISPER_MODEL:-small}
+      FASTER_WHISPER_DEVICE: ${FASTER_WHISPER_DEVICE:-cpu}
+      FASTER_WHISPER_COMPUTE_TYPE: ${FASTER_WHISPER_COMPUTE_TYPE:-int8}
+    volumes:
+      - whisper_models:/models
+    # `backend` reaches PostgreSQL/Redis; `egress` is required for Telegram's
+    # long polling API. It does not publish a host port.
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
 
-  # Optional result cache. SearXNG works without it; enable by setting
-  # SEARXNG_VALKEY_URL on the bot service above.
-  valkey:
-    profiles: ["cache"]
-    image: valkey/valkey:8-alpine
-    command: valkey-server --save "" --appendonly no
+  worker:
+    profiles: [future]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo 'controlled acquisition worker placeholder'; sleep infinity"]
+    networks: [backend]
+
+  browser:
+    build:
+      context: .
+      dockerfile: docker/browser-session.Dockerfile
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL in .env}
+      BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
+      BROWSER_PROFILE_ROOT: /profiles
+      BROWSER_SCREENSHOT_ROOT: /screenshots
+      BROWSER_LEASE_SECONDS: ${BROWSER_LEASE_SECONDS:-120}
+      BROWSER_LEASE_RENEW_SECONDS: ${BROWSER_LEASE_RENEW_SECONDS:-30}
+      BROWSER_IDLE_SECONDS: ${BROWSER_IDLE_SECONDS:-300}
+    volumes:
+      - browser_profiles:/profiles
+      - browser_screenshots:/screenshots
+    # No published ports, including noVNC: during an operator login session
+    # (scripts/browser_login.sh) it is reached over an SSH tunnel to this
+    # container's bridge address, and nothing listens outside a session.
+    # Chromium needs outbound HTTPS while the session API remains reachable
+    # only by services on the private backend network.
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    shm_size: 1gb
+
+  facebook-collector:
+    profiles: [collector]
+    build:
+      context: .
+      dockerfile: docker/facebook-collector.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      browser:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      BROWSER_SESSION_URL: http://browser:8090
+      BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
+      # Validated by the one-shot worker at runtime; keeping this optional here
+      # lets ordinary `docker compose config` and non-collector services start.
+      FACEBOOK_BATCH_ID: ${FACEBOOK_BATCH_ID:-}
+      FACEBOOK_COLLECTOR_MAX_GROUPS: ${FACEBOOK_COLLECTOR_MAX_GROUPS:-20}
+      FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP: ${FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP:-15}
+      FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS: ${FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS:-90}
+      FACEBOOK_COLLECTOR_PAUSE_MIN_SECONDS: ${FACEBOOK_COLLECTOR_PAUSE_MIN_SECONDS:-4}
+      FACEBOOK_COLLECTOR_PAUSE_MAX_SECONDS: ${FACEBOOK_COLLECTOR_PAUSE_MAX_SECONDS:-9}
+    networks: [backend]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
+  agent-reach:
+    # Controlled, one-shot public-page reader. It is deliberately profile-gated
+    # so upstream Agent Reach is never installed or invoked by this stack.
+    profiles: [agent-reach]
+    build:
+      context: .
+      dockerfile: docker/agent-reach.Dockerfile
+    depends_on:
+      browser:
+        condition: service_started
+    environment:
+      BROWSER_SESSION_URL: http://browser:8090
+      BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
+      AGENT_REACH_TASK_JSON: ${AGENT_REACH_TASK_JSON:-}
+      AGENT_REACH_MAX_PAGES: ${AGENT_REACH_MAX_PAGES:-5}
+      AGENT_REACH_MAX_EXECUTION_SECONDS: ${AGENT_REACH_MAX_EXECUTION_SECONDS:-120}
+      AGENT_REACH_PAGE_TIMEOUT_SECONDS: ${AGENT_REACH_PAGE_TIMEOUT_SECONDS:-30}
+      # Must remain false: no upstream CLI/shell/tool installation is allowed.
+      AGENT_REACH_UPSTREAM_ENABLED: "false"
+    networks: [backend]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
+  scrapling-connector:
+    # One-shot HTTP-first public website reader. It has no browser profile,
+    # browser API token, shell tool, or crawler capability.
+    profiles: [scrapling]
+    build:
+      context: .
+      dockerfile: docker/scrapling-connector.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      SCRAPLING_RUN_ID: ${SCRAPLING_RUN_ID:-}
+      SCRAPLING_CONNECTOR_MAX_RUNTIME_SECONDS: ${SCRAPLING_CONNECTOR_MAX_RUNTIME_SECONDS:-45}
+      SCRAPLING_CONNECTOR_REQUEST_TIMEOUT_SECONDS: ${SCRAPLING_CONNECTOR_REQUEST_TIMEOUT_SECONDS:-20}
+      SCRAPLING_CONNECTOR_MAX_CONTENT_BYTES: ${SCRAPLING_CONNECTOR_MAX_CONTENT_BYTES:-1500000}
+      SCRAPLING_CONNECTOR_MAX_CONTENT_CHARS: ${SCRAPLING_CONNECTOR_MAX_CONTENT_CHARS:-120000}
+      SCRAPLING_CONNECTOR_USER_AGENT: ${SCRAPLING_CONNECTOR_USER_AGENT:-RealEstateResearchBot/0.1}
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+  whisper_models:
+  browser_profiles:
+  browser_screenshots:
+
+networks:
+  backend:
+    internal: true
+  # An ordinary bridge network with no published ports. Only services that
+  # need outbound HTTPS may join it; PostgreSQL and Redis remain backend-only.
+  egress:
+  # Caddy alone joins this network so its loopback-published gateway port can
+  # accept host traffic while databases remain unreachable from it.
+  edge:

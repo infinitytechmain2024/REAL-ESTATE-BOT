@@ -23,6 +23,7 @@ screen and decide.
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from collections import defaultdict, deque
 
@@ -90,17 +91,40 @@ def _viewer_path(token: str) -> str:
 _RATE_LIMIT_MAX_FAILURES = 20
 _RATE_LIMIT_WINDOW_SECONDS = 600
 
+#: Names the cookie that proves *this browser* passed the PIN check. The PIN
+#: exists to protect the link itself -- a forwarded message, an unlocked phone
+#: -- so passing it must not open the door for everyone else holding the URL.
+_PIN_COOKIE = "fb_gate_pin"
+
 
 class _RateLimiter:
+    """Failed attempts per client IP, within a sliding window.
+
+    Reads never create an entry and expired entries are dropped, so scanning
+    the gate with a fresh source address each time cannot grow this without
+    bound -- which is the one thing an unauthenticated endpoint must not let
+    a stranger do to it.
+    """
+
     def __init__(self) -> None:
         self._failures: dict[str, deque[float]] = defaultdict(deque)
 
-    def is_blocked(self, client_ip: str) -> bool:
+    def _recent(self, client_ip: str) -> deque[float] | None:
+        """Prune and return this IP's failures, or None if it has none left."""
+        recent = self._failures.get(client_ip)
+        if recent is None:
+            return None
         now = time.time()
-        recent = self._failures[client_ip]
         while recent and now - recent[0] > _RATE_LIMIT_WINDOW_SECONDS:
             recent.popleft()
-        return len(recent) >= _RATE_LIMIT_MAX_FAILURES
+        if not recent:
+            del self._failures[client_ip]
+            return None
+        return recent
+
+    def is_blocked(self, client_ip: str) -> bool:
+        recent = self._recent(client_ip)
+        return recent is not None and len(recent) >= _RATE_LIMIT_MAX_FAILURES
 
     def record_failure(self, client_ip: str) -> None:
         self._failures[client_ip].append(time.time())
@@ -110,10 +134,27 @@ def build_gate_app(
     token_store: TokenStore,
     novnc_internal_url: str,
     pin: str | None,
+    *,
+    secure_cookie: bool = False,
+    cookie_max_age: int | None = None,
 ) -> web.Application:
-    """Build the aiohttp app; caller owns running it (see bot/main.py)."""
+    """Build the aiohttp app; caller owns running it (see bot/main.py).
+
+    ``secure_cookie`` marks the PIN cookie HTTPS-only. It is not simply always
+    on because a loopback-only deployment serves the gate over plain http on
+    127.0.0.1, where a Secure cookie is not sent back by every client -- and
+    where there is no network for anyone to sit on anyway. The caller turns it
+    on exactly when the gate is published over HTTPS, which is the case the
+    flag exists for.
+
+    ``cookie_max_age`` bounds the cookie to the life of the link it belongs
+    to, so a browser does not keep a usable session credential after the
+    incident that issued it is over.
+    """
     rate_limiter = _RateLimiter()
-    pin_verified: set[str] = set()  # tokens that have passed the PIN check
+    # token -> the cookie values of browsers that passed the PIN for it.
+    # Keyed by token so a new incident's token starts with nobody admitted.
+    pin_sessions: dict[str, set[str]] = defaultdict(set)
     backend = novnc_internal_url.rstrip("/")
 
     def client_ip(request: web.Request) -> str:
@@ -127,10 +168,16 @@ def build_gate_app(
         token = request.match_info["token"]
         if not await token_store.validate(token):
             rate_limiter.record_failure(ip)
+            pin_sessions.pop(token, None)  # a dead token admits nobody
             return None
-        if pin and token not in pin_verified:
+        if pin and not _pin_ok(request, token):
             return None
         return token
+
+    def _pin_ok(request: web.Request, token: str) -> bool:
+        """Whether *this* browser has passed the PIN for *token*."""
+        cookie = request.cookies.get(_PIN_COOKIE)
+        return bool(cookie) and cookie in pin_sessions.get(token, set())
 
     async def handle_pin_form(request: web.Request) -> web.Response:
         token = request.match_info["token"]
@@ -147,9 +194,27 @@ def build_gate_app(
         if rate_limiter.is_blocked(ip) or not await token_store.validate(token):
             return web.Response(text=_EXPIRED_HTML, content_type="text/html", status=410)
         form = await request.post()
-        if form.get("pin") == pin:
-            pin_verified.add(token)
-            raise web.HTTPFound(_viewer_path(token))
+        submitted = form.get("pin")
+        # Constant-time: the token is compared this way, and a 4-digit PIN is
+        # the shorter secret of the two.
+        if isinstance(submitted, str) and pin and secrets.compare_digest(submitted, pin):
+            session_id = secrets.token_urlsafe(24)
+            pin_sessions[token].add(session_id)
+            # _viewer_path, not a bare vnc.html: the viewer needs the socket
+            # path and autoconnect parameters or the page loads and sits there.
+            response = web.HTTPFound(_viewer_path(token))
+            # Scoped to this token's path, so it is not sent anywhere else,
+            # and HttpOnly so page scripts cannot read it.
+            response.set_cookie(
+                _PIN_COOKIE,
+                session_id,
+                path=f"/s/{token}",
+                httponly=True,
+                samesite="Lax",
+                secure=secure_cookie,
+                max_age=cookie_max_age,
+            )
+            raise response
         rate_limiter.record_failure(ip)
         return web.Response(
             text=_PIN_FORM_HTML.format(action=f"/s/{token}/pin"), content_type="text/html"

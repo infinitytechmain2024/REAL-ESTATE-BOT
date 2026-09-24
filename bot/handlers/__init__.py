@@ -9,7 +9,7 @@ attached to the dispatcher separately.
 
 from aiogram import Router
 
-from bot.handlers import callbacks, errors, facebook_admin, search, start, voice
+from bot.handlers import callbacks, errors, facebook_admin, privacy, search, start, voice
 
 
 def build_router() -> Router:
@@ -17,6 +17,7 @@ def build_router() -> Router:
     root = Router(name="root")
     root.include_router(start.router)
     root.include_router(facebook_admin.router)
+    root.include_router(privacy.router)
     root.include_router(callbacks.router)
     root.include_router(voice.router)
     root.include_router(search.router)

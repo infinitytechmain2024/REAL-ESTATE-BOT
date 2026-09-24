@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import json
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -45,6 +46,24 @@ def _parse_str_list(value: object) -> object:
             if isinstance(decoded, list):
                 return [str(item).strip() for item in decoded if str(item).strip()]
     return [part.strip() for part in text.split(",") if part.strip()]
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _is_reachable_base(base: str | None) -> bool:
+    """Whether *base* is an address some other device could open.
+
+    Anything that is not loopback counts, including a LAN address: the point
+    is whether the live view can be reached from a machine that is not this
+    one, not whether it is on the public internet.
+    """
+    if not base:
+        return False
+    host = urlsplit(base.strip()).hostname
+    if host is None:
+        return True  # unparsable: assume the riskier reading
+    return host.lower() not in _LOOPBACK_HOSTS
+
 
 BotMode = Literal["polling", "webhook"]
 LogFormat = Literal["console", "json"]
@@ -127,6 +146,18 @@ class LLMSettings(_Base):
     model_rank: str | None = Field(
         default=None, description="Stronger model for ranking/structuring; defaults to `model`"
     )
+    model_fast: str | None = Field(
+        default=None,
+        description="Fast local model for extraction; falls back to MODEL_EXTRACT then MODEL",
+    )
+    model_strong: str | None = Field(
+        default=None,
+        description="Stronger local model for ranking; falls back to MODEL_RANK then MODEL",
+    )
+    model_long: str | None = Field(
+        default=None,
+        description="Long-context local model for detailed briefings; falls back to MODEL_RANK",
+    )
 
     base_url: str | None = Field(
         default=None,
@@ -152,6 +183,33 @@ class LLMSettings(_Base):
     @property
     def rank_model(self) -> str:
         return self.model_rank or self.model
+
+    @property
+    def fast_model(self) -> str:
+        return self.model_fast or self.extract_model
+
+    @property
+    def strong_model(self) -> str:
+        return self.model_strong or self.rank_model
+
+    @property
+    def long_model(self) -> str:
+        return self.model_long or self.strong_model
+
+    def model_for(self, purpose: str, *, content_chars: int = 0) -> str:
+        """Choose a model from the pool for a pipeline task.
+
+        Routing is deliberately deterministic: it keeps browser and search
+        behaviour code-controlled while allowing a local Ollama pool to use
+        the smallest suitable model for each stage.
+        """
+        if purpose == "extract":
+            return self.fast_model
+        if purpose == "rank":
+            return self.strong_model
+        if purpose == "details":
+            return self.long_model if content_chars > 6000 else self.strong_model
+        return self.model
 
 
 class STTSettings(_Base):
@@ -197,6 +255,21 @@ class SearxngSettings(_Base):
         description="Engines requested per query; must be enabled in settings.yml",
     )
     max_queries: int = Field(default=6, ge=1, le=20, description="Search strings per user request")
+    languages: CsvList = Field(
+        default_factory=lambda: ["en", "es", "ru"],
+        description="Always searched, whatever language the request arrived in and "
+        "whatever the Facebook account's interface is set to. The same plot is "
+        "advertised by a Spanish seller, discussed in a Russian-speaking group and "
+        "listed in English on a portal; searching one of those finds one slice of it.",
+    )
+    max_languages: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description="Upper bound on languages per request. The list above is always "
+        "covered even if this is lower; raising it leaves room for a local language "
+        "the request implies but the list does not carry -- Greek for Cyprus, say.",
+    )
     results_per_query: int = Field(default=15, ge=1, le=50)
     max_hits: int = Field(default=40, ge=1, le=200, description="Cap after merging and de-duping")
     concurrency: int = Field(default=4, ge=1, le=20, description="Parallel SearXNG requests")
@@ -220,7 +293,7 @@ class SearxngSettings(_Base):
     def _no_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
 
-    @field_validator("engines", "blocked_domains", mode="before")
+    @field_validator("languages", "engines", "blocked_domains", mode="before")
     @classmethod
     def _parse_lists(cls, value: object) -> object:
         return _parse_str_list(value)
@@ -232,6 +305,10 @@ class ParserSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PARSER_"})
 
     enabled: bool = Field(default=True, description="Set false to rank on snippets alone")
+    scrapling_enabled: bool = Field(
+        default=False,
+        description="Use Scrapling as an adaptive HTTP fallback when the regular fetcher fails",
+    )
     max_pages: int = Field(default=8, ge=1, le=50, description="Hits to actually fetch")
     concurrency: int = Field(default=5, ge=1, le=20)
     timeout_seconds: float = Field(default=15.0, gt=0)
@@ -298,6 +375,14 @@ class SupabaseSettings(_Base):
     key: SecretStr | None = Field(
         default=None, description="service_role key (server side) or anon key"
     )
+    retention_days: int = Field(
+        default=90,
+        ge=0,
+        description="Delete searches and results older than this many days. The stored "
+        "rows include page text and contact details of people who never used the bot "
+        "(see COMPLIANCE.md), so keeping them indefinitely is a choice, not a default: "
+        "0 means keep everything and is a deliberate opt-out.",
+    )
     schema_name: str = Field(default="public", alias="SUPABASE_SCHEMA")
     timeout_seconds: float = Field(default=20.0, gt=0)
 
@@ -318,6 +403,14 @@ class PipelineSettings(_Base):
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "PIPELINE_"})
 
     max_results_to_user: int = Field(default=8, ge=1, le=30)
+    max_candidates_to_rank: int = Field(
+        default=60,
+        ge=1,
+        le=500,
+        description="Candidates handed to the ranking model in one call. Reading "
+        "a whole group can produce hundreds of posts; they are ordered by a "
+        "local, deterministic score first, and this many are judged by the LLM.",
+    )
     min_score: int = Field(
         default=45, ge=0, le=100, description="Drop results the LLM scored lower"
     )
@@ -344,6 +437,26 @@ class PipelineSettings(_Base):
     )
 
 
+class GoogleMapsSettings(_Base):
+    """Optional local Google Maps Scraper Kit sidecar."""
+
+    model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "GOOGLE_MAPS_"})
+
+    enabled: bool = Field(default=False, description="Query a local Maps Scraper Kit sidecar")
+    base_url: str = Field(default="http://127.0.0.1:8080")
+    latitude: float | None = None
+    longitude: float | None = None
+    radius_meters: int = Field(default=10_000, ge=100, le=100_000)
+    depth: int = Field(default=5, ge=1, le=20)
+    timeout_seconds: float = Field(default=120.0, gt=0)
+    poll_seconds: float = Field(default=2.0, gt=0)
+    max_results: int = Field(default=30, ge=1, le=200)
+    extract_emails: bool = Field(
+        default=False,
+        description="Ask the sidecar to crawl listing websites for emails; slower when enabled",
+    )
+
+
 class FacebookSettings(_Base):
     """Facebook group scraping: the shared, operator-controlled browser session.
 
@@ -355,7 +468,28 @@ class FacebookSettings(_Base):
 
     model_config = SettingsConfigDict(**{**_Base.model_config, "env_prefix": "FACEBOOK_"})
 
-    enabled: bool = Field(default=False, description="Set true once a profile/groups are configured")
+    enabled: bool = Field(
+        default=False,
+        description="Enable the shared Facebook browser and admin tools; public search is independent",
+    )
+
+    public_search_enabled: bool = Field(
+        default=True,
+        description="Discover public group posts through web search; requires no Facebook login",
+    )
+    max_discovered_groups: int = Field(default=3, ge=1, le=10)
+    group_activity_days: int = Field(
+        default=30, ge=1, le=365, description="Skip groups without a post this recent"
+    )
+    group_store_path: str = Field(
+        default="./data/facebook_groups.sqlite3", description="Local discovered-group registry"
+    )
+    auto_join_groups: bool = Field(
+        default=True,
+        description="Join an active public group when Facebook presents a normal Join button",
+    )
+
+    watchdog_interval_seconds: float = Field(default=60.0, gt=0)
 
     profile_dir: str = Field(
         default="./data/facebook_profile",
@@ -379,10 +513,33 @@ class FacebookSettings(_Base):
 
     group_urls: CsvList = Field(
         default_factory=list,
-        description="Facebook group URLs to read, comma-separated. Supplied by the operator, "
-        "never discovered automatically in v1.",
+        description="Group URLs for the logged-in browser reader, comma-separated. "
+        "Public web-search discovery does not require this list.",
     )
-    max_posts_per_group: int = Field(default=20, ge=1, le=200)
+    max_posts_per_group: int = Field(
+        default=0,
+        ge=0,
+        le=5000,
+        description="Posts read per group. 0 means every post the group's feed "
+        "will give up -- what actually stops the reader is group_read_seconds "
+        "and the feed running out of new posts.",
+    )
+    group_read_seconds: float = Field(
+        default=180.0,
+        gt=0,
+        description="Wall-clock budget for reading one group. The Facebook "
+        "browser is shared and single-threaded: without this, one busy group "
+        "holds every other search behind it.",
+    )
+    max_search_terms: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description="Localized search phrases tried per group. Spanish sellers post in "
+        "Spanish and the diaspora groups in Russian, so one phrase finds one slice. Each "
+        "extra term is a full in-group search -- navigation, typing, scrolling -- through "
+        "the one shared browser, so this buys coverage with time.",
+    )
     max_comments_per_post: int = Field(default=15, ge=0, le=200)
     min_group_recheck_minutes: int = Field(
         default=60, ge=1, description="Do not re-open a group more often than this"
@@ -410,8 +567,30 @@ class FacebookSettings(_Base):
         "it must be reissued"
     )
     desktop_pin: str | None = Field(
-        default=None, description="Optional PIN required before the live browser view is shown"
+        default=None,
+        description="Required once FACEBOOK_DESKTOP_PUBLIC_BASE is set: the second factor "
+        "behind a link that would otherwise be the only thing protecting the session",
     )
+
+    @model_validator(mode="after")
+    def _public_view_needs_a_pin(self) -> FacebookSettings:
+        """A reachable live view must have more than a URL in front of it.
+
+        The token travels in a Telegram message, so without a PIN, possession
+        of that message is possession of a browser logged into Facebook -- a
+        forwarded chat or an unlocked phone is enough.
+
+        A loopback base is exempt because no second device can open it. That
+        exemption matters in practice: running locally is how the first
+        Facebook login gets done, and refusing to start there would only teach
+        people to invent a throwaway PIN before the base becomes real.
+        """
+        if _is_reachable_base(self.desktop_public_base) and not self.desktop_pin:
+            raise ValueError(
+                "FACEBOOK_DESKTOP_PIN is required when FACEBOOK_DESKTOP_PUBLIC_BASE is set: "
+                "the live view would otherwise be protected by the link alone"
+            )
+        return self
     gate_bind_address: str = Field(default="127.0.0.1")
     gate_port: int = Field(default=8090)
     novnc_internal_url: str = Field(
@@ -449,6 +628,7 @@ class Settings(_Base):
     parser: ParserSettings = Field(default_factory=ParserSettings)
     supabase: SupabaseSettings = Field(default_factory=SupabaseSettings)
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
+    google_maps: GoogleMapsSettings = Field(default_factory=GoogleMapsSettings)
     facebook: FacebookSettings = Field(default_factory=FacebookSettings)
 
     @field_validator("log_level")

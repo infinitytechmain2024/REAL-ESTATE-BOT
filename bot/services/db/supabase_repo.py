@@ -310,6 +310,113 @@ class SupabaseRepository:
         )
         return [_row_to_result(row) for row in rows or []]
 
+    # -- Facebook session incidents ----------------------------------------
+
+    async def open_facebook_incident(self, state: str) -> UUID | None:
+        if self._client is None:
+            return None
+        rows = await self._execute(
+            "open_facebook_incident",
+            lambda: self._table("facebook_session_incidents").insert({"state": state}),
+        )
+        if not rows:
+            return None
+        try:
+            return UUID(str(rows[0]["id"]))
+        except (KeyError, ValueError):
+            return None
+
+    async def current_facebook_incident(self) -> dict[str, Any] | None:
+        if self._client is None:
+            return None
+        rows = await self._execute(
+            "current_facebook_incident",
+            lambda: self._table("facebook_session_incidents").select("*")
+            .is_("resolved_at", "null").order("detected_at", desc=True).limit(1),
+        )
+        return rows[0] if rows else None
+
+    async def resolve_facebook_incident(self, incident_id: UUID) -> None:
+        if self._client is None:
+            return
+        await self._execute(
+            "resolve_facebook_incident",
+            lambda: self._table("facebook_session_incidents")
+            .update({"resolved_at": dt.datetime.now(dt.UTC).isoformat()})
+            .eq("id", str(incident_id)).is_("resolved_at", "null"),
+        )
+
+    # -- retention and erasure ---------------------------------------------
+
+    async def purge_expired(self, cutoff: dt.datetime) -> None:
+        """Delete searches and results created before *cutoff*.
+
+        Results are deleted first: a search row is the parent, and clearing
+        the children first means an interrupted purge leaves orphaned parents
+        rather than results whose search has vanished.
+        """
+        if self._client is None:
+            return
+        stamp = cutoff.isoformat()
+        for table in ("results", "searches"):
+            await self._execute(
+                f"purge_{table}",
+                lambda table=table: self._table(table).delete().lt("created_at", stamp),
+            )
+        log.info("retention.purged", cutoff=stamp)
+
+    async def forget_user(self, telegram_id: int) -> bool:
+        """Erase everything held about one user. Returns whether it worked.
+
+        One delete is enough: searches, results and feedback all reference
+        ``users`` with ``on delete cascade``. The boolean matters -- the caller
+        tells the person their data is gone, and must not say that when the
+        delete failed.
+        """
+        if self._client is None:
+            return False
+        rows = await self._execute(
+            "forget_user",
+            lambda: self._table("users").delete().eq("telegram_id", telegram_id),
+        )
+        return rows is not None
+
+    # -- facebook groups ---------------------------------------------------
+
+    async def facebook_group_access(self, url: str) -> str | None:
+        """The access state last recorded for *url*, or None if unrecorded.
+
+        None is deliberately ambiguous between "never checked" and "the query
+        failed": the caller treats both as "no previous state", which at worst
+        repeats one alert rather than swallowing one.
+        """
+        if self._client is None:
+            return None
+        rows = await self._execute(
+            "facebook_group_access",
+            lambda: self._table("facebook_groups").select("access_state").eq("url", url).limit(1),
+        )
+        if not rows:
+            return None
+        state = rows[0].get("access_state")
+        return str(state) if state else None
+
+    async def record_facebook_group_access(self, url: str, access_state: str) -> None:
+        """Remember what a group looked like, so a restart does not re-announce it."""
+        if self._client is None:
+            return
+        await self._execute(
+            "record_facebook_group_access",
+            lambda: self._table("facebook_groups").upsert(
+                {
+                    "url": url,
+                    "access_state": access_state,
+                    "last_checked_at": dt.datetime.now(dt.UTC).isoformat(),
+                },
+                on_conflict="url",
+            ),
+        )
+
     # -- internals ---------------------------------------------------------
 
     def _table(self, name: str):  # type: ignore[no-untyped-def]

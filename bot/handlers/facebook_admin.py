@@ -26,17 +26,18 @@ from datetime import UTC, datetime
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 
 from bot.config import Settings
 from bot.keyboards.facebook_admin import FacebookAdminCallback, facebook_admin_keyboard
 from bot.logging_conf import get_logger
 from bot.services.facebook import FacebookSession, SessionState, TokenStore
+from bot.services.facebook.alerts import RECOVERY_TEXT
+from bot.services.facebook.alerts import open_button as _open_button
+from bot.services.facebook.watchdog import FacebookWatchdog
 
 router = Router(name="facebook_admin")
 log = get_logger(__name__)
-
-OPEN_BUTTON_TEXT = "Открыть Facebook"
 
 STATE_LABEL = {
     SessionState.HEALTHY: "✅ Подключено",
@@ -85,24 +86,6 @@ def _format_last_change() -> str:
     return f"{minutes} минут назад"
 
 
-async def _open_button(
-    settings: Settings, token_store: TokenStore | None
-) -> InlineKeyboardMarkup | None:
-    """A keyboard with the live-view link, or None if there is nothing to link to.
-
-    Reuses the current token if one is still valid rather than always minting
-    a fresh one -- see ``TokenStore.get_or_create`` for why: a fresh token on
-    every button tap would invalidate a login the admin is already mid-way
-    through in an open tab.
-    """
-    if token_store is None or not settings.facebook.desktop_public_base:
-        return None
-    token = await token_store.get_or_create(settings.facebook.desktop_token_ttl_seconds)
-    url = f"{settings.facebook.desktop_public_base.rstrip('/')}/s/{token}"
-    button = InlineKeyboardButton(text=OPEN_BUTTON_TEXT, url=url)
-    return InlineKeyboardMarkup(inline_keyboard=[[button]])
-
-
 async def _watch_for_recovery(
     facebook_session: FacebookSession,
     token_store: TokenStore | None,
@@ -114,7 +97,7 @@ async def _watch_for_recovery(
 
     Runs as a detached background task started from the callback handler
     below. Never raises into the event loop's default handler on its own
-    account: a failed check_state() call is logged and treated as "still not
+    account: a failed observe_state() call is logged and treated as "still not
     recovered" rather than crashing the watcher. On recovery, invalidates the
     live-view token so the old link stops working the moment it is no longer
     needed, matching "close the page" in the message the admin gets.
@@ -124,7 +107,12 @@ async def _watch_for_recovery(
         await asyncio.sleep(_WATCH_INTERVAL_SECONDS)
         elapsed += _WATCH_INTERVAL_SECONDS
         try:
-            state = await facebook_session.check_state()
+            # observe_state, never probe_state: a human is typing in this very
+            # browser -- in CDP mode, this very tab. Navigating would wipe
+            # their half-finished login every few seconds. And the lock is
+            # held because a group job may be driving the same single page.
+            async with facebook_session.lock:
+                state = await facebook_session.observe_state()
         except Exception:
             log.exception("facebook.admin.watch_check_failed")
             continue
@@ -133,7 +121,7 @@ async def _watch_for_recovery(
             log.info("facebook.admin.watch_recovered", chat_id=chat_id, elapsed_seconds=elapsed)
             if token_store is not None:
                 await token_store.invalidate()
-            await bot.send_message(chat_id, "Готово. Страницу можно закрыть. Бот продолжит работу.")
+            await bot.send_message(chat_id, RECOVERY_TEXT)
             return
 
     log.warning("facebook.admin.watch_timed_out", chat_id=chat_id)
@@ -171,8 +159,8 @@ async def cmd_facebook(
 
     if not settings.facebook.enabled or facebook_session is None:
         await message.answer(
-            "Facebook-модуль выключен. Задайте FACEBOOK_ENABLED=true, "
-            "FACEBOOK_GROUP_URLS и перезапустите бота, чтобы включить его."
+            "Facebook-модуль выключен. Задайте FACEBOOK_ENABLED=true и "
+            "перезапустите бота, чтобы включить его. Группы бот найдёт сам по запросу."
         )
         return
 
@@ -189,6 +177,7 @@ async def on_facebook_admin_action(
     settings: Settings,
     facebook_session: FacebookSession | None,
     facebook_token_store: TokenStore | None,
+    facebook_watchdog: FacebookWatchdog | None = None,
 ) -> None:
     if query.from_user is None or not _is_admin(query.from_user.id, settings):
         await query.answer()
@@ -202,7 +191,8 @@ async def on_facebook_admin_action(
 
     if callback_data.action == "status":
         await query.answer("Проверяю…")
-        state = await facebook_session.check_state()
+        async with facebook_session.lock:
+            state = await facebook_session.probe_state()
         _note_state(state)
         log.info("facebook.admin.status_checked", admin_id=query.from_user.id, state=state.value)
 
@@ -218,7 +208,8 @@ async def on_facebook_admin_action(
 
     if callback_data.action == "start_login":
         await query.answer("Проверяю…")
-        state = await facebook_session.check_state()
+        async with facebook_session.lock:
+            state = await facebook_session.probe_state()
         _note_state(state)
         log.info("facebook.admin.login_started", admin_id=query.from_user.id, state=state.value)
 
@@ -242,7 +233,9 @@ async def on_facebook_admin_action(
             )
         await query.message.answer(text, reply_markup=keyboard)
 
-        if query.bot is not None:
+        if facebook_watchdog is not None:
+            await facebook_watchdog.tick()
+        elif query.bot is not None:
             _start_watcher(
                 facebook_session, facebook_token_store, settings, query.bot, query.message.chat.id
             )

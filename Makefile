@@ -18,6 +18,9 @@ help: ## Show this help
 setup: ## Ask for your keys and write .env (nothing is sent anywhere)
 	@$(PYTHON) scripts/setup_env.py
 
+test: ## Run the test suite
+	$(BIN)/python -m pytest
+
 install: ## Create the venv, install every dependency, fetch the browser
 	$(PYTHON) -m venv $(VENV)
 	$(BIN)/pip install --upgrade pip
@@ -42,7 +45,10 @@ searxng: ## Run the SearXNG JSON API on 127.0.0.1:$(SEARXNG_PORT)
 	$(BIN)/granian --interface wsgi --host 127.0.0.1 --port $(SEARXNG_PORT) \
 		searxng.api_only:application
 
-check: check-vendor lint check-imports check-config check-sql probe-gate ## Run every check
+llm: ## Run a local model on 127.0.0.1:8080 (llama.cpp; see DEPLOYMENT.md §11)
+	./scripts/run_llm.sh
+
+check: check-vendor lint check-imports check-config check-sql test probe-gate ## Run every check
 
 lint: ## Lint with the pinned ruff
 	# No `ruff format --check` here: the tree predates the current formatter
