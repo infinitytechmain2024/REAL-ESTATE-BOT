@@ -16,8 +16,8 @@ from bot.facebook_collector.store import PostgresCollectorStore
 from bot.verification.models import Recovery
 from bot.verification.service import ActionRefused, FlowConfig, VerificationService
 from bot.verification.store import PostgresVerificationStore
+from tests.test_live_view import TOKEN, init_data
 from tests.test_verification_flow import (
-    LOGIN,
     OPERATOR,
     OWNER,
     FakeLive,
@@ -28,7 +28,7 @@ from tests.test_verification_flow import (
 
 URL = os.environ.get("VERIFICATION_TEST_DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(not URL or not URL.split("?")[0].rstrip("/").endswith("_test"), reason="set VERIFICATION_TEST_DATABASE_URL to a *_test database")
-MIGRATIONS = sorted((Path(__file__).resolve().parents[1] / "bot/services/db/migrations").glob("00*.sql"))
+MIGRATIONS = sorted((Path(__file__).resolve().parents[1] / "bot/services/db/migrations").glob("[0-9][0-9][0-9]_*.sql"))
 
 
 @pytest.fixture
@@ -72,7 +72,7 @@ def service_for(store: PostgresVerificationStore, *recoveries: Recovery, live: F
     notifier = FakeNotifier()
     service = VerificationService(
         store, live or FakeLive(), FakeWatchdog(*recoveries), notifier,
-        FlowConfig(public_url="https://v.tail1.ts.net", operator_ids=frozenset({OWNER, OPERATOR}), owner_id=OWNER, tailscale_logins=frozenset({LOGIN})),
+        FlowConfig(public_url="https://1-2-3-4.sslip.io", operator_ids=frozenset({OWNER, OPERATOR}), owner_id=OWNER, bot_token=TOKEN),
     )
     return service, notifier
 
@@ -102,7 +102,7 @@ async def test_challenge_to_resumed_batch_on_the_real_schema(db) -> None:
     link = notifier.links(OPERATOR)[0]
     assert await pool.fetchval("select count(*) from verification_access_tokens where token_sha256 = $1", token_of(link)) == 0
 
-    session = (await service.open(token_of(link), LOGIN)).session
+    session = (await service.open(token_of(link), init_data(OPERATOR))).session
     await service.claim(session)
     await service.view(session)
     assert await service.solve(session) is True
@@ -115,8 +115,9 @@ async def test_challenge_to_resumed_batch_on_the_real_schema(db) -> None:
     events = [r[0] for r in await pool.fetch("select event from verification_events where verification_job_id=$1::uuid order by id", job.id)]
     assert events == ["detected", "token_issued", "notified", "token_issued", "notified", "opened", "claim", "view", "solve", "recovery_confirmed", "resume"]
     actors = {r[0] for r in await pool.fetch("select actor from orchestration_audit_log where entity_type='acquisition_batches'")}
-    assert f"telegram:{OPERATOR}/tailscale:{LOGIN}" in actors
+    assert f"telegram:{OPERATOR}" in actors
 
+    assert await pool.fetchval("select identity from verification_page_sessions") == f"telegram:{OPERATOR}"
     # The collector can pick the batch up again from the challenged group.
     plan = await PostgresCollectorStore(pool).load_plan(ids["batch"])
     assert [item.sequence_no for item in plan.items] == [1, 2]
@@ -129,9 +130,9 @@ async def test_single_use_tokens_and_append_only_events(db) -> None:
     service, notifier = service_for(store)
     await service.tick()
     token = token_of(notifier.links(OPERATOR)[0])
-    await service.open(token, LOGIN)
+    await service.open(token, init_data(OPERATOR))
     with pytest.raises(PermissionError):
-        await service.open(token, LOGIN)
+        await service.open(token, init_data(OPERATOR))
     import asyncpg
 
     with pytest.raises(asyncpg.PostgresError, match="append-only"):
@@ -144,7 +145,7 @@ async def test_fail_and_cancel_use_legal_transitions(db) -> None:
     ids = await challenged(pool)
     service, notifier = service_for(store)
     await service.tick()
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.fail(session)  # requested -> active -> rejected
     assert await states(pool, ids) == {
         "profile": "quarantined", "batch": "failed", "batch_run": "stopped", "run": "stopped", "source": "human_verification_required", "items": "failed,queued",
@@ -159,7 +160,7 @@ async def test_cancel_and_expiry(db) -> None:
     ids = await challenged(pool)
     service, notifier = service_for(store)
     await service.tick()
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     await service.cancel(session)
     state = await states(pool, ids)

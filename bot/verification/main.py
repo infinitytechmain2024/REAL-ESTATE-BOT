@@ -1,7 +1,7 @@
-"""Verification service: Tailscale-only page plus the job watcher.
+"""Verification service: the /verify page plus the job watcher.
 
-Runs inside the Tailscale container's network namespace and listens on
-127.0.0.1 only; ``tailscale serve`` is its single entry point.
+Listens on the private Docker network only; Caddy is its HTTPS front.
+Without a public URL it stays idle (health endpoint only) instead of failing.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ async def run() -> None:
         notifier,
         FlowConfig(
             public_url=settings.public_url, operator_ids=settings.operator_ids, owner_id=settings.owner_id,
-            tailscale_logins=settings.tailscale_logins, token_minutes=settings.token_minutes,
+            bot_token=settings.telegram_token, token_minutes=settings.token_minutes,
             session_minutes=settings.session_minutes, job_hours=settings.job_hours,
             renotify_minutes=settings.renotify_minutes, live_minutes=settings.live_minutes,
         ),
@@ -46,11 +46,15 @@ async def run() -> None:
     runner = web.AppRunner(create_app(service, settings.novnc_url))
     await runner.setup()
     await web.TCPSite(runner, settings.listen_host, settings.listen_port).start()
-    log.info("verification.started", extra={"public_url": settings.public_url})
+    if not settings.public_url:
+        log.warning("verification.disabled", extra={"hint": "set VERIFICATION_PUBLIC_URL or LIVE_VIEW_PUBLIC_URL to an https:// origin"})
+    else:
+        log.info("verification.started", extra={"public_url": settings.public_url})
     try:
         while True:
             try:
-                await service.tick()
+                if settings.public_url:
+                    await service.tick()
             except Exception:
                 log.exception("verification.tick_failed")
             await asyncio.sleep(settings.poll_seconds)

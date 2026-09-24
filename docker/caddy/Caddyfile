@@ -1,5 +1,5 @@
 # Internal health site on :8080 (loopback-published), plus one public HTTPS
-# site that serves only the operator live browser under /live/*.
+# site that serves only the operator Mini Apps under /live/* and /verify/*.
 {
     admin off
 }
@@ -21,6 +21,10 @@
     # Access itself is decided by the gate: a Telegram-signed operator identity.
     handle /live/* {
         reverse_proxy telegram:8081
+    }
+    # Human verification page (bot/verification), also a Telegram Mini App.
+    handle /verify/* {
+        reverse_proxy verification:8095
     }
     header {
         Strict-Transport-Security "max-age=31536000"

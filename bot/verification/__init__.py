@@ -1,1 +1,1 @@
-"""Human-in-the-loop verification: Telegram link, Tailscale-only page, watchdog."""
+"""Human-in-the-loop verification: Telegram Mini App page, live browser, watchdog."""

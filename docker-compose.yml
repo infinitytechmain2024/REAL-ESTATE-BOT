@@ -246,43 +246,15 @@ services:
     read_only: true
     tmpfs: [/tmp]
 
-  tailscale:
-    # Private entry point for the human verification page. It joins the
-    # operator's tailnet and serves https://<hostname>.<tailnet>.ts.net only
-    # inside it (`tailscale serve`, never `funnel`). Userspace networking: no
-    # /dev/net/tun and no extra capabilities. Publishes no host port.
-    profiles: [verification]
-    image: tailscale/tailscale:${TAILSCALE_IMAGE_TAG:-stable}
-    restart: unless-stopped
-    hostname: ${VERIFICATION_TS_HOSTNAME:-real-estate-verify}
-    environment:
-      TS_AUTHKEY: ${TS_AUTHKEY:-}
-      TS_HOSTNAME: ${VERIFICATION_TS_HOSTNAME:-real-estate-verify}
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: "true"
-      TS_SERVE_CONFIG: /config/serve.json
-    volumes:
-      - tailscale_state:/var/lib/tailscale
-      - ./docker/tailscale/serve.json:/config/serve.json:ro
-    # `backend` reaches PostgreSQL and the browser for the service sharing this
-    # namespace; `egress` lets Tailscale and the Telegram notices out.
-    networks: [backend, egress]
-    security_opt: [no-new-privileges:true]
-
   verification:
-    # Human-in-the-loop verification (bot/verification). Shares the tailscale
-    # container's network namespace and listens on 127.0.0.1:8095 only, so
-    # `tailscale serve` is the single way in and its identity header cannot be
-    # forged by any other container.
-    profiles: [verification]
+    # Human-in-the-loop verification (bot/verification). Operators open it as
+    # a Telegram Mini App through Caddy at /verify/*; it publishes no host port.
+    # Without VERIFICATION_PUBLIC_URL (or LIVE_VIEW_PUBLIC_URL) it stays idle.
     build:
       context: .
       dockerfile: docker/verification.Dockerfile
     restart: unless-stopped
-    network_mode: service:tailscale
     depends_on:
-      tailscale:
-        condition: service_started
       postgres:
         condition: service_healthy
     environment:
@@ -291,7 +263,7 @@ services:
       TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}
       VERIFICATION_OWNER_TELEGRAM_ID: ${VERIFICATION_OWNER_TELEGRAM_ID:-}
       VERIFICATION_PUBLIC_URL: ${VERIFICATION_PUBLIC_URL:-}
-      VERIFICATION_TAILSCALE_LOGINS: ${VERIFICATION_TAILSCALE_LOGINS:-}
+      LIVE_VIEW_PUBLIC_URL: ${LIVE_VIEW_PUBLIC_URL:-}
       VERIFICATION_TOKEN_MINUTES: ${VERIFICATION_TOKEN_MINUTES:-15}
       VERIFICATION_SESSION_MINUTES: ${VERIFICATION_SESSION_MINUTES:-30}
       VERIFICATION_JOB_HOURS: ${VERIFICATION_JOB_HOURS:-24}
@@ -300,6 +272,9 @@ services:
       VERIFICATION_POLL_SECONDS: ${VERIFICATION_POLL_SECONDS:-30}
       BROWSER_SESSION_URL: http://browser:8090
       BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
+    # `backend` reaches PostgreSQL, the browser and Caddy; `egress` sends the
+    # Telegram notices.
+    networks: [backend, egress]
     security_opt: [no-new-privileges:true]
     read_only: true
     tmpfs: [/tmp]
@@ -311,7 +286,6 @@ volumes:
   caddy_config:
   browser_profiles:
   browser_screenshots:
-  tailscale_state:
 
 networks:
   backend:

@@ -12,12 +12,12 @@ from bot.verification.browser import BrowserUnavailable, judge
 from bot.verification.classify import classify
 from bot.verification.models import Job, Recovery
 from bot.verification.service import AccessDenied, ActionRefused, FlowConfig, VerificationService
-from bot.verification.settings import VerificationSettings, tailnet_url
+from bot.verification.settings import VerificationSettings, https_origin
 from bot.verification.store import MemoryVerificationStore
+from tests.test_live_view import TOKEN, init_data
 
 OWNER, OPERATOR, OTHER, OUTSIDER = 11, 12, 13, 99
-LOGIN = "owner@example.com"
-PUBLIC = "https://real-estate-verify.tail1234.ts.net"
+PUBLIC = "https://1-2-3-4.sslip.io"
 
 
 class FakeLive:
@@ -74,7 +74,7 @@ def flow(*recoveries: Recovery, live: FakeLive | None = None, operators: frozens
     watchdog = FakeWatchdog(*recoveries)
     service = VerificationService(
         store, live or FakeLive(), watchdog, notifier,
-        FlowConfig(public_url=PUBLIC, operator_ids=operators, owner_id=OWNER, tailscale_logins=frozenset({LOGIN, "op@example.com"})),
+        FlowConfig(public_url=PUBLIC, operator_ids=operators, owner_id=OWNER, bot_token=TOKEN),
     )
     return service, store, notifier, watchdog
 
@@ -103,7 +103,7 @@ async def test_a_new_job_sends_every_operator_a_single_use_tailnet_link() -> Non
     assert job.notified_at and job.expires_at and job.challenge_kind == "checkpoint"
     for user in (OWNER, OPERATOR, OTHER):
         [link] = notifier.links(user)
-        assert link.startswith(f"{PUBLIC}/v/")
+        assert link.startswith(f"{PUBLIC}/verify/v/")
         # Only a hash is stored, never the secret itself.
         assert token_of(link) not in store.tokens
     assert events(store, job) == ["detected"] + ["token_issued", "notified"] * 3
@@ -119,25 +119,46 @@ async def test_an_unreachable_operator_does_not_stop_the_rest() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_link_opens_once_for_an_approved_tailscale_login() -> None:
+async def test_a_link_opens_once_for_the_operator_telegram_signed() -> None:
     service, store, notifier, _ = flow()
     job = await announced(service, store)
     token = token_of(notifier.links(OPERATOR)[0])
-    opened = await service.open(token, "Owner@Example.com")
+    opened = await service.open(token, init_data(OPERATOR))
     assert opened.session.job_id == job.id and opened.session.user_id == OPERATOR
-    assert opened.session.tailscale_login == LOGIN and len(opened.cookie) == 43
+    assert opened.session.identity == f"telegram:{OPERATOR}" and len(opened.cookie) == 43
     with pytest.raises(AccessDenied, match="already used"):
-        await service.open(token, LOGIN)
+        await service.open(token, init_data(OPERATOR))
     assert "opened" in events(store, job)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("login", [None, "", "stranger@example.com"])
-async def test_only_listed_tailscale_logins_get_in(login: str | None) -> None:
+@pytest.mark.parametrize(
+    ("signed", "match"),
+    [
+        (None, "button in the Telegram bot"),
+        ("", "button in the Telegram bot"),
+        ("user=%7B%22id%22%3A12%7D&auth_date=1&hash=00", "button in the Telegram bot"),  # forged
+        ("forwarded-to-stranger", "Only operators"),
+    ],
+)
+async def test_only_a_telegram_signed_operator_gets_in(signed: str | None, match: str) -> None:
     service, store, notifier, _ = flow()
     await announced(service, store)
-    with pytest.raises(AccessDenied, match="Tailscale"):
-        await service.open(token_of(notifier.links(OPERATOR)[0]), login)
+    token = token_of(notifier.links(OPERATOR)[0])
+    with pytest.raises(AccessDenied, match=match):
+        await service.open(token, init_data(OUTSIDER) if signed == "forwarded-to-stranger" else signed)
+    # None of these burned the link: its recipient still gets in.
+    assert (await service.open(token, init_data(OPERATOR))).session.user_id == OPERATOR
+
+
+@pytest.mark.asyncio
+async def test_another_operator_cannot_use_or_burn_someone_elses_link() -> None:
+    service, store, notifier, _ = flow()
+    await announced(service, store)
+    token = token_of(notifier.links(OPERATOR)[0])
+    with pytest.raises(AccessDenied, match="sent to someone else"):
+        await service.open(token, init_data(OTHER))
+    assert (await service.open(token, init_data(OPERATOR))).session.user_id == OPERATOR
 
 
 @pytest.mark.asyncio
@@ -147,11 +168,11 @@ async def test_expired_malformed_and_foreign_tokens_are_refused() -> None:
     for record in store.tokens.values():
         record.expires_at = datetime.now(UTC) - timedelta(seconds=1)
     with pytest.raises(AccessDenied, match="expired"):
-        await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)
+        await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))
     with pytest.raises(AccessDenied, match="invalid"):
-        await service.open("short", LOGIN)
+        await service.open("short", init_data(OPERATOR))
     with pytest.raises(AccessDenied):
-        await service.open("A" * 43, LOGIN)
+        await service.open("A" * 43, init_data(OPERATOR))
     assert store.jobs[job.id].state == "requested"
 
 
@@ -161,37 +182,38 @@ async def test_a_token_is_bound_to_its_profile_and_to_a_current_operator() -> No
     job = await announced(service, store)
     store.jobs[job.id] = replace(store.jobs[job.id], profile_id=str(uuid.uuid4()))
     with pytest.raises(AccessDenied, match="no longer open"):
-        await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)
+        await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))
     assert events(store, job)[-1] == "access_denied"
 
     removed, store2, notifier2, _ = flow()
     job2 = await announced(removed, store2)
     demoted = VerificationService(store2, FakeLive(), FakeWatchdog(), notifier2, replace(removed.config, operator_ids=frozenset({OWNER})))
     with pytest.raises(AccessDenied):
-        await demoted.open(token_of(notifier2.links(OPERATOR)[0]), LOGIN)
+        await demoted.open(token_of(notifier2.links(OPERATOR)[0]), init_data(OPERATOR))
     assert store2.jobs[job2.id].state == "requested"
 
 
 @pytest.mark.asyncio
-async def test_a_session_is_bound_to_job_and_login() -> None:
+async def test_a_session_is_bound_to_its_job_and_to_a_current_operator() -> None:
     service, store, notifier, _ = flow()
     job = await announced(service, store)
-    opened = await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)
-    assert (await service.session(opened.cookie, job.id, LOGIN)).user_id == OPERATOR
+    opened = await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))
+    assert (await service.session(opened.cookie, job.id)).user_id == OPERATOR
     with pytest.raises(AccessDenied):
-        await service.session(opened.cookie, str(uuid.uuid4()), LOGIN)
+        await service.session(opened.cookie, str(uuid.uuid4()))
     with pytest.raises(AccessDenied):
-        await service.session(opened.cookie, job.id, "op@example.com")
+        await service.session(None, job.id)
+    demoted = VerificationService(store, FakeLive(), FakeWatchdog(), notifier, replace(service.config, operator_ids=frozenset({OWNER})))
     with pytest.raises(AccessDenied):
-        await service.session(None, job.id, LOGIN)
+        await demoted.session(opened.cookie, job.id)
 
 
 # --- claim, view, decisions ---------------------------------------------------------------
 
 
 async def two_operators(service: VerificationService, notifier: FakeNotifier, job: Job):
-    a = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
-    b = (await service.open(token_of(notifier.links(OTHER)[0]), "op@example.com")).session
+    a = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
+    b = (await service.open(token_of(notifier.links(OTHER)[0]), init_data(OTHER))).session
     return a, b
 
 
@@ -223,7 +245,7 @@ async def test_one_operator_claims_and_only_they_drive_the_job() -> None:
 async def test_a_busy_browser_is_reported_not_crashed() -> None:
     service, store, notifier, _ = flow(live=FakeLive(fail=True))
     job = await announced(service, store)
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     with pytest.raises(ActionRefused, match="busy"):
         await service.view(session)
@@ -235,7 +257,7 @@ async def test_solved_is_confirmed_by_the_watchdog_then_the_run_resumes_once() -
     live = FakeLive()
     service, store, notifier, watchdog = flow(Recovery(True), live=live)
     job = await announced(service, store)
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     await service.view(session)
 
@@ -259,7 +281,7 @@ async def test_solved_is_confirmed_by_the_watchdog_then_the_run_resumes_once() -
 async def test_a_challenge_still_showing_keeps_the_run_stopped() -> None:
     service, store, notifier, _ = flow(Recovery(False, kind="checkpoint", reason="facebook_url:/checkpoint"))
     job = await announced(service, store)
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     assert await service.solve(session) is False
     assert store.jobs[job.id].state == "active"
@@ -273,7 +295,7 @@ async def test_a_challenge_still_showing_keeps_the_run_stopped() -> None:
 async def test_a_challenge_that_returns_before_resume_blocks_it() -> None:
     service, store, notifier, _ = flow(Recovery(True), Recovery(False, kind="captcha", reason="facebook_page:captcha"))
     job = await announced(service, store)
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     assert await service.solve(session) is True
     with pytest.raises(ActionRefused, match="challenge again"):
@@ -287,7 +309,7 @@ async def test_cancel_closes_the_job_and_its_stopped_batch() -> None:
     live = FakeLive()
     service, store, notifier, _ = flow(live=live)
     job = await announced(service, store)
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     await service.view(session)
     await service.cancel(session)
@@ -295,7 +317,7 @@ async def test_cancel_closes_the_job_and_its_stopped_batch() -> None:
     assert store.world[f"batch:{job.batch_id}"] == "cancelled"
     assert all(t.revoked or t.used_at for t in store.tokens.values())
     with pytest.raises(AccessDenied):
-        await service.session(None, job.id, LOGIN)
+        await service.session(None, job.id)
     assert events(store, job)[-1] == "cancel"
 
 
@@ -303,7 +325,7 @@ async def test_cancel_closes_the_job_and_its_stopped_batch() -> None:
 async def test_failed_quarantines_the_profile_and_tells_the_owner() -> None:
     service, store, notifier, _ = flow()
     job = await announced(service, store)
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     await service.fail(session)
     assert store.jobs[job.id].state == "rejected"
@@ -338,7 +360,7 @@ async def test_sensitive_challenges_stop_and_go_to_the_owner_only(note: str, kin
     assert chat == OWNER and "OWNER ACTION NEEDED" in text and button and button[0] == "Close verification job"
     assert "sensitive_stop" in events(store, job)
 
-    owner = (await service.open(token_of(button[1]), LOGIN)).session
+    owner = (await service.open(token_of(button[1]), init_data(OWNER))).session
     with pytest.raises(ActionRefused, match="closed"):
         await service.claim(owner)
     with pytest.raises(ActionRefused):
@@ -351,14 +373,14 @@ async def test_sensitive_challenges_stop_and_go_to_the_owner_only(note: str, kin
 async def test_a_sensitive_page_found_by_the_watchdog_stops_the_flow() -> None:
     service, store, notifier, _ = flow(Recovery(False, kind="identity_verification", sensitive=True, reason="upload id"))
     job = await announced(service, store)
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     assert await service.solve(session) is False
     assert store.jobs[job.id].sensitive
     assert store.world[f"profile:{job.profile_id}"] == "quarantined"
     assert notifier.sent[-1][0] == OWNER and "OWNER ACTION NEEDED" in notifier.sent[-1][1]
     with pytest.raises(AccessDenied):
-        await service.session(None, job.id, LOGIN)
+        await service.session(None, job.id)
     with pytest.raises(ActionRefused, match="Only the owner"):
         await service.cancel(session)
 
@@ -371,7 +393,7 @@ async def test_an_unsolved_job_expires_and_its_window_closes() -> None:
     live = FakeLive()
     service, store, notifier, _ = flow(live=live)
     job = await announced(service, store)
-    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), LOGIN)).session
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
     await service.claim(session)
     await service.view(session)
     store.jobs[job.id] = replace(store.jobs[job.id], expires_at=datetime.now(UTC) - timedelta(seconds=1))
@@ -391,7 +413,7 @@ async def test_unopened_links_are_renewed_after_the_reminder_interval() -> None:
     await service.tick()
     assert len(notifier.sent) == 6 and notifier.sent[-1][1].startswith("Reminder:")
     # Someone with an open page session gets no reminders.
-    await service.open(token_of(notifier.links(OPERATOR)[-1]), LOGIN)
+    await service.open(token_of(notifier.links(OPERATOR)[-1]), init_data(OPERATOR))
     for record in store.tokens.values():
         record.created_at = datetime.now(UTC) - timedelta(hours=1)
     await service.tick()
@@ -435,29 +457,35 @@ def test_the_watchdog_needs_a_clean_page() -> None:
 def _env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
     base = {
         "DATABASE_URL": "postgresql://x", "TELEGRAM_TOKEN": "1:x", "TELEGRAM_OPERATOR_IDS": "11,12",
-        "VERIFICATION_PUBLIC_URL": PUBLIC, "VERIFICATION_TAILSCALE_LOGINS": LOGIN, "BROWSER_SESSION_API_TOKEN": "t" * 32,
+        "VERIFICATION_PUBLIC_URL": PUBLIC, "BROWSER_SESSION_API_TOKEN": "t" * 32,
     }
-    for key in (*base, "VERIFICATION_OWNER_TELEGRAM_ID"):
+    for key in (*base, "VERIFICATION_OWNER_TELEGRAM_ID", "LIVE_VIEW_PUBLIC_URL"):
         monkeypatch.delenv(key, raising=False)
     for key, value in {**base, **values}.items():
         monkeypatch.setenv(key, value)
 
 
-def test_settings_default_the_owner_and_normalise_logins(monkeypatch: pytest.MonkeyPatch) -> None:
-    _env(monkeypatch, VERIFICATION_TAILSCALE_LOGINS="Owner@Example.com, op@example.com")
+def test_settings_default_the_owner_and_keep_secrets_out_of_repr(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch)
     settings = VerificationSettings.from_env()
-    assert settings.owner_id == 11 and settings.tailscale_logins == frozenset({LOGIN, "op@example.com"})
+    assert settings.owner_id == 11 and settings.public_url == PUBLIC
     assert "1:x" not in repr(settings)
+
+
+def test_the_public_url_falls_back_to_the_live_view_one_and_may_be_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch, VERIFICATION_PUBLIC_URL="", LIVE_VIEW_PUBLIC_URL="https://5-6-7-8.sslip.io/")
+    assert VerificationSettings.from_env().public_url == "https://5-6-7-8.sslip.io"
+    _env(monkeypatch, VERIFICATION_PUBLIC_URL="")
+    assert VerificationSettings.from_env().public_url == ""  # idle, not a crash loop
 
 
 @pytest.mark.parametrize(
     ("values", "match"),
     [
-        ({"VERIFICATION_PUBLIC_URL": "https://1-2-3-4.sslip.io"}, "ts.net"),
-        ({"VERIFICATION_PUBLIC_URL": "http://x.tail1.ts.net"}, "ts.net"),
-        ({"VERIFICATION_PUBLIC_URL": "https://x.tail1.ts.net/path"}, "ts.net"),
-        ({"VERIFICATION_TAILSCALE_LOGINS": ""}, "TAILSCALE_LOGINS"),
+        ({"VERIFICATION_PUBLIC_URL": "http://1-2-3-4.sslip.io"}, "https://host"),
+        ({"VERIFICATION_PUBLIC_URL": "https://1-2-3-4.sslip.io/verify"}, "https://host"),
         ({"TELEGRAM_OPERATOR_IDS": ""}, "at least one"),
+        ({"TELEGRAM_OPERATOR_IDS": "@owner"}, "numeric"),
         ({"VERIFICATION_OWNER_TELEGRAM_ID": "99"}, "must also be"),
         ({"VERIFICATION_TOKEN_MINUTES": "0"}, "between"),
     ],
@@ -468,5 +496,5 @@ def test_unsafe_settings_stop_startup(monkeypatch: pytest.MonkeyPatch, values: d
         VerificationSettings.from_env()
 
 
-def test_tailnet_url_is_an_origin() -> None:
-    assert tailnet_url(PUBLIC + "/") == PUBLIC
+def test_https_origin_strips_the_slash() -> None:
+    assert https_origin(PUBLIC + "/") == PUBLIC
