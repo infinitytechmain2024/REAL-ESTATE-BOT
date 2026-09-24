@@ -12,7 +12,7 @@ from bot.control_plane.models import CommandEnvelope, IncomingMessage
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import PostgresControlPlaneStore
-from bot.control_plane.stt import FasterWhisperTranscriber
+from bot.control_plane.stt import OpenRouterTranscriber
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import ConfirmedCommand
 from bot.orchestra.store import PostgresOrchestraStore
@@ -49,15 +49,30 @@ async def run() -> None:
 
     if not settings.operator_user_ids:
         logging.getLogger(__name__).warning("telegram.control.no_operators", extra={"hint": "set TELEGRAM_OPERATOR_IDS; state-changing commands are refused"})
-    control = ControlPlane(settings, store, FasterWhisperTranscriber(model=settings.stt_model, device=settings.stt_device, compute_type=settings.stt_compute_type), enqueue)
+    transcriber: OpenRouterTranscriber | None = None
+    if settings.openrouter_api_key:
+        transcriber = OpenRouterTranscriber(
+            api_key=settings.openrouter_api_key,
+            model=settings.stt_model,
+            timeout_seconds=settings.stt_timeout_seconds,
+            max_audio_bytes=settings.stt_max_audio_bytes,
+        )
+    else:
+        logging.getLogger(__name__).warning("telegram.control.stt_disabled", extra={"hint": "set OPENROUTER_API_KEY; voice messages are refused"})
+    control = ControlPlane(settings, store, transcriber, enqueue)
     router = Router(name="control-plane")
 
     @router.message(lambda message: bool(message.voice))
     async def voice(message: Message) -> None:
-        if message.voice is None:
+        voice_note = message.voice
+        if voice_note is None:
             return
-        data = await message.bot.download(message.voice)
-        reply = await control.handle_voice(_incoming(message), data.read() if data else b"")
+
+        async def download() -> bytes:
+            data = await message.bot.download(voice_note, timeout=int(settings.stt_timeout_seconds))
+            return data.read() if data else b""
+
+        reply = await control.handle_voice(_incoming(message), download)
         if reply:
             await message.answer(reply.text)
 
@@ -79,6 +94,8 @@ async def run() -> None:
         await dispatcher_task
         await orchestra_store.close()
         await store.close()
+        if transcriber is not None:
+            await transcriber.aclose()
         await bot.session.close()
 
 

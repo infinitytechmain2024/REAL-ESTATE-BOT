@@ -82,17 +82,19 @@ services:
       TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}
       # Tunables read by bot/control_plane/settings.py; defaults match it.
       TELEGRAM_CONFIRMATION_TTL_SECONDS: ${TELEGRAM_CONFIRMATION_TTL_SECONDS:-300}
-      TELEGRAM_MAX_VOICE_MB: ${TELEGRAM_MAX_VOICE_MB:-20}
       ORCHESTRA_COMMAND_LEASE_SECONDS: ${ORCHESTRA_COMMAND_LEASE_SECONDS:-30}
       ORCHESTRA_POLL_SECONDS: ${ORCHESTRA_POLL_SECONDS:-1}
       ORCHESTRA_STALE_BATCH_SECONDS: ${ORCHESTRA_STALE_BATCH_SECONDS:-900}
-      FASTER_WHISPER_MODEL: ${FASTER_WHISPER_MODEL:-small}
-      FASTER_WHISPER_DEVICE: ${FASTER_WHISPER_DEVICE:-cpu}
-      FASTER_WHISPER_COMPUTE_TYPE: ${FASTER_WHISPER_COMPUTE_TYPE:-int8}
-    volumes:
-      - whisper_models:/models
+      # Voice transcription via OpenRouter, reusing the analysis pipeline's key.
+      # Without the key the bot still starts and refuses voice notes.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      STT_PROVIDER: ${STT_PROVIDER:-openrouter}
+      STT_MODEL: ${STT_MODEL:-openai/whisper-large-v3-turbo}
+      STT_MAX_AUDIO_BYTES: ${STT_MAX_AUDIO_BYTES:-20971520}
+      STT_MAX_AUDIO_SECONDS: ${STT_MAX_AUDIO_SECONDS:-300}
+      STT_TIMEOUT_SECONDS: ${STT_TIMEOUT_SECONDS:-60}
     # `backend` reaches PostgreSQL/Redis; `egress` is required for Telegram's
-    # long polling API. It does not publish a host port.
+    # long polling API and OpenRouter. It does not publish a host port.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
     read_only: true
@@ -211,7 +213,6 @@ volumes:
   redis_data:
   caddy_data:
   caddy_config:
-  whisper_models:
   browser_profiles:
   browser_screenshots:
 

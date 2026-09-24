@@ -150,3 +150,17 @@ class NvidiaSTTProvider(OpenAIWhisperProvider):
     name: ClassVar[str] = "nvidia"
     default_base_url: ClassVar[str | None] = "https://integrate.api.nvidia.com/v1"
     api_key_env_vars: ClassVar[tuple[str, ...]] = ("NVIDIA_API_KEY", "NGC_API_KEY")
+
+
+@register_stt("openrouter")
+class OpenRouterSTTProvider(OpenAIWhisperProvider):
+    """OpenRouter's transcription route; use model `openai/whisper-large-v3-turbo`.
+
+    Registered so one shared `.env` with ``STT_PROVIDER=openrouter`` (what the
+    VPS Telegram control plane reads) is valid for this bot too, on the same
+    ``OPENROUTER_API_KEY`` the LLM calls already use.
+    """
+
+    name: ClassVar[str] = "openrouter"
+    default_base_url: ClassVar[str | None] = "https://openrouter.ai/api/v1"
+    api_key_env_vars: ClassVar[tuple[str, ...]] = ("OPENROUTER_API_KEY",)

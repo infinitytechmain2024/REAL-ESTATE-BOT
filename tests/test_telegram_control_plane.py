@@ -10,16 +10,28 @@ from bot.control_plane.models import CommandEnvelope, IncomingMessage, Transcrip
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import MemoryControlPlaneStore
+from bot.control_plane.stt import TranscriptionError
 
 
 @dataclass
 class FakeTranscriber:
     result: TranscriptResult | Exception
+    model: str = "openai/whisper-large-v3-turbo"
+    provider: str = "openrouter"
+    calls: int = 0
 
     async def transcribe(self, audio: bytes, *, filename: str) -> TranscriptResult:
+        self.calls += 1
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+def audio(payload: bytes = b"OggS-opus"):
+    async def download() -> bytes:
+        return payload
+
+    return download
 
 
 def settings() -> ControlPlaneSettings:
@@ -81,7 +93,7 @@ async def test_voice_transcription_is_saved_and_echoed() -> None:
     store = MemoryControlPlaneStore()
     transcript = TranscriptResult("/status", "uk", 0.91, "small")
     control = ControlPlane(settings(), store, FakeTranscriber(transcript), lambda _: None)
-    response = await control.handle_voice(message(3, None, voice=True), b"opus")
+    response = await control.handle_voice(message(3, None, voice=True), audio(b"opus"))
     assert response and "Transcript (uk, confidence 91%)" in response.text
     assert "Control plane is online" in response.text
     assert store.transcripts[(22, 3)] == transcript
@@ -113,19 +125,22 @@ async def test_state_change_requires_one_time_confirmation() -> None:
 @pytest.mark.asyncio
 async def test_transcription_and_voice_size_errors_are_clear() -> None:
     failed = ControlPlane(
-        settings(), MemoryControlPlaneStore(), FakeTranscriber(ValueError("no speech")), lambda _: None
+        settings(),
+        MemoryControlPlaneStore(),
+        FakeTranscriber(TranscriptionError("empty_transcript", "no speech")),
+        lambda _: None,
     )
-    response = await failed.handle_voice(message(7, None, voice=True), b"opus")
-    assert response and "could not transcribe" in response.text
+    response = await failed.handle_voice(message(7, None, voice=True), audio(b"opus"))
+    assert response and "could not transcribe" in response.text and "No speech" in response.text
 
-    too_small = replace(settings(), max_voice_mb=0.000001)
+    too_small = replace(settings(), stt_max_audio_bytes=1)
     oversized = ControlPlane(
         too_small,
         MemoryControlPlaneStore(),
         FakeTranscriber(TranscriptResult("ok", "en", 1, "small")),
         lambda _: None,
     )
-    response = await oversized.handle_voice(message(8, None, voice=True), b"longer-than-one-byte")
+    response = await oversized.handle_voice(message(8, None, voice=True), audio(b"longer-than-one-byte"))
     assert response and "too large" in response.text
 
 

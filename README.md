@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`005_orchestra_dispatcher.sql` in order. It records SHA-256 checksums in
+`006_openrouter_transcription.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -32,8 +32,15 @@ is enabled. See [VPS hardening notes](docs/VPS_HARDENING.md) before deployment.
 
 The `telegram` Compose service receives only text and voice control messages.
 It accepts messages from every Telegram user and chat, records each inbound
-message with a unique `(chat_id, message_id)` idempotency key, and uses local
-multilingual faster-whisper for voice notes. Anyone can use `/status` and
+message with a unique `(chat_id, message_id)` idempotency key, and transcribes
+operators' voice notes with OpenRouter (`STT_MODEL`, default
+`openai/whisper-large-v3-turbo`) using the existing `OPENROUTER_API_KEY`. Each
+voice note is one bounded request (`STT_MAX_AUDIO_BYTES`,
+`STT_MAX_AUDIO_SECONDS`, `STT_TIMEOUT_SECONDS`) that is never retried; the
+transcript, detected language, model, HTTP status and the exact cost OpenRouter
+returns are stored on the message row, and failures are stored with an
+`error_code`. Duplicates, non-operators and over-limit notes are refused before
+any download or paid call. Anyone can use `/status` and
 `/help`, but only the Telegram user IDs in `TELEGRAM_OPERATOR_IDS` can use
 `/run`, `/pause`, `/resume`, `/cancel`, or `confirm`. Everyone else is told
 their own user ID, which is how an operator finds the value to add. An empty
@@ -450,8 +457,8 @@ class MyProvider(OpenAICompatibleProvider):
 ### Распознавание речи
 
 ```sh
-STT_PROVIDER=groq_whisper           # или openai_whisper, nvidia
-STT_MODEL=whisper-large-v3-turbo
+STT_PROVIDER=openrouter             # или groq_whisper, openai_whisper, nvidia
+STT_MODEL=openai/whisper-large-v3-turbo
 ```
 
 Голосовые Telegram приходят в OGG/Opus, который принимают все перечисленные
