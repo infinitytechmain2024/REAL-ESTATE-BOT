@@ -12,6 +12,7 @@ from bot.control_plane.models import CommandEnvelope, IncomingMessage, Reply, Tr
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import ControlPlaneStore
 from bot.control_plane.stt import Transcriber, TranscriptionError
+from bot.control_plane.voice_commands import clean_transcript, spoken_command
 
 log = logging.getLogger(__name__)
 CommandSink = Callable[[CommandEnvelope], Awaitable[object]]
@@ -81,8 +82,13 @@ class ControlPlane:
             extra={"model": transcript.model, "language": transcript.language, "cost_usd": transcript.cost_usd, "audio_seconds": transcript.audio_seconds},
         )
         confidence = f", confidence {transcript.confidence:.0%}" if transcript.confidence is not None else ""
-        command_reply = await self._handle_command(message, transcript.text)
-        return Reply(f"Transcript ({transcript.language or 'unknown'}{confidence}):\n{transcript.text}\n\n{command_reply.text}")
+        # The stored transcript stays exactly as returned; only the reply and
+        # the command see the cleaned text.
+        text = clean_transcript(transcript.text)
+        command = spoken_command(text)
+        command_reply = await self._handle_command(message, command or text)
+        heard = f"\nUnderstood as: {command}" if command else ""
+        return Reply(f"Transcript ({transcript.language or 'unknown'}{confidence}):\n{text}{heard}\n\n{command_reply.text}")
 
     async def _voice_refused(self, message: IncomingMessage, code: str, *, status: int | None = None) -> None:
         transcriber = self.transcriber
