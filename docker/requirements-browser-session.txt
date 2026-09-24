@@ -1,0 +1,8 @@
+# Deliberately smaller than requirements.txt: the browser session owner needs
+# only its HTTP API, Redis leases, settings and Playwright. Versions match
+# requirements.txt; playwright must match the base image tag.
+aiohttp==3.13.2
+pydantic==2.12.4
+pydantic-settings==2.13.1
+playwright==1.63.0
+redis==5.2.1
