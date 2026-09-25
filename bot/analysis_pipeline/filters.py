@@ -7,17 +7,38 @@ from .models import Evidence, FilterDecision
 
 RELEVANCE = {
     "real_estate": (
+        # en
         "rent",
         "apartment",
         "property",
         "house",
         "flat",
+        "room",
+        "for sale",
+        # es
         "alquiler",
+        "alquilo",
         "piso",
         "vivienda",
+        "habitaci",
+        "estudio",
+        "venta",
+        "vendo",
+        # ru / uk (stems: сдаю, сдаётся, сниму, продаю, продаётся, комната, квартира ...)
         "аренд",
         "квартир",
         "недвижим",
+        "комнат",
+        "сда",
+        "сним",
+        "снять",
+        "прода",
+        "жиль",
+        "студи",
+        "апартамент",
+        "оренд",
+        "кімнат",
+        "житл",
     ),
     "investors": (
         "invest",
@@ -28,10 +49,29 @@ RELEVANCE = {
         "инвест",
         "стартап",
         "invers",
+        "інвест",
     ),
 }
 SPAM = ("guaranteed profit", "click here", "free crypto", "http://bit.ly")
-LOCATIONS = ("madrid", "barcelona", "kyiv", "kiev", "valencia", "españa", "украин")
+LOCATIONS = (
+    "madrid",
+    "barcelona",
+    "valencia",
+    "españa",
+    "espana",
+    "spain",
+    "kyiv",
+    "kiev",
+    "мадрид",
+    "барселон",
+    "валенси",
+    "испани",
+    "іспані",
+    "киев",
+    "київ",
+    "украин",
+    "україн",
+)
 
 
 def detect_language(text: str) -> str:
@@ -61,6 +101,8 @@ def filter_evidence(
         return FilterDecision(accepted=False, reason="spam_signal", language=language)
     if not any(keyword in low for keyword in RELEVANCE[vertical]):
         return FilterDecision(accepted=False, reason="irrelevant_keywords", language=language)
-    if vertical == "real_estate" and not any(place in low for place in LOCATIONS):
+    # A post in a city's group rarely repeats the city; the group title (Evidence.title) counts.
+    place_text = f"{low} {evidence.title.lower()}"
+    if vertical == "real_estate" and not any(place in place_text for place in LOCATIONS):
         return FilterDecision(accepted=False, reason="missing_location_signal", language=language)
     return FilterDecision(accepted=True, reason="accepted", language=language)
