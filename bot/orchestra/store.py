@@ -70,7 +70,8 @@ class PostgresOrchestraStore:
     async def enqueue(self, item: ConfirmedCommand) -> CommandReceipt:
         key = f"telegram:{item.chat_id}:{item.message_id}:{item.command}"
         async with self._pool().acquire() as conn, conn.transaction():
-            await _set_actor(conn, f"telegram:{item.user_id}")
+            # Auto-queued commands stay distinguishable in orchestration_audit_log.
+            await _set_actor(conn, f"telegram:{item.user_id}:auto" if item.auto else f"telegram:{item.user_id}")
             row = await conn.fetchrow(
                 """insert into orchestration_commands
                        (confirmation_id, telegram_chat_id, telegram_user_id, telegram_message_id, command, arguments, idempotency_key)

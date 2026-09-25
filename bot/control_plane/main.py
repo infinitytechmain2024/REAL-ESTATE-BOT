@@ -17,6 +17,7 @@ from aiohttp import web
 
 from bot.campaign.store import PostgresCampaignStore
 from bot.control_plane.access import AccessDesk, PostgresAccessStore
+from bot.control_plane.auto import PostgresSettingsStore
 from bot.control_plane.live_view import (
     BrowserLiveClient,
     LiveViewConfig,
@@ -87,7 +88,7 @@ async def run() -> None:
 
     async def enqueue(envelope: CommandEnvelope) -> object:
         logging.getLogger(__name__).info("telegram.control.command_confirmed", extra={"command": envelope.command, "chat_id": envelope.chat_id, "user_id": envelope.user_id})
-        return await orchestra.enqueue(ConfirmedCommand(envelope.command, envelope.arguments, envelope.chat_id, envelope.user_id, envelope.message_id, envelope.confirmation_id))
+        return await orchestra.enqueue(ConfirmedCommand(envelope.command, envelope.arguments, envelope.chat_id, envelope.user_id, envelope.message_id, envelope.confirmation_id, envelope.auto))
 
     if not settings.operator_user_ids:
         logging.getLogger(__name__).warning("telegram.control.no_operators", extra={"hint": "set TELEGRAM_OPERATOR_IDS; state-changing commands are refused"})
@@ -116,7 +117,11 @@ async def run() -> None:
     )
     if not live.enabled:
         logging.getLogger(__name__).warning("telegram.control.live_view_disabled", extra={"hint": "set LIVE_VIEW_PUBLIC_URL to an https:// origin"})
-    control = ControlPlane(settings, store, transcriber, enqueue, live, access)
+    control = ControlPlane(settings, store, transcriber, enqueue, live, access, PostgresSettingsStore(store))
+    for user_id in sorted(settings.auto_operator_user_ids):
+        if not operators.can_control(user_id):
+            # Not refused at startup (approvals change at runtime), but never auto-eligible meanwhile.
+            logging.getLogger(__name__).warning("telegram.control.auto_operator_not_eligible", extra={"user_id": user_id})
     router = Router(name="control-plane")
 
     @router.callback_query()

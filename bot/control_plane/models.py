@@ -111,3 +111,5 @@ class CommandEnvelope:
     user_id: int
     message_id: int
     confirmation_id: str | None = None
+    # Queued by auto mode without confirmation; audited as telegram:<id>:auto.
+    auto: bool = False

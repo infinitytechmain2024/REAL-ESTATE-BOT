@@ -86,6 +86,9 @@ services:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
       # Empty is allowed but refuses every state-changing command.
       TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}
+      # Auto mode default (owners switch it with /auto) and extra auto-operators.
+      AUTO_MODE: ${AUTO_MODE:-off}
+      TELEGRAM_AUTO_OPERATOR_IDS: ${TELEGRAM_AUTO_OPERATOR_IDS:-}
       # Tunables read by bot/control_plane/settings.py; defaults match it.
       TELEGRAM_CONFIRMATION_TTL_SECONDS: ${TELEGRAM_CONFIRMATION_TTL_SECONDS:-300}
       ORCHESTRA_COMMAND_LEASE_SECONDS: ${ORCHESTRA_COMMAND_LEASE_SECONDS:-30}

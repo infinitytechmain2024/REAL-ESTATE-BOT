@@ -37,6 +37,7 @@ from bot.campaign.discovery import FacebookDiscovery, PostgresDiscoveryStore, pl
 from bot.campaign.runner import VERIFY, CampaignRunner, RunnerConfig
 from bot.campaign.runs import PostgresRunStore
 from bot.campaign.store import PostgresCampaignStore
+from bot.control_plane.auto import PostgresSettingsStore
 from bot.control_plane.models import IncomingMessage, TranscriptResult
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
@@ -195,8 +196,8 @@ def analysis_settings() -> AnalysisSettings:
 class System:
     """Control plane -> confirmation -> Orchestra, as wired in bot/control_plane/main.py."""
 
-    def __init__(self, limits: SafetyLimits | None = None, transcriber: FakeTranscriber | None = None) -> None:
-        self.limits, self.transcriber = limits, transcriber
+    def __init__(self, limits: SafetyLimits | None = None, transcriber: FakeTranscriber | None = None, auto_mode: bool = False) -> None:
+        self.limits, self.transcriber, self.auto_mode = limits, transcriber, auto_mode
         self.notices: list[tuple[int, str]] = []
 
     async def __aenter__(self) -> System:
@@ -206,8 +207,9 @@ class System:
                                               campaigns=PostgresCampaignStore(self.orchestra.pool))
         self.store = PostgresControlPlaneStore(URL)
         await self.store.connect()
-        settings = ControlPlaneSettings(telegram_token=TOKEN, database_url=URL, operator_user_ids=frozenset({OWNER, OPERATOR}))
-        self.control = ControlPlane(settings, self.store, self.transcriber, self._sink)
+        settings = ControlPlaneSettings(telegram_token=TOKEN, database_url=URL, operator_user_ids=frozenset({OWNER, OPERATOR}),
+                                        auto_mode=self.auto_mode)
+        self.control = ControlPlane(settings, self.store, self.transcriber, self._sink, settings_store=PostgresSettingsStore(self.store))
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -219,7 +221,7 @@ class System:
 
     async def _sink(self, envelope):
         return await self.dispatcher.enqueue(ConfirmedCommand(
-            envelope.command, envelope.arguments, envelope.chat_id, envelope.user_id, envelope.message_id, envelope.confirmation_id))
+            envelope.command, envelope.arguments, envelope.chat_id, envelope.user_id, envelope.message_id, envelope.confirmation_id, envelope.auto))
 
     def _message(self, user: int, text: str | None = None, voice: bool = False) -> IncomingMessage:
         return IncomingMessage(chat_id=user, user_id=user, message_id=next(MESSAGE_IDS), text=text,
@@ -506,6 +508,42 @@ async def test_quotas_and_circuit_breakers_refuse_excess_work_before_it_exists(p
         assert "safety breaker open: 1 facebook challenges" in answer
     assert await pool.fetchval("select count(*) from acquisition_runs") == 2
     assert await pool.fetchval("select count(*) from acquisition_batches") == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_switch_is_persisted_and_auto_queued_work_still_meets_quotas(pool) -> None:
+    limits = SafetyLimits(facebook_batches_per_day=1, runs_per_day=1)
+    async with System(limits) as system:
+        assert "off (AUTO_MODE default" in (await system.control.handle_text(system._message(OWNER, "/auto status"))).text
+        assert (await system.control.handle_text(system._message(OWNER, "/auto on"))).text.startswith("Auto mode is on")
+    assert tuple(await pool.fetchrow("select value #>> '{}', updated_by from control_settings where key='auto_mode'")) == ("on", OWNER)
+    audit = await pool.fetchrow("select actor, action, new_state from orchestration_audit_log where entity_type='control_settings'")
+    assert tuple(audit) == (f"telegram:{OWNER}", "insert", "on")
+
+    async with System(limits) as system:  # a restart keeps the switch; .env says off
+        for n in (1, 2):
+            reply = (await system.control.handle_text(system._message(OPERATOR, f"/run website https://example.org/{n}"))).text
+            assert reply.startswith("Авто: /run поставлена в очередь"), reply
+            assert await system.dispatcher.process_once()
+        assert "queued run" in system.notices[-3][1]
+        assert "daily quota reached: 1 of 1 scrapling runs" in system.notices[-1][1]
+        assert await pool.fetchval("select count(*) from acquisition_runs") == 1
+        rows = await pool.fetch("select confirmation_id, state, error_code from orchestration_commands order by created_at")
+        assert [tuple(r) for r in rows] == [(None, "finished", None), (None, "failed", "precondition_failed")]
+        actors = await pool.fetch("select actor from orchestration_audit_log where entity_type='orchestration_commands' and action='insert'")
+        assert {r[0] for r in actors} == {f"telegram:{OPERATOR}:auto"}
+
+        # A goal written as plain text becomes a planned campaign; /cancel still asks.
+        reply = (await system.control.handle_text(system._message(OPERATOR, "квартиры в аренду в Мадриде"))).text
+        assert reply.startswith("Авто: /campaign")
+        assert await system.dispatcher.process_once()
+        assert "запланирована" in system.notices[-1][1]
+        assert await pool.fetchval("select count(*) from campaigns where requested_by=$1", OPERATOR) == 1
+        assert "Confirmation required" in (await system.control.handle_text(system._message(OPERATOR, "/cancel all"))).text
+
+        assert (await system.control.handle_text(system._message(OWNER, "/auto off"))).text.startswith("Auto mode is off")
+        assert "Confirmation required" in (await system.control.handle_text(system._message(OPERATOR, "/pause all"))).text
+    assert await pool.fetchval("select count(*) from orchestration_audit_log where entity_type='control_settings'") == 2
 
 
 @pytest.mark.asyncio
