@@ -13,8 +13,10 @@ the profile is quarantined, every link is revoked and only the owner is told.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import secrets
+import time
 from collections.abc import Collection
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -77,11 +79,30 @@ class Opened:
     cookie: str
 
 
+@dataclass
+class _BrowserRequest:
+    """A link opened outside Telegram, waiting for its recipient to approve it in Telegram."""
+
+    token_sha: str
+    user_id: int
+    job_id: str
+    approval_sha: str
+    expires_at: float
+    approved: bool = False
+
+
+BROWSER_REQUEST_SECONDS = 600
+MAX_BROWSER_REQUESTS_PER_LINK = 3
+
+
 class VerificationService:
     def __init__(self, store: VerificationStore, live: LiveBrowser, watchdog: RecoveryChecker, notifier: Notifier, config: FlowConfig) -> None:
         self.store, self.live, self.watchdog, self.notifier, self.config = store, live, watchdog, notifier, config
         # One-time VNC passwords of open windows, by job; never persisted.
         self._live_passwords: dict[str, str] = {}
+        # Browser logins waiting for approval, by the hash of the waiting browser's cookie.
+        # Lost on restart, which only means opening the link again.
+        self._browser: dict[str, _BrowserRequest] = {}
         self._lock = asyncio.Lock()
 
     # --- detection and notification -------------------------------------------------
@@ -152,8 +173,11 @@ class VerificationService:
             secret, sha = new_secret()
             await self.store.issue_token(job.id, user_id, job.profile_id, sha, self.config.token_minutes * 60)
             await self.store.add_event(job.id, "token_issued", "verification", {"user_id": user_id, "reminder": reminder})
+            link = self._link(secret)
+            browser = (f"\n\nOr copy this link into Safari or another browser; you will confirm it here in Telegram "
+                       f"before it opens. Do not forward it.\n{link}")
             try:
-                await self.notifier.send(user_id, text, ("Open verification page", self._link(secret)))
+                await self.notifier.send(user_id, text + browser, ("Open verification page", link))
                 await self.store.add_event(job.id, "notified", "verification", {"user_id": user_id, "reminder": reminder})
             except Exception as exc:  # noqa: BLE001 - one unreachable operator must not stop the others
                 log.warning("verification.notify_failed", extra={"user_id": user_id, "error": type(exc).__name__})
@@ -208,8 +232,71 @@ class VerificationService:
         user_id = self.telegram_user(init_data)
         if not looks_like_secret(token):
             raise AccessDenied("This link is invalid.")
+        return await self._consume(digest(token), user_id, "telegram")
+
+    # --- the same link in an ordinary browser, approved from Telegram ---------------
+
+    def _browser_prune(self) -> None:
+        now = time.time()
+        for key in [k for k, r in self._browser.items() if r.expires_at < now]:
+            del self._browser[key]
+
+    async def request_browser(self, token: str, client: str) -> str:
+        """Someone opened the link outside Telegram: ask its recipient; returns the waiting browser's cookie."""
+        if not looks_like_secret(token):
+            raise AccessDenied("This link is invalid.")
+        token_sha = digest(token)
+        record = await self.store.peek_token(token_sha)
+        if record is None:
+            raise AccessDenied("This link was already used or has expired. Wait for a new message.")
+        if record.user_id not in self.config.operator_ids:
+            raise AccessDenied("This link is no longer valid.")
+        self._browser_prune()
+        if sum(1 for r in self._browser.values() if r.token_sha == token_sha) >= MAX_BROWSER_REQUESTS_PER_LINK:
+            raise AccessDenied("Too many attempts with this link. Wait for a new message.")
+        cookie, cookie_sha = new_secret()
+        approval, approval_sha = new_secret()
+        self._browser[cookie_sha] = _BrowserRequest(token_sha, record.user_id, record.job_id, approval_sha,
+                                                   time.time() + BROWSER_REQUEST_SECONDS)
+        await self.notifier.send(record.user_id, (
+            f"Your verification link was opened in a browser ({client[:120]}).\n\n"
+            "If that was you, press Approve and go back to that browser. If not, ignore this message: "
+            "nothing opens without your approval."
+        ), ("Approve browser login", f"{self.config.public_url}/verify/a/{approval}"))
+        return cookie
+
+    async def approve_browser(self, approval: str, init_data: str | None) -> None:
+        """The recipient pressed Approve in Telegram (signed Mini App)."""
+        user_id = self.telegram_user(init_data)
+        if not looks_like_secret(approval):
+            raise AccessDenied("This approval is invalid.")
+        self._browser_prune()
+        approval_sha = digest(approval)
+        for request in self._browser.values():
+            if hmac.compare_digest(request.approval_sha, approval_sha):
+                if request.user_id != user_id:
+                    await self.store.add_event(request.job_id, "access_denied", f"telegram:{user_id}", {"reason": "browser_approval_by_other"})
+                    raise AccessDenied("Only the person the link was sent to can approve it.")
+                request.approved = True
+                return
+        raise AccessDenied("This approval has expired. Open the link in the browser again.")
+
+    async def browser_status(self, token: str, cookie: str | None) -> Opened | None:
+        """For the waiting browser: None while not approved, then its page session (once)."""
+        if not looks_like_secret(token) or not cookie or not looks_like_secret(cookie):
+            raise AccessDenied("Open the link again.")
+        self._browser_prune()
+        request = self._browser.get(digest(cookie))
+        if request is None or not hmac.compare_digest(request.token_sha, digest(token)):
+            raise AccessDenied("This browser request has expired. Open the link again.")
+        if not request.approved:
+            return None
+        del self._browser[digest(cookie)]
+        return await self._consume(request.token_sha, request.user_id, "browser")
+
+    async def _consume(self, token_sha: str, user_id: int, via: str) -> Opened:
         identity = f"telegram:{user_id}"
-        record = await self.store.consume_token(digest(token), user_id, identity)
+        record = await self.store.consume_token(token_sha, user_id, identity)
         if record is None:
             raise AccessDenied("This link was already used, has expired, or was sent to someone else. Wait for a new message.")
         job = await self.store.get_job(record.job_id)
@@ -221,7 +308,7 @@ class VerificationService:
             raise AccessDenied("This verification is no longer open.")
         cookie, cookie_sha = new_secret()
         session = await self.store.create_session(record, identity, cookie_sha, secrets.token_urlsafe(24), self.config.session_minutes * 60)
-        await self.store.add_event(job.id, "opened", self._actor(session), {})
+        await self.store.add_event(job.id, "opened", self._actor(session), {"via": via})
         return Opened(session, cookie)
 
     async def session(self, cookie: str | None, job_id: str) -> PageSession:

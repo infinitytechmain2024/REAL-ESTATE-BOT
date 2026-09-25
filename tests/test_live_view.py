@@ -350,3 +350,72 @@ async def test_gate_reports_a_busy_browser() -> None:
         assert response.status == 409 and "busy" in (await response.json())["error"]
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_the_login_message_carries_a_copyable_link_for_its_recipient() -> None:
+    store = MemoryLiveViewStore()
+    reply = await coordinator(store).login(OPERATOR, "facebook", "facebook-main")
+    session_id = next(iter(store.sessions))
+    assert f"https://1-2-3-4.sslip.io/live/{session_id}/?for={OPERATOR}" in reply.text
+
+
+@pytest.mark.asyncio
+async def test_the_window_opens_in_safari_only_after_its_recipient_approves_in_the_chat() -> None:
+    sent: list[tuple[int, object]] = []
+
+    async def notify(user_id: int, reply) -> None:
+        sent.append((user_id, reply))
+
+    store, browser = MemoryLiveViewStore(), FakeBrowser()
+    live = coordinator(store, browser, notifier=notify)
+    await live.login(OPERATOR, "facebook", "facebook-main")
+    session_id = next(iter(store.sessions))
+    settings = ControlPlaneSettings(telegram_token=TOKEN, database_url="postgresql://unused", operator_user_ids=frozenset({OPERATOR}))
+    control = ControlPlane(settings, MemoryControlPlaneStore(), None, lambda _e: None, live)  # type: ignore[arg-type,return-value]
+    client = TestClient(TestServer(create_gate_app(live, TOKEN, "http://127.0.0.1:9")))
+    await client.start_server()
+    try:
+        page = await client.get(f"/live/{session_id}/?for={OPERATOR}")
+        assert "Continue in this browser" in await page.text()
+        assert "Continue in this browser" not in await (await client.get(f"/live/{session_id}/")).text()
+
+        asked = await client.post(f"/live/{session_id}/browser?for={OPERATOR}", allow_redirects=False,
+                                  headers={"User-Agent": "Mozilla/5.0 (Macintosh) Safari/605.1", "X-Forwarded-For": "198.51.100.4"})
+        assert asked.status == 303 and asked.headers["Location"] == f"/live/{session_id}/wait"
+        pending = {"Cookie": f"live_view_pending={asked.cookies['live_view_pending'].value}"}
+        [(user_id, message)] = sent
+        assert user_id == OPERATOR and "Macintosh" in message.text and "198.51.100.4" in message.text
+        approve = message.buttons[0].callback_data
+        assert approve.startswith("live:approve:") and browser.started == []
+
+        waiting = await client.get(f"/live/{session_id}/wait", headers=pending, allow_redirects=False)
+        assert waiting.status == 200 and "Check Telegram" in await waiting.text()
+        assert "Only the person" in (await control.handle_callback(STRANGER, approve)).text
+        assert "Approved" in (await control.handle_callback(OPERATOR, approve)).text
+
+        opened = await client.get(f"/live/{session_id}/wait", headers=pending, allow_redirects=False)
+        assert opened.status == 303 and opened.headers["Location"].startswith(f"/live/{session_id}/vnc.html?path=")
+        assert opened.cookies["live_view"]["httponly"] and browser.started
+        # One approval, one browser: the request is spent, and another browser has no cookie.
+        assert (await client.get(f"/live/{session_id}/wait", headers=pending)).status == 403
+        assert (await client.get(f"/live/{session_id}/wait")).status == 403
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_browser_request_must_name_an_operator_and_cannot_flood() -> None:
+    async def notify(user_id: int, reply) -> None:
+        return None
+
+    store = MemoryLiveViewStore()
+    live = coordinator(store, notifier=notify)
+    await live.login(OPERATOR, "facebook", "facebook-main")
+    session_id = next(iter(store.sessions))
+    with pytest.raises(LiveViewUnavailable):
+        await live.request_browser(session_id, STRANGER, "x")
+    for _ in range(3):
+        await live.request_browser(session_id, OPERATOR, "x")
+    with pytest.raises(LiveViewUnavailable, match="too many"):
+        await live.request_browser(session_id, OPERATOR, "x")

@@ -22,6 +22,7 @@ class VerificationStore(Protocol):
     async def get_job(self, job_id: str) -> Job | None: ...
     async def issue_token(self, job_id: str, user_id: int, profile_id: str, token_sha256: str, ttl_seconds: int) -> None: ...
     async def consume_token(self, token_sha256: str, user_id: int, identity: str) -> AccessToken | None: ...
+    async def peek_token(self, token_sha256: str) -> AccessToken | None: ...
     async def create_session(self, token: AccessToken, identity: str, cookie_sha256: str, csrf: str, ttl_seconds: int) -> PageSession: ...
     async def get_session(self, cookie_sha256: str) -> PageSession | None: ...
     async def claim(self, job_id: str, user_id: int, actor: str) -> bool: ...
@@ -135,6 +136,16 @@ class PostgresVerificationStore:
                   and used_at is null and revoked_at is null and expires_at > now()
             returning id::text, verification_job_id::text, telegram_user_id, browser_profile_id::text""",
             token_sha256, user_id, identity,
+        )
+        return AccessToken(row[0], row[1], row[2], row[3]) if row else None
+
+    async def peek_token(self, token_sha256: str) -> AccessToken | None:
+        """A still-usable token, without using it (for the browser approval)."""
+        row = await self._pool().fetchrow(
+            """select id::text, verification_job_id::text, telegram_user_id, browser_profile_id::text
+                 from public.verification_access_tokens
+                where token_sha256 = $1 and used_at is null and revoked_at is null and expires_at > now()""",
+            token_sha256,
         )
         return AccessToken(row[0], row[1], row[2], row[3]) if row else None
 
@@ -457,6 +468,12 @@ class MemoryVerificationStore:
         if token is None or token.record.user_id != user_id or token.used_at or token.revoked or token.expires_at <= datetime.now(UTC):
             return None
         token.used_at = datetime.now(UTC)
+        return token.record
+
+    async def peek_token(self, token_sha256: str) -> AccessToken | None:
+        token = self.tokens.get(token_sha256)
+        if token is None or token.used_at or token.revoked or token.expires_at <= datetime.now(UTC):
+            return None
         return token.record
 
     async def create_session(self, token: AccessToken, identity: str, cookie_sha256: str, csrf: str, ttl_seconds: int) -> PageSession:

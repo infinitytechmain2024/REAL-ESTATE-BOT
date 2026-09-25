@@ -105,6 +105,17 @@ class BrowserLiveClient:
 
 
 Notifier = Callable[[int, Reply], Awaitable[None]]
+BROWSER_REQUEST_SECONDS = 600
+MAX_BROWSER_REQUESTS = 3
+
+
+@dataclass
+class _BrowserRequest:
+    session_id: str
+    user_id: int
+    approval: str
+    expires_at: float
+    approved: bool = False
 
 
 @dataclass
@@ -121,6 +132,9 @@ class LiveViewCoordinator:
         # One-time VNC passwords of open sessions; never stored in the database.
         self._passwords: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        # Browsers waiting for approval: waiting browser's cookie -> request. Lost on
+        # restart, which only means opening the link again.
+        self._browser: dict[str, _BrowserRequest] = {}
 
     @property
     def enabled(self) -> bool:
@@ -129,7 +143,7 @@ class LiveViewCoordinator:
     def is_operator(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.config.operator_ids
 
-    def request_reply(self, session: LiveSession) -> Reply:
+    def request_reply(self, session: LiveSession, user_id: int | None = None) -> Reply:
         profile = session.profile
         why = (
             f"Profile {profile.name} ({profile.platform}) needs a login."
@@ -137,10 +151,14 @@ class LiveViewCoordinator:
             else f"{profile.platform.capitalize()} asked for verification on profile {profile.name}; collection on it is paused."
         )
         url = f"{self.config.public_url.rstrip('/')}/live/{session.id}/"
+        # The same page in Safari or a desktop browser (full size): it names the
+        # recipient, who must approve that browser from Telegram before it opens.
+        browser = (f"\n\nEasier on a big screen: copy this link into Safari or another browser; you will confirm it "
+                   f"here in Telegram before it opens. Do not forward it.\n{url}?for={user_id}") if user_id else ""
         return Reply(
             f"{why}\n\nOpen the browser, log in or pass the check yourself, then press Done. "
             f"The window stays open for {self.config.open_minutes} minutes; this request lapses in "
-            f"{self.config.request_minutes} minutes.",
+            f"{self.config.request_minutes} minutes.{browser}",
             (
                 Button("Open browser", web_app_url=url),
                 Button("Done, I am logged in", callback_data=f"live:done:{session.id}"),
@@ -163,7 +181,7 @@ class LiveViewCoordinator:
         if profile.state in {"disabled", "retired", "in_use"}:
             return Reply(f"Profile {name} is {profile.state}; it cannot be opened now.")
         session, _ = await self.store.request_live_view(profile, "login", f"telegram:{user_id}", self.config.request_minutes * 60)
-        return self.request_reply(session)
+        return self.request_reply(session, user_id)
 
     async def open(self, session_id: str, user_id: int) -> str:
         """Start (or resume) the window for an operator; returns the VNC password."""
@@ -186,6 +204,54 @@ class LiveViewCoordinator:
             self._passwords[session_id] = password
             log.info("telegram.live_view.opened", extra={"session_id": session_id, "user_id": user_id})
             return password
+
+    # --- the same window in an ordinary browser, approved from Telegram ----------------
+
+    def _browser_prune(self) -> None:
+        now = time.time()
+        for key in [k for k, r in self._browser.items() if r.expires_at < now]:
+            del self._browser[key]
+
+    async def request_browser(self, session_id: str, for_user: int, client: str) -> str:
+        """The link was opened outside Telegram: ask the named operator; returns the waiting cookie."""
+        if not self.is_operator(for_user) or self.notifier is None:
+            raise LiveViewUnavailable("this link is not valid; open it from the Telegram message")
+        session = await self.store.get_live_view(session_id)
+        if session is None or session.state not in {"requested", "open"} or session.expires_at <= datetime.now(UTC):
+            raise LiveViewUnavailable("this request has expired; wait for a new message or send /login")
+        self._browser_prune()
+        if sum(1 for r in self._browser.values() if r.session_id == session_id) >= MAX_BROWSER_REQUESTS:
+            raise LiveViewUnavailable("too many attempts with this link; send /login again")
+        cookie, approval = secrets.token_urlsafe(32), secrets.token_urlsafe(16)
+        self._browser[cookie] = _BrowserRequest(session_id, for_user, approval, time.time() + BROWSER_REQUEST_SECONDS)
+        await self.notifier(for_user, Reply(
+            f"The browser link for profile {session.profile.name} was opened in a browser ({client[:120]}).\n\n"
+            "If that was you, press Approve and go back to that browser. If not, ignore this message: nothing opens without it.",
+            (Button("Approve browser login", callback_data=f"live:approve:{approval}"),),
+        ))
+        return cookie
+
+    def approve_browser(self, approval: str, user_id: int | None) -> Reply:
+        """The operator pressed Approve in the chat: Telegram vouches for who pressed it."""
+        self._browser_prune()
+        for request in self._browser.values():
+            if secrets.compare_digest(request.approval, approval):
+                if request.user_id != user_id or not self.is_operator(user_id):
+                    return Reply("Only the person the link was sent to can approve it.")
+                request.approved = True
+                return Reply("Approved. Go back to your browser; the window opens there in a few seconds.")
+        return Reply("This approval has expired. Open the link in the browser again.")
+
+    def browser_status(self, session_id: str, cookie: str | None) -> int | None:
+        """For the waiting browser: the approving operator's ID once approved (once), else None."""
+        self._browser_prune()
+        request = self._browser.get(cookie or "")
+        if request is None or request.session_id != session_id:
+            raise LiveViewUnavailable("this browser request has expired; open the link again")
+        if not request.approved:
+            return None
+        del self._browser[cookie or ""]
+        return request.user_id
 
     async def finish(self, session_id: str, user_id: int | None, *, done: bool) -> Reply:
         if not self.is_operator(user_id):
@@ -222,10 +288,9 @@ class LiveViewCoordinator:
             session, created = await self.store.request_live_view(profile, "checkpoint", "system", self.config.request_minutes * 60)
             if not created:
                 continue
-            reply = self.request_reply(session)
             for operator in sorted(self.config.operator_ids):
                 try:
-                    await self.notifier(operator, reply)
+                    await self.notifier(operator, self.request_reply(session, operator))
                 except Exception:  # noqa: BLE001 - one operator who never started the bot must not stop the rest
                     log.warning("telegram.live_view.notify_failed", extra={"user_id": operator})
 
@@ -246,21 +311,36 @@ _PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Browser</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>body{{font-family:sans-serif;text-align:center;padding:3em 1em}}</style>
-</head><body><p id="m">Opening the browser, this can take up to a minute&hellip;</p>
+<style>body{{font-family:sans-serif;text-align:center;padding:3em 1em}}button{{font-size:1.1em;padding:.6em 1.2em}}</style>
+</head><body><div id="m">{outside}</div>
 <script>
 const tg = window.Telegram && window.Telegram.WebApp;
 const say = (t) => document.getElementById('m').textContent = t;
-if (!tg || !tg.initData) {{
-  say('Open this page from the button in the Telegram bot.');
-}} else {{
+if (tg && tg.initData) {{
+  say('Opening the browser, this can take up to a minute\u2026');
   tg.ready(); tg.expand();
+  // Use the whole screen, and keep swipes inside the remote page from closing the app.
+  try {{ if (tg.requestFullscreen) tg.requestFullscreen(); }} catch (e) {{}}
+  try {{ if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); }} catch (e) {{}}
   fetch('{auth}', {{method: 'POST', headers: {{'Content-Type': 'text/plain'}}, body: tg.initData, credentials: 'same-origin'}})
     .then(r => r.json().then(j => [r.ok, j]))
     .then(([ok, j]) => ok ? location.replace(j.viewer) : say(j.error || 'Not allowed.'))
     .catch(() => say('The server did not answer. Try again in a moment.'));
 }}
 </script></body></html>"""
+
+_OUTSIDE = (
+    "<p>This page is opened outside Telegram. Continue here and the bot will ask you to approve this browser first.</p>"
+    "<form method='post' action='/live/{session}/browser?for={user}'><button type='submit'>Continue in this browser</button></form>"
+)
+
+_WAIT = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="3"><title>Waiting for approval</title>
+<style>body{font-family:sans-serif;text-align:center;padding:3em 1em}</style></head>
+<body><h1>Check Telegram</h1><p>The bot sent you an <b>Approve browser login</b> button. Press it, then come back here;
+this page checks every few seconds.</p></body></html>"""
+
+_PENDING_COOKIE = "live_view_pending"
 
 _COOKIE = "live_view"
 
@@ -292,8 +372,50 @@ def create_gate_app(coordinator: LiveViewCoordinator, bot_token: str, novnc_url:
 
     async def page(request: web.Request) -> web.Response:
         session_id = request.match_info["session"]
-        return web.Response(text=_PAGE.format(auth=f"/live/{session_id}/auth"), content_type="text/html",
+        named = request.query.get("for", "")
+        outside = (_OUTSIDE.format(session=session_id, user=int(named)) if named.isdigit()
+                   else "Open this page from the button or link in the Telegram bot.")
+        return web.Response(text=_PAGE.format(auth=f"/live/{session_id}/auth", outside=outside), content_type="text/html",
                             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+    def _admit(session_id: str, user_id: int, password: str) -> tuple[str, str, int]:
+        now = time.time()
+        for stale in [key for key, (_, _, until) in admitted.items() if until < now]:
+            del admitted[stale]
+        cookie = secrets.token_urlsafe(32)
+        max_age = coordinator.config.open_minutes * 60
+        admitted[cookie] = (session_id, user_id, now + max_age)
+        return cookie, _viewer_path(session_id, password), max_age
+
+    async def browser_request(request: web.Request) -> web.StreamResponse:
+        session_id, named = request.match_info["session"], request.query.get("for", "")
+        forwarded = request.headers.get("X-Forwarded-For", request.remote or "").split(",")[0].strip()
+        agent = " ".join(request.headers.get("User-Agent", "unknown browser").split())[:100]
+        if not named.isdigit():
+            return web.Response(text="Open this page from the link in the Telegram bot.", status=403)
+        try:
+            cookie = await coordinator.request_browser(session_id, int(named), f"{agent}; IP {forwarded or 'unknown'}")
+        except LiveViewUnavailable as exc:
+            return web.Response(text=f"Cannot continue: {exc}.", status=403)
+        response = web.HTTPSeeOther(f"/live/{session_id}/wait")
+        response.set_cookie(_PENDING_COOKIE, cookie, path=f"/live/{session_id}/", httponly=True, secure=True,
+                            samesite="Strict", max_age=BROWSER_REQUEST_SECONDS)
+        return response
+
+    async def browser_wait(request: web.Request) -> web.StreamResponse:
+        session_id = request.match_info["session"]
+        try:
+            user_id = coordinator.browser_status(session_id, request.cookies.get(_PENDING_COOKIE))
+            if user_id is None:
+                return web.Response(text=_WAIT, content_type="text/html", headers={"Cache-Control": "no-store"})
+            password = await coordinator.open(session_id, user_id)
+        except (LiveViewUnavailable, PermissionError) as exc:
+            return web.Response(text=f"Cannot open the browser: {exc}.", status=403)
+        cookie, viewer, max_age = _admit(session_id, user_id, password)
+        response = web.HTTPSeeOther(viewer)
+        response.set_cookie(_COOKIE, cookie, path=f"/live/{session_id}/", httponly=True, secure=True, samesite="Lax", max_age=max_age)
+        response.del_cookie(_PENDING_COOKIE, path=f"/live/{session_id}/")
+        return response
 
     async def auth(request: web.Request) -> web.Response:
         session_id = request.match_info["session"]
@@ -306,13 +428,8 @@ def create_gate_app(coordinator: LiveViewCoordinator, bot_token: str, novnc_url:
             password = await coordinator.open(session_id, user_id)
         except LiveViewUnavailable as exc:
             return web.json_response({"error": f"Cannot open the browser: {exc}."}, status=409)
-        now = time.time()
-        for stale in [key for key, (_, _, until) in admitted.items() if until < now]:
-            del admitted[stale]
-        cookie = secrets.token_urlsafe(32)
-        max_age = coordinator.config.open_minutes * 60
-        admitted[cookie] = (session_id, user_id, time.time() + max_age)
-        response = web.json_response({"viewer": _viewer_path(session_id, password)})
+        cookie, viewer, max_age = _admit(session_id, user_id, password)
+        response = web.json_response({"viewer": viewer})
         response.set_cookie(_COOKIE, cookie, path=f"/live/{session_id}/", httponly=True, secure=True, samesite="Lax", max_age=max_age)
         return response
 
@@ -374,5 +491,7 @@ def create_gate_app(coordinator: LiveViewCoordinator, bot_token: str, novnc_url:
     app = web.Application(client_max_size=64 * 1024, middlewares=[known_ids_only])
     app.router.add_get("/live/{session}/", page)
     app.router.add_post("/live/{session}/auth", auth)
+    app.router.add_post("/live/{session}/browser", browser_request)
+    app.router.add_get("/live/{session}/wait", browser_wait)
     app.router.add_get("/live/{session}/{path:.+}", proxy)
     return app
