@@ -54,7 +54,7 @@ async def run() -> None:
     settings = ControlPlaneSettings.from_env()
     store = PostgresControlPlaneStore(settings.database_url)
     await store.connect()
-    orchestra_store = PostgresOrchestraStore(settings.database_url)
+    orchestra_store = PostgresOrchestraStore(settings.database_url, settings.safety_limits)
     await orchestra_store.connect()
     bot = Bot(settings.telegram_token)
 

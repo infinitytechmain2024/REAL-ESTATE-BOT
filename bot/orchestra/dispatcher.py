@@ -112,7 +112,7 @@ class OrchestraDispatcher:
 
 def _summary(result: dict[str, Any]) -> str:
     if result.get("batch_id"):
-        return f"queued Facebook batch {result['batch_id']} ({result.get('max_groups')} groups); start it with the collector"
+        return f"queued Facebook batch {result['batch_id']} ({result.get('max_groups')} groups); it starts automatically"
     if result.get("run_id"):
-        return f"queued run {result['run_id']}"
+        return f"queued run {result['run_id']}; it starts automatically"
     return f"{result.get('status', 'finished')} ({result.get('affected', 0)} affected)"
