@@ -313,3 +313,61 @@ async def test_the_real_browser_is_not_marked_as_automated(monkeypatch: pytest.M
     assert seen["headless"] is False and seen["user_data_dir"] == str(tmp_path)
     assert "--enable-automation" in seen["ignore_default_args"]  # type: ignore[operator]
     assert "--disable-blink-features=AutomationControlled" in seen["args"]  # type: ignore[operator]
+
+
+_SEARCH_PAGE = """
+<div role="feed">
+  <div role="article"><div>
+    <a href="https://www.facebook.com/groups/PisosMadrid/?__cft__[0]=x"><img alt=""></a>
+    <a href="https://www.facebook.com/groups/PisosMadrid/?__tn__=y">Pisos Madrid</a>
+    <span>Público · 12 mil miembros · 10+ publicaciones al día</span>
+  </div></div>
+  <div><div>
+    <a href="https://m.facebook.com/groups/123456789/">Rent Madrid</a>
+    <span>Public · 5K members · 3 posts a week</span>
+    <a href="https://www.facebook.com/groups/123456789/members/">See members</a>
+  </div></div>
+  <a href="https://www.facebook.com/groups/feed/">Your feed</a>
+  <a href="https://www.facebook.com/groups/777/posts/1/">A post</a>
+  <a href="https://www.facebook.com/groups/777/permalink/2/">A permalink</a>
+  <a href="https://example.com/groups/elsewhere/">Elsewhere</a>
+</div>
+"""
+
+
+@pytest.mark.asyncio
+async def test_snapshot_extracts_bounded_group_links_with_their_result_cards() -> None:
+    """Runs the real extraction script in a headless Chromium when one is installed."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        installed = sorted(Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/nonexistent")).glob("chromium-*/chrome-linux/chrome"))
+        browser = None
+        for executable in [None, *installed]:
+            try:
+                browser = await playwright.chromium.launch(headless=True, executable_path=executable)
+                break
+            except Exception:  # noqa: BLE001 - try the next binary
+                continue
+        if browser is None:
+            pytest.skip("chromium unavailable")
+        try:
+            page = await browser.new_page()
+            await page.set_content(_SEARCH_PAGE)
+            snapshot = await BrowserSessionManager._extract(page)
+            assert {"url", "title", "text", "diagnostics", "posts", "group_links"} <= set(snapshot)
+            assert snapshot["group_links"] == [
+                {"url": "https://www.facebook.com/groups/pisosmadrid/", "name": "Pisos Madrid",
+                 "card": "Pisos Madrid Público · 12 mil miembros · 10+ publicaciones al día"},
+                {"url": "https://www.facebook.com/groups/123456789/", "name": "Rent Madrid",
+                 "card": "Rent Madrid Public · 5K members · 3 posts a week See members"},
+            ]
+
+            long_name = "x" * 500
+            links = "".join(f'<p><a href="https://www.facebook.com/groups/g{i}/">{long_name}</a></p>' for i in range(60))
+            await page.set_content(links)
+            group_links = (await BrowserSessionManager._extract(page))["group_links"]
+            assert len(group_links) == 40
+            assert all(len(g["name"]) == 200 and len(g["card"]) <= 400 for g in group_links)
+        finally:
+            await browser.close()
