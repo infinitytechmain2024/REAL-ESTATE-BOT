@@ -19,7 +19,7 @@ import logging
 import secrets
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -53,9 +53,15 @@ class LiveViewController:
         *,
         start_viewer: Callable[[str], list[Any]] | None = None,
         stop_viewer: Callable[[list[Any]], None] | None = None,
+        wait_viewer: Callable[[list[Any]], Awaitable[None]] | None = None,
         keepalive_seconds: float = KEEPALIVE_SECONDS,
     ) -> None:
         self.manager = manager
+        # A real viewer is only reported once noVNC listens; injected test
+        # viewers have nothing to wait for unless a waiter is injected too.
+        if wait_viewer is None and start_viewer is None:
+            wait_viewer = lambda processes: interactive._wait_viewer(processes)  # noqa: E731
+        self._wait_viewer = wait_viewer
         # Looked up at call time so tests can replace interactive's helpers.
         self._start_viewer = start_viewer or (lambda password: interactive._start_viewer(password))
         self._stop_viewer = stop_viewer or (lambda processes: interactive._stop(processes))
@@ -87,6 +93,12 @@ class LiveViewController:
                         raise
                 password = secrets.token_urlsafe(9)[:8]  # VNC reads at most 8 characters
                 viewer = self._start_viewer(password)
+                if self._wait_viewer is not None:
+                    try:
+                        await self._wait_viewer(viewer)
+                    except RuntimeError as exc:
+                        log.error("browser_session.viewer_failed", extra={"error": str(exc)})
+                        raise LiveViewError(f"the viewer did not start: {exc}") from exc
             except BaseException:
                 self._stop_viewer(viewer)
                 await self.manager.release(handle)

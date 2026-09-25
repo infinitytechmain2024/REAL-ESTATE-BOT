@@ -326,12 +326,17 @@ def create_gate_app(coordinator: LiveViewCoordinator, bot_token: str, novnc_url:
         if request.headers.get("Upgrade", "").lower() == "websocket":
             return await _proxy_websocket(request, upstream)
         async with ClientSession() as client:
-            try:
-                async with client.get(upstream) as response:
-                    body = await response.read()
-                    content_type = response.headers.get("Content-Type", "application/octet-stream")
-            except (OSError, ClientError):
-                return web.Response(text="The browser is not running. Press Close and ask for a new window.", status=502)
+            # noVNC can still be binding for a moment right after the window opens.
+            for attempt in range(4):
+                try:
+                    async with client.get(upstream) as response:
+                        body = await response.read()
+                        content_type = response.headers.get("Content-Type", "application/octet-stream")
+                    break
+                except (OSError, ClientError):
+                    if attempt == 3:
+                        return web.Response(text="The browser is not running. Press Close and ask for a new window.", status=502)
+                    await asyncio.sleep(1)
         return web.Response(body=body, status=response.status, headers={"Content-Type": content_type, "Cache-Control": "no-store"})
 
     async def _proxy_websocket(request: web.Request, upstream: str) -> web.StreamResponse:
