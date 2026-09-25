@@ -9,7 +9,7 @@ import pytest
 from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from bot.verification.web import COOKIE, create_app
+from bot.verification.web import COOKIE, PENDING_COOKIE, create_app
 from tests.test_live_view import init_data
 from tests.test_verification_flow import OPERATOR, OTHER, announced, flow, token_of
 
@@ -156,3 +156,70 @@ async def test_unknown_actions_and_refusals_are_reported(page) -> None:
     assert (await client.post(f"/verify/jobs/{job.id}/explode", data={"csrf": token}, headers=headers)).status == 404
     refused = await client.post(f"/verify/jobs/{job.id}/solve", data={"csrf": token}, headers=headers, allow_redirects=False)
     assert "Claim the job first" in unquote(refused.headers["Location"])
+
+
+async def open_in_browser(client: TestClient, link: str) -> dict[str, str]:
+    """Safari: no Telegram signature, so ask for approval; returns the pending cookie header."""
+    opener = await client.get(path_of(link))
+    assert "Continue in this browser" in await opener.text()
+    response = await client.post(f"/verify/v/{token_of(link)}/browser", allow_redirects=False,
+                                 headers={"User-Agent": "Mozilla/5.0 (iPhone) Safari/605.1", "X-Forwarded-For": "203.0.113.9"})
+    assert response.status == 303 and response.headers["Location"] == f"/verify/v/{token_of(link)}/wait"
+    pending = response.cookies[PENDING_COOKIE]
+    assert pending["httponly"] and pending["secure"] and pending["samesite"] == "Strict"
+    return {"Cookie": f"{PENDING_COOKIE}={pending.value}"}
+
+
+def approval_of(notifier, user: int) -> str:
+    return next(url for url in reversed(notifier.links(user)) if "/verify/a/" in url)
+
+
+@pytest.mark.asyncio
+async def test_a_link_opened_in_safari_works_only_after_its_recipient_approves_in_telegram(page) -> None:
+    client, store, notifier, job = page
+    link = notifier.links(OPERATOR)[0]
+    assert link in next(t for c, t, _ in notifier.sent if c == OPERATOR)  # the link is also in the text, to copy
+    pending = await open_in_browser(client, link)
+    ask = [t for c, t, b in notifier.sent if c == OPERATOR and b and "/verify/a/" in b[1]]
+    assert ask and "iPhone" in ask[0] and "203.0.113.9" in ask[0]
+
+    waiting = await client.get(f"/verify/v/{token_of(link)}/wait", headers=pending, allow_redirects=False)
+    assert waiting.status == 200 and "Check Telegram" in await waiting.text()
+
+    approval = path_of(approval_of(notifier, OPERATOR))
+    assert (await client.post(f"{approval}/auth", data=init_data(OTHER))).status == 403  # not the recipient
+    assert (await client.post(f"{approval}/auth", data="garbage")).status == 403
+    assert (await client.post(f"{approval}/auth", data=init_data(OPERATOR))).status == 200
+
+    done = await client.get(f"/verify/v/{token_of(link)}/wait", headers=pending, allow_redirects=False)
+    assert done.status == 303 and done.headers["Location"] == f"/verify/jobs/{job.id}"
+    session = {"Cookie": f"{COOKIE}={done.cookies[COOKIE].value}"}
+    assert (await client.get(f"/verify/jobs/{job.id}", headers=session)).status == 200
+    assert [e.detail.get("via") for e in store.log[job.id] if e.event == "opened"] == ["browser"]
+    # The approval opened one browser once; the link itself is now used up.
+    assert (await client.get(f"/verify/v/{token_of(link)}/wait", headers=pending)).status == 403
+    assert (await client.post(f"/verify/v/{token_of(link)}/auth", data=init_data(OPERATOR))).status == 403
+
+
+@pytest.mark.asyncio
+async def test_an_approved_request_serves_only_the_browser_that_asked(page) -> None:
+    client, _store, notifier, _job = page
+    link = notifier.links(OPERATOR)[0]
+    await open_in_browser(client, link)
+    await client.post(f"{path_of(approval_of(notifier, OPERATOR))}/auth", data=init_data(OPERATOR))
+    # Someone else holding the forwarded link, but not the waiting browser's cookie.
+    assert (await client.get(f"/verify/v/{token_of(link)}/wait")).status == 403
+    stranger = await client.get(f"/verify/v/{token_of(link)}/wait", headers={"Cookie": f"{PENDING_COOKIE}=x" * 1})
+    assert stranger.status == 403
+
+
+@pytest.mark.asyncio
+async def test_a_link_cannot_be_used_to_flood_its_recipient(page) -> None:
+    client, _store, notifier, _job = page
+    link = notifier.links(OPERATOR)[0]
+    for _ in range(3):
+        await open_in_browser(client, link)
+    refused = await client.post(f"/verify/v/{token_of(link)}/browser", allow_redirects=False)
+    assert refused.status == 403 and "Too many attempts" in await refused.text()
+    bogus = await client.post("/verify/v/not-a-token/browser", allow_redirects=False)
+    assert bogus.status == 403

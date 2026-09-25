@@ -296,6 +296,21 @@ Facebook account, so list only trusted people in `TELEGRAM_OPERATOR_IDS`.
 While the verification service handles a job, the `/login` watcher stays quiet
 about that profile, so each checkpoint produces one message.
 
+#### Opening the window in Safari or a desktop browser
+
+Every `/login` and verification message also carries its link as text, so it
+can be copied into Safari or a desktop browser and used full size. There is no
+Telegram signature there, so the page offers **Continue in this browser**, and
+the bot then asks the message's recipient to approve that browser. The
+message shows the browser's user agent and IP. `/login` asks with an
+**Approve** button in the chat; a verification link asks with a signed Mini
+App button. Only the browser that asked, which holds a short-lived pending
+cookie, gets the session, once, and only after that person approves. A
+forwarded link is useless without that approval. At most three requests per
+link; each lapses after 10 minutes. Inside Telegram the Mini App now opens
+full screen, and vertical swipes no longer close it while you use the remote
+page.
+
 #### Running a batch
 
 A confirmed `/run facebook-groups ...` starts by itself: the Orchestra writes

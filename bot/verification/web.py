@@ -1,5 +1,10 @@
 """The verification page, opened as a Telegram Mini App under /verify.
 
+The same link also works in an ordinary browser (Safari): there is no
+Telegram signature there, so the bot first asks the link's recipient to
+approve that browser with a signed Mini App button, and only the waiting
+browser that asked (it holds a pending cookie) gets the page session.
+
 Caddy serves it over HTTPS; the service itself has no host port. Access is
 layered: Telegram's signature on the Mini App says which user pressed the
 button (checked before anything else), that user must be an operator, the
@@ -24,11 +29,12 @@ from aiohttp import ClientError, ClientSession, ClientWSTimeout, WSMsgType, web
 
 from bot.telegram_webapp import TELEGRAM_WEB_APP_JS
 
-from .service import AccessDenied, ActionRefused, VerificationService
+from .service import BROWSER_REQUEST_SECONDS, AccessDenied, ActionRefused, VerificationService
 
 log = logging.getLogger(__name__)
 PREFIX = "/verify"
 COOKIE = "verification_session"
+PENDING_COOKIE = "verification_pending"
 ACTIONS = ("claim", "view", "solve", "resume", "cancel", "fail")
 
 _BASE_HEADERS = {
@@ -80,25 +86,75 @@ def create_app(service: VerificationService, novnc_url: str) -> web.Application:
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
-    async def opener(request: web.Request) -> web.Response:
-        """The Mini App's first page: hands Telegram's signed initData to /auth."""
-        token = request.match_info["token"]
+    def _mini_app(title: str, waiting: str, fallback: str, post_to: str, done: str, *, full: bool = False) -> web.Response:
+        """A page that posts Telegram's signed initData, then follows ``next`` or shows ``done``."""
         nonce = secrets.token_urlsafe(16)
         script = f"""<script nonce="{nonce}">
 const tg = window.Telegram && window.Telegram.WebApp;
 const say = (t) => document.getElementById('m').textContent = t;
-if (!tg || !tg.initData) {{ say('Open this page from the button in the Telegram bot.'); }}
-else {{
+if (tg && tg.initData) {{
+  document.getElementById('m').textContent = {json.dumps(waiting)};
   tg.ready(); tg.expand();
-  fetch({json.dumps(f"{PREFIX}/v/{token}/auth")}, {{method: 'POST', headers: {{'Content-Type': 'text/plain'}}, body: tg.initData, credentials: 'same-origin'}})
+  {"try { if (tg.requestFullscreen) tg.requestFullscreen(); } catch (e) {} try { if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {}" if full else ""}
+  fetch({json.dumps(post_to)}, {{method: 'POST', headers: {{'Content-Type': 'text/plain'}}, body: tg.initData, credentials: 'same-origin'}})
     .then(r => r.json().then(j => [r.ok, j]))
-    .then(([ok, j]) => ok ? location.replace(j.next) : say(j.error || 'Not allowed.'))
+    .then(([ok, j]) => !ok ? say(j.error || 'Not allowed.') : j.next ? location.replace(j.next) : (say({json.dumps(done)}), setTimeout(() => tg.close(), 1500)))
     .catch(() => say('The server did not answer. Try again in a moment.'));
 }}
 </script>"""
-        csp = f"default-src 'none'; script-src 'nonce-{nonce}' https://telegram.org; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self' https://web.telegram.org; base-uri 'none'"
-        return _html("Verification", f"<p id='m'>Checking who you are&hellip;</p>{script}", csp=csp,
-                     head=f"<script src='{TELEGRAM_WEB_APP_JS}'></script>")
+        csp = (f"default-src 'none'; script-src 'nonce-{nonce}' https://telegram.org; connect-src 'self'; style-src 'unsafe-inline'; "
+               "form-action 'self'; frame-ancestors 'self' https://web.telegram.org; base-uri 'none'")
+        return _html(title, f"<div id='m'>{fallback}</div>{script}", csp=csp, head=f"<script src='{TELEGRAM_WEB_APP_JS}'></script>")
+
+    async def opener(request: web.Request) -> web.Response:
+        """First page of the link: signed Mini App inside Telegram, approval flow anywhere else."""
+        token = request.match_info["token"]
+        outside = (
+            "<h1>Verification</h1><p>This link is opened outside Telegram. Continue here and the bot will ask you "
+            "to approve this browser in Telegram first.</p>"
+            f"<form method='post' action='{PREFIX}/v/{html.escape(token)}/browser'><button type='submit'>Continue in this browser</button></form>"
+        )
+        return _mini_app("Verification", "Checking who you are…", outside, f"{PREFIX}/v/{token}/auth", "", full=True)
+
+    async def browser_request(request: web.Request) -> web.StreamResponse:
+        token = request.match_info["token"]
+        forwarded = request.headers.get("X-Forwarded-For", request.remote or "").split(",")[0].strip()
+        agent = " ".join(request.headers.get("User-Agent", "unknown browser").split())[:100]
+        try:
+            cookie = await service.request_browser(token, f"{agent}; IP {forwarded or 'unknown'}")
+        except AccessDenied as exc:
+            return _denied(str(exc))
+        response = web.HTTPSeeOther(f"{PREFIX}/v/{token}/wait")
+        response.set_cookie(PENDING_COOKIE, cookie, path=f"{PREFIX}/", httponly=True, secure=True, samesite="Strict",
+                            max_age=BROWSER_REQUEST_SECONDS)
+        return response
+
+    async def browser_wait(request: web.Request) -> web.StreamResponse:
+        try:
+            opened = await service.browser_status(request.match_info["token"], request.cookies.get(PENDING_COOKIE))
+        except AccessDenied as exc:
+            return _denied(str(exc))
+        if opened is None:
+            return _html("Waiting for approval", "<h1>Check Telegram</h1><p>The bot sent you an <b>Approve browser login</b> "
+                         "button. Press it, then come back here; this page checks every few seconds.</p>",
+                         head="<meta http-equiv='refresh' content='3'>")
+        response = web.HTTPSeeOther(f"{PREFIX}/jobs/{opened.session.job_id}")
+        response.set_cookie(COOKIE, opened.cookie, path=f"{PREFIX}/", httponly=True, secure=True, samesite="Strict",
+                            max_age=service.config.session_minutes * 60)
+        response.del_cookie(PENDING_COOKIE, path=f"{PREFIX}/")
+        return response
+
+    async def approval_page(request: web.Request) -> web.Response:
+        approval = request.match_info["approval"]
+        return _mini_app("Approve browser", "Approving…", "<p>Open this from the Approve button in the Telegram bot.</p>",
+                         f"{PREFIX}/a/{approval}/auth", "Approved. Go back to your browser.")
+
+    async def approval_auth(request: web.Request) -> web.Response:
+        try:
+            await service.approve_browser(request.match_info["approval"], (await request.text())[:4096])
+        except AccessDenied as exc:
+            return web.json_response({"error": str(exc)}, status=403, headers=_BASE_HEADERS)
+        return web.json_response({"approved": True}, headers=_BASE_HEADERS)
 
     async def auth(request: web.Request) -> web.Response:
         try:
@@ -258,6 +314,10 @@ else {{
     app.router.add_get("/healthz", health)
     app.router.add_get(f"{PREFIX}/v/{{token}}", opener)
     app.router.add_post(f"{PREFIX}/v/{{token}}/auth", auth)
+    app.router.add_post(f"{PREFIX}/v/{{token}}/browser", browser_request)
+    app.router.add_get(f"{PREFIX}/v/{{token}}/wait", browser_wait)
+    app.router.add_get(f"{PREFIX}/a/{{approval}}", approval_page)
+    app.router.add_post(f"{PREFIX}/a/{{approval}}/auth", approval_auth)
     app.router.add_get(f"{PREFIX}/jobs/{{job}}", job_page)
     app.router.add_post(f"{PREFIX}/jobs/{{job}}/{{action}}", act)
     app.router.add_get(f"{PREFIX}/jobs/{{job}}/live/{{path:.+}}", live_proxy)

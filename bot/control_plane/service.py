@@ -65,7 +65,7 @@ class ControlPlane:
         return Reply(reply.text, (*reply.buttons, self.access.button()))
 
     async def handle_callback(self, user_id: int | None, data: str, display_name: str | None = None, username: str | None = None) -> Reply:
-        """Inline buttons: ``live:done|cancel:<id>``, ``access:request``, ``access:approve|deny:<id>``."""
+        """Inline buttons: ``live:done|cancel:<id>``, ``live:approve:<code>``, ``access:request``, ``access:approve|deny:<id>``."""
         kind, _, rest = data.partition(":")
         action, _, target = rest.partition(":")
         if kind == "access" and self.access is not None:
@@ -74,6 +74,8 @@ class ControlPlane:
             if action in {"helper", "operator", "deny"}:
                 return await self.access.decide(user_id, target, None if action == "deny" else action)
             return Reply("This button is no longer valid.")
+        if kind == "live" and action == "approve" and self.live is not None:
+            return self.live.approve_browser(target, user_id)
         session_id = target
         if kind != "live" or action not in {"done", "cancel"} or not is_session_id(session_id) or self.live is None:
             return Reply("This button is no longer valid.")
