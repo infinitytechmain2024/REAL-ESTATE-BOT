@@ -30,6 +30,7 @@ class BrowserUnavailable(RuntimeError):
 class LiveBrowser(Protocol):
     async def start(self, profile_id: str, profile_name: str, platform: str, url: str, minutes: int) -> str: ...
     async def stop(self, profile_id: str) -> None: ...
+    async def is_open(self, profile_id: str) -> bool: ...
 
 
 class RecoveryChecker(Protocol):
@@ -52,6 +53,14 @@ class BrowserLiveClient:
                 return str((await response.json())["password"])
         except aiohttp.ClientError as exc:
             raise BrowserUnavailable("the browser service is not reachable") from exc
+
+    async def is_open(self, profile_id: str) -> bool:
+        """Whether the browser service still shows this profile's window (a restart closes it)."""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers=self._headers) as http, http.get(self._url) as response:
+                return response.status == 200 and (await response.json()).get("profile_id") == profile_id
+        except (aiohttp.ClientError, ValueError):
+            return False
 
     async def stop(self, profile_id: str) -> None:
         try:

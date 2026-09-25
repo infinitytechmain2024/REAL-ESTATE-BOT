@@ -45,15 +45,22 @@ class FakeBrowser:
         self.started: list[str] = []
         self.stopped: list[str] = []
         self.fail = fail
+        self.window: str | None = None  # the profile whose window the browser service shows
 
     async def start(self, profile: LiveProfile, url: str, minutes: int) -> str:
         if self.fail:
             raise LiveViewUnavailable("the browser is busy")
         self.started.append(f"{profile.name}@{url}")
+        self.window = profile.id
         return f"pw{len(self.started)}"
 
     async def stop(self, profile_id: str) -> None:
         self.stopped.append(profile_id)
+        if self.window == profile_id:
+            self.window = None
+
+    async def is_open(self, profile_id: str) -> bool:
+        return self.window == profile_id
 
 
 def coordinator(store: MemoryLiveViewStore | None = None, browser: FakeBrowser | None = None, notifier=None, public_url: str = "https://1-2-3-4.sslip.io") -> LiveViewCoordinator:
@@ -419,3 +426,15 @@ async def test_a_browser_request_must_name_an_operator_and_cannot_flood() -> Non
         await live.request_browser(session_id, OPERATOR, "x")
     with pytest.raises(LiveViewUnavailable, match="too many"):
         await live.request_browser(session_id, OPERATOR, "x")
+
+
+@pytest.mark.asyncio
+async def test_a_window_closed_by_a_browser_restart_is_opened_again() -> None:
+    store, browser = MemoryLiveViewStore(), FakeBrowser()
+    live = coordinator(store, browser)
+    await live.login(OPERATOR, "facebook", "facebook-main")
+    session_id = next(iter(store.sessions))
+    assert await live.open(session_id, OPERATOR) == "pw1"
+    assert await live.open(session_id, OPERATOR) == "pw1" and len(browser.started) == 1  # still open: reused
+    browser.window = None  # the browser container was restarted
+    assert await live.open(session_id, OPERATOR) == "pw2" and len(browser.started) == 2

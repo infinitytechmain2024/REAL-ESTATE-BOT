@@ -30,10 +30,16 @@ class FakeLive:
         if self.fail:
             raise BrowserUnavailable("the browser is busy")
         self.started.append(f"{profile_id}@{url}")
+        self.window = profile_id
         return "vncpass1"
 
     async def stop(self, profile_id: str) -> None:
         self.stopped.append(profile_id)
+        if getattr(self, "window", None) == profile_id:
+            self.window = None
+
+    async def is_open(self, profile_id: str) -> bool:
+        return getattr(self, "window", None) == profile_id
 
 
 class FakeWatchdog:
@@ -554,3 +560,18 @@ async def test_a_launch_nobody_picks_up_is_reported_as_stale_once() -> None:
     stale = notifier.sent[before:]
     assert {c for c, _, _ in stale} == {OWNER, OPERATOR} and len(stale) == 2
     assert all("facebook-runner" in t and f"FACEBOOK_BATCH_ID={job.batch_id}" in t for _, t, _ in stale)
+
+
+@pytest.mark.asyncio
+async def test_a_live_window_closed_by_a_browser_restart_is_opened_again() -> None:
+    live = FakeLive()
+    service, store, notifier, _ = flow(live=live)
+    await announced(service, store)
+    session = (await service.open(token_of(notifier.links(OPERATOR)[0]), init_data(OPERATOR))).session
+    await service.claim(session)
+    await service.view(session)
+    await service.view(session)
+    assert len(live.started) == 1  # still open: reused
+    live.window = None  # the browser container was restarted
+    await service.view(session)
+    assert len(live.started) == 2
