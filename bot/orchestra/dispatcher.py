@@ -6,11 +6,17 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from bot.campaign.architect import InvalidGoal, plan_campaign
+from bot.campaign.models import Campaign
 
 from .models import ClaimedCommand, ClaimLost, CommandReceipt, CommandState, ConfirmedCommand
-from .parser import CommandValidationError, parse_run, parse_scope
-from .store import PostgresOrchestraStore
+from .parser import CommandValidationError, parse_campaign, parse_run, parse_scope
+from .store import DISPATCHER_ACTOR, PostgresOrchestraStore
+
+if TYPE_CHECKING:
+    from bot.campaign.store import CampaignStore
 
 log = logging.getLogger(__name__)
 Notifier = Callable[[int, str], Awaitable[None]]
@@ -19,13 +25,14 @@ REAP_INTERVAL_SECONDS = 60.0
 
 
 class OrchestraDispatcher:
-    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, stale_batch_seconds: int = 900, notifier: Notifier | None = None) -> None:
+    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, stale_batch_seconds: int = 900, notifier: Notifier | None = None, campaigns: CampaignStore | None = None) -> None:
         if not 10 <= lease_seconds <= 300 or not 0.1 <= poll_seconds <= 30 or not 300 <= stale_batch_seconds <= 86_400:
             raise ValueError("unsafe dispatcher settings")
         self.stale_batch_seconds = stale_batch_seconds
         self._last_reap = float("-inf")
         self.store, self.lease_seconds, self.poll_seconds = store, lease_seconds, poll_seconds
         self.notifier, self.operator_ids = notifier, operator_ids
+        self.campaigns = campaigns
         self._stop = asyncio.Event()
 
     async def enqueue(self, command: ConfirmedCommand) -> CommandReceipt:
@@ -55,10 +62,13 @@ class OrchestraDispatcher:
         await self._notify(item.chat_id, f"Orchestra: processing {item.command} request {item.id}.")
         try:
             result = await self._dispatch(item)
-            await self._notify(item.chat_id, f"Orchestra: {item.command} request {item.id} {_summary(result)}.")
+            await self._notify(item.chat_id, result.get("reply") or f"Orchestra: {item.command} request {item.id} {_summary(result)}.")
         except ClaimLost:
             log.warning("orchestra.claim_lost", extra={"command_id": item.id})
             await self._notify(item.chat_id, f"Orchestra: request {item.id} was cancelled before it completed; nothing was planned.")
+        except InvalidGoal as exc:
+            await self._fail(item, "invalid_goal", str(exc))
+            await self._notify(item.chat_id, str(exc))
         except CommandValidationError as exc:
             await self._fail(item, "invalid_command", str(exc))
             await self._notify(item.chat_id, f"Orchestra: request {item.id} failed validation: {exc}")
@@ -76,8 +86,36 @@ class OrchestraDispatcher:
         actor = f"telegram:{item.user_id}"
         if item.command == "run":
             return await self.store.plan_run(parse_run(item.arguments), item, actor=actor)
+        if item.command == "campaign":
+            return await self._campaign(item, actor)
         scope_kind, identifier = parse_scope(item.arguments)
         return await self.store.apply_lifecycle(item, scope_kind, identifier, actor=actor)
+
+    async def _campaign(self, item: ClaimedCommand, actor: str) -> dict[str, Any]:
+        """Plan and store a campaign, cancel one, or report the chat's latest; the runner does the work."""
+        if self.campaigns is None:
+            raise ValueError("campaigns are not available in this service")
+        action, value = parse_campaign(item.arguments)
+        created: str | None = None
+        if action == "status":
+            campaign = await self.campaigns.latest_for_chat(item.chat_id)
+            result = {"status": "finished", "campaign_id": campaign.id if campaign else None, "reply": campaign_status(campaign)}
+        elif action == "cancel":
+            cancelled = await self.campaigns.cancel(value, actor)
+            reply = f"Кампания {value} остановлена." if cancelled else f"Кампания {value} не найдена или уже завершена."
+            result = {"status": "cancelled" if cancelled else "unchanged", "campaign_id": value, "reply": reply}
+        else:
+            plan = plan_campaign(value)  # InvalidGoal: nothing is stored
+            created = await self.campaigns.create(plan, chat_id=item.chat_id, requested_by=item.user_id,
+                                                  source_text=value, actor=actor)
+            result = {"status": "planned", "campaign_id": created, "reply": f"Кампания {created} запланирована: {plan.goal}"}
+        try:
+            await self.store.complete(item, CommandState.FINISHED, result)
+        except ClaimLost:
+            if created is not None:  # the command was cancelled meanwhile: so is its campaign
+                await self.campaigns.cancel(created, DISPATCHER_ACTOR)
+            raise
+        return result
 
     async def _fail(self, item: ClaimedCommand, error_code: str, error_detail: str) -> None:
         with suppress(ClaimLost):
@@ -108,6 +146,20 @@ class OrchestraDispatcher:
             await self.notifier(chat_id, text)
         except Exception:  # noqa: BLE001 - Telegram delivery must not undo durable orchestration.
             log.warning("orchestra.status_notification_failed", extra={"chat_id": chat_id})
+
+
+_STATE_NAMES = {
+    "planned": "запланирована", "discovering": "поиск групп", "running": "идёт сбор",
+    "paused_verification": "нужна verification", "completed": "завершена", "cancelled": "остановлена",
+    "failed": "ошибка",
+}
+
+
+def campaign_status(campaign: Campaign | None) -> str:
+    if campaign is None:
+        return "В этом чате ещё нет кампаний. Начните: /campaign <что и где искать>"
+    reason = f" ({campaign.stop_reason})" if campaign.stop_reason and campaign.state in ("failed", "paused_verification") else ""
+    return f"Кампания {campaign.id}: {_STATE_NAMES.get(campaign.state, campaign.state)}{reason}\n{campaign.plan.goal}"
 
 
 def _summary(result: dict[str, Any]) -> str:

@@ -26,6 +26,10 @@ class CampaignStore(Protocol):
 
     async def set_status_message(self, campaign_id: str, message_id: int, *, actor: str = STORE_ACTOR) -> bool: ...
 
+    async def cancel(self, campaign_id: str, actor: str) -> bool: ...
+
+    async def latest_for_chat(self, chat_id: int) -> Campaign | None: ...
+
 
 def _check_create(source_text: str) -> None:
     if not source_text or len(source_text) > MAX_SOURCE_TEXT:
@@ -98,6 +102,19 @@ class PostgresCampaignStore:
             )
         return row is not None
 
+    async def cancel(self, campaign_id: str, actor: str) -> bool:
+        """Stop a campaign that has not ended; the runner then cancels its in-flight window."""
+        return await self.set_state(campaign_id, "cancelled", actor, reason=f"cancelled_by:{actor}"[:500])
+
+    async def latest_for_chat(self, chat_id: int) -> Campaign | None:
+        row = await self.pool.fetchrow(
+            """select id::text, plan::text, state, telegram_chat_id, requested_by, source_text,
+                      status_message_id, stop_reason, created_at, finished_at
+               from campaigns where telegram_chat_id = $1 order by created_at desc limit 1""",
+            chat_id,
+        )
+        return _campaign(row) if row else None
+
 
 class MemoryCampaignStore:
     """In-process twin of ``PostgresCampaignStore`` for tests and dry runs."""
@@ -138,6 +155,13 @@ class MemoryCampaignStore:
             return False
         self.campaigns[campaign_id] = replace(current, status_message_id=message_id)
         return True
+
+    async def cancel(self, campaign_id: str, actor: str) -> bool:
+        return await self.set_state(campaign_id, "cancelled", actor, reason=f"cancelled_by:{actor}"[:500])
+
+    async def latest_for_chat(self, chat_id: int) -> Campaign | None:
+        mine = [c for c in self.campaigns.values() if c.chat_id == chat_id]
+        return max(mine, key=lambda c: c.created_at) if mine else None
 
 
 def _campaign(row: asyncpg.Record) -> Campaign:

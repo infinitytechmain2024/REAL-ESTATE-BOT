@@ -124,103 +124,13 @@ class PostgresOrchestraStore:
             await _finish(conn, item, state, result, error_code=error_code, error_detail=error_detail)
 
     async def _ready_profile(self, conn: asyncpg.Connection[asyncpg.Record], platform: str) -> str:
-        profile = await conn.fetchval(
-            """select id from browser_profiles where platform=$1 and state='ready' and deleted_at is null
-                 order by created_at limit 1""", platform
-        )
-        if profile is None:
-            raise ValueError(f"no ready {platform} browser profile is provisioned")
-        return str(profile)
+        return await ready_profile(conn, platform)
 
     async def _source(self, conn: asyncpg.Connection[asyncpg.Record], request: RunRequest, target: str) -> str:
-        """Create an active source, or reuse an existing one only while it may run.
-
-        Reusing a paused, disabled, retired, deleted, or verification-blocked
-        source would let ``/run`` silently override ``/pause`` or a challenge.
-        """
-        source_id = await conn.fetchval(
-            """insert into monitoring_sources(platform, source_kind, vertical, canonical_url, acquisition_method, state)
-               values($1,$2,$3,$4,$5,'active')
-               on conflict(platform, canonical_url) do nothing
-               returning id""",
-            request.platform, request.source_kind, request.vertical, target, request.method.value,
-        )
-        if source_id is not None:
-            return str(source_id)
-        existing = await conn.fetchrow(
-            "select id, state, deleted_at from monitoring_sources where platform=$1 and canonical_url=$2 for update",
-            request.platform, target,
-        )
-        assert existing is not None
-        source_id, state = str(existing["id"]), existing["state"]
-        if existing["deleted_at"] is not None:
-            raise ValueError(f"source {source_id} is deleted and cannot be run")
-        if state == "paused":
-            raise ValueError(f"source {source_id} is paused; send /resume source:{source_id} first")
-        if state == "human_verification_required":
-            raise ValueError(f"source {source_id} is waiting for human verification")
-        if state == "draft":
-            await conn.execute("update monitoring_sources set state='active' where id=$1", source_id)
-        elif state != "active":
-            raise ValueError(f"source {source_id} is {state} and cannot be run")
-        return source_id
+        return await ensure_source(conn, request, target)
 
     async def _check_safety(self, conn: asyncpg.Connection[asyncpg.Record], request: RunRequest) -> None:
-        """Refuse work over a daily quota or while a breaker is open (raises ValueError)."""
-        limits, method, platform = self.limits, request.method.value, request.platform
-        # Serialise quota checks so two commands cannot both take the last slot.
-        await conn.execute("select pg_advisory_xact_lock(hashtext('orchestra_safety_quota'))")
-        window = limits.breaker_window_hours
-        challenges = await conn.fetchval(
-            """select count(*) from verification_jobs j join monitoring_sources s on s.id=j.source_id
-                where s.platform=$1 and j.requested_at > now() - make_interval(hours => $2)""",
-            platform, window,
-        )
-        if challenges >= limits.breaker_challenges:
-            raise ValueError(
-                f"safety breaker open: {challenges} {platform} challenges in the last {window} h; "
-                "new work on this platform waits until the window passes"
-            )
-        if method == "facebook_connector":
-            row = await conn.fetchrow(
-                """select count(*) as batches, coalesce(sum(max_items), 0) as groups from acquisition_batches
-                    where platform='facebook' and created_at > now() - interval '1 day'"""
-            )
-            if row["batches"] + 1 > limits.facebook_batches_per_day:
-                raise ValueError(f"daily quota reached: {row['batches']} of {limits.facebook_batches_per_day} Facebook batches in 24 h")
-            if row["groups"] + len(request.targets) > limits.facebook_groups_per_day:
-                raise ValueError(
-                    f"daily quota reached: {row['groups']} of {limits.facebook_groups_per_day} Facebook group reads in 24 h; "
-                    f"this batch needs {len(request.targets)}"
-                )
-            failures = await conn.fetchval(
-                """select count(*) from acquisition_batches
-                    where platform='facebook' and state='failed' and finished_at > now() - make_interval(hours => $1)
-                      and finished_at > coalesce((select max(finished_at) from acquisition_batches
-                                                   where platform='facebook' and state='succeeded'), '-infinity')""",
-                window,
-            )
-        else:
-            runs = await conn.fetchval(
-                """select count(*) from acquisition_runs where acquisition_method=$1 and batch_item_id is null
-                    and created_at > now() - interval '1 day'""",
-                method,
-            )
-            if runs + 1 > limits.runs_per_day:
-                raise ValueError(f"daily quota reached: {runs} of {limits.runs_per_day} {method} runs in 24 h")
-            failures = await conn.fetchval(
-                """select count(*) from acquisition_runs
-                    where acquisition_method=$1 and batch_item_id is null and state='failed'
-                      and finished_at > now() - make_interval(hours => $2)
-                      and finished_at > coalesce((select max(finished_at) from acquisition_runs
-                                                   where acquisition_method=$1 and batch_item_id is null and state='succeeded'), '-infinity')""",
-                method, window,
-            )
-        if failures >= limits.breaker_failures:
-            raise ValueError(
-                f"safety breaker open: {failures} failed {method} runs in a row in the last {window} h; "
-                "check the worker logs, it closes after the window or the next success"
-            )
+        await check_safety(conn, self.limits, request)
 
     async def plan_run(self, request: RunRequest, item: ClaimedCommand, *, actor: str) -> dict[str, Any]:
         """Persist bounded work and finish the command in one transaction.
@@ -230,38 +140,25 @@ class PostgresOrchestraStore:
         """
         async with self._pool().acquire() as conn, conn.transaction():
             await _set_actor(conn, actor)
-            await self._check_safety(conn, request)
-            profile_id = None
-            if request.method.value != "scrapling":
-                profile_id = await self._ready_profile(conn, request.platform)
-            source_ids = [await self._source(conn, request, target) for target in request.targets]
             if request.method.value == "facebook_connector":
-                batch_id = await conn.fetchval(
-                    """insert into acquisition_batches(platform, acquisition_method, vertical, state, max_items, requested_by)
-                       values ('facebook','facebook_connector',$1,'planned',$2,$3) returning id""",
-                    request.vertical, len(source_ids), actor,
-                )
-                for sequence_no, source_id in enumerate(source_ids, 1):
-                    await conn.execute(
-                        "insert into acquisition_batch_items(batch_id, source_id, sequence_no) values($1,$2,$3)",
-                        batch_id, source_id, sequence_no,
-                    )
-                await conn.execute("update acquisition_batches set state='queued' where id=$1", batch_id)
                 # facebook-runner starts it (migration 012); the requester hears the outcome.
-                await conn.execute(
-                    """insert into collector_launch_requests(batch_id, requested_by, notify_telegram_id)
-                       values ($1, $2, $3) on conflict do nothing""",
-                    batch_id, actor, item.user_id,
-                )
-                result = {"status": "queued", "method": request.method.value, "batch_id": str(batch_id), "source_ids": source_ids, "max_groups": len(source_ids), "max_posts_per_group": 20, "browser_profile_id": profile_id}
-            elif request.method.value == "agent_ridge":
+                planned = await plan_facebook_batch(conn, self.limits, request, actor=actor, notify_telegram_id=item.user_id)
+                assert planned is not None  # only skip_unavailable leaves every target out
+                result = {"status": "queued", "method": request.method.value, "batch_id": planned.batch_id, "source_ids": planned.source_ids, "max_groups": len(planned.source_ids), "max_posts_per_group": 20, "browser_profile_id": planned.profile_id}
+            else:
+                await check_safety(conn, self.limits, request)
+                profile_id = None
+                if request.method.value != "scrapling":
+                    profile_id = await ready_profile(conn, request.platform)
+                source_ids = [await ensure_source(conn, request, target) for target in request.targets]
+            if request.method.value == "agent_ridge":
                 run_id = await conn.fetchval(
                     """insert into acquisition_runs(source_id, browser_profile_id, acquisition_method, state, max_pages, max_runtime_seconds, allowed_skills)
                        values($1,$2,'agent_ridge','queued',5,120,'[\"read_public_page\",\"extract_public_text\"]'::jsonb) returning id""",
                     source_ids[0], profile_id,
                 )
                 result = {"status": "queued", "method": request.method.value, "run_id": str(run_id), "source_ids": source_ids, "max_pages": 5, "max_runtime_seconds": 120, "browser_profile_id": profile_id}
-            else:
+            elif request.method.value == "scrapling":
                 run_id = await conn.fetchval(
                     """insert into acquisition_runs(source_id, acquisition_method, state, max_pages, max_runtime_seconds, allowed_skills)
                        values($1,'scrapling','queued',1,45,'[\"http_get\",\"scrapling_parse\"]'::jsonb) returning id""",
@@ -382,6 +279,196 @@ class PostgresOrchestraStore:
                         row["browser_profile_id"],
                     )
             return [str(row["batch_id"]) for row in stale]
+
+
+@dataclass(frozen=True)
+class FacebookBatchPlan:
+    batch_id: str
+    source_ids: list[str]
+    profile_id: str
+    skipped: tuple[str, ...] = ()  # targets whose source may not run now (skip_unavailable)
+
+
+async def ready_profile(conn: asyncpg.Connection[asyncpg.Record], platform: str) -> str:
+    profile = await conn.fetchval(
+        """select id from browser_profiles where platform=$1 and state='ready' and deleted_at is null
+             order by created_at limit 1""", platform
+    )
+    if profile is None:
+        raise ValueError(f"no ready {platform} browser profile is provisioned")
+    return str(profile)
+
+
+async def ensure_source(conn: asyncpg.Connection[asyncpg.Record], request: RunRequest, target: str) -> str:
+    """Create an active source, or reuse an existing one only while it may run.
+
+    Reusing a paused, disabled, retired, deleted, or verification-blocked
+    source would let ``/run`` silently override ``/pause`` or a challenge.
+    A refusal raises before this function writes anything.
+    """
+    source_id = await conn.fetchval(
+        """insert into monitoring_sources(platform, source_kind, vertical, canonical_url, acquisition_method, state)
+           values($1,$2,$3,$4,$5,'active')
+           on conflict(platform, canonical_url) do nothing
+           returning id""",
+        request.platform, request.source_kind, request.vertical, target, request.method.value,
+    )
+    if source_id is not None:
+        return str(source_id)
+    existing = await conn.fetchrow(
+        "select id, state, deleted_at from monitoring_sources where platform=$1 and canonical_url=$2 for update",
+        request.platform, target,
+    )
+    assert existing is not None
+    source_id, state = str(existing["id"]), existing["state"]
+    if existing["deleted_at"] is not None:
+        raise ValueError(f"source {source_id} is deleted and cannot be run")
+    if state == "paused":
+        raise ValueError(f"source {source_id} is paused; send /resume source:{source_id} first")
+    if state == "human_verification_required":
+        raise ValueError(f"source {source_id} is waiting for human verification")
+    if state == "draft":
+        await conn.execute("update monitoring_sources set state='active' where id=$1", source_id)
+    elif state != "active":
+        raise ValueError(f"source {source_id} is {state} and cannot be run")
+    return source_id
+
+
+async def challenge_breaker(conn: asyncpg.Connection[asyncpg.Record], limits: SafetyLimits, platform: str) -> str | None:
+    """Why new work on ``platform`` must wait for recent challenges, or ``None``.
+
+    Counts verification jobs and, for Facebook, campaign discoveries that
+    stopped at a Facebook challenge (they pause the campaign, see
+    bot/campaign/discovery.py, and create no verification job).
+    """
+    window = limits.breaker_window_hours
+    challenges = await conn.fetchval(
+        """select count(*) from verification_jobs j join monitoring_sources s on s.id=j.source_id
+            where s.platform=$1 and j.requested_at > now() - make_interval(hours => $2)""",
+        platform, window,
+    )
+    if platform == "facebook":
+        challenges += await conn.fetchval(
+            """select count(*) from orchestration_audit_log
+                where entity_type='campaigns' and old_state='discovering' and new_state='paused_verification'
+                  and new_data->>'stop_reason' like 'facebook_challenge:%'
+                  and occurred_at > now() - make_interval(hours => $1)""",
+            window,
+        )
+    if challenges >= limits.breaker_challenges:
+        return (
+            f"safety breaker open: {challenges} {platform} challenges in the last {window} h; "
+            "new work on this platform waits until the window passes"
+        )
+    return None
+
+
+async def check_safety(conn: asyncpg.Connection[asyncpg.Record], limits: SafetyLimits, request: RunRequest) -> None:
+    """Refuse work over a daily quota or while a breaker is open (raises ValueError)."""
+    method, platform = request.method.value, request.platform
+    # Serialise quota checks so two commands cannot both take the last slot.
+    await conn.execute("select pg_advisory_xact_lock(hashtext('orchestra_safety_quota'))")
+    window = limits.breaker_window_hours
+    if (reason := await challenge_breaker(conn, limits, platform)) is not None:
+        raise ValueError(reason)
+    if method == "facebook_connector":
+        row = await conn.fetchrow(
+            """select count(*) as batches, coalesce(sum(max_items), 0) as groups from acquisition_batches
+                where platform='facebook' and created_at > now() - interval '1 day'"""
+        )
+        if row["batches"] + 1 > limits.facebook_batches_per_day:
+            raise ValueError(f"daily quota reached: {row['batches']} of {limits.facebook_batches_per_day} Facebook batches in 24 h")
+        if row["groups"] + len(request.targets) > limits.facebook_groups_per_day:
+            raise ValueError(
+                f"daily quota reached: {row['groups']} of {limits.facebook_groups_per_day} Facebook group reads in 24 h; "
+                f"this batch needs {len(request.targets)}"
+            )
+        failures = await conn.fetchval(
+            """select count(*) from acquisition_batches
+                where platform='facebook' and state='failed' and finished_at > now() - make_interval(hours => $1)
+                  and finished_at > coalesce((select max(finished_at) from acquisition_batches
+                                               where platform='facebook' and state='succeeded'), '-infinity')""",
+            window,
+        )
+    else:
+        runs = await conn.fetchval(
+            """select count(*) from acquisition_runs where acquisition_method=$1 and batch_item_id is null
+                and created_at > now() - interval '1 day'""",
+            method,
+        )
+        if runs + 1 > limits.runs_per_day:
+            raise ValueError(f"daily quota reached: {runs} of {limits.runs_per_day} {method} runs in 24 h")
+        failures = await conn.fetchval(
+            """select count(*) from acquisition_runs
+                where acquisition_method=$1 and batch_item_id is null and state='failed'
+                  and finished_at > now() - make_interval(hours => $2)
+                  and finished_at > coalesce((select max(finished_at) from acquisition_runs
+                                               where acquisition_method=$1 and batch_item_id is null and state='succeeded'), '-infinity')""",
+            method, window,
+        )
+    if failures >= limits.breaker_failures:
+        raise ValueError(
+            f"safety breaker open: {failures} failed {method} runs in a row in the last {window} h; "
+            "check the worker logs, it closes after the window or the next success"
+        )
+
+
+async def plan_facebook_batch(
+    conn: asyncpg.Connection[asyncpg.Record],
+    limits: SafetyLimits,
+    request: RunRequest,
+    *,
+    actor: str,
+    notify_telegram_id: int | None,
+    campaign_id: str | None = None,
+    skip_unavailable: bool = False,
+) -> FacebookBatchPlan | None:
+    """Queue one Facebook batch (at most 20 groups) plus its facebook-runner launch request.
+
+    The single path for ``/run facebook-groups`` and campaign windows: the
+    same quotas, breakers, profile and source checks, in the caller's
+    transaction. With ``skip_unavailable`` a target whose source may not run
+    (paused, deleted, waiting for verification) is left out instead of
+    refusing the batch; ``None`` means every target was left out.
+    """
+    if not 1 <= len(request.targets) <= 20:
+        raise ValueError("a Facebook batch may contain at most 20 groups")
+    await check_safety(conn, limits, request)
+    profile_id = await ready_profile(conn, request.platform)
+    source_ids: list[str] = []
+    skipped: list[str] = []
+    for target in request.targets:
+        try:
+            source_ids.append(await ensure_source(conn, request, target))
+        except ValueError:
+            if not skip_unavailable:
+                raise
+            skipped.append(target)
+    if not source_ids:
+        return None
+    batch_id = await conn.fetchval(
+        """insert into acquisition_batches(platform, acquisition_method, vertical, state, max_items, requested_by, campaign_id)
+           values ('facebook','facebook_connector',$1,'planned',$2,$3,$4::uuid) returning id""",
+        request.vertical, len(source_ids), actor, campaign_id,
+    )
+    for sequence_no, source_id in enumerate(source_ids, 1):
+        await conn.execute(
+            "insert into acquisition_batch_items(batch_id, source_id, sequence_no) values($1,$2,$3)",
+            batch_id, source_id, sequence_no,
+        )
+    await conn.execute("update acquisition_batches set state='queued' where id=$1", batch_id)
+    # facebook-runner starts it (migration 012).
+    await conn.execute(
+        """insert into collector_launch_requests(batch_id, requested_by, notify_telegram_id)
+           values ($1, $2, $3) on conflict do nothing""",
+        batch_id, actor, notify_telegram_id,
+    )
+    return FacebookBatchPlan(str(batch_id), source_ids, profile_id, tuple(skipped))
+
+
+async def cancel_batches(conn: asyncpg.Connection[asyncpg.Record], condition: str, *args: object) -> int:
+    """Public name of the batch cancel used by /cancel, for campaign cancels."""
+    return await _cancel_batches(conn, condition, *args)
 
 
 async def _set_actor(conn: asyncpg.Connection[asyncpg.Record], actor: str) -> None:

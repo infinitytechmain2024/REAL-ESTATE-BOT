@@ -33,7 +33,7 @@ TRANSCRIPTION_ERROR_REPLIES = {
     "empty_audio": "The voice message was empty.",
     "empty_transcript": "No speech was detected in that voice message.",
 }
-STATE_CHANGING = frozenset({"run", "pause", "resume", "cancel"})
+STATE_CHANGING = frozenset({"run", "pause", "resume", "cancel", "campaign"})
 
 
 class ControlPlane:
@@ -179,6 +179,7 @@ class ControlPlane:
                         "with a button to open the browser. You can also send /login [facebook|instagram|tiktok] [profile-name].")
             else:
                 text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
+                        "/campaign <goal> | status | cancel <id>, "
                         "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>.")
                 if role == "owner":
                     text += " Owners: /operators, /role <ID> helper|operator, /revoke <ID>."
@@ -211,6 +212,13 @@ class ControlPlane:
             return Reply("State-changing commands require a Telegram user identity.")
         if (refusal := self._operator_refusal(message)) is not None:
             return refusal
+        if command == "campaign":
+            if not arguments.strip():
+                return Reply("Use /campaign <what and where to search>, /campaign status, or /campaign cancel <id>.")
+            if arguments.strip().lower() == "status":
+                # Read-only: no confirmation; the Orchestra answers in this chat.
+                await self.command_sink(CommandEnvelope(command, "status", message.chat_id, message.user_id, message.message_id))
+                return Reply("Campaign status requested.")
         token = await self.store.create_confirmation(message, command, arguments, ttl_seconds=self.settings.confirmation_ttl_seconds)
         return Reply(f"Confirmation required for /{command}. Reply exactly: confirm {token} (expires in {self.settings.confirmation_ttl_seconds // 60} minutes).")
 

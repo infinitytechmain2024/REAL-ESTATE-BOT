@@ -357,6 +357,42 @@ services:
     read_only: true
     tmpfs: [/tmp]
 
+  campaign-runner:
+    # Drives /campaign goals: discovery, then windows of at most 20 groups as
+    # ordinary Facebook batches that facebook-runner executes (same quotas and
+    # breakers as /run), live status and findings in the campaign's chat.
+    build:
+      context: .
+      dockerfile: docker/campaign-runner.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      browser:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
+      BROWSER_SESSION_URL: http://browser:8090
+      BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
+      FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP: ${FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP:-15}
+      FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS: ${FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS:-90}
+      CAMPAIGN_POLL_SECONDS: ${CAMPAIGN_POLL_SECONDS:-10}
+      CAMPAIGN_WINDOW_COOLDOWN_SECONDS: ${CAMPAIGN_WINDOW_COOLDOWN_SECONDS:-120}
+      CAMPAIGN_ANALYSIS_GRACE_SECONDS: ${CAMPAIGN_ANALYSIS_GRACE_SECONDS:-600}
+      CAMPAIGN_REFUSAL_RETRY_SECONDS: ${CAMPAIGN_REFUSAL_RETRY_SECONDS:-300}
+      SAFETY_MAX_FACEBOOK_BATCHES_PER_DAY: ${SAFETY_MAX_FACEBOOK_BATCHES_PER_DAY:-6}
+      SAFETY_MAX_FACEBOOK_GROUPS_PER_DAY: ${SAFETY_MAX_FACEBOOK_GROUPS_PER_DAY:-60}
+      SAFETY_MAX_RUNS_PER_DAY: ${SAFETY_MAX_RUNS_PER_DAY:-40}
+      SAFETY_BREAKER_FAILURES: ${SAFETY_BREAKER_FAILURES:-3}
+      SAFETY_BREAKER_CHALLENGES: ${SAFETY_BREAKER_CHALLENGES:-2}
+      SAFETY_BREAKER_WINDOW_HOURS: ${SAFETY_BREAKER_WINDOW_HOURS:-6}
+    # `backend` reaches PostgreSQL and the browser; `egress` sends Telegram messages.
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
   verification:
     # Human-in-the-loop verification (bot/verification). Operators open it as
     # a Telegram Mini App through Caddy at /verify/*; it publishes no host port.

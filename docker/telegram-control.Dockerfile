@@ -12,6 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bot/__init__.py bot/telegram_webapp.py bot/operators.py ./bot/
 COPY bot/control_plane/ ./bot/control_plane/
 COPY bot/orchestra/ ./bot/orchestra/
+# /campaign plans and stores campaigns (planning and storage only; no discovery stack).
+COPY bot/campaign/ ./bot/campaign/
 RUN chown -R appuser:appuser /app
 USER appuser
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

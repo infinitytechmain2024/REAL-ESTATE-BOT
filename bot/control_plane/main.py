@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 from aiohttp import web
 
+from bot.campaign.store import PostgresCampaignStore
 from bot.control_plane.access import AccessDesk, PostgresAccessStore
 from bot.control_plane.live_view import (
     BrowserLiveClient,
@@ -80,6 +81,8 @@ async def run() -> None:
         poll_seconds=settings.orchestra_poll_seconds,
         stale_batch_seconds=settings.orchestra_stale_batch_seconds,
         notifier=notify,
+        # /campaign plans and stores a campaign; the campaign-runner service runs it.
+        campaigns=PostgresCampaignStore(orchestra_store.pool) if orchestra_store.pool else None,
     )
 
     async def enqueue(envelope: CommandEnvelope) -> object:

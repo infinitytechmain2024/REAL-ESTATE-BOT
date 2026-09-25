@@ -72,3 +72,19 @@ def parse_scope(arguments: str) -> tuple[str, str]:
     if not separator or kind not in {"source", "batch", "run", "command"} or not identifier:
         raise CommandValidationError("use a scope of all, source:<uuid>, batch:<uuid>, run:<uuid>, or command:<uuid>")
     return kind, identifier
+
+
+def parse_campaign(arguments: str) -> tuple[str, str]:
+    """``/campaign <goal>``, ``/campaign status`` or ``/campaign cancel <id>`` -> (action, value)."""
+    text = arguments.strip()
+    if not text:
+        raise CommandValidationError("use /campaign <goal>, /campaign status, or /campaign cancel <id>")
+    head, _, rest = text.partition(" ")
+    if head.lower() == "status" and not rest.strip():
+        return ("status", "")
+    if head.lower() == "cancel":
+        parts = rest.split()
+        if len(parts) != 1:
+            raise CommandValidationError("use /campaign cancel <campaign id>")
+        return ("cancel", parts[0])
+    return ("plan", text)

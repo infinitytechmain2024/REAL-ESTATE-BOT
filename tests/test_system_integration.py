@@ -32,6 +32,11 @@ from bot.analysis_pipeline.models import AnalysisResult
 from bot.analysis_pipeline.pipeline import AnalysisPipeline
 from bot.analysis_pipeline.settings import AnalysisSettings
 from bot.analysis_pipeline.store import PostgresAnalysisStore
+from bot.campaign.architect import plan_campaign
+from bot.campaign.discovery import FacebookDiscovery, PostgresDiscoveryStore, plan_seeds
+from bot.campaign.runner import VERIFY, CampaignRunner, RunnerConfig
+from bot.campaign.runs import PostgresRunStore
+from bot.campaign.store import PostgresCampaignStore
 from bot.control_plane.models import IncomingMessage, TranscriptResult
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
@@ -50,6 +55,8 @@ from bot.scrapling_connector.worker import step as scrapling_step
 from bot.verification.models import Recovery
 from bot.verification.service import FlowConfig, VerificationService
 from bot.verification.store import PostgresVerificationStore
+from tests.test_campaign_discovery import NOW, FakeBrowser, FakeReader, Sleeps, link
+from tests.test_campaign_runner import FakeMessenger
 from tests.test_live_view import TOKEN, init_data
 from tests.test_verification_flow import (
     OPERATOR,
@@ -195,7 +202,8 @@ class System:
     async def __aenter__(self) -> System:
         self.orchestra = PostgresOrchestraStore(URL, self.limits)
         await self.orchestra.connect()
-        self.dispatcher = OrchestraDispatcher(self.orchestra, operator_ids=frozenset({OWNER, OPERATOR}), notifier=self._notify)
+        self.dispatcher = OrchestraDispatcher(self.orchestra, operator_ids=frozenset({OWNER, OPERATOR}), notifier=self._notify,
+                                              campaigns=PostgresCampaignStore(self.orchestra.pool))
         self.store = PostgresControlPlaneStore(URL)
         await self.store.connect()
         settings = ControlPlaneSettings(telegram_token=TOKEN, database_url=URL, operator_user_ids=frozenset({OWNER, OPERATOR}))
@@ -550,3 +558,203 @@ async def test_a_digest_telegram_refused_is_sent_later_exactly_once(pool) -> Non
     assert len(down.messages) == 1
     assert await pool.fetchval("select state from analysis_digests") == "sent"
     assert await pool.fetchval("select state from findings") == "delivered"
+
+
+# --- campaigns ----------------------------------------------------------------------------
+
+CAMPAIGN_GOAL = "Найди квартиры в аренду в Мадриде"
+PISOS = "https://www.facebook.com/groups/pisosmadrid/"
+RENT = "https://www.facebook.com/groups/rentmadrid/"
+
+
+class CampaignFacebook(FakeFacebook):
+    """The group reader also lets the campaign runner look while a group is being read."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.during_read = None
+
+    async def read(self, lease: BrowserLease, url: str) -> GroupRead:
+        if self.during_read is not None:
+            await self.during_read(url)
+        return await super().read(lease, url)
+
+
+def campaign_runner(pool, messenger: FakeMessenger) -> CampaignRunner:
+    campaigns = PostgresCampaignStore(pool)
+    plan = plan_campaign(CAMPAIGN_GOAL)
+    seeds = plan_seeds(plan, 12)
+    browser = FakeBrowser({seeds[0][1]: [link("pisosmadrid", "Pisos alquiler Madrid", "10 posts a day"),
+                                         link("rentmadrid", "Madrid rent", "3 posts a week")]})
+    discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, FakeReader(), sleep=Sleeps(), now=lambda: NOW)
+    return CampaignRunner(campaigns, PostgresRunStore(pool, SafetyLimits()), messenger, discovery,
+                          config=RunnerConfig(window_cooldown_seconds=0, analysis_grace_seconds=600))
+
+
+async def start_campaign(pool) -> str:
+    async with System() as system:
+        answer = await system.command(f"/campaign {CAMPAIGN_GOAL}")
+    campaign_id = await pool.fetchval("select id::text from campaigns")
+    assert answer.startswith(f"Кампания {campaign_id} запланирована: ")
+    row = await pool.fetchrow("select state, telegram_chat_id, requested_by, source_text from campaigns")
+    assert tuple(row) == ("planned", OPERATOR, OPERATOR, CAMPAIGN_GOAL)
+    return campaign_id
+
+
+@pytest.mark.asyncio
+async def test_campaign_from_command_to_streamed_finding_and_completion(pool) -> None:
+    campaign_id = await start_campaign(pool)
+    messenger = FakeMessenger()
+    runner = campaign_runner(pool, messenger)
+
+    await runner.tick()  # discovery, then window 1 as one ordinary batch for facebook-runner
+    assert await pool.fetchval("select state from campaigns") == "running"
+    batch = await pool.fetchrow("select id::text, campaign_id::text, max_items, state from acquisition_batches")
+    assert (batch["campaign_id"], batch["max_items"], batch["state"]) == (campaign_id, 2, "queued")
+    assert tuple(await pool.fetchrow("select state, notify_telegram_id from collector_launch_requests")) == ("pending", None)
+    assert await pool.fetchval(
+        "select count(*) from campaign_groups where batch_id=$1::uuid and state='queued'", batch["id"]) == 2
+    assert await pool.fetchval("select status_message_id from campaigns") == 1
+
+    fb = CampaignFacebook({PISOS: [RENT_POST], RENT: [NOISE_POST]})
+    reading: list[str] = []
+
+    async def look(url: str) -> None:
+        if url == PISOS:
+            await runner.tick()
+            reading.append(messenger.edits[-1][2])
+
+    fb.during_read = look
+    assert await facebook_runner(pool, fb).step() is True
+    assert fb.reads == [PISOS, RENT]
+    assert reading == [f"🎯 {(await runner.campaigns.get(campaign_id)).plan.goal}\nСейчас: Facebook · Pisos alquiler Madrid · ищу дальше"]
+    assert await pool.fetchval("select state from acquisition_batches") == "succeeded"
+
+    digest = Telegram()
+    result = await analyse(None, AnalysisPipeline(FakeAnalyzer()), digest.send, analysis_settings())
+    assert len(result["findings"]) == 1
+    assert digest.messages == [] and await pool.fetchval("select count(*) from analysis_digests") == 0
+
+    await runner.tick()  # streams the finding, closes the window
+    await runner.tick()  # nothing queued any more: completes
+    findings = messenger.findings()
+    assert len(findings) == 1 and RENT_POST.canonical_url in findings[0]
+    assert findings[0].endswith("🔎 Найдено: 1 · ищу дальше")
+    assert {chat for chat, _, _ in messenger.sent} == {OPERATOR}
+    assert tuple(await pool.fetchrow("select state, stop_reason from campaigns")) == ("completed", "queue_exhausted")
+    assert await pool.fetchval("select state from findings") == "delivered"
+    assert dict(await pool.fetch("select group_key, state from campaign_groups")) == {"pisosmadrid": "collected", "rentmadrid": "collected"}
+    assert tuple(await pool.fetchrow("select state, outcome from campaign_windows")) == ("finished", "succeeded")
+    assert messenger.edits[-1][2].endswith("Кампания завершена · найдено 1")
+    assert messenger.edits[-1][1] == await pool.fetchval("select status_message_id from campaigns")
+
+    # Restarts and later cycles never send anything twice.
+    edits, sent = len(messenger.edits), len(messenger.sent)
+    await campaign_runner(pool, messenger).tick()
+    await analyse(None, AnalysisPipeline(FakeAnalyzer()), digest.send, analysis_settings())
+    assert (len(messenger.edits), len(messenger.sent), digest.messages) == (edits, sent, [])
+    assert await pool.fetchval("select count(*) from campaign_findings where state='sent'") == 1
+    actors = {r[0] for r in await pool.fetch(
+        "select actor from orchestration_audit_log where entity_type='campaigns' and action='state_transition'")}
+    assert actors == {"campaign:discovery", "campaign:runner"}
+
+
+@pytest.mark.asyncio
+async def test_campaign_window_challenge_pauses_until_verification_resumes_it(pool) -> None:
+    await start_campaign(pool)
+    messenger = FakeMessenger()
+    runner = campaign_runner(pool, messenger)
+    await runner.tick()
+
+    fb = CampaignFacebook({PISOS: [RENT_POST], RENT: [NOISE_POST]}, challenge_once={RENT})
+    collector = facebook_runner(pool, fb)
+    assert await collector.step() is True
+    assert await pool.fetchval("select state from acquisition_batches") == "human_verification_required"
+    await runner.tick()
+    assert await pool.fetchval("select state from campaigns") == "paused_verification"
+    assert messenger.edits[-1][2].endswith(VERIFY)
+    await runner.tick()
+    assert await pool.fetchval("select count(*) from acquisition_batches") == 1  # nothing new while paused
+
+    service, notifier, store = verification()
+    await store.connect()
+    try:
+        await solve_and_resume(service, notifier)
+    finally:
+        await store.close()
+    await runner.tick()
+    assert await pool.fetchval("select state from campaigns") == "running"
+    assert await collector.step() is True
+    assert fb.reads == [PISOS, RENT, RENT]
+    assert await pool.fetchval("select state from acquisition_batches") == "succeeded"
+
+    await analyse(None, AnalysisPipeline(FakeAnalyzer()), Telegram().send, analysis_settings())
+    await runner.tick()
+    await runner.tick()
+    assert await pool.fetchval("select state from campaigns") == "completed"
+    assert len(messenger.findings()) == 1
+    assert messenger.edits[-1][2].endswith("Кампания завершена · найдено 1")
+
+
+@pytest.mark.asyncio
+async def test_campaign_cancel_command_cancels_the_in_flight_window(pool) -> None:
+    campaign_id = await start_campaign(pool)
+    messenger = FakeMessenger()
+    runner = campaign_runner(pool, messenger)
+    await runner.tick()
+    async with System() as system:
+        status = await system.command(f"/campaign cancel {campaign_id}")
+        assert status == f"Кампания {campaign_id} остановлена."
+        reply = (await system.control.handle_text(system._message(OPERATOR, "/campaign status"))).text
+        assert "Confirmation" not in reply
+        assert await system.dispatcher.process_once()
+        assert system.notices[-1][1].startswith(f"Кампания {campaign_id}: остановлена")
+    await runner.tick()
+    assert await pool.fetchval("select state from acquisition_batches") == "cancelled"
+    assert await pool.fetchval("select state from campaign_windows") == "finished"
+    assert messenger.edits[-1][2].endswith("Кампания остановлена")
+    # facebook-runner skips the cancelled batch; the campaign never issues another window.
+    assert await facebook_runner(pool, CampaignFacebook({})).step() is True
+    assert await pool.fetchval("select state from collector_launch_requests") == "skipped"
+    await runner.tick()
+    assert await pool.fetchval("select count(*) from acquisition_batches") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_challenge_counts_toward_the_facebook_breaker(pool) -> None:
+    campaign_id = await start_campaign(pool)
+    campaigns = PostgresCampaignStore(pool)
+    await campaigns.set_state(campaign_id, "discovering", "campaign:discovery")
+    await campaigns.set_state(campaign_id, "paused_verification", "campaign:discovery", reason="facebook_challenge:x")
+    async with System(SafetyLimits(breaker_challenges=1)) as system:
+        answer = await system.command(f"/run facebook-groups {RENT_GROUP}")
+    assert "safety breaker open: 1 facebook challenges" in answer
+    assert await pool.fetchval("select count(*) from acquisition_batches") == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_startup_frees_a_profile_stuck_by_a_crashed_discovery_only_when_unheld(pool) -> None:
+    campaign_id = await start_campaign(pool)
+    await PostgresCampaignStore(pool).set_state(campaign_id, "discovering", "campaign:discovery")
+    profile = await pool.fetchval("update browser_profiles set state='in_use' returning id")
+    runner = campaign_runner(pool, FakeMessenger())
+
+    # A running batch on the profile legitimately holds it.
+    batch = await pool.fetchval(
+        "insert into acquisition_batches(platform, acquisition_method, vertical, state) values('facebook','facebook_connector','both','queued') returning id")
+    await pool.execute("update acquisition_batches set state='running' where id=$1", batch)
+    batch_run = await pool.fetchval(
+        "insert into batch_runs(batch_id, browser_profile_id, state) values($1,$2,'queued') returning id", batch, profile)
+    await pool.execute("update batch_runs set state='running' where id=$1", batch_run)
+    assert await runner.recover() == 0
+    assert await pool.fetchval("select state from browser_profiles") == "in_use"
+
+    await pool.execute("update batch_runs set state='succeeded', finished_at=now() where id=$1", batch_run)
+    assert await runner.recover() == 1
+    assert await pool.fetchval("select state from browser_profiles") == "ready"
+    actor = await pool.fetchval(
+        "select actor from orchestration_audit_log where entity_type='browser_profiles' order by id desc limit 1")
+    assert actor == "campaign:runner:recovery"
+    assert await pool.fetchval("select state from campaigns") == "discovering"
+    await runner.tick()  # discovery resumes from its saved progress
+    assert await pool.fetchval("select state from campaigns") == "running"

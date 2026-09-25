@@ -104,8 +104,10 @@ async def run_once(store=None, pipeline: AnalysisPipeline | None = None, send: S
         formatted, processed = await analyse_batch(store, p, batch_size=s.batch_size, claim_seconds=s.claim_seconds, model=s.openrouter_model)
         saved = [fid for entries in formatted.values() for fid, _ in entries]
         if s.telegram_token and s.telegram_chat_id:
+            # A campaign's findings are streamed to its own chat by the campaign runner.
+            streamed = await store.campaign_finding_ids(saved) if saved else set()
             for vertical, entries in formatted.items():
-                for chunk in split_digest(entries):
+                for chunk in split_digest([e for e in entries if e[0] not in streamed]):
                     await store.save_digest(s.telegram_chat_id, vertical, [fid for fid, _ in chunk], digest(vertical, [t for _, t in chunk]))
             token = s.telegram_token
             await deliver(store, s.telegram_chat_id, send or (lambda chat, body: send_digest(token, chat, body)))
