@@ -148,3 +148,22 @@ async def test_live_api_requires_the_token_and_maps_errors() -> None:
         assert (await client.post("/v1/live", json={"platform": "facebook"}, headers=auth)).status == 400
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_that_does_not_start_is_an_error_and_frees_the_profile() -> None:
+    manager, viewers = FakeManager(), []
+
+    async def never_ready(processes: list[str]) -> None:
+        raise RuntimeError("websockify exited (1): Address already in use")
+
+    live = LiveViewController(
+        manager,  # type: ignore[arg-type]
+        start_viewer=lambda password: viewers.append("start") or ["viewer"],
+        stop_viewer=lambda processes: viewers.append(f"stop:{processes}"),
+        wait_viewer=never_ready,
+    )
+    with pytest.raises(LiveViewError, match="viewer did not start: websockify exited"):
+        await live.start(REQUEST, "https://www.facebook.com/", 5)
+    assert viewers == ["start", "stop:['viewer']"]
+    assert manager.events[-1] == ("release", "handle:profile-1") and live.status() == {}

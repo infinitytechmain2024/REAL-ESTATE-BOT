@@ -33,6 +33,7 @@ VNC_PORT = 5900
 NOVNC_PORT = 6080
 NOVNC_WEB_ROOT = "/usr/share/novnc"
 MAX_MINUTES = 60
+VIEWER_LOGS = ("/tmp/x11vnc.log", "/tmp/websockify.log")
 
 
 def _start_viewer(password: str) -> list[subprocess.Popen[bytes]]:
@@ -42,17 +43,52 @@ def _start_viewer(password: str) -> list[subprocess.Popen[bytes]]:
     with os.fdopen(fd, "w") as handle:
         handle.write(password + "\n")
     os.chmod(path, 0o600)
-    vnc = subprocess.Popen(
-        # `rm:` makes x11vnc delete the password file as soon as it has read it.
-        ["x11vnc", "-display", display, "-localhost", "-rfbport", str(VNC_PORT),
-         "-passwdfile", f"rm:{path}", "-forever", "-shared", "-quiet", "-noxdamage"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    novnc = subprocess.Popen(
-        ["websockify", "--web", NOVNC_WEB_ROOT, f"0.0.0.0:{NOVNC_PORT}", f"localhost:{VNC_PORT}"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    # Errors go to /tmp so a viewer that will not start can be diagnosed with
+    # `docker compose exec browser cat /tmp/x11vnc.log /tmp/websockify.log`.
+    with open(VIEWER_LOGS[0], "ab") as vnc_log, open(VIEWER_LOGS[1], "ab") as novnc_log:
+        vnc = subprocess.Popen(
+            # `rm:` makes x11vnc delete the password file as soon as it has read it.
+            ["x11vnc", "-display", display, "-localhost", "-rfbport", str(VNC_PORT),
+             "-passwdfile", f"rm:{path}", "-forever", "-shared", "-quiet", "-noxdamage"],
+            stdout=subprocess.DEVNULL, stderr=vnc_log,
+        )
+        novnc = subprocess.Popen(
+            ["websockify", "--web", NOVNC_WEB_ROOT, f"0.0.0.0:{NOVNC_PORT}", f"localhost:{VNC_PORT}"],
+            stdout=subprocess.DEVNULL, stderr=novnc_log,
+        )
     return [vnc, novnc]
+
+
+def _log_tail(path: str, limit: int = 300) -> str:
+    try:
+        return Path(path).read_bytes()[-limit:].decode(errors="replace").strip()
+    except OSError:
+        return ""
+
+
+async def _wait_viewer(processes: list[subprocess.Popen[bytes]], timeout: float = 15.0) -> None:
+    """Return once noVNC accepts connections; raise if a viewer process died first.
+
+    Starting the processes returns at once, but websockify needs a moment to
+    bind. Reporting the window as open before that made the first page load
+    fail with "the browser is not running".
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        for process, log_path in zip(processes, VIEWER_LOGS, strict=False):
+            if process.poll() is not None:
+                raise RuntimeError(f"{Path(log_path).stem} exited ({process.returncode}): {_log_tail(log_path)}")
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", NOVNC_PORT), timeout=1)
+        except (OSError, TimeoutError):
+            if asyncio.get_running_loop().time() > deadline:
+                raise RuntimeError(f"noVNC did not start listening within {timeout:.0f} s") from None
+            await asyncio.sleep(0.25)
+            continue
+        writer.close()
+        with suppress(Exception):
+            await writer.wait_closed()
+        return
 
 
 def _stop(processes: list[subprocess.Popen[bytes]]) -> None:
@@ -84,6 +120,7 @@ async def run(profile_id: str, platform: str, url: str, minutes: int) -> None:
         await manager.snapshot(handle, url, timeout_ms=60_000)
         password = secrets.token_urlsafe(9)[:8]  # VNC uses at most 8 characters
         viewer = _start_viewer(password)
+        await _wait_viewer(viewer)
         print(
             f"\nBrowser for profile {profile_id} is open at {url}\n"
             f"noVNC password for this session: {password}\n"
