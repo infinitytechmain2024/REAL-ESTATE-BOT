@@ -75,6 +75,8 @@ async def analyse_batch(store, pipeline: AnalysisPipeline, *, batch_size: int, c
                     # The model answered outside the schema: not a finding, and not retried.
                     log.warning("analysis.invalid_model_response", extra={"post_id": e.post_id, "vertical": vertical})
                     continue
+                if not result.accepted:
+                    log.info("analysis.not_a_finding %s %s %s", e.post_id, vertical, result.reason)
                 fid = await store.save(e, vertical, result, model, token)
                 if fid:
                     found.append((vertical, fid, result.formatted or ""))

@@ -130,3 +130,25 @@ def test_a_long_digest_is_split_into_telegram_sized_messages_not_truncated():
     assert [fid for chunk in chunks for fid, _ in chunk] == [f"f{n}" for n in range(7)]
     assert all(sum(len(t) for _, t in chunk) + 2 * (len(chunk) - 1) <= MAX_MESSAGE_CHARS for chunk in chunks)
     assert len(chunks) == 4
+
+
+@pytest.mark.parametrize(
+    ("text", "title"),
+    [
+        ("Сдаётся комната в центре Мадрида, 450€ в месяц, всё включено, звоните", ""),
+        ("Сдаю комнату в районе Usera, 400 евро, для одной девушки, без животных", "🇪🇸 Мадрид‼️Комнаты Квартиры Аренда"),
+        ("Продаётся квартира 2 спальни, Карабанчель, 180000€, срочно, без посредников", "МАДРИД АРЕНДА ПРОДАЖА КВАРТИР"),
+        ("Alquilo habitación en Lavapiés, 450 euros al mes, gastos incluidos, Madrid", ""),
+        ("Здаю кімнату в центрі, 400 євро на місяць, все включено, пишіть", "Українці в Іспанії"),
+    ],
+)
+def test_russian_spanish_and_ukrainian_listings_reach_the_model(text, title):
+    assert filter_evidence(evidence(text=text, title=title), "real_estate").accepted
+
+
+def test_the_group_title_is_the_location_but_not_the_topic():
+    # A Madrid group's title names the city, but an off-topic post stays out.
+    off_topic = evidence(text="Всем привет, кто знает хорошего стоматолога в районе? Посоветуйте пожалуйста", title="МАДРИД АРЕНДА")
+    assert filter_evidence(off_topic, "real_estate").reason == "irrelevant_keywords"
+    no_place = evidence(text="Сдаю комнату в районе Usera, 400 евро, для одной девушки, без животных", title="")
+    assert filter_evidence(no_place, "real_estate").reason == "missing_location_signal"
