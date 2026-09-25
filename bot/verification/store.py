@@ -231,6 +231,9 @@ class PostgresVerificationStore:
                     await conn.execute(
                         """insert into public.collector_launch_requests(batch_id, verification_job_id, requested_by, notify_telegram_id)
                            values ($1::uuid, $2::uuid, $3, $4) on conflict do nothing""", b, job_id, actor, notify_user_id)
+            else:
+                # A single run outside a batch (Agent Reach): its worker picks it up again.
+                await _single_run(conn, job_id, "queued")
             await conn.execute("update public.verification_jobs set resumed_at = now() where id = $1::uuid", job_id)
         return job.batch_id
 
@@ -261,6 +264,8 @@ class PostgresVerificationStore:
                 job_id, actor)
             if job.batch_id:
                 await _close_batch(conn, job.batch_id, item_state="cancelled", run_state="cancelled", batch_run_state="cancelled", batch_state="cancelled")
+            else:
+                await _single_run(conn, job_id, "cancelled")
             await _revoke(conn, job_id)
         return True
 
@@ -277,6 +282,8 @@ class PostgresVerificationStore:
                 job_id, actor)
             if job.batch_id:
                 await _close_batch(conn, job.batch_id, item_state="failed", run_state="stopped", batch_run_state="stopped", batch_state="failed")
+            else:
+                await _single_run(conn, job_id, "stopped")
             if job.profile_id:
                 await conn.execute(
                     "update public.browser_profiles set state = 'quarantined' where id = $1::uuid and state = 'human_verification_required'",
@@ -342,6 +349,16 @@ async def _close_batch(conn: Any, batch_id: str, *, item_state: str, run_state: 
     await conn.execute(
         f"update public.acquisition_batches set state = '{batch_state}', finished_at = now() where id = $1::uuid and state = 'human_verification_required'",
         batch_id)
+
+
+async def _single_run(conn: Any, job_id: str, state: str) -> None:
+    """Move the job's own stopped run (one not in a batch) along with the job."""
+    await conn.execute(
+        f"""update public.acquisition_runs set state = '{state}',
+                   finished_at = case when '{state}' = 'queued' then null else now() end,
+                   stop_reason = coalesce(stop_reason, 'verification_closed')
+             where id = (select acquisition_run_id from public.verification_jobs where id = $1::uuid)
+               and batch_item_id is null and state = 'awaiting_human_verification'""", job_id)
 
 
 async def _revoke(conn: Any, job_id: str) -> None:

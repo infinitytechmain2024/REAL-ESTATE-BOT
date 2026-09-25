@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`012_collector_launch_requests.sql` in order. It records SHA-256 checksums in
+`013_analysis_claims.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -109,19 +109,48 @@ running Agent Reach or Facebook item run is not cancelled directly: cancel its
 batch instead. Every change is audited with the Telegram user as the actor.
 
 An active, platform-matched browser profile must already be provisioned in
-PostgreSQL. The dispatcher creates plans only; an operator-controlled one-shot
-collector or Agent Reach invocation claims execution later. This is deliberate:
-the Telegram bot cannot turn untrusted chat input into Docker, shell, or
-browser launches.
+PostgreSQL. The dispatcher only writes plans; long-running workers in the
+default stack pick them up from PostgreSQL, one at a time
+(`facebook-runner`, `scrapling-worker`, `agent-reach-worker`). The Telegram
+bot never turns chat input into Docker, shell or browser launches: a worker
+runs only a plan the Orchestra validated, with its own fixed limits.
+
+#### Safety quotas and circuit breakers
+
+`/run` is checked before anything is written, from the lifecycle tables
+themselves (rolling 24 hours, serialised with an advisory lock):
+
+| Limit | Default |
+| --- | --- |
+| Facebook batches per day (`SAFETY_MAX_FACEBOOK_BATCHES_PER_DAY`) | 6 |
+| Facebook group reads per day (`SAFETY_MAX_FACEBOOK_GROUPS_PER_DAY`) | 60 |
+| Single Scrapling / Agent Reach runs per day, per method (`SAFETY_MAX_RUNS_PER_DAY`) | 40 |
+| Breaker: challenges on a platform within the window (`SAFETY_BREAKER_CHALLENGES`) | 2 |
+| Breaker: failed runs of a method since its last success, within the window (`SAFETY_BREAKER_FAILURES`) | 3 |
+| Breaker window (`SAFETY_BREAKER_WINDOW_HOURS`) | 6 h |
+
+A refused command is answered in Telegram ("cannot run: daily quota
+reached ..." or "safety breaker open ...") and recorded as a failed command
+with `precondition_failed`; no batch or run is created. Breakers close on
+their own when the window passes (failures also after the next success).
 
 ### Bounded analysis pipeline
 
-The one-shot `analysis-pipeline` worker reads only normalised posts, rejects
+`analysis-worker` (default stack; idle without `OPENROUTER_API_KEY`) runs the
+pipeline every `ANALYSIS_POLL_SECONDS` (60). It reads only normalised posts, rejects
 stale/spam/irrelevant evidence deterministically, then requests strict JSON
 from OpenRouter with the same `OPENROUTER_API_KEY`. It stores the model,
 prompt version, language, confidence and a stable finding key (migration
 `008_analysis_pipeline.sql`). Optionally set `ANALYSIS_TELEGRAM_CHAT_ID` to
 send an idempotent digest to one chat.
+
+Sources created by `/run` are analysed for both verticals. Each post is held
+by a durable claim (migration `013_analysis_claims.sql`) while OpenRouter is
+called, so two workers never pay for the same post and a crashed worker's
+posts are retried after `ANALYSIS_CLAIM_SECONDS`. A post ends `analysed` (at
+least one finding) or `rejected`. Digests are split to fit Telegram, never
+truncated; one Telegram refused stays `queued` and is sent on the next cycle,
+after which its findings are `delivered`. A single manual cycle:
 
 ```sh
 docker compose --env-file .env --profile analysis run --rm analysis-pipeline
@@ -269,8 +298,9 @@ about that profile, so each checkpoint produces one message.
 
 #### Running a batch
 
-After a profile is `ready` and `/run facebook-groups ...` has queued a batch,
-run exactly one batch:
+A confirmed `/run facebook-groups ...` starts by itself: the Orchestra writes
+a launch request with the batch and `facebook-runner` runs it (see below).
+To run a queued batch by hand instead (safe: a batch is claimed only once):
 
 ```sh
 FACEBOOK_BATCH_ID=<queued-batch-uuid> docker compose --profile collector up --build facebook-collector
@@ -296,12 +326,14 @@ analysis, or human-verification UI.
 #### Automatic restart after verification
 
 `facebook-runner` (default stack, same image and limits as
-`facebook-collector`) is the only long-running collector. It starts nothing on
-its own: a verification **Resume** writes a row to
+`facebook-collector`) starts nothing on its own: a verification **Resume**
+writes a row to
 `collector_launch_requests` (migration `012_collector_launch_requests.sql`) in
 the same transaction that requeues the batch, and the runner claims that row
 and runs the batch, one at a time, through the same collector code. Batches
-queued by `/run` still wait for the manual command above.
+confirmed with `/run facebook-groups` get a launch request the same way, in
+the Orchestra's planning transaction. A request waits while an Agent Reach
+task holds the Facebook profile.
 
 The operator who resumed hears when the batch starts and how it ends
 (finished, cancelled, a new challenge, failed or skipped); failures and skips
@@ -325,7 +357,12 @@ pages by default, has a 120-second total limit, never follows discovered
 links, and exits for CAPTCHA, checkpoint, login, account-warning, or unusual
 activity signals. It cannot join groups, send messages, or change accounts.
 
-After a browser profile is provisioned, run one explicit task:
+`/run instagram|tiktok|facebook <https-url>` queues a run that
+`agent-reach-worker` (default stack) claims once the platform's profile is
+`ready`. It stores each page read as normalised evidence for analysis. A
+challenge stops the run and opens a verification job exactly as a Facebook
+batch does; **Resume** in the verification page requeues the run and Cancel /
+Failed close it. For a one-off task outside the database:
 
 ```sh
 AGENT_REACH_TASK_JSON='{"task_id":"task-1","platform":"website","targets":["https://example.org"],"browser_profile_id":"website-main","browser_profile_name":"website-main"}' \
@@ -340,7 +377,7 @@ policy; flipping an environment variable cannot enable it.
 
 The `scrapling-connector` Compose profile is the lightweight choice for a
 single ordinary public website. `/run website <https-url>` creates its bounded
-database run; an operator starts it explicitly with:
+database run and `scrapling-worker` (default stack) runs it. To run one by hand:
 
 ```sh
 SCRAPLING_RUN_ID=<queued-run-uuid> docker compose --profile scrapling run --rm scrapling-connector

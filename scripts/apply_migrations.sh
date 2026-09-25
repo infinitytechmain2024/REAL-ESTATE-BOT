@@ -13,7 +13,7 @@ if [[ ! -f "$env_file" ]]; then
 fi
 
 compose=(docker compose --env-file "$env_file")
-for required in 001_init.sql 002_facebook.sql 003_orchestration.sql 004_telegram_control_plane.sql 005_orchestra_dispatcher.sql 006_openrouter_transcription.sql 007_live_view_sessions.sql 008_analysis_pipeline.sql 009_verification_flow.sql 010_verification_telegram_identity.sql 011_operator_access_requests.sql 012_collector_launch_requests.sql; do
+for required in 001_init.sql 002_facebook.sql 003_orchestration.sql 004_telegram_control_plane.sql 005_orchestra_dispatcher.sql 006_openrouter_transcription.sql 007_live_view_sessions.sql 008_analysis_pipeline.sql 009_verification_flow.sql 010_verification_telegram_identity.sql 011_operator_access_requests.sql 012_collector_launch_requests.sql 013_analysis_claims.sql; do
   [[ -f "bot/services/db/migrations/$required" ]] || {
     echo "Required migration is missing: $required" >&2
     exit 2
@@ -40,7 +40,8 @@ for migration_path in bot/services/db/migrations/001_init.sql \
                       bot/services/db/migrations/009_verification_flow.sql \
                       bot/services/db/migrations/010_verification_telegram_identity.sql \
                       bot/services/db/migrations/011_operator_access_requests.sql \
-                      bot/services/db/migrations/012_collector_launch_requests.sql; do
+                      bot/services/db/migrations/012_collector_launch_requests.sql \
+                      bot/services/db/migrations/013_analysis_claims.sql; do
   migration="$(basename "$migration_path")"
   digest="$(checksum "$migration_path")"
   existing="$("${compose[@]}" exec -T postgres sh -ec \

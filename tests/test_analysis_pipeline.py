@@ -120,3 +120,13 @@ def test_idempotency_key_is_stable():
 
     assert finding_key(evidence(), "real_estate") == finding_key(evidence(), "real_estate")
     assert finding_key(evidence(), "real_estate") != finding_key(evidence(), "investors")
+
+
+def test_a_long_digest_is_split_into_telegram_sized_messages_not_truncated():
+    from bot.analysis_pipeline.main import MAX_MESSAGE_CHARS, split_digest
+
+    entries = [(f"f{n}", "x" * 1500) for n in range(7)]
+    chunks = split_digest(entries)
+    assert [fid for chunk in chunks for fid, _ in chunk] == [f"f{n}" for n in range(7)]
+    assert all(sum(len(t) for _, t in chunk) + 2 * (len(chunk) - 1) <= MAX_MESSAGE_CHARS for chunk in chunks)
+    assert len(chunks) == 4

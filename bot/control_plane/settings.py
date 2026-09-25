@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from bot.orchestra.store import SafetyLimits
+
 # Telegram's Bot API will not hand a bot a file larger than 20 MB.
 TELEGRAM_DOWNLOAD_LIMIT_BYTES = 20 * 1_048_576
 SUPPORTED_STT_PROVIDERS = frozenset({"openrouter"})
@@ -34,6 +36,7 @@ class ControlPlaneSettings:
     orchestra_command_lease_seconds: int = 30
     orchestra_poll_seconds: float = 1.0
     orchestra_stale_batch_seconds: int = 900
+    safety_limits: SafetyLimits = field(default_factory=SafetyLimits)
     # Telegram user IDs allowed to run, pause, resume, or cancel acquisition.
     # Empty means nobody: state changes fail closed until an operator is named.
     operator_user_ids: frozenset[int] = frozenset()
@@ -65,6 +68,14 @@ class ControlPlaneSettings:
             orchestra_command_lease_seconds=int(os.environ.get("ORCHESTRA_COMMAND_LEASE_SECONDS", "30")),
             orchestra_poll_seconds=float(os.environ.get("ORCHESTRA_POLL_SECONDS", "1")),
             orchestra_stale_batch_seconds=int(os.environ.get("ORCHESTRA_STALE_BATCH_SECONDS", "900")),
+            safety_limits=SafetyLimits(
+                facebook_batches_per_day=_bounded_int("SAFETY_MAX_FACEBOOK_BATCHES_PER_DAY", 6, 1, 48),
+                facebook_groups_per_day=_bounded_int("SAFETY_MAX_FACEBOOK_GROUPS_PER_DAY", 60, 1, 500),
+                runs_per_day=_bounded_int("SAFETY_MAX_RUNS_PER_DAY", 40, 1, 500),
+                breaker_failures=_bounded_int("SAFETY_BREAKER_FAILURES", 3, 1, 20),
+                breaker_challenges=_bounded_int("SAFETY_BREAKER_CHALLENGES", 2, 1, 20),
+                breaker_window_hours=_bounded_int("SAFETY_BREAKER_WINDOW_HOURS", 6, 1, 72),
+            ),
             operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_OPERATOR_IDS", "")),
         )
 

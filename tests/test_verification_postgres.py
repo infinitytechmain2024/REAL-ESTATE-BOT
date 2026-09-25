@@ -224,7 +224,7 @@ async def test_resume_requests_a_launch_that_the_runner_starts_and_reports(db) -
     before = len(notifier.sent)
     await service.tick()
     await service.tick()
-    assert [(c, t) for c, t, _ in notifier.sent[before:]] == [(OPERATOR, f"Batch {ids['batch']} finished: the remaining groups were read.")]
+    assert [(c, t) for c, t, _ in notifier.sent[before:]] == [(OPERATOR, f"Batch {ids['batch']} finished: all its groups were read.")]
     assert await pool.fetchval("select notified_state from collector_launch_requests") == "finished"
 
 

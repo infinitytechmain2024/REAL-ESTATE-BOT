@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 
 import asyncpg
 
 from .models import BatchCancelled, BatchItem, BatchPlan, CollectedPost, GroupState
+
+
+def _timestamp(value: object) -> datetime | None:
+    """The page's ``<time datetime>`` string as a datetime; anything unparsable is dropped."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 class PostgresCollectorStore:
@@ -66,10 +80,13 @@ class PostgresCollectorStore:
     async def save_post(self, source_id: str, run_id: str, post: CollectedPost) -> None:
         content_hash = hashlib.sha256((post.canonical_url + "\n" + post.body_text).encode()).hexdigest()
         await self.pool.execute(
-            """insert into collected_posts(source_id,acquisition_run_id,platform_post_id,canonical_url,body_text,published_at,content_hash,raw_payload)
-               values($1,$2,$3,$4,$5,$6::timestamptz,$7,'{}'::jsonb)
-               on conflict (source_id,platform_post_id) do nothing""",
-            source_id, run_id, post.platform_post_id, post.canonical_url, post.body_text, post.published_at, content_hash,
+            # Text and link are already extracted, so the post is ready for the
+            # analysis worker ('normalised'); a repeat read of the same post, by
+            # id or by content, is ignored.
+            """insert into collected_posts(source_id,acquisition_run_id,platform_post_id,canonical_url,body_text,published_at,content_hash,raw_payload,state)
+               values($1,$2,$3,$4,$5,$6::timestamptz,$7,'{}'::jsonb,'normalised')
+               on conflict do nothing""",
+            source_id, run_id, post.platform_post_id, post.canonical_url, post.body_text, _timestamp(post.published_at), content_hash,
         )
 
     async def finish_item(self, item: BatchItem, run_id: str, state: str, group_state: GroupState, detail: str | None = None, *, diagnostics: dict[str, object] | None = None) -> None:

@@ -105,10 +105,10 @@ class VerificationService:
             text = (f"Batch {launch.batch_id} has not started automatically after {self.config.launch_stale_minutes} minutes; "
                     f"is facebook-runner running? Start it by hand on the VPS:\n{manual}")
         elif launch.state == "running":
-            text = f"Batch {launch.batch_id} started again automatically."
+            text = f"Batch {launch.batch_id} started automatically."
         elif launch.state == "finished":
             text = {
-                "succeeded": f"Batch {launch.batch_id} finished: the remaining groups were read.",
+                "succeeded": f"Batch {launch.batch_id} finished: all its groups were read.",
                 "cancelled": f"Batch {launch.batch_id} was cancelled while it ran.",
                 "human_verification_required": f"Batch {launch.batch_id} stopped at a new challenge; a verification notice follows.",
             }.get(launch.result or "", f"Batch {launch.batch_id} finished: {launch.result}.")

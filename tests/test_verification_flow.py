@@ -523,11 +523,11 @@ async def test_the_restarted_batch_is_reported_once_per_state() -> None:
     store.set_launch(launch_id, "running")
     await service.tick()
     await service.tick()
-    assert [(c, t) for c, t, _ in notifier.sent[before:]] == [(OPERATOR, f"Batch {job.batch_id} started again automatically.")]
+    assert [(c, t) for c, t, _ in notifier.sent[before:]] == [(OPERATOR, f"Batch {job.batch_id} started automatically.")]
 
     store.set_launch(launch_id, "finished", result="succeeded")
     await service.tick()
-    assert notifier.sent[-1][:2] == (OPERATOR, f"Batch {job.batch_id} finished: the remaining groups were read.")
+    assert notifier.sent[-1][:2] == (OPERATOR, f"Batch {job.batch_id} finished: all its groups were read.")
     assert len(notifier.sent) == before + 2
     assert [e.detail.get("launch") for e in store.log[job.id] if e.actor == "verification:runner"] == ["running", "finished"]
 

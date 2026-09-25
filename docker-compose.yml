@@ -91,6 +91,12 @@ services:
       ORCHESTRA_COMMAND_LEASE_SECONDS: ${ORCHESTRA_COMMAND_LEASE_SECONDS:-30}
       ORCHESTRA_POLL_SECONDS: ${ORCHESTRA_POLL_SECONDS:-1}
       ORCHESTRA_STALE_BATCH_SECONDS: ${ORCHESTRA_STALE_BATCH_SECONDS:-900}
+      SAFETY_MAX_FACEBOOK_BATCHES_PER_DAY: ${SAFETY_MAX_FACEBOOK_BATCHES_PER_DAY:-6}
+      SAFETY_MAX_FACEBOOK_GROUPS_PER_DAY: ${SAFETY_MAX_FACEBOOK_GROUPS_PER_DAY:-60}
+      SAFETY_MAX_RUNS_PER_DAY: ${SAFETY_MAX_RUNS_PER_DAY:-40}
+      SAFETY_BREAKER_FAILURES: ${SAFETY_BREAKER_FAILURES:-3}
+      SAFETY_BREAKER_CHALLENGES: ${SAFETY_BREAKER_CHALLENGES:-2}
+      SAFETY_BREAKER_WINDOW_HOURS: ${SAFETY_BREAKER_WINDOW_HOURS:-6}
       # Voice transcription via OpenRouter, reusing the analysis pipeline's key.
       # Without the key the bot still starts and refuses voice notes.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -268,6 +274,82 @@ services:
       OPENROUTER_ANALYSIS_MODEL: ${OPENROUTER_ANALYSIS_MODEL:-openai/gpt-4o-mini}
       OPENROUTER_ANALYSIS_TIMEOUT_SECONDS: ${OPENROUTER_ANALYSIS_TIMEOUT_SECONDS:-30}
       ANALYSIS_BATCH_SIZE: ${ANALYSIS_BATCH_SIZE:-10}
+      ANALYSIS_TELEGRAM_CHAT_ID: ${ANALYSIS_TELEGRAM_CHAT_ID:-}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
+  # --- Long-running workers: each takes only work that a confirmed Telegram
+  # command (or a verification Resume) queued in PostgreSQL, one item at a
+  # time, with the same limits as its one-shot service above.
+
+  agent-reach-worker:
+    build:
+      context: .
+      dockerfile: docker/agent-reach.Dockerfile
+    command: ["python", "-m", "bot.agent_reach.worker"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      browser:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      BROWSER_SESSION_URL: http://browser:8090
+      BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
+      AGENT_REACH_MAX_PAGES: ${AGENT_REACH_MAX_PAGES:-5}
+      AGENT_REACH_MAX_EXECUTION_SECONDS: ${AGENT_REACH_MAX_EXECUTION_SECONDS:-120}
+      AGENT_REACH_PAGE_TIMEOUT_SECONDS: ${AGENT_REACH_PAGE_TIMEOUT_SECONDS:-30}
+      AGENT_REACH_POLL_SECONDS: ${AGENT_REACH_POLL_SECONDS:-15}
+      AGENT_REACH_UPSTREAM_ENABLED: "false"
+    networks: [backend]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
+  scrapling-worker:
+    build:
+      context: .
+      dockerfile: docker/scrapling-connector.Dockerfile
+    command: ["python", "-m", "bot.scrapling_connector.worker"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      SCRAPLING_CONNECTOR_MAX_RUNTIME_SECONDS: ${SCRAPLING_CONNECTOR_MAX_RUNTIME_SECONDS:-45}
+      SCRAPLING_CONNECTOR_REQUEST_TIMEOUT_SECONDS: ${SCRAPLING_CONNECTOR_REQUEST_TIMEOUT_SECONDS:-20}
+      SCRAPLING_CONNECTOR_MAX_CONTENT_BYTES: ${SCRAPLING_CONNECTOR_MAX_CONTENT_BYTES:-1500000}
+      SCRAPLING_CONNECTOR_MAX_CONTENT_CHARS: ${SCRAPLING_CONNECTOR_MAX_CONTENT_CHARS:-120000}
+      SCRAPLING_CONNECTOR_USER_AGENT: ${SCRAPLING_CONNECTOR_USER_AGENT:-RealEstateResearchBot/0.1}
+      SCRAPLING_POLL_SECONDS: ${SCRAPLING_POLL_SECONDS:-15}
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
+  analysis-worker:
+    # Idle without OPENROUTER_API_KEY; digests need ANALYSIS_TELEGRAM_CHAT_ID.
+    build:
+      context: .
+      dockerfile: docker/analysis-pipeline.Dockerfile
+    command: ["python", "-m", "bot.analysis_pipeline.main", "--serve"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_ANALYSIS_MODEL: ${OPENROUTER_ANALYSIS_MODEL:-openai/gpt-4o-mini}
+      OPENROUTER_ANALYSIS_TIMEOUT_SECONDS: ${OPENROUTER_ANALYSIS_TIMEOUT_SECONDS:-30}
+      ANALYSIS_BATCH_SIZE: ${ANALYSIS_BATCH_SIZE:-10}
+      ANALYSIS_POLL_SECONDS: ${ANALYSIS_POLL_SECONDS:-60}
+      ANALYSIS_CLAIM_SECONDS: ${ANALYSIS_CLAIM_SECONDS:-300}
       ANALYSIS_TELEGRAM_CHAT_ID: ${ANALYSIS_TELEGRAM_CHAT_ID:-}
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
     networks: [backend, egress]

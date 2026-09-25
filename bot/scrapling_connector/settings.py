@@ -11,6 +11,8 @@ class ScraplingSettings(BaseSettings):
 
     database_url: str = Field(validation_alias="DATABASE_URL")
     run_id: str = Field(default="", validation_alias="SCRAPLING_RUN_ID")
+    # Worker mode only (bot.scrapling_connector.worker): seconds between queue checks.
+    poll_seconds: PositiveInt = Field(default=15, ge=5, le=300, validation_alias="SCRAPLING_POLL_SECONDS")
     max_runtime_seconds: PositiveInt = Field(default=45, ge=10, le=300, validation_alias="SCRAPLING_CONNECTOR_MAX_RUNTIME_SECONDS")
     request_timeout_seconds: PositiveInt = Field(default=20, ge=3, le=60, validation_alias="SCRAPLING_CONNECTOR_REQUEST_TIMEOUT_SECONDS")
     max_content_bytes: PositiveInt = Field(default=1_500_000, ge=10_000, le=5_000_000, validation_alias="SCRAPLING_CONNECTOR_MAX_CONTENT_BYTES")

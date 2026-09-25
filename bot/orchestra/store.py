@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -20,9 +21,36 @@ from .models import (
 DISPATCHER_ACTOR = "orchestra:dispatcher"
 
 
+@dataclass(frozen=True)
+class SafetyLimits:
+    """Quotas and circuit breakers checked before /run creates any work.
+
+    Counts come from the lifecycle tables themselves, so they cannot drift
+    from what actually ran. A breaker closes on its own once the window passes
+    (or, for failures, after the next success).
+    """
+
+    facebook_batches_per_day: int = 6
+    facebook_groups_per_day: int = 60
+    runs_per_day: int = 40  # per method, for single Agent Reach / Scrapling runs
+    breaker_failures: int = 3
+    breaker_challenges: int = 2
+    breaker_window_hours: int = 6
+
+    def __post_init__(self) -> None:
+        bounds = {
+            "facebook_batches_per_day": (1, 48), "facebook_groups_per_day": (1, 500), "runs_per_day": (1, 500),
+            "breaker_failures": (1, 20), "breaker_challenges": (1, 20), "breaker_window_hours": (1, 72),
+        }
+        for name, (low, high) in bounds.items():
+            if not low <= getattr(self, name) <= high:
+                raise ValueError(f"unsafe safety limit {name}")
+
+
 class PostgresOrchestraStore:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, limits: SafetyLimits | None = None) -> None:
         self.database_url = database_url
+        self.limits = limits or SafetyLimits()
         self.pool: asyncpg.Pool[asyncpg.Record] | None = None
 
     async def connect(self) -> None:
@@ -137,6 +165,63 @@ class PostgresOrchestraStore:
             raise ValueError(f"source {source_id} is {state} and cannot be run")
         return source_id
 
+    async def _check_safety(self, conn: asyncpg.Connection[asyncpg.Record], request: RunRequest) -> None:
+        """Refuse work over a daily quota or while a breaker is open (raises ValueError)."""
+        limits, method, platform = self.limits, request.method.value, request.platform
+        # Serialise quota checks so two commands cannot both take the last slot.
+        await conn.execute("select pg_advisory_xact_lock(hashtext('orchestra_safety_quota'))")
+        window = limits.breaker_window_hours
+        challenges = await conn.fetchval(
+            """select count(*) from verification_jobs j join monitoring_sources s on s.id=j.source_id
+                where s.platform=$1 and j.requested_at > now() - make_interval(hours => $2)""",
+            platform, window,
+        )
+        if challenges >= limits.breaker_challenges:
+            raise ValueError(
+                f"safety breaker open: {challenges} {platform} challenges in the last {window} h; "
+                "new work on this platform waits until the window passes"
+            )
+        if method == "facebook_connector":
+            row = await conn.fetchrow(
+                """select count(*) as batches, coalesce(sum(max_items), 0) as groups from acquisition_batches
+                    where platform='facebook' and created_at > now() - interval '1 day'"""
+            )
+            if row["batches"] + 1 > limits.facebook_batches_per_day:
+                raise ValueError(f"daily quota reached: {row['batches']} of {limits.facebook_batches_per_day} Facebook batches in 24 h")
+            if row["groups"] + len(request.targets) > limits.facebook_groups_per_day:
+                raise ValueError(
+                    f"daily quota reached: {row['groups']} of {limits.facebook_groups_per_day} Facebook group reads in 24 h; "
+                    f"this batch needs {len(request.targets)}"
+                )
+            failures = await conn.fetchval(
+                """select count(*) from acquisition_batches
+                    where platform='facebook' and state='failed' and finished_at > now() - make_interval(hours => $1)
+                      and finished_at > coalesce((select max(finished_at) from acquisition_batches
+                                                   where platform='facebook' and state='succeeded'), '-infinity')""",
+                window,
+            )
+        else:
+            runs = await conn.fetchval(
+                """select count(*) from acquisition_runs where acquisition_method=$1 and batch_item_id is null
+                    and created_at > now() - interval '1 day'""",
+                method,
+            )
+            if runs + 1 > limits.runs_per_day:
+                raise ValueError(f"daily quota reached: {runs} of {limits.runs_per_day} {method} runs in 24 h")
+            failures = await conn.fetchval(
+                """select count(*) from acquisition_runs
+                    where acquisition_method=$1 and batch_item_id is null and state='failed'
+                      and finished_at > now() - make_interval(hours => $2)
+                      and finished_at > coalesce((select max(finished_at) from acquisition_runs
+                                                   where acquisition_method=$1 and batch_item_id is null and state='succeeded'), '-infinity')""",
+                method, window,
+            )
+        if failures >= limits.breaker_failures:
+            raise ValueError(
+                f"safety breaker open: {failures} failed {method} runs in a row in the last {window} h; "
+                "check the worker logs, it closes after the window or the next success"
+            )
+
     async def plan_run(self, request: RunRequest, item: ClaimedCommand, *, actor: str) -> dict[str, Any]:
         """Persist bounded work and finish the command in one transaction.
 
@@ -145,6 +230,7 @@ class PostgresOrchestraStore:
         """
         async with self._pool().acquire() as conn, conn.transaction():
             await _set_actor(conn, actor)
+            await self._check_safety(conn, request)
             profile_id = None
             if request.method.value != "scrapling":
                 profile_id = await self._ready_profile(conn, request.platform)
@@ -161,6 +247,12 @@ class PostgresOrchestraStore:
                         batch_id, source_id, sequence_no,
                     )
                 await conn.execute("update acquisition_batches set state='queued' where id=$1", batch_id)
+                # facebook-runner starts it (migration 012); the requester hears the outcome.
+                await conn.execute(
+                    """insert into collector_launch_requests(batch_id, requested_by, notify_telegram_id)
+                       values ($1, $2, $3) on conflict do nothing""",
+                    batch_id, actor, item.user_id,
+                )
                 result = {"status": "queued", "method": request.method.value, "batch_id": str(batch_id), "source_ids": source_ids, "max_groups": len(source_ids), "max_posts_per_group": 20, "browser_profile_id": profile_id}
             elif request.method.value == "agent_ridge":
                 run_id = await conn.fetchval(
@@ -271,6 +363,22 @@ class PostgresOrchestraStore:
                     await conn.execute(
                         """update browser_profiles set state='ready' where id=$1 and state='in_use'
                              and not exists (select 1 from batch_runs other where other.browser_profile_id=$1 and other.state='running')""",
+                        row["browser_profile_id"],
+                    )
+            # A single Agent Reach or Scrapling run whose worker died: fail it and free its profile.
+            lost = await conn.fetch(
+                """update acquisition_runs set state='failed', finished_at=now(), error_code='worker_lost'
+                    where state='running' and batch_item_id is null and acquisition_method in ('agent_ridge','scrapling')
+                      and updated_at < now() - ($1 * interval '1 second')
+                returning browser_profile_id""",
+                stale_seconds,
+            )
+            for row in lost:
+                if row["browser_profile_id"] is not None:
+                    await conn.execute(
+                        """update browser_profiles set state='ready' where id=$1 and state='in_use'
+                             and not exists (select 1 from batch_runs b where b.browser_profile_id=$1 and b.state='running')
+                             and not exists (select 1 from acquisition_runs a where a.browser_profile_id=$1 and a.state='running')""",
                         row["browser_profile_id"],
                     )
             return [str(row["batch_id"]) for row in stale]

@@ -41,7 +41,7 @@ async def store() -> AsyncIterator[PostgresOrchestraStore]:
     pool = orchestra.pool
     assert pool is not None
     await pool.execute("drop schema public cascade; create schema public")
-    for migration in sorted(MIGRATIONS.glob("00[1-5]_*.sql")):
+    for migration in sorted(MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")):
         await pool.execute(migration.read_text(encoding="utf-8"))
     await pool.execute(
         """insert into browser_profiles(profile_name, platform, storage_locator) values ('fb', 'facebook', 'x');

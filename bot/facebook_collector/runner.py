@@ -1,9 +1,10 @@
 """Long-running launcher for batches resumed after human verification.
 
-It runs only batches that have a ``collector_launch_requests`` row, which the
-verification service writes in the same transaction that requeues the batch.
-Other queued batches stay manual. One batch at a time, through the same
-one-shot collector code, so every limit of the collector still applies.
+It runs only batches that have a ``collector_launch_requests`` row: the
+Orchestra writes one with every confirmed ``/run facebook-groups`` batch, and
+the verification service writes one when Resume requeues a batch. One batch at
+a time, through the same one-shot collector code, so every limit of the
+collector still applies.
 """
 
 from __future__ import annotations
@@ -46,6 +47,9 @@ class PostgresLaunchStore:
         row = await self.pool.fetchrow(
             """update public.collector_launch_requests set state = 'running', started_at = now()
                 where id = (select id from public.collector_launch_requests where state = 'pending'
+                               -- wait while an Agent Reach task holds the Facebook profile
+                               and not exists (select 1 from public.browser_profiles
+                                                where platform = 'facebook' and state = 'in_use' and deleted_at is null)
                              order by requested_at for update skip locked limit 1)
                returning id::text as id, batch_id::text as batch_id""")
         return Launch(row["id"], row["batch_id"]) if row else None

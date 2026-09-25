@@ -66,6 +66,16 @@ class PostgresScraplingStore:
                 )
             )
 
+    async def next_queued(self) -> str | None:
+        """The oldest queued Scrapling run on an active source (worker mode)."""
+        run_id = await self._pool().fetchval(
+            """select r.id::text from acquisition_runs r join monitoring_sources s on s.id=r.source_id
+                where r.acquisition_method='scrapling' and r.state='queued'
+                  and s.state='active' and s.deleted_at is null
+                order by r.created_at limit 1"""
+        )
+        return str(run_id) if run_id else None
+
     async def complete(self, claimed: ClaimedScraplingRun, result: ScraplingResult) -> None:
         """Persist normalized evidence, then close the exact running attempt."""
         task = claimed.task
