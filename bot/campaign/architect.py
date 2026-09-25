@@ -135,16 +135,27 @@ _TEMPLATES: dict[str, dict[Language, tuple[tuple[str, str], ...]]] = {
 }
 
 
-def plan_campaign(text: str) -> CampaignPlan:
-    """Turn a user goal in ES/EN/RU/UK into a bounded plan, or raise ``InvalidGoal``."""
+EXPLICIT_VERTICALS = ("real_estate", "investors")
+
+
+def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str | None = None) -> CampaignPlan:
+    """Turn a user goal in ES/EN/RU/UK into a bounded plan, or raise ``InvalidGoal``.
+
+    ``vertical`` (real_estate|investors) and ``location`` (a gazetteer
+    canonical name) are choices a person already made; they override what
+    the text says, so "no vertical" and "several cities" cannot fire.
+    """
     if not isinstance(text, str) or not text.strip():
         raise InvalidGoal("Пустая задача. Напишите, что искать и где, например: «квартиры в аренду в Мадриде».")
     if len(text) > MAX_TEXT_CHARS:
         raise InvalidGoal(f"Слишком длинная задача (больше {MAX_TEXT_CHARS} символов). Сократите её.")
     normalized = _norm(text)
     words = _WORD.findall(normalized)
-    place = _detect_place(words)
-    vertical = _detect_vertical(words)
+    place = _place_named(location) if location is not None else _detect_place(words)
+    if vertical is None:
+        vertical = _detect_vertical(words)
+    elif vertical not in EXPLICIT_VERTICALS:
+        raise InvalidGoal(f"Неизвестный режим: {vertical}.")
 
     rest = normalized
     max_groups, rest = _extract_groups(rest)
@@ -170,8 +181,25 @@ def _has(words: list[str], exact: frozenset[str], stems: tuple[str, ...]) -> boo
     return any(w in exact or w.startswith(stems) for w in words)
 
 
+def _matches(place: _Place, word: str) -> bool:
+    return word in place.words or word.startswith(place.stems)
+
+
+def find_places(text: str) -> list[str]:
+    """Canonical names of the gazetteer cities a text mentions, in gazetteer order."""
+    words = _WORD.findall(_norm(text))
+    return [p.canonical for p in GAZETTEER if any(_matches(p, w) for w in words)]
+
+
+def _place_named(name: str) -> _Place:
+    for place in GAZETTEER:
+        if place.canonical == name:
+            return place
+    raise InvalidGoal(f"Неизвестный город: {name}.")
+
+
 def _detect_place(words: list[str]) -> _Place:
-    found = [p for p in GAZETTEER if any(w in p.words or w.startswith(p.stems) for w in words)]
+    found = [p for p in GAZETTEER if any(_matches(p, w) for w in words)]
     if not found:
         raise InvalidGoal(
             "Не понял город. Укажите его явно: Мадрид, Барселона, Валенсия, Малага, Аликанте, "

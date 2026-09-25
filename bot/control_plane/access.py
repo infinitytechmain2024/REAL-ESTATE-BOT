@@ -2,10 +2,12 @@
 
 Someone without access gets a "Request access" button. The owners
 (TELEGRAM_OPERATOR_IDS in .env) receive the request with "Approve as helper",
-"Approve as operator" and "Deny" buttons. A helper only handles human
-verification (log in, CAPTCHA, checkpoint); an operator also controls
-collection. An approval takes effect at once in the shared OperatorSet and is
-stored (migration 011). Only owners decide, list, change roles and revoke.
+"Approve as user", "Approve as operator" and "Deny" buttons. A helper only
+handles human verification (log in, CAPTCHA, checkpoint); a user picks a mode
+and gives search tasks, each launched with a button (bot/control_plane/intake.py);
+an operator also controls collection. An approval takes effect at once in the
+shared OperatorSet and is stored (migrations 011, 018). Only owners decide,
+list, change roles and revoke.
 """
 
 from __future__ import annotations
@@ -44,8 +46,13 @@ class AccessStore(Protocol):
 
 ROLE_TEXT = {
     "helper": "helper (verification only: log in, CAPTCHA, checkpoint)",
+    "user": "user (Пользователь: choose a mode, describe a search task, press Запустить)",
     "operator": "operator (verification and control of collection)",
 }
+
+
+USER_WELCOME = ("Доступ открыт: вы пользователь. Нажмите /start, выберите режим и опишите задачу — "
+                "бот уточнит детали и попросит подтвердить запуск кнопкой «Запустить».")
 
 
 def label(display_name: str | None, username: str | None, user_id: int) -> str:
@@ -67,8 +74,8 @@ class AccessDesk:
     async def request(self, user_id: int | None, display_name: str | None, username: str | None) -> Reply:
         if user_id is None:
             return Reply("Access can only be requested from a Telegram account.")
-        if user_id in self.operators:
-            return Reply("You already have operator access.")
+        if self.operators.has_access(user_id):
+            return Reply("You already have access.")
         request, status = await self.store.open_request(user_id, display_name, username, DENY_COOLDOWN)
         if status == "pending":
             return Reply("Your request is already waiting for an owner's decision.")
@@ -78,10 +85,13 @@ class AccessDesk:
             f"Access request: {label(display_name, username, user_id)}.\n\n"
             "A helper only gets verification tasks (log in, CAPTCHA, checkpoint); an operator can also start, "
             "pause and cancel collection. Both open the browser logged into the Facebook account, so approve "
-            "only people you trust. Everything else keeps coming to owners only."
+            "only people you trust. A user (Пользователь) only picks a mode and gives search tasks, each "
+            "confirmed with a button; no browser, no verification, no control. Everything else keeps coming "
+            "to owners only."
         )
         buttons = (
             Button("Approve as helper", callback_data=f"access:helper:{request.id}"),
+            Button("Approve as user (Пользователь)", callback_data=f"access:user:{request.id}"),
             Button("Approve as operator", callback_data=f"access:operator:{request.id}"),
             Button("Deny", callback_data=f"access:deny:{request.id}"),
         )
@@ -98,7 +108,7 @@ class AccessDesk:
         return Reply("Request sent. You will get a message when an owner decides.")
 
     async def decide(self, owner_id: int | None, request_id: str, role: str | None) -> Reply:
-        """``role`` is ``helper`` or ``operator`` to approve, ``None`` to deny."""
+        """``role`` is ``helper``, ``user`` or ``operator`` to approve, ``None`` to deny."""
         if not self.operators.is_owner(owner_id):
             return Reply("Only an owner can decide access requests.")
         if not _is_uuid(request_id) or (role is not None and role not in ROLES):
@@ -111,7 +121,8 @@ class AccessDesk:
             self.operators.set(decided.user_id, role)
         log.info("telegram.access.decided", extra={"user_id": decided.user_id, "role": role, "owner": owner_id})
         await self._tell(decided.user_id, (
-            f"Access granted as {ROLE_TEXT[role]}. Send /help to see what you can do." if role
+            USER_WELCOME if role == "user"
+            else f"Access granted as {ROLE_TEXT[role]}. Send /help to see what you can do." if role
             else "Your access request was declined."))
         return Reply(f"Approved as {role}: {who}." if role else f"Denied: {who}.")
 
@@ -120,7 +131,7 @@ class AccessDesk:
             return Reply("Only an owner can change roles.")
         parts = argument.split()
         if len(parts) != 2 or not parts[0].isdigit() or parts[1].lower() not in ROLES:
-            return Reply("Use: /role <Telegram user ID> helper|operator")
+            return Reply("Use: /role <Telegram user ID> helper|user|operator")
         user_id, role = int(parts[0]), parts[1].lower()
         if user_id in self.operators.owners:
             return Reply("Owners are set in .env (TELEGRAM_OPERATOR_IDS) and always have full access.")
@@ -144,7 +155,7 @@ class AccessDesk:
         rows = await self.store.operators()
         owners = ", ".join(str(i) for i in sorted(self.operators.owners))
         approved = "\n".join(f"- {label(name, username, uid)}: {role}" for uid, name, username, role in rows) or "- none"
-        return Reply(f"Owners (from .env): {owners}\nApproved:\n{approved}\n\nChange with /role <ID> helper|operator, remove with /revoke <ID>.")
+        return Reply(f"Owners (from .env): {owners}\nApproved:\n{approved}\n\nChange with /role <ID> helper|user|operator, remove with /revoke <ID>.")
 
     async def revoke(self, owner_id: int | None, argument: str) -> Reply:
         if not self.operators.is_owner(owner_id):

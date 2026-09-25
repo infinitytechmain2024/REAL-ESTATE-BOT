@@ -37,8 +37,10 @@ from bot.campaign.discovery import FacebookDiscovery, PostgresDiscoveryStore, pl
 from bot.campaign.runner import VERIFY, CampaignRunner, RunnerConfig
 from bot.campaign.runs import PostgresRunStore
 from bot.campaign.store import PostgresCampaignStore
+from bot.control_plane.access import AccessDesk, PostgresAccessStore
 from bot.control_plane.auto import PostgresSettingsStore
-from bot.control_plane.models import IncomingMessage, TranscriptResult
+from bot.control_plane.intake import PostgresIntakeStore
+from bot.control_plane.models import IncomingMessage, Reply, TranscriptResult
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import PostgresControlPlaneStore
@@ -47,6 +49,7 @@ from bot.facebook_collector.collector import FacebookBatchCollector
 from bot.facebook_collector.models import ChallengeDetected, CollectedPost, GroupRead, GroupState
 from bot.facebook_collector.runner import CollectorRunner, PostgresLaunchStore
 from bot.facebook_collector.store import PostgresCollectorStore
+from bot.operators import OperatorSet
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import ConfirmedCommand
 from bot.orchestra.store import PostgresOrchestraStore, SafetyLimits
@@ -796,3 +799,120 @@ async def test_runner_startup_frees_a_profile_stuck_by_a_crashed_discovery_only_
     assert await pool.fetchval("select state from campaigns") == "discovering"
     await runner.tick()  # discovery resumes from its saved progress
     assert await pool.fetchval("select state from campaigns") == "running"
+
+
+# --- the user role ------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_campaign(pool) -> None:
+    """Owner approves as user -> /start -> mode -> task without a city -> answer -> Запустить -> campaign."""
+    user = 777
+    store = PostgresControlPlaneStore(URL)
+    await store.connect()
+    orchestra = PostgresOrchestraStore(URL)
+    await orchestra.connect()
+    inbox: list[tuple[int, Reply]] = []
+    notices: list[tuple[int, str]] = []
+
+    async def send(chat_id: int, reply: Reply) -> None:
+        inbox.append((chat_id, reply))
+
+    async def notify(chat_id: int, text: str) -> None:
+        notices.append((chat_id, text))
+
+    operators = OperatorSet({OWNER})
+    access = AccessDesk(PostgresAccessStore(store), operators, notify=send)
+    dispatcher = OrchestraDispatcher(orchestra, operator_ids=operators.controllers, notifier=notify,
+                                     campaigns=PostgresCampaignStore(orchestra.pool), roles=operators)
+
+    async def sink(envelope):
+        return await dispatcher.enqueue(ConfirmedCommand(envelope.command, envelope.arguments, envelope.chat_id, envelope.user_id,
+                                                         envelope.message_id, envelope.confirmation_id, envelope.auto))
+
+    settings = ControlPlaneSettings(telegram_token=TOKEN, database_url=URL, operator_user_ids=frozenset({OWNER}))
+    control = ControlPlane(settings, store, None, sink, access=access, settings_store=PostgresSettingsStore(store),
+                           intake_store=PostgresIntakeStore(store))
+
+    def message(text: str) -> IncomingMessage:
+        return IncomingMessage(chat_id=user, user_id=user, message_id=next(MESSAGE_IDS), text=text)
+
+    try:
+        await control.handle_callback(user, "access:request", "Ann", "ann")
+        [(_, request)] = [(c, r) for c, r in inbox if c == OWNER]
+        approve_as_user = next(b.callback_data for b in request.buttons if b.callback_data.startswith("access:user:"))
+        assert (await control.handle_callback(OWNER, approve_as_user)).text.startswith("Approved as user")
+        assert tuple(await pool.fetchrow("select role, state from telegram_operators where telegram_user_id=$1", user)) == ("user", "approved")
+        restarted = OperatorSet({OWNER})
+        await AccessDesk(PostgresAccessStore(store), restarted).load()
+        assert restarted.role(user) == "user" and user not in restarted
+
+        start = await control.handle_text(message("/start"))
+        assert [b.callback_data for b in start.buttons] == ["mode:real_estate", "mode:investors"]
+        await control.handle_callback(user, "mode:real_estate", chat_id=user)
+        assert await pool.fetchval("select mode from user_task_drafts where telegram_user_id=$1", user) == "real_estate"
+
+        question = await control.handle_text(message("снять квартиру до 1000 €"))
+        assert question.text.startswith("В каком городе искать?")
+        assert await pool.fetchval("select step from user_task_drafts where telegram_user_id=$1", user) == "city"
+        summary = await control.handle_text(message("Мадрид"))
+        assert "Город: Madrid" in summary.text and "Сделка: аренда" in summary.text
+        assert await pool.fetchval("select count(*) from orchestration_commands") == 0  # nothing without Запустить
+
+        assert "поставлена в очередь" in (await control.handle_callback(user, "task:launch", chat_id=user)).text
+        assert "устарела" in (await control.handle_callback(user, "task:launch", chat_id=user)).text
+        assert await pool.fetchval("select count(*) from orchestration_commands") == 1
+        assert (await pool.fetchval("select arguments from orchestration_commands")).startswith("mode=real_estate city=Madrid ")
+        assert await dispatcher.process_once()
+        assert await pool.fetchval("select source_text from campaigns") == "снять квартиру до 1000 €"
+        owner_notices = [r.text for c, r in inbox if c == OWNER and r.text.startswith("Пользователь ")]
+        assert len(owner_notices) == 1 and owner_notices[0].startswith("Пользователь Unknown, ID 777 запустил кампанию: ")
+        row = await pool.fetchrow("select requested_by, telegram_chat_id, plan->>'vertical', plan->>'location', plan->'constraints'->>'deal' from campaigns")
+        assert tuple(row) == (user, user, "real_estate", "Madrid", "rent")
+        assert "запланирована" in notices[-1][1] and notices[-1][0] == user
+        draft = await pool.fetchrow("select step, draft::text, launched_at from user_task_drafts where telegram_user_id=$1", user)
+        assert draft[0] == "idle" and draft[1] == "{}" and draft[2] is not None
+        actors = await pool.fetch("select actor from orchestration_audit_log where entity_type='orchestration_commands' and action='insert'")
+        assert {r[0] for r in actors} == {f"telegram:{user}"}
+
+        # Investors mode is authoritative even when the task mentions flats.
+        await control.handle_callback(user, "mode:investors", chat_id=user)
+        assert "Проверьте задачу" in (await control.handle_text(message("инвесторы и квартиры в Барселоне"))).text
+        await control.handle_callback(user, "task:launch", "Ann", "ann", chat_id=user)
+        assert (await pool.fetchval("select arguments from orchestration_commands order by created_at desc limit 1")).startswith(
+            "mode=investors city=Barcelona ")
+        assert await dispatcher.process_once()
+        row = await pool.fetchrow("select source_text, plan->>'vertical', plan->>'location' from campaigns where requested_by=$1 "
+                                  "order by created_at desc limit 1", user)
+        assert tuple(row) == ("инвесторы и квартиры в Барселоне", "investors", "Barcelona")
+        owner_notices = [r.text for c, r in inbox if c == OWNER and r.text.startswith("Пользователь ")]
+        assert len(owner_notices) == 2 and owner_notices[-1].startswith("Пользователь Ann (@ann), ID 777 запустил кампанию: investors")
+
+        # Several cities: the picked one is stored, with the task text as written.
+        await control.handle_callback(user, "mode:real_estate", chat_id=user)
+        question = await control.handle_text(message("квартиры в аренду в Мадриде или Валенсии до 900 €"))
+        assert "несколько городов" in question.text
+        valencia = next(b.callback_data for b in question.buttons if b.text == "Валенсия")
+        assert "Город: Valencia" in (await control.handle_callback(user, valencia, chat_id=user)).text
+        await control.handle_callback(user, "task:launch", chat_id=user)
+        assert await dispatcher.process_once()
+        row = await pool.fetchrow("select source_text, plan->>'vertical', plan->>'location' from campaigns where requested_by=$1 "
+                                  "order by created_at desc limit 1", user)
+        assert tuple(row) == ("квартиры в аренду в Мадриде или Валенсии до 900 €", "real_estate", "Valencia")
+        assert await pool.fetchval("select count(*) from orchestration_commands") == 3
+
+        # A day-old summary cannot be launched.
+        assert "Проверьте задачу" in (await control.handle_text(message("квартиры в аренду в Севилье до 800 €"))).text
+        await pool.execute("update user_task_drafts set updated_at = now() - interval '25 hours' where telegram_user_id=$1", user)
+        stale = await control.handle_callback(user, "task:launch", "Ann", "ann", chat_id=user)
+        assert stale.text == "Черновик устарел, опишите задачу заново."
+        assert await pool.fetchval("select count(*) from orchestration_commands") == 3
+
+        # Still no operator commands for a user; the Orchestra refuses them even if queued.
+        assert "Only operators" in (await control.handle_text(message("/run website https://example.org"))).text
+        await dispatcher.enqueue(ConfirmedCommand("pause", "all", user, user, next(MESSAGE_IDS)))
+        assert await dispatcher.process_once()
+        assert await pool.fetchval("select error_code from orchestration_commands where command='pause'") == "not_operator"
+    finally:
+        await orchestra.close()
+        await store.close()

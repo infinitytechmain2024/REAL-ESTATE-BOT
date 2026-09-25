@@ -88,3 +88,35 @@ def parse_campaign(arguments: str) -> tuple[str, str]:
             raise CommandValidationError("use /campaign cancel <campaign id>")
         return ("cancel", parts[0])
     return ("plan", text)
+
+
+GOAL_MODES = frozenset({"real_estate", "investors"})
+
+
+def parse_campaign_goal(value: str) -> tuple[str, str | None, str | None]:
+    """Strip leading ``mode=<vertical>`` and ``city=<name>`` tokens -> (goal, vertical, city).
+
+    Task intake queues the person's chosen mode and city this way so the
+    Orchestra plans exactly what they confirmed; a plain goal keeps detection.
+    The city must be a gazetteer canonical name (e.g. ``Madrid``, ``Málaga``).
+    """
+    from bot.campaign.architect import GAZETTEER
+
+    cities = {place.canonical for place in GAZETTEER}
+    vertical: str | None = None
+    city: str | None = None
+    words = value.split()
+    while words and "=" in words[0] and words[0].split("=", 1)[0] in {"mode", "city"}:
+        key, _, raw = words.pop(0).partition("=")
+        if key == "mode":
+            if raw not in GOAL_MODES or vertical is not None:
+                raise CommandValidationError("mode must be real_estate or investors")
+            vertical = raw
+        else:
+            if raw not in cities or city is not None:
+                raise CommandValidationError(f"city must be one of: {', '.join(sorted(cities))}")
+            city = raw
+    goal = " ".join(words)
+    if not goal:
+        raise CommandValidationError("use /campaign <goal>")
+    return goal, vertical, city

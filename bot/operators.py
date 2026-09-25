@@ -6,17 +6,22 @@
   commands, detailed status) and handles verification.
 - ``helper``: handles human verification only -- log in, CAPTCHA,
   checkpoint -- and nothing else.
+- ``user``: picks a mode and gives search tasks in Telegram; each launch is
+  confirmed with a button. No verification, no control, no browser.
 
-Approved people live in the database (migration 011) and change at runtime.
-``user_id in operators`` means "may handle verification" (every role);
-``operators.controllers`` is the narrower set allowed to change state.
+Approved people live in the database (migrations 011, 018) and change at
+runtime. ``has_access`` is true for every role; ``user_id in operators``
+means "may handle verification" (owners, operators, helpers -- never a
+user); ``operators.controllers`` is the narrower set allowed to change state.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Iterator, Mapping
 
-ROLES = ("helper", "operator")
+ROLES = ("helper", "user", "operator")
+# Roles that handle verification (and open the logged-in browser).
+STAFF_ROLES = frozenset({"owner", "helper", "operator"})
 
 
 class _Controllers(Collection[int]):
@@ -49,6 +54,10 @@ class OperatorSet(Collection[int]):
             return "owner"
         return self._roles.get(user_id)
 
+    def has_access(self, user_id: int | None) -> bool:
+        """Any role at all, including ``user``."""
+        return self.role(user_id) is not None
+
     def can_control(self, user_id: int | None) -> bool:
         return self.role(user_id) in {"owner", "operator"}
 
@@ -67,14 +76,18 @@ class OperatorSet(Collection[int]):
     def discard(self, user_id: int) -> None:
         self._roles.pop(user_id, None)
 
+    def _staff(self) -> set[int]:
+        return set(self.owners) | {u for u, r in self._roles.items() if r in STAFF_ROLES}
+
     def __contains__(self, user_id: object) -> bool:
-        return user_id in self.owners or user_id in self._roles
+        """May handle verification: owners, operators and helpers, never a ``user``."""
+        return isinstance(user_id, int) and self.role(user_id) in STAFF_ROLES
 
     def __iter__(self) -> Iterator[int]:
-        return iter(sorted(self.owners | set(self._roles)))
+        return iter(sorted(self._staff()))
 
     def __len__(self) -> int:
-        return len(self.owners | set(self._roles))
+        return len(self._staff())
 
     def __repr__(self) -> str:
         return f"OperatorSet(owners={sorted(self.owners)}, approved={dict(sorted(self.approved.items()))})"

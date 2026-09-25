@@ -18,6 +18,7 @@ from aiohttp import web
 from bot.campaign.store import PostgresCampaignStore
 from bot.control_plane.access import AccessDesk, PostgresAccessStore
 from bot.control_plane.auto import PostgresSettingsStore
+from bot.control_plane.intake import PostgresIntakeStore
 from bot.control_plane.live_view import (
     BrowserLiveClient,
     LiveViewConfig,
@@ -84,6 +85,8 @@ async def run() -> None:
         notifier=notify,
         # /campaign plans and stores a campaign; the campaign-runner service runs it.
         campaigns=PostgresCampaignStore(orchestra_store.pool) if orchestra_store.pool else None,
+        # People with the ``user`` role may queue campaign create/status/own cancel only.
+        roles=operators,
     )
 
     async def enqueue(envelope: CommandEnvelope) -> object:
@@ -117,7 +120,7 @@ async def run() -> None:
     )
     if not live.enabled:
         logging.getLogger(__name__).warning("telegram.control.live_view_disabled", extra={"hint": "set LIVE_VIEW_PUBLIC_URL to an https:// origin"})
-    control = ControlPlane(settings, store, transcriber, enqueue, live, access, PostgresSettingsStore(store))
+    control = ControlPlane(settings, store, transcriber, enqueue, live, access, PostgresSettingsStore(store), PostgresIntakeStore(store))
     for user_id in sorted(settings.auto_operator_user_ids):
         if not operators.can_control(user_id):
             # Not refused at startup (approvals change at runtime), but never auto-eligible meanwhile.
@@ -130,6 +133,7 @@ async def run() -> None:
         reply = await control.handle_callback(
             user.id if user else None, query.data or "",
             user.full_name if user else None, user.username if user else None,
+            chat_id=query.message.chat.id if query.message is not None else None,
         )
         await query.answer()
         if query.message is not None:
