@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from .models import Evidence
+from .openrouter import PROMPT_VERSION
 
 ACTOR = "analysis_pipeline"
 
@@ -96,7 +97,7 @@ class PostgresAnalysisStore:
                 json.dumps(payload),
                 outcome.result.confidence,
                 json.dumps(
-                    {"prompt_version": "analysis-v1", "model": model, "language": outcome.language}
+                    {"prompt_version": PROMPT_VERSION, "model": model, "language": outcome.language}
                 ),
             )
             return str(row["id"])
