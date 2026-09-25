@@ -286,3 +286,30 @@ async def test_facebook_snapshots_wait_for_the_feed_and_tolerate_an_empty_one(ma
     assert (await manager.snapshot(handle, "https://www.facebook.com/groups/b", timeout_ms=1_000))["url"].endswith("/b")
     assert page.mouse.scrolls == 3
     await manager.release(handle)
+
+
+@pytest.mark.asyncio
+async def test_the_real_browser_is_not_marked_as_automated(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import playwright.async_api
+
+    from bot.browser_session.manager import BrowserSessionManager
+
+    seen: dict[str, object] = {}
+
+    class FakeChromium:
+        async def launch_persistent_context(self, user_data_dir: str, **options: object) -> object:
+            seen.update(options, user_data_dir=user_data_dir)
+            return object()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class Starter:
+        async def start(self) -> FakePlaywright:
+            return FakePlaywright()
+
+    monkeypatch.setattr(playwright.async_api, "async_playwright", lambda: Starter())
+    await BrowserSessionManager._playwright_launcher(tmp_path)
+    assert seen["headless"] is False and seen["user_data_dir"] == str(tmp_path)
+    assert "--enable-automation" in seen["ignore_default_args"]  # type: ignore[operator]
+    assert "--disable-blink-features=AutomationControlled" in seen["args"]  # type: ignore[operator]

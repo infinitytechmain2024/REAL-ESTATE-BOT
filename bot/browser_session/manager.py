@@ -27,6 +27,19 @@ FEED_SCROLLS = 3
 FEED_SCROLL_PAUSE_MS = 1_500
 
 
+
+# The same profile is used by a person in the live window (login, checkpoints).
+# Playwright's defaults mark the browser as automated (the --enable-automation
+# switch and navigator.webdriver), and Facebook answers that by sending a
+# person who passed its check straight back to the login form. Without those
+# markers it behaves like the ordinary Chromium it is.
+LAUNCH_OPTIONS: dict[str, Any] = {
+    "headless": False,
+    "viewport": {"width": 1440, "height": 1000},
+    "ignore_default_args": ["--enable-automation"],
+    "args": ["--disable-blink-features=AutomationControlled"],
+}
+
 class RedisLease(Protocol):
     async def set(self, name: str, value: str, *, nx: bool, ex: int) -> bool | None: ...
     async def get(self, name: str) -> str | None: ...
@@ -376,7 +389,5 @@ class BrowserSessionManager:
         from playwright.async_api import async_playwright
 
         playwright = await async_playwright().start()
-        context = await playwright.chromium.launch_persistent_context(
-            str(profile_dir), headless=False, viewport={"width": 1440, "height": 1000}
-        )
+        context = await playwright.chromium.launch_persistent_context(str(profile_dir), **LAUNCH_OPTIONS)
         return _ManagedContext(context, playwright)
