@@ -356,6 +356,9 @@ class VerificationService:
         async with self._lock:
             job = await self._job(session)
             self._require_claimant(job, session)
+            if job.id in self._live_passwords and not await self.live.is_open(job.profile_id or ""):
+                # The browser service restarted and closed the window: open it again.
+                self._live_passwords.pop(job.id, None)
             if job.id not in self._live_passwords:
                 try:
                     self._live_passwords[job.id] = await self.live.start(job.profile_id or "", job.profile_name or "", job.platform, job.source_url, self.config.live_minutes)

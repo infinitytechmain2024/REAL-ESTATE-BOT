@@ -60,6 +60,7 @@ class LiveViewStore(Protocol):
 class LiveBrowser(Protocol):
     async def start(self, profile: LiveProfile, url: str, minutes: int) -> str: ...
     async def stop(self, profile_id: str) -> None: ...
+    async def is_open(self, profile_id: str) -> bool: ...
 
 
 class LiveViewUnavailable(RuntimeError):
@@ -93,6 +94,14 @@ class BrowserLiveClient:
         if response.status_code != 200:
             raise LiveViewUnavailable(f"the browser service returned HTTP {response.status_code}")
         return str(response.json()["password"])
+
+    async def is_open(self, profile_id: str) -> bool:
+        """Whether the browser service still shows this profile's window (a restart closes it)."""
+        try:
+            response = await self._client.get(self._url, headers=self._headers)
+        except httpx.HTTPError:
+            return False
+        return response.status_code == 200 and response.json().get("profile_id") == profile_id
 
     async def stop(self, profile_id: str) -> None:
         try:
@@ -192,9 +201,12 @@ class LiveViewCoordinator:
             if session is None or session.state not in {"requested", "open"} or session.expires_at <= datetime.now(UTC):
                 raise LiveViewUnavailable("this request has expired; wait for a new message or send /login")
             if session.state == "open" and session_id in self._passwords:
-                return self._passwords[session_id]
+                if await self.browser.is_open(session.profile.id):
+                    return self._passwords[session_id]
+                # The browser service restarted and closed the window: open it again.
+                self._passwords.pop(session_id, None)
             if session.state == "open":
-                # The bot restarted while the window was open: start it afresh.
+                # The bot or the browser restarted while the window was open: start it afresh.
                 await self.browser.stop(session.profile.id)
             password = await self.browser.start(session.profile, START_URLS.get(session.profile.platform, START_URLS["facebook"]), self.config.open_minutes)
             opened = await self.store.mark_live_view_open(session_id, user_id, self.config.open_minutes * 60) if session.state == "requested" else session
