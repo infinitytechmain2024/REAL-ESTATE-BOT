@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -152,3 +153,46 @@ def test_the_group_title_is_the_location_but_not_the_topic():
     assert filter_evidence(off_topic, "real_estate").reason == "irrelevant_keywords"
     no_place = evidence(text="Сдаю комнату в районе Usera, 400 евро, для одной девушки, без животных", title="")
     assert filter_evidence(no_place, "real_estate").reason == "missing_location_signal"
+
+
+def test_model_output_drift_is_normalised_but_the_schema_still_holds():
+    import json
+
+    from bot.analysis_pipeline.openrouter import RESULT_SCHEMA, parse_result
+
+    drifted = {
+        "relevant": "true", "confidence": "85%", "summary": "Комната в Усере за 400 евро", "location": None,
+        "price_signals": 400, "related_links": None, "category": "Real Estate", "reason": "offer", "language": "ru",
+    }
+    result = parse_result("```json\n" + json.dumps(drifted, ensure_ascii=False) + "\n```")
+    assert (result.relevant, result.confidence, result.category) == (True, 0.85, "real_estate")
+    assert result.price_signals == ["400"] and result.related_links == [] and result.location is None
+    assert parse_result(json.dumps({**drifted, "category": "Investment opportunity"})).category == "investors"
+    assert parse_result(json.dumps({**drifted, "category": "spam"})).category == "other"
+    # What cannot be repaired is still refused.
+    for broken in ("not json", "[1, 2]", json.dumps({**drifted, "confidence": 250}), json.dumps({"relevant": True})):
+        with pytest.raises((ValueError, ValidationError)):
+            parse_result(broken)
+    assert RESULT_SCHEMA["properties"]["category"]["enum"] == ["real_estate", "investors", "other"]
+
+
+@pytest.mark.asyncio
+async def test_the_request_carries_the_json_schema(monkeypatch):
+    import httpx
+
+    from bot.analysis_pipeline.openrouter import OpenRouterAnalyzer
+
+    sent = {}
+    answer = {"relevant": True, "confidence": 0.9, "summary": "s", "location": "Madrid", "price_signals": ["450 EUR"],
+              "related_links": [], "category": "real_estate", "reason": "r"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    result = await OpenRouterAnalyzer("key", "openai/gpt-4o-mini").analyze(evidence(), "real_estate")
+    assert result.category == "real_estate"
+    assert sent["response_format"]["type"] == "json_schema" and sent["response_format"]["json_schema"]["strict"] is True
+    assert '"real_estate", "investors", "other"' in sent["messages"][1]["content"]
