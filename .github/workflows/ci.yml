@@ -123,3 +123,4 @@ jobs:
           tests/test_verification_postgres.py
           tests/test_orchestra_postgres.py
           tests/test_operator_access.py
+          tests/test_image_imports.py
