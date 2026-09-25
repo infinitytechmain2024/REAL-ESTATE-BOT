@@ -9,7 +9,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
+from bot.campaign.architect import InvalidGoal, plan_campaign
 from bot.control_plane.access import AccessDesk
+from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
 from bot.control_plane.live_view import LiveViewCoordinator, LiveViewUnavailable, is_session_id
 from bot.control_plane.models import (
     CommandEnvelope,
@@ -33,7 +35,7 @@ TRANSCRIPTION_ERROR_REPLIES = {
     "empty_audio": "The voice message was empty.",
     "empty_transcript": "No speech was detected in that voice message.",
 }
-STATE_CHANGING = frozenset({"run", "pause", "resume", "cancel"})
+STATE_CHANGING = frozenset({"run", "pause", "resume", "cancel", "campaign"})
 
 
 class ControlPlane:
@@ -45,11 +47,14 @@ class ControlPlane:
         command_sink: CommandSink,
         live: LiveViewCoordinator | None = None,
         access: AccessDesk | None = None,
+        settings_store: SettingsStore | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
         # Owners from .env plus operators they approved; shared and live.
         self.operators = access.operators if access else OperatorSet(settings.operator_user_ids)
+        self.auto = AutoMode(settings_store or MemorySettingsStore(), default=settings.auto_mode,
+                             operators=self.operators, auto_operator_ids=settings.auto_operator_user_ids)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, operators and owners."""
@@ -168,6 +173,8 @@ class ControlPlane:
             suffix = f" Queue id: {command_id}." if command_id else ""
             return Reply(f"Confirmed: /{command}. Safely queued for bounded orchestration.{suffix}")
         if not text.startswith("/"):
+            if text and await self.auto.applies_to(message.user_id):
+                return await self._auto_goal(message, text)
             return Reply("Send /help for control-plane commands. State-changing commands require confirmation.")
         command_line = text[1:].split(maxsplit=1)
         command = command_line[0].split("@", 1)[0].lower()
@@ -179,9 +186,14 @@ class ControlPlane:
                         "with a button to open the browser. You can also send /login [facebook|instagram|tiktok] [profile-name].")
             else:
                 text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
+                        "/campaign <goal> | status | cancel <id>, "
                         "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>.")
                 if role == "owner":
-                    text += " Owners: /operators, /role <ID> helper|operator, /revoke <ID>."
+                    text += " Owners: /operators, /role <ID> helper|operator, /revoke <ID>, /auto on|off|status."
+                if self.auto.eligible(message.user_id):
+                    text += ("\n\nAuto mode (when an owner turns it on): just write or say the goal, e.g. "
+                             "«квартиры в аренду в Мадриде»; /campaign, /run, /pause and /resume are queued "
+                             "without confirmation, /cancel still asks.")
                 elif role is None:
                     text += "\n\nYou have no access yet; press the button to ask for it."
             return self._with_access_button(Reply(text), message.user_id)
@@ -203,6 +215,8 @@ class ControlPlane:
             return await self.live.login(message.user_id, platform, name)
         if command == "status":
             return await self._status(message)
+        if command == "auto":
+            return await self.auto.command(message.user_id, arguments)
         if command not in STATE_CHANGING:
             return Reply("Unknown command. Send /help.")
         # Telegram channel posts may not have a sending user. Confirmation
@@ -211,8 +225,37 @@ class ControlPlane:
             return Reply("State-changing commands require a Telegram user identity.")
         if (refusal := self._operator_refusal(message)) is not None:
             return refusal
+        if command == "campaign":
+            if not arguments.strip():
+                return Reply("Use /campaign <what and where to search>, /campaign status, or /campaign cancel <id>.")
+            if arguments.strip().lower() == "status":
+                # Read-only: no confirmation; the Orchestra answers in this chat.
+                await self.command_sink(CommandEnvelope(command, "status", message.chat_id, message.user_id, message.message_id))
+                return Reply("Campaign status requested.")
+        cancelling = command == "campaign" and arguments.split(maxsplit=1)[0].lower() == "cancel"
+        if command in AUTO_COMMANDS and not cancelling and await self.auto.applies_to(message.user_id):
+            return await self._auto_queue(message, command, arguments)
         token = await self.store.create_confirmation(message, command, arguments, ttl_seconds=self.settings.confirmation_ttl_seconds)
         return Reply(f"Confirmation required for /{command}. Reply exactly: confirm {token} (expires in {self.settings.confirmation_ttl_seconds // 60} minutes).")
+
+    async def _auto_goal(self, message: IncomingMessage, text: str) -> Reply:
+        """Plain text (or speech) from an auto-operator is a campaign goal."""
+        if text.split(maxsplit=1)[0].lower() in {"status", "cancel"}:
+            return Reply("Для статуса или отмены используйте /campaign status или /campaign cancel <id>.")
+        try:
+            plan_campaign(text)  # the Orchestra plans again; this only avoids queuing nonsense
+        except InvalidGoal as exc:
+            return Reply(f"{exc}\nНапишите цель одной фразой, например «квартиры в аренду в Мадриде», или отправьте /help.")
+        return await self._auto_queue(message, "campaign", text)
+
+    async def _auto_queue(self, message: IncomingMessage, command: str, arguments: str) -> Reply:
+        """Straight to the Orchestra, which still applies quotas and breakers."""
+        assert message.user_id is not None
+        receipt = await self.command_sink(CommandEnvelope(command, arguments, message.chat_id, message.user_id, message.message_id, auto=True))
+        command_id = getattr(receipt, "command_id", None)
+        log.info("telegram.control.auto_queued", extra={"command": command, "chat_id": message.chat_id, "user_id": message.user_id, "command_id": command_id})
+        suffix = f" Queue id: {command_id}." if command_id else ""
+        return Reply(f"Авто: /{command} поставлена в очередь без подтверждения.{suffix}")
 
     async def _status(self, message: IncomingMessage) -> Reply:
         # /status is open to everyone, but queue sizes, sources and spend are

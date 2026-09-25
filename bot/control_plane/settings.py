@@ -40,6 +40,10 @@ class ControlPlaneSettings:
     # Telegram user IDs allowed to run, pause, resume, or cancel acquisition.
     # Empty means nobody: state changes fail closed until an operator is named.
     operator_user_ids: frozenset[int] = frozenset()
+    # Auto mode (see bot/control_plane/auto.py): default switch while no /auto
+    # row exists, and who besides owners may skip confirmation.
+    auto_mode: bool = False
+    auto_operator_user_ids: frozenset[int] = frozenset()
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
@@ -77,17 +81,26 @@ class ControlPlaneSettings:
                 breaker_window_hours=_bounded_int("SAFETY_BREAKER_WINDOW_HOURS", 6, 1, 72),
             ),
             operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_OPERATOR_IDS", "")),
+            auto_mode=_on_off("AUTO_MODE"),
+            auto_operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_AUTO_OPERATOR_IDS", ""), "TELEGRAM_AUTO_OPERATOR_IDS"),
         )
 
 
-def parse_user_ids(raw: str) -> frozenset[int]:
+def parse_user_ids(raw: str, name: str = "TELEGRAM_OPERATOR_IDS") -> frozenset[int]:
     """Parse ``123, 456`` strictly: a typo must stop startup, not lock operators out."""
     ids: set[int] = set()
     for part in raw.replace(",", " ").split():
         if not part.isdigit():
-            raise ValueError(f"TELEGRAM_OPERATOR_IDS must be numeric Telegram user IDs, got {part!r}")
+            raise ValueError(f"{name} must be numeric Telegram user IDs, got {part!r}")
         ids.add(int(part))
     return frozenset(ids)
+
+
+def _on_off(name: str) -> bool:
+    raw = os.environ.get(name, "").strip().lower() or "off"
+    if raw not in {"on", "off"}:
+        raise ValueError(f"{name} must be on or off, got {raw!r}")
+    return raw == "on"
 
 
 def _stt_provider(raw: str) -> str:

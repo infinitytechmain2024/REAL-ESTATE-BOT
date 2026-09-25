@@ -30,6 +30,7 @@ class ConfirmedCommand:
     user_id: int
     message_id: int
     confirmation_id: str | None = None
+    auto: bool = False  # queued by auto mode, without a confirmation
 
 
 @dataclass(frozen=True, slots=True)

@@ -291,8 +291,50 @@ class BrowserSessionManager:
     async def _extract(page: Any) -> dict[str, Any]:
         # Keep the payload small and evidence-focused.  Facebook's markup is
         # volatile, so the collector treats this as a candidate feed, not truth.
+        #
+        # group_links: at most 40 distinct links to a Facebook group itself
+        # (/groups/<slug-or-id>/, never a post, member list or other sub-page),
+        # each with its anchor text and the text of the result card around it:
+        # the nearest ancestor that still links to no other group.
         return await page.evaluate(
-            """() => ({
+            """() => (() => {
+              const GROUP = /^https:\\/\\/(?:www\\.|m\\.)?facebook\\.com\\/groups\\/([A-Za-z0-9_.-]{1,100})\\/?(?:[?#].*)?$/;
+              const RESERVED = new Set(['feed', 'discover', 'joins', 'create', 'search', 'category', 'you']);
+              const groupKey = (href) => {
+                const match = GROUP.exec(href || '');
+                const key = match ? match[1].toLowerCase() : null;
+                return key && !RESERVED.has(key) ? key : null;
+              };
+              const squash = (value, limit) => (value || '').replace(/\\s+/g, ' ').trim().slice(0, limit);
+              const cardText = (anchor, key) => {
+                let node = anchor, best = anchor;
+                for (let depth = 0; depth < 10 && node.parentElement; depth++) {
+                  node = node.parentElement;
+                  const keys = new Set(Array.from(node.querySelectorAll('a[href*="/groups/"]'))
+                    .map(a => groupKey(a.href)).filter(Boolean));
+                  if (keys.size > 1 || (keys.size === 1 && !keys.has(key))) break;
+                  best = node;
+                  if (node.matches('[role="article"], [role="listitem"]')) break;
+                }
+                return squash(best.innerText, 400);
+              };
+              const groupLinks = () => {
+                const found = new Map();
+                for (const anchor of document.querySelectorAll('a[href*="/groups/"]')) {
+                  const key = groupKey(anchor.href);
+                  if (!key) continue;
+                  const name = squash(anchor.innerText, 200);
+                  const known = found.get(key);
+                  if (known) {
+                    if (!known.name && name) known.name = name;
+                    continue;
+                  }
+                  if (found.size >= 40) continue;
+                  found.set(key, {url: `https://www.facebook.com/groups/${key}/`, name, card: cardText(anchor, key)});
+                }
+                return Array.from(found.values());
+              };
+              return ({
               url: location.href,
               title: document.title.slice(0, 500),
               text: (document.body?.innerText || '').slice(0, 120000),
@@ -309,8 +351,10 @@ class BrowserSessionManager:
                   .find(href => /\\/(posts|permalink)\\//.test(href)) || null;
                 const time = node.querySelector('time');
                 return {url: link, text: (node.innerText || '').slice(0, 12000), published_at: time?.dateTime || null};
-              })
-            })"""
+              }),
+              group_links: groupLinks(),
+              });
+            })()"""
         )
 
     async def status(self, profile_id: str, *, persisted_state: str = "ready") -> ProfileStatus:
