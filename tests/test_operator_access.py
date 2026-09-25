@@ -92,7 +92,7 @@ async def test_a_request_goes_to_every_owner_once_with_role_choices() -> None:
     for owner in (OWNER, SECOND_OWNER):
         [notice] = outbox.to(owner)
         assert "Ann Smith (@ann), ID 99" in notice.text
-        assert [b.text for b in notice.buttons] == ["Approve as helper", "Approve as operator", "Deny"]
+        assert [b.text for b in notice.buttons] == ["Approve as helper", "Approve as user (Пользователь)", "Approve as operator", "Deny"]
     again = await control.handle_callback(STRANGER, "access:request", "Ann Smith", "ann")
     assert "already waiting" in again.text and len(outbox.sent) == 2
     assert "already have" in (await control.handle_callback(OWNER, "access:request")).text

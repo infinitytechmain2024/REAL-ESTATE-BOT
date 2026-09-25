@@ -12,11 +12,18 @@ from bot.campaign.architect import InvalidGoal, plan_campaign
 from bot.campaign.models import Campaign
 
 from .models import ClaimedCommand, ClaimLost, CommandReceipt, CommandState, ConfirmedCommand
-from .parser import CommandValidationError, parse_campaign, parse_run, parse_scope
+from .parser import (
+    CommandValidationError,
+    parse_campaign,
+    parse_campaign_goal,
+    parse_run,
+    parse_scope,
+)
 from .store import DISPATCHER_ACTOR, PostgresOrchestraStore
 
 if TYPE_CHECKING:
     from bot.campaign.store import CampaignStore
+    from bot.operators import OperatorSet
 
 log = logging.getLogger(__name__)
 Notifier = Callable[[int, str], Awaitable[None]]
@@ -25,7 +32,7 @@ REAP_INTERVAL_SECONDS = 60.0
 
 
 class OrchestraDispatcher:
-    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, stale_batch_seconds: int = 900, notifier: Notifier | None = None, campaigns: CampaignStore | None = None) -> None:
+    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, stale_batch_seconds: int = 900, notifier: Notifier | None = None, campaigns: CampaignStore | None = None, roles: OperatorSet | None = None) -> None:
         if not 10 <= lease_seconds <= 300 or not 0.1 <= poll_seconds <= 30 or not 300 <= stale_batch_seconds <= 86_400:
             raise ValueError("unsafe dispatcher settings")
         self.stale_batch_seconds = stale_batch_seconds
@@ -33,6 +40,9 @@ class OrchestraDispatcher:
         self.store, self.lease_seconds, self.poll_seconds = store, lease_seconds, poll_seconds
         self.notifier, self.operator_ids = notifier, operator_ids
         self.campaigns = campaigns
+        # The shared, live OperatorSet: people with the ``user`` role may
+        # create campaigns, read their status and cancel their own, nothing else.
+        self.roles = roles
         self._stop = asyncio.Event()
 
     async def enqueue(self, command: ConfirmedCommand) -> CommandReceipt:
@@ -52,7 +62,7 @@ class OrchestraDispatcher:
         item = await self.store.claim_next(lease_seconds=self.lease_seconds)
         if item is None:
             return False
-        if item.user_id not in self.operator_ids:
+        if item.user_id not in self.operator_ids and not self._user_campaign(item):
             # Defence in depth: also rejects commands queued before the
             # allowlist existed or by an operator who has since been removed.
             log.warning("orchestra.not_operator", extra={"command_id": item.id, "user_id": item.user_id})
@@ -87,27 +97,40 @@ class OrchestraDispatcher:
         if item.command == "run":
             return await self.store.plan_run(parse_run(item.arguments), item, actor=actor)
         if item.command == "campaign":
-            return await self._campaign(item, actor)
+            return await self._campaign(item, actor, own_only=item.user_id not in self.operator_ids)
         scope_kind, identifier = parse_scope(item.arguments)
         return await self.store.apply_lifecycle(item, scope_kind, identifier, actor=actor)
 
-    async def _campaign(self, item: ClaimedCommand, actor: str) -> dict[str, Any]:
-        """Plan and store a campaign, cancel one, or report the chat's latest; the runner does the work."""
+    def _user_campaign(self, item: ClaimedCommand) -> bool:
+        return item.command == "campaign" and self.roles is not None and self.roles.role(item.user_id) == "user"
+
+    async def _campaign(self, item: ClaimedCommand, actor: str, *, own_only: bool = False) -> dict[str, Any]:
+        """Plan and store a campaign, cancel one, or report the chat's latest; the runner does the work.
+
+        ``own_only`` (the ``user`` role): status and cancel see only campaigns this person requested.
+        """
         if self.campaigns is None:
             raise ValueError("campaigns are not available in this service")
         action, value = parse_campaign(item.arguments)
         created: str | None = None
         if action == "status":
             campaign = await self.campaigns.latest_for_chat(item.chat_id)
+            if own_only and campaign is not None and campaign.requested_by != item.user_id:
+                campaign = None
             result = {"status": "finished", "campaign_id": campaign.id if campaign else None, "reply": campaign_status(campaign)}
+        elif action == "cancel" and own_only and not await self._owns(value, item.user_id):
+            log.warning("orchestra.campaign_cancel_refused", extra={"command_id": item.id, "user_id": item.user_id})
+            result = {"status": "refused", "campaign_id": value, "reply": f"Можно остановить только свою кампанию; {value} не ваша или не найдена."}
         elif action == "cancel":
             cancelled = await self.campaigns.cancel(value, actor)
             reply = f"Кампания {value} остановлена." if cancelled else f"Кампания {value} не найдена или уже завершена."
             result = {"status": "cancelled" if cancelled else "unchanged", "campaign_id": value, "reply": reply}
         else:
-            plan = plan_campaign(value)  # InvalidGoal: nothing is stored
+            # Intake queues "mode=<vertical> city=<name> <task>": the person's choices override detection.
+            goal, vertical, city = parse_campaign_goal(value)
+            plan = plan_campaign(goal, vertical=vertical, location=city)  # type: ignore[arg-type]  # InvalidGoal: nothing is stored
             created = await self.campaigns.create(plan, chat_id=item.chat_id, requested_by=item.user_id,
-                                                  source_text=value, actor=actor)
+                                                  source_text=goal, actor=actor)
             result = {"status": "planned", "campaign_id": created, "reply": f"Кампания {created} запланирована: {plan.goal}"}
         try:
             await self.store.complete(item, CommandState.FINISHED, result)
@@ -116,6 +139,11 @@ class OrchestraDispatcher:
                 await self.campaigns.cancel(created, DISPATCHER_ACTOR)
             raise
         return result
+
+    async def _owns(self, campaign_id: str, user_id: int) -> bool:
+        assert self.campaigns is not None
+        campaign = await self.campaigns.get(campaign_id)
+        return campaign is not None and campaign.requested_by == user_id
 
     async def _fail(self, item: ClaimedCommand, error_code: str, error_detail: str) -> None:
         with suppress(ClaimLost):
