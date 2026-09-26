@@ -1,0 +1,195 @@
+"""Finding cards: Russian labels and text, fields chosen by the task, always the original post."""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import UTC, datetime
+
+import pytest
+
+from bot.analysis_pipeline.cards import MAX_CARD_CHARS, CardTask, confidence_words, render_card
+from bot.analysis_pipeline.formatters import finding_payload, real_estate
+from bot.analysis_pipeline.models import Evidence
+from bot.analysis_pipeline.openrouter import PROMPT_VERSION, RESULT_SCHEMA, parse_result
+from bot.analysis_pipeline.pipeline import AnalysisPipeline
+from bot.campaign.architect import plan_campaign
+from bot.campaign.models import Campaign
+from bot.campaign.runner import finding_card
+from bot.campaign.runs import StreamFinding
+
+ES_POST = (
+    "Alquilo piso de 2 habitaciones en Lavapiés, Madrid. 1.200 € al mes, gastos aparte. "
+    "Disponible desde octubre, sin mascotas. Contacto por privado."
+)
+RU_POST = "Сдаю комнату в районе Usera, Мадрид, 400 евро в месяц, всё включено, для одной девушки."
+LINK = "https://www.facebook.com/groups/pisosmadrid/posts/123/"
+ENGLISH_LABELS = re.compile(r"\b(location|price|confidence|summary|signal|links?|original post|not stated)\b", re.I)
+
+
+def es_payload(**extra) -> dict:
+    return {
+        "schema_version": "analysis-v3",
+        "summary": "Piso de 2 habitaciones en Lavapiés por 1.200 € al mes.",
+        "summary_ru": "Сдаётся квартира с двумя спальнями в Лавапьес, Мадрид, за 1200 € в месяц, коммунальные отдельно. "
+                      "Свободна с октября, без животных.",
+        "source_language": "es",
+        "location": "Madrid, Lavapiés",
+        "price_signals": ["1.200 € al mes"],
+        "price_amount": 1200,
+        "price_currency": "EUR",
+        "deal_type": "rent",
+        "property_type": "apartment",
+        "rooms": 2,
+        "who": None,
+        "original_post_link": LINK,
+        "related_links": [],
+        **extra,
+    }
+
+
+def test_spanish_source_gives_russian_card_and_the_spanish_original() -> None:
+    card = render_card(es_payload(), original=ES_POST, confidence=0.91)
+    assert card.startswith("🏠 Недвижимость")
+    assert "Кратко: Сдаётся квартира с двумя спальнями" in card
+    assert "Цена: 1 200 € в месяц" in card and "Локация: Madrid, Lavapiés" in card
+    assert "Сделка: аренда" in card and "Тип: квартира" in card and "Уверенность: высокая" in card
+    assert f"Ссылка: {LINK}" in card and "Источник: Facebook" in card
+    assert card.endswith(f"Оригинал (es):\n{ES_POST}")
+    # The Russian text comes before the original block.
+    assert card.index("Кратко:") < card.index("Оригинал (es):")
+
+
+def test_russian_source_gives_russian_body_and_russian_original() -> None:
+    payload = {
+        "schema_version": "analysis-v3", "summary": "Комната в Усере за 400 евро.",
+        "summary_ru": "Сдаётся комната в районе Усера за 400 € в месяц, всё включено.", "source_language": "ru",
+        "location": "Мадрид, Усера", "price_amount": 400, "price_currency": "EUR", "deal_type": "rent",
+        "property_type": "room", "original_post_link": LINK,
+    }
+    card = render_card(payload, original=RU_POST, confidence=0.6)
+    assert "Кратко: Сдаётся комната в районе Усера" in card and "Уверенность: средняя" in card
+    assert card.endswith(f"Оригинал (ru):\n{RU_POST}")
+
+
+def test_no_english_labels_or_raw_numbers_anywhere() -> None:
+    cards = [
+        render_card(es_payload(), original=ES_POST, confidence=0.91),
+        render_card(es_payload(who="Fondo Norte"), original=ES_POST, vertical="investors", confidence=0.3),
+        render_card({"summary": "x", "price_signals": ["450 EUR/month"], "original_post_link": LINK}, original=ES_POST),
+    ]
+    for card in cards:
+        head = card.split("\nОригинал")[0]  # the original post itself may be in any language
+        assert not ENGLISH_LABELS.search(head), head
+        assert "0.91" not in head and "91%" not in head and "analysis" not in head and "None" not in head
+    assert "Уверенность: низкая" in cards[1] and "Кто: Fondo Norte" in cards[1] and cards[1].startswith("📈 Инвестиции")
+
+
+def test_the_task_decides_the_fields_and_unknown_ones_are_left_out() -> None:
+    sparse = {"summary_ru": "Сдаётся квартира в Мадриде.", "source_language": "es", "price_amount": 950,
+              "price_currency": "EUR", "location": "Madrid", "original_post_link": LINK}
+    budget = render_card(sparse, original=ES_POST, task=CardTask(max_price=1000))
+    lines = budget.splitlines()
+    assert lines[1] == "Цена: 950 €"  # a budget task shows the price first
+    for missing in ("Сделка:", "Тип:", "Комнаты:", "Кто:", "Уверенность:", "не указано", "not stated"):
+        assert missing not in budget
+    rent = render_card(es_payload(), original=ES_POST, task=CardTask(deal="rent"))
+    assert rent.splitlines()[1:3] == ["Сделка: аренда", "Тип: квартира"]
+    both = render_card(es_payload(), original=ES_POST, task=CardTask(deal="rent", max_price=1300))
+    assert both.splitlines()[1:4] == ["Цена: 1 200 € в месяц", "Сделка: аренда", "Тип: квартира"]
+    investors = render_card(es_payload(who="Ana García, Norte Capital"), original=ES_POST, vertical="investors")
+    assert investors.splitlines()[1:3] == ["Кто: Ana García, Norte Capital", "Локация: Madrid, Lavapiés"]
+    assert "Тип:" not in investors and "Сумма: 1 200 €" in investors
+
+
+def test_an_old_payload_without_the_new_fields_still_renders() -> None:
+    old = {
+        "schema_version": "analysis-v1", "summary": "Piso en Madrid por 900 euros al mes.", "location": "Madrid",
+        "price_signals": ["900 EUR/month"], "original_post_link": LINK, "related_links": [],
+        "formatted": "🏠 Real Estate proposition\nLocation: Madrid",
+    }
+    card = render_card(old, original="Alquilo piso en Madrid, 900 euros al mes.", language="es", confidence=0.85)
+    assert "Цена: 900 EUR/month" in card and "Локация: Madrid" in card and "Кратко: Piso en Madrid" in card
+    assert card.endswith("Оригинал (es):\nAlquilo piso en Madrid, 900 euros al mes.")
+    assert "Real Estate" not in card and "Location" not in card
+    # No original text stored: the summary stands in; the language is guessed from it.
+    assert render_card({"summary": "Alquilo habitación en Madrid"}, language="unknown").endswith(
+        "Оригинал (es):\nAlquilo habitación en Madrid")
+    # A Ukrainian post the keyword filter called "ru".
+    assert "Оригинал (uk):" in render_card({"summary": "x"}, original="Здаю кімнату в Мадриді", language="ru")
+
+
+def test_a_long_post_is_trimmed_to_one_telegram_message() -> None:
+    long_post = "Alquilo piso en Madrid. " * 600
+    card = render_card(es_payload(summary_ru="Очень длинный текст. " * 200), original=long_post)
+    assert len(card) <= MAX_CARD_CHARS and card.rstrip().endswith("…")
+    assert "Оригинал (es):\nAlquilo piso en Madrid." in card
+    assert len(f"{card}\n\n🔎 Найдено: 100 · ищу дальше") <= 4096
+
+
+def test_confidence_words() -> None:
+    assert [confidence_words(x) for x in (0.95, 0.8, 0.5, 0.2, None, "x")] == [
+        "высокая", "высокая", "средняя", "низкая", None, None]
+
+
+def test_parse_result_accepts_the_new_schema_and_drifted_variants() -> None:
+    assert PROMPT_VERSION == "analysis-v3"
+    assert set(RESULT_SCHEMA["required"]) == set(RESULT_SCHEMA["properties"])
+    assert {"summary_ru", "source_language", "price_amount", "price_currency"} <= set(RESULT_SCHEMA["required"])
+    exact = {
+        "relevant": True, "confidence": 0.9, "summary": "Piso en Lavapiés", "location": "Madrid", "price_signals": ["1.200 €"],
+        "related_links": [], "category": "real_estate", "reason": "offer", "summary_ru": "Квартира в Лавапьес",
+        "source_language": "es", "price_amount": 1200, "price_currency": "EUR", "deal_type": "rent",
+        "property_type": "apartment", "rooms": 2, "who": None,
+    }
+    result = parse_result(json.dumps(exact, ensure_ascii=False))
+    assert (result.summary_ru, result.source_language, result.price_amount, result.price_currency) == (
+        "Квартира в Лавапьес", "es", 1200.0, "EUR")
+    assert (result.deal_type, result.property_type, result.rooms, result.who) == ("rent", "apartment", 2, None)
+
+    drifted = {**exact, "source_language": "Spanish", "price_amount": "1.200 €", "price_currency": "euros",
+               "deal_type": "Alquiler", "property_type": "Piso", "rooms": "2", "who": ""}
+    result = parse_result(json.dumps(drifted, ensure_ascii=False))
+    assert (result.source_language, result.price_amount, result.price_currency) == ("es", 1200.0, "EUR")
+    assert (result.deal_type, result.property_type, result.rooms, result.who) == ("rent", "apartment", 2, None)
+    odd = parse_result(json.dumps({**exact, "source_language": "ES-es", "price_amount": "a consultar",
+                                   "price_currency": "chf", "deal_type": "swap", "property_type": "boat", "rooms": -1}))
+    assert (odd.source_language, odd.price_amount, odd.price_currency) == ("es", None, "CHF")
+    assert (odd.deal_type, odd.property_type, odd.rooms) == (None, None, None)
+    # An analysis-v2 answer (json_object fallback without the new keys) is still accepted.
+    legacy = {k: exact[k] for k in ("relevant", "confidence", "summary", "location", "price_signals", "related_links",
+                                    "category", "reason")}
+    result = parse_result(json.dumps(legacy))
+    assert result.summary_ru is None and result.price_amount is None and result.source_language is None
+
+
+class SpanishAnalyzer:
+    async def analyze(self, evidence, vertical):
+        return parse_result(json.dumps({
+            "relevant": True, "confidence": 0.88, "summary": "Piso en Lavapiés", "location": "Madrid, Lavapiés",
+            "price_signals": ["1.200 € al mes"], "related_links": [], "category": vertical, "reason": "offer",
+            "summary_ru": "Сдаётся квартира с двумя спальнями в Лавапьес за 1200 € в месяц.", "source_language": "es",
+            "price_amount": 1200, "price_currency": "EUR", "deal_type": "rent", "property_type": "apartment",
+            "rooms": 2, "who": None,
+        }, ensure_ascii=False))
+
+
+@pytest.mark.asyncio
+async def test_pipeline_digest_and_campaign_stream_use_the_same_card() -> None:
+    evidence = Evidence(post_id="p1", source_id="s1", canonical_url=LINK, text=ES_POST,
+                        published_at=datetime.now(UTC))
+    outcome = await AnalysisPipeline(SpanishAnalyzer()).process(evidence, "real_estate")
+    assert outcome.accepted and outcome.formatted == real_estate(outcome.result, evidence, "es")
+    assert outcome.formatted.endswith(f"Оригинал (es):\n{ES_POST}")
+    payload = {**finding_payload(outcome.result, evidence), "formatted": outcome.formatted}
+    assert payload["schema_version"] == "analysis-v3" and payload["price_amount"] == 1200.0
+
+    plan = plan_campaign("Найди квартиры в аренду в Мадриде до 1300 евро")
+    campaign = Campaign("c1", plan, "running", 1, 1, "goal", None, None, datetime.now(UTC))
+    stored = json.loads(json.dumps(payload))  # as read back from jsonb
+    card = finding_card(campaign, StreamFinding("f1", outcome.formatted, stored, ES_POST, "es", 0.88, "real_estate"))
+    assert plan.constraints["max_price"] == 1300 and plan.constraints["deal"] == "rent"
+    assert card.splitlines()[1:4] == ["Цена: 1 200 € в месяц", "Сделка: аренда", "Тип: квартира"]
+    assert "Кратко: Сдаётся квартира" in card and card.endswith(f"Оригинал (es):\n{ES_POST}")
+    # A finding without a payload (legacy memory store) is sent as its text.
+    assert finding_card(campaign, StreamFinding("f2", "🏠 text")) == "🏠 text"

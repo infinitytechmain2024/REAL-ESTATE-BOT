@@ -9,10 +9,11 @@ only process that reads Facebook groups) executes it from its launch request.
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import WINDOW_SIZE
 
@@ -57,8 +58,16 @@ class WindowStart:
 
 @dataclass(frozen=True, slots=True)
 class StreamFinding:
+    """A finding to stream. ``payload`` (the stored structured payload) is rendered
+    as a Russian card with the post's ``original`` text; without it ``text`` is sent."""
+
     id: str
     text: str
+    payload: dict[str, Any] | None = None
+    original: str = ""
+    language: str | None = None
+    confidence: float | None = None
+    vertical: str | None = None
 
 
 RECOVERY_ACTOR = "campaign:runner:recovery"
@@ -85,6 +94,14 @@ class RunStore(Protocol):
     async def finding_sent(self, finding_id: str, message_id: int) -> None: ...
     async def release_finding(self, finding_id: str) -> None: ...
     async def streamed_count(self, campaign_id: str) -> int: ...
+
+
+def _payload(raw: str | None) -> dict[str, Any] | None:
+    try:
+        value = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _window_size(limit: int) -> int:
@@ -269,7 +286,9 @@ class PostgresRunStore:
     async def unstreamed_findings(self, campaign_id: str, limit: int) -> list[StreamFinding]:
         rows = await self.pool.fetch(
             f"""select f.id::text as id,
-                       coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text
+                       coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
+                       f.structured_payload::text as payload, coalesce(p.body_text, '') as original,
+                       f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical
                   from findings f
                   join collected_posts p on p.id = f.post_id
                   join acquisition_runs r on r.id = p.acquisition_run_id
@@ -280,7 +299,8 @@ class PostgresRunStore:
                  order by f.created_at, f.id limit {int(limit)}""",
             campaign_id,
         )
-        return [StreamFinding(r["id"], r["text"]) for r in rows]
+        return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
+                              r["confidence"], r["vertical"]) for r in rows]
 
     async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None:
         """Take the one send slot for a finding; returns the campaign's finding count, or None if taken."""
@@ -394,8 +414,8 @@ class MemoryRunStore:
         for url in batch.items:
             batch.items[url] = "succeeded" if state == "succeeded" else "cancelled"
 
-    def add_finding(self, campaign_id: str, finding_id: str, text: str) -> None:
-        self.findings.setdefault(campaign_id, []).append(StreamFinding(finding_id, text))
+    def add_finding(self, campaign_id: str, finding_id: str, text: str, **card: Any) -> None:
+        self.findings.setdefault(campaign_id, []).append(StreamFinding(finding_id, text, **card))
         self.findings_state[finding_id] = "ready"
 
     # protocol

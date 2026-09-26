@@ -42,8 +42,10 @@ from typing import Any, Protocol
 
 import httpx
 
+from bot.analysis_pipeline.cards import CardTask, render_card
+
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
-from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, Window
+from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
 from .status_text import campaign_label
 from .store import CampaignStore
 
@@ -345,7 +347,7 @@ class CampaignRunner:
                 continue
             tail = f"🔎 Найдено: {count} · ищу дальше" if active else f"🔎 Найдено: {count}"
             try:
-                message_id = await self.messenger.send(campaign.chat_id, f"{finding.text[:MAX_MESSAGE_CHARS]}\n\n{tail}")
+                message_id = await self.messenger.send(campaign.chat_id, f"{finding_card(campaign, finding)}\n\n{tail}")
             except Exception:  # noqa: BLE001 - Telegram down: give the slot back, retry next tick
                 log.warning("campaign.finding_send_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
                 await self.store.release_finding(finding.id)
@@ -392,6 +394,22 @@ class CampaignRunner:
         if campaign.state == "failed":
             return f"{STOPPED} · ошибка: {campaign.stop_reason or 'unknown'}"
         return STOPPED if not found else f"{STOPPED} · найдено {found}"
+
+
+def finding_card(campaign: Campaign, finding: StreamFinding) -> str:
+    """The Russian card for one finding, its fields ordered by the campaign's task."""
+    if finding.payload is None:
+        return finding.text[:MAX_MESSAGE_CHARS]
+    constraints = campaign.plan.constraints
+    deal, max_price, rooms = constraints.get("deal"), constraints.get("max_price"), constraints.get("rooms")
+    task = CardTask(
+        vertical=campaign.plan.vertical,
+        deal=deal if isinstance(deal, str) else None,
+        max_price=max_price if isinstance(max_price, int) else None,
+        rooms=rooms if isinstance(rooms, int) else None,
+    )
+    return render_card(finding.payload, original=finding.original, task=task, vertical=finding.vertical,
+                       language=finding.language, confidence=finding.confidence, limit=MAX_MESSAGE_CHARS)
 
 
 # --- service ------------------------------------------------------------------------------

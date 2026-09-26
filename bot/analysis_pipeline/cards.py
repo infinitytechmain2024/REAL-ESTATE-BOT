@@ -1,0 +1,194 @@
+"""The Russian finding card: what a user reads in Telegram for one finding.
+
+One pure function, ``render_card``, used by the analysis digest and by the
+campaign runner (which streams each finding to the requester). It reads the
+stored ``findings.structured_payload`` (any schema version; old payloads
+without the analysis-v3 fields still render) plus the post's original text and
+an optional task, and returns plain text:
+
+* Russian labels only; a field that is unknown is left out;
+* the order of the fields follows the task (a budget puts Цена first, a rent or
+  sale request puts Сделка/Тип first, investors see Кто first);
+* the main text is the Russian summary, then always ``Оригинал (<lang>):``
+  with the post text, trimmed so the whole card fits one Telegram message.
+
+No ids, model names, prompts or English system text reach the card.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlparse
+
+MAX_CARD_CHARS = 3900  # Telegram allows 4096; the runner adds a short footer.
+MAX_SUMMARY_CHARS = 1200
+
+DEALS = {"rent": "аренда", "sale": "продажа"}
+PROPERTIES = {
+    "apartment": "квартира",
+    "room": "комната",
+    "house": "дом",
+    "studio": "студия",
+    "land": "участок",
+    "commercial": "коммерческая недвижимость",
+}
+CURRENCIES = {"EUR": "€", "USD": "$", "GBP": "£", "RUB": "₽", "UAH": "₴"}
+SOURCES = {
+    "facebook.com": "Facebook",
+    "fb.com": "Facebook",
+    "instagram.com": "Instagram",
+    "t.me": "Telegram",
+    "idealista.com": "Idealista",
+    "fotocasa.es": "Fotocasa",
+    "milanuncios.com": "Milanuncios",
+}
+
+
+@dataclass(frozen=True)
+class CardTask:
+    """What the requester asked for; decides which fields lead the card."""
+
+    vertical: str = "real_estate"  # real_estate | investors | both
+    deal: str | None = None  # rent | sale
+    max_price: int | None = None
+    rooms: int | None = None
+
+
+def confidence_words(value: object) -> str | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if number >= 0.8:
+        return "высокая"
+    if number >= 0.5:
+        return "средняя"
+    return "низкая"
+
+
+def detect_language(text: str) -> str | None:
+    """A last-resort guess when neither the model nor the filter named the language."""
+    lower = text.lower()
+    if re.search(r"[іїєґ]", lower):
+        return "uk"
+    if re.search(r"[а-яё]", lower):
+        return "ru"
+    if re.search(r"[ñ¿¡]|\b(el|la|los|las|piso|alquil\w*|habitaci\w*|venta|euros?)\b", lower):
+        return "es"
+    if re.search(r"[a-z]", lower):
+        return "en"
+    return None
+
+
+def _number(value: float) -> str:
+    whole = int(value)
+    text = f"{whole:,}".replace(",", " ") if value == whole else f"{value:,.2f}".replace(",", " ")
+    return text
+
+
+def _price(payload: Mapping[str, Any], deal: str | None) -> str | None:
+    amount, currency = payload.get("price_amount"), payload.get("price_currency")
+    if isinstance(amount, int | float) and not isinstance(amount, bool) and amount > 0:
+        unit = CURRENCIES.get(str(currency or "").upper(), str(currency or "").upper())
+        text = f"{_number(float(amount))} {unit}".strip()
+        return f"{text} в месяц" if deal == "rent" else text
+    signals = [str(s).strip() for s in payload.get("price_signals") or [] if str(s).strip()]
+    return ", ".join(signals[:3]) or None
+
+
+def _source(link: str) -> str | None:
+    host = (urlparse(link).hostname or "").lower().removeprefix("www.").removeprefix("m.")
+    if not host:
+        return None
+    for domain, name in SOURCES.items():
+        if host == domain or host.endswith("." + domain):
+            return name
+    return host
+
+
+def _trim(text: str, limit: int) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def render_card(
+    payload: Mapping[str, Any],
+    *,
+    original: str = "",
+    task: CardTask | None = None,
+    vertical: str | None = None,
+    language: str | None = None,
+    confidence: float | None = None,
+    limit: int = MAX_CARD_CHARS,
+) -> str:
+    """Build the Russian card for one finding; always ends with the original post block."""
+    task = task or CardTask(vertical=vertical or "real_estate")
+    kind = vertical or ("investors" if task.vertical == "investors" else "real_estate")
+    investors = kind == "investors"
+
+    source_language = str(payload.get("source_language") or "").strip().lower() or None
+    lang = source_language or (language if language and language != "unknown" else None)
+    original_text = (original or "").strip() or str(payload.get("summary") or "").strip()
+    guessed = detect_language(original_text)
+    if not source_language and lang == "ru" and guessed == "uk":
+        lang = "uk"  # the keyword filter reads every Cyrillic post as ru
+    lang = lang or guessed
+
+    deal = payload.get("deal_type") if payload.get("deal_type") in DEALS else None
+    fields: dict[str, str | None] = {
+        "Кто": _trim(str(payload["who"]), 200) if payload.get("who") else None,
+        "Сделка": DEALS.get(deal) if deal else None,
+        "Тип": PROPERTIES.get(str(payload.get("property_type") or "")),
+        "Цена": _price(payload, deal),
+        "Локация": _trim(str(payload["location"]), 200) if payload.get("location") else None,
+        "Комнаты": str(payload["rooms"]) if isinstance(payload.get("rooms"), int) and payload["rooms"] > 0 else None,
+    }
+    if investors:
+        order = ["Кто", "Локация", "Цена"]
+    else:
+        order = ["Сделка", "Тип", "Цена", "Локация", "Комнаты"]
+        if task.deal:
+            order = ["Сделка", "Тип"] + [f for f in order if f not in ("Сделка", "Тип")]
+        if task.max_price:
+            order = ["Цена"] + [f for f in order if f != "Цена"]
+    labels = {"Цена": "Сумма"} if investors else {}
+    lines = [f"{labels.get(name, name)}: {fields[name]}" for name in order if fields.get(name)]
+    words = confidence_words(confidence if confidence is not None else payload.get("confidence"))
+    if words:
+        lines.append(f"Уверенность: {words}")
+
+    summary = str(payload.get("summary_ru") or "").strip()
+    if not summary:
+        # An analysis-v1/v2 payload has only the summary in the post's language.
+        summary = str(payload.get("summary") or "").strip()
+    link = str(payload.get("original_post_link") or "").strip()
+    links = [str(x).strip() for x in payload.get("related_links") or [] if str(x).strip() and str(x).strip() != link][:3]
+
+    head = ["📈 Инвестиции" if investors else "🏠 Недвижимость", *lines]
+    parts = ["\n".join(head)]
+    if summary:
+        parts.append(f"Кратко: {_trim(summary, MAX_SUMMARY_CHARS)}")
+    tail = []
+    if link:
+        tail.append(f"Ссылка: {link}")
+        if source := _source(link):
+            tail.append(f"Источник: {source}")
+    if links:
+        tail.append("Ещё ссылки:\n" + "\n".join(f"• {x}" for x in links))
+    if tail:
+        parts.append("\n".join(tail))
+    body = "\n\n".join(parts)
+
+    label = f"Оригинал ({lang}):" if lang else "Оригинал:"
+    room = limit - len(body) - len(label) - 3
+    if room < 40 and summary:
+        # A very long summary gives way so the original always fits.
+        parts[1] = f"Кратко: {_trim(summary, max(80, len(summary) - (40 - room)))}"
+        body = "\n\n".join(parts)
+        room = limit - len(body) - len(label) - 3
+    return f"{body}\n\n{label}\n{_trim(original_text, max(room, 1))}"[:limit]

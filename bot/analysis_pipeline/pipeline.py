@@ -31,7 +31,7 @@ class AnalysisPipeline:
             return PipelineOutcome(False, "model_not_relevant", decision.language, result=result)
         formatter = real_estate if vertical == "real_estate" else investors
         return PipelineOutcome(
-            True, "accepted", decision.language, result, formatter(result, evidence)
+            True, "accepted", decision.language, result, formatter(result, evidence, decision.language)
         )
 
 
