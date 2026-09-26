@@ -99,7 +99,7 @@ def make(max_groups: int = 50, max_windows: int | None = None, groups: int = 50,
     messenger = FakeMessenger()
     discovery = FakeDiscovery(campaigns, store, groups)
     clock = Clock()
-    runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock,
+    runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids={7},
                             config=RunnerConfig(**{"window_cooldown_seconds": 120, "analysis_grace_seconds": 600,
                                                    "refusal_retry_seconds": 300, **config}))
     limits = {"max_groups": max_groups}
@@ -190,7 +190,7 @@ async def test_findings_stream_once_in_order_and_survive_a_restart() -> None:
     assert all(chat == CHAT for chat, _, _ in messenger.sent)
     assert store.findings_state == {"f1": "delivered", "f2": "delivered"}
 
-    restarted = CampaignRunner(campaigns, store, messenger, discovery, now=clock)
+    restarted = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids={7})
     await restarted.tick()
     await restarted.tick()
     assert len(messenger.findings()) == 2

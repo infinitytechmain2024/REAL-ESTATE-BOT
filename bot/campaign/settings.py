@@ -21,6 +21,9 @@ class CampaignRunnerSettings(BaseSettings):
     discovery_max_posts: PositiveInt = Field(default=15, ge=1, le=20, validation_alias="FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP")
     discovery_group_timeout_seconds: PositiveInt = Field(default=90, ge=35, le=600, validation_alias="FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS")
 
+    # Owners see the technical campaign status; everyone else only user-safe labels.
+    operator_ids_raw: str = Field(default="", validation_alias="TELEGRAM_OPERATOR_IDS")
+
     poll_seconds: PositiveInt = Field(default=10, ge=2, le=300, validation_alias="CAMPAIGN_POLL_SECONDS")
     window_cooldown_seconds: int = Field(default=120, ge=30, le=86_400, validation_alias="CAMPAIGN_WINDOW_COOLDOWN_SECONDS")
     analysis_grace_seconds: int = Field(default=600, ge=0, le=7_200, validation_alias="CAMPAIGN_ANALYSIS_GRACE_SECONDS")
@@ -45,3 +48,13 @@ class CampaignRunnerSettings(BaseSettings):
         return RunnerConfig(window_cooldown_seconds=self.window_cooldown_seconds,
                             analysis_grace_seconds=self.analysis_grace_seconds,
                             refusal_retry_seconds=self.refusal_retry_seconds)
+
+
+    def owner_ids(self) -> frozenset[int]:
+        """``123, 456`` -> owners; a typo stops startup rather than showing users technical text."""
+        ids: set[int] = set()
+        for part in self.operator_ids_raw.replace(",", " ").split():
+            if not part.isdigit():
+                raise ValueError(f"TELEGRAM_OPERATOR_IDS must be numeric Telegram user IDs, got {part!r}")
+            ids.add(int(part))
+        return frozenset(ids)

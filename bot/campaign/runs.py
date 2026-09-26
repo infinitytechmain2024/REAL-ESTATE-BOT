@@ -9,12 +9,15 @@ only process that reads Facebook groups) executes it from its launch request.
 
 from __future__ import annotations
 
+import json
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import WINDOW_SIZE
+from .offers import MemoryOffer, MemoryOfferDesk
 
 if TYPE_CHECKING:
     import asyncpg
@@ -57,8 +60,16 @@ class WindowStart:
 
 @dataclass(frozen=True, slots=True)
 class StreamFinding:
+    """A finding to stream. ``payload`` (the stored structured payload) is rendered
+    as a Russian card with the post's ``original`` text; without it ``text`` is sent."""
+
     id: str
     text: str
+    payload: dict[str, Any] | None = None
+    original: str = ""
+    language: str | None = None
+    confidence: float | None = None
+    vertical: str | None = None
 
 
 RECOVERY_ACTOR = "campaign:runner:recovery"
@@ -85,6 +96,27 @@ class RunStore(Protocol):
     async def finding_sent(self, finding_id: str, message_id: int) -> None: ...
     async def release_finding(self, finding_id: str) -> None: ...
     async def streamed_count(self, campaign_id: str) -> int: ...
+    # exact / similar / other (migration 019, ``tolerance`` and ``offers``)
+    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None) -> bool: ...
+    async def held_findings(self, campaign_id: str, bucket: str, limit: int) -> list[StreamFinding]: ...
+    async def claim_held(self, campaign_id: str, finding_id: str) -> int | None: ...
+    async def exact_count(self, campaign_id: str) -> int: ...
+    async def offer_state(self, campaign_id: str, bucket: str) -> str | None: ...
+    async def open_offer(self, campaign_id: str, bucket: str) -> bool: ...
+    async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None: ...
+    async def drop_offer(self, campaign_id: str, bucket: str) -> None: ...
+
+
+def _distance(value: float | None) -> float | None:
+    return value if value is not None and math.isfinite(value) else None
+
+
+def _payload(raw: str | None) -> dict[str, Any] | None:
+    try:
+        value = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _window_size(limit: int) -> int:
@@ -269,7 +301,9 @@ class PostgresRunStore:
     async def unstreamed_findings(self, campaign_id: str, limit: int) -> list[StreamFinding]:
         rows = await self.pool.fetch(
             f"""select f.id::text as id,
-                       coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text
+                       coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
+                       f.structured_payload::text as payload, coalesce(p.body_text, '') as original,
+                       f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical
                   from findings f
                   join collected_posts p on p.id = f.post_id
                   join acquisition_runs r on r.id = p.acquisition_run_id
@@ -280,7 +314,8 @@ class PostgresRunStore:
                  order by f.created_at, f.id limit {int(limit)}""",
             campaign_id,
         )
-        return [StreamFinding(r["id"], r["text"]) for r in rows]
+        return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
+                              r["confidence"], r["vertical"]) for r in rows]
 
     async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None:
         """Take the one send slot for a finding; returns the campaign's finding count, or None if taken."""
@@ -292,8 +327,7 @@ class PostgresRunStore:
             )
             if not claimed:
                 return None
-            return int(await conn.fetchval(
-                "select count(*) from campaign_findings where campaign_id = $1::uuid", campaign_id))
+            return await _sent_count(conn, campaign_id)
 
     async def finding_sent(self, finding_id: str, message_id: int) -> None:
         async with self.pool.acquire() as conn, conn.transaction():
@@ -306,12 +340,91 @@ class PostgresRunStore:
             await conn.execute("update findings set state = 'delivered' where id = $1::uuid and state = 'ready'", finding_id)
 
     async def release_finding(self, finding_id: str) -> None:
-        await self.pool.execute(
-            "delete from campaign_findings where finding_id = $1::uuid and state = 'sending'", finding_id)
+        """Give a failed send back: an exact finding is picked up again, a held one is held again."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "delete from campaign_findings where finding_id = $1::uuid and state = 'sending' and bucket = 'exact'",
+                finding_id)
+            await conn.execute(
+                "update campaign_findings set state = 'held' where finding_id = $1::uuid and state = 'sending'",
+                finding_id)
 
     async def streamed_count(self, campaign_id: str) -> int:
         return int(await self.pool.fetchval(
             "select count(*) from campaign_findings where campaign_id = $1::uuid and state = 'sent'", campaign_id))
+
+    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None) -> bool:
+        """File a similar/other finding without sending it; False if it already has a bucket."""
+        return bool(await self.pool.fetchval(
+            """insert into campaign_findings (finding_id, campaign_id, bucket, distance, state)
+               values ($1::uuid, $2::uuid, $3, $4, 'held') on conflict do nothing returning 1""",
+            finding_id, campaign_id, bucket, _distance(distance),
+        ))
+
+    async def held_findings(self, campaign_id: str, bucket: str, limit: int) -> list[StreamFinding]:
+        """Held findings of one bucket, closest to the request first."""
+        rows = await self.pool.fetch(
+            f"""select f.id::text as id,
+                       coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
+                       f.structured_payload::text as payload, coalesce(p.body_text, '') as original,
+                       f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical
+                  from campaign_findings cf
+                  join findings f on f.id = cf.finding_id
+                  join collected_posts p on p.id = f.post_id
+                 where cf.campaign_id = $1::uuid and cf.bucket = $2 and cf.state = 'held'
+                 order by cf.distance nulls last, f.created_at, f.id limit {int(limit)}""",
+            campaign_id, bucket,
+        )
+        return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
+                              r["confidence"], r["vertical"]) for r in rows]
+
+    async def claim_held(self, campaign_id: str, finding_id: str) -> int | None:
+        """Take the send slot of a held finding (held -> sending); None if it is not held any more."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            claimed = await conn.fetchval(
+                """update campaign_findings set state = 'sending'
+                    where finding_id = $1::uuid and campaign_id = $2::uuid and state = 'held' returning 1""",
+                finding_id, campaign_id,
+            )
+            return await _sent_count(conn, campaign_id) if claimed else None
+
+    async def exact_count(self, campaign_id: str) -> int:
+        return int(await self.pool.fetchval(
+            "select count(*) from campaign_findings where campaign_id = $1::uuid and bucket = 'exact'", campaign_id))
+
+    async def offer_state(self, campaign_id: str, bucket: str) -> str | None:
+        state: str | None = await self.pool.fetchval(
+            "select state from campaign_offers where campaign_id = $1::uuid and bucket = $2", campaign_id, bucket)
+        return state
+
+    async def open_offer(self, campaign_id: str, bucket: str) -> bool:
+        """Take the one question slot of a bucket; False if it was already asked."""
+        return bool(await self.pool.fetchval(
+            """insert into campaign_offers (campaign_id, bucket) values ($1::uuid, $2)
+               on conflict do nothing returning 1""",
+            campaign_id, bucket,
+        ))
+
+    async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None:
+        await self.pool.execute(
+            "update campaign_offers set telegram_message_id = $3 where campaign_id = $1::uuid and bucket = $2",
+            campaign_id, bucket, message_id,
+        )
+
+    async def drop_offer(self, campaign_id: str, bucket: str) -> None:
+        """The question could not be sent: free the slot so the next tick asks again."""
+        await self.pool.execute(
+            """delete from campaign_offers where campaign_id = $1::uuid and bucket = $2 and state = 'asked'
+                  and telegram_message_id is null""",
+            campaign_id, bucket,
+        )
+
+
+async def _sent_count(conn: asyncpg.Connection[asyncpg.Record], campaign_id: str) -> int:
+    """The number on a card's «🔎 Найдено: N»: findings sent or being sent, never held ones."""
+    return int(await conn.fetchval(
+        "select count(*) from campaign_findings where campaign_id = $1::uuid and state in ('sending', 'sent')",
+        campaign_id))
 
 
 _CAMPAIGN_POSTS = """from collected_posts p
@@ -369,6 +482,9 @@ class MemoryRunStore:
         self.cancelled_batches: list[str] = []
         self.collector_running = False  # a batch run / acquisition run / launch holds the profile
         self.recovered: list[str] = []  # actors that freed the profile
+        self.buckets: dict[str, tuple[str, float | None]] = {}  # finding -> (bucket, distance)
+        self.held: dict[str, dict[str, None]] = {}  # cid -> held finding ids, in filing order
+        self.desk = MemoryOfferDesk()  # the control plane's side of campaign_offers
 
     async def recover_discovery_profile(self) -> int:
         items = getattr(self.campaigns, "campaigns", {})
@@ -394,8 +510,8 @@ class MemoryRunStore:
         for url in batch.items:
             batch.items[url] = "succeeded" if state == "succeeded" else "cancelled"
 
-    def add_finding(self, campaign_id: str, finding_id: str, text: str) -> None:
-        self.findings.setdefault(campaign_id, []).append(StreamFinding(finding_id, text))
+    def add_finding(self, campaign_id: str, finding_id: str, text: str, **card: Any) -> None:
+        self.findings.setdefault(campaign_id, []).append(StreamFinding(finding_id, text, **card))
         self.findings_state[finding_id] = "ready"
 
     # protocol
@@ -480,13 +596,14 @@ class MemoryRunStore:
 
     async def unstreamed_findings(self, campaign_id: str, limit: int) -> list[StreamFinding]:
         done = self.streamed.get(campaign_id, {})
-        return [f for f in self.findings.get(campaign_id, []) if f.id not in done][:limit]
+        return [f for f in self.findings.get(campaign_id, []) if f.id not in done and f.id not in self.buckets][:limit]
 
     async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None:
         done = self.streamed.setdefault(campaign_id, {})
-        if finding_id in done:
+        if finding_id in done or finding_id in self.buckets:
             return None
         done[finding_id] = None
+        self.buckets[finding_id] = ("exact", 0.0)
         return len(done)
 
     async def finding_sent(self, finding_id: str, message_id: int) -> None:
@@ -496,9 +613,59 @@ class MemoryRunStore:
         self.findings_state[finding_id] = "delivered"
 
     async def release_finding(self, finding_id: str) -> None:
-        for done in self.streamed.values():
+        for cid, done in self.streamed.items():
             if done.get(finding_id, 0) is None:
                 del done[finding_id]
+                if self.buckets[finding_id][0] == "exact":
+                    del self.buckets[finding_id]
+                else:
+                    self.held.setdefault(cid, {})[finding_id] = None
 
     async def streamed_count(self, campaign_id: str) -> int:
         return sum(1 for m in self.streamed.get(campaign_id, {}).values() if m is not None)
+
+    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None) -> bool:
+        if finding_id in self.buckets or finding_id in self.streamed.get(campaign_id, {}):
+            return False
+        self.buckets[finding_id] = (bucket, _distance(distance))
+        self.held.setdefault(campaign_id, {})[finding_id] = None
+        return True
+
+    async def held_findings(self, campaign_id: str, bucket: str, limit: int) -> list[StreamFinding]:
+        order = list(self.held.get(campaign_id, {}))
+        by_id = {f.id: f for f in self.findings.get(campaign_id, [])}
+        ids = [i for i in order if self.buckets[i][0] == bucket]
+        ids.sort(key=lambda i: (self.buckets[i][1] is None, self.buckets[i][1] or 0.0, order.index(i)))
+        return [by_id[i] for i in ids[:limit]]
+
+    async def claim_held(self, campaign_id: str, finding_id: str) -> int | None:
+        held = self.held.get(campaign_id, {})
+        if finding_id not in held:
+            return None
+        del held[finding_id]
+        done = self.streamed.setdefault(campaign_id, {})
+        done[finding_id] = None
+        return len(done)
+
+    async def exact_count(self, campaign_id: str) -> int:
+        return sum(1 for f in self.findings.get(campaign_id, [])
+                   if self.buckets.get(f.id, ("", None))[0] == "exact")
+
+    async def offer_state(self, campaign_id: str, bucket: str) -> str | None:
+        offer = self.desk.offers.get((campaign_id, bucket))
+        return offer.state if offer else None
+
+    async def open_offer(self, campaign_id: str, bucket: str) -> bool:
+        if (campaign_id, bucket) in self.desk.offers:
+            return False
+        campaign = getattr(self.campaigns, "campaigns", {}).get(campaign_id)
+        self.desk.offers[(campaign_id, bucket)] = MemoryOffer(campaign.requested_by if campaign else 0)
+        return True
+
+    async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None:
+        self.desk.offers[(campaign_id, bucket)].message_id = message_id
+
+    async def drop_offer(self, campaign_id: str, bucket: str) -> None:
+        offer = self.desk.offers.get((campaign_id, bucket))
+        if offer is not None and offer.state == "asked" and offer.message_id is None:
+            del self.desk.offers[(campaign_id, bucket)]

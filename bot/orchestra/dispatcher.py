@@ -9,7 +9,8 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from bot.campaign.architect import InvalidGoal, plan_campaign
-from bot.campaign.models import Campaign
+from bot.campaign.models import TERMINAL_STATES, Campaign
+from bot.campaign.status_text import DONE, NOTHING, campaign_label
 
 from .models import ClaimedCommand, ClaimLost, CommandReceipt, CommandState, ConfirmedCommand
 from .parser import (
@@ -29,6 +30,7 @@ log = logging.getLogger(__name__)
 Notifier = Callable[[int, str], Awaitable[None]]
 MAX_BACKOFF_SECONDS = 30.0
 REAP_INTERVAL_SECONDS = 60.0
+NOT_STOPPABLE = "Этот поиск уже завершён или недоступен."
 
 
 class OrchestraDispatcher:
@@ -67,29 +69,53 @@ class OrchestraDispatcher:
             # allowlist existed or by an operator who has since been removed.
             log.warning("orchestra.not_operator", extra={"command_id": item.id, "user_id": item.user_id})
             await self._fail(item, "not_operator", f"telegram user {item.user_id} is not an operator")
-            await self._notify(item.chat_id, f"Orchestra: request {item.id} was rejected; only operators can change acquisition state.")
+            await self._problem(item, f"Orchestra: request {item.id} was rejected; only operators can change acquisition state.")
             return True
-        await self._notify(item.chat_id, f"Orchestra: processing {item.command} request {item.id}.")
+        plain = self._plain(item)
+        if not plain:
+            await self._notify(item.chat_id, f"Orchestra: processing {item.command} request {item.id}.")
         try:
             result = await self._dispatch(item)
-            await self._notify(item.chat_id, result.get("reply") or f"Orchestra: {item.command} request {item.id} {_summary(result)}.")
+            if plain:  # the campaign's own status message carries the progress
+                if result.get("user_reply"):
+                    await self._notify(item.chat_id, result["user_reply"])
+            else:
+                await self._notify(item.chat_id, result.get("reply") or f"Orchestra: {item.command} request {item.id} {_summary(result)}.")
         except ClaimLost:
             log.warning("orchestra.claim_lost", extra={"command_id": item.id})
-            await self._notify(item.chat_id, f"Orchestra: request {item.id} was cancelled before it completed; nothing was planned.")
+            await self._problem(item, f"Orchestra: request {item.id} was cancelled before it completed; nothing was planned.")
         except InvalidGoal as exc:
             await self._fail(item, "invalid_goal", str(exc))
-            await self._notify(item.chat_id, str(exc))
+            await self._notify(item.chat_id, str(exc))  # written for the person who asked
         except CommandValidationError as exc:
             await self._fail(item, "invalid_command", str(exc))
-            await self._notify(item.chat_id, f"Orchestra: request {item.id} failed validation: {exc}")
+            await self._problem(item, f"Orchestra: request {item.id} failed validation: {exc}")
         except ValueError as exc:
             await self._fail(item, "precondition_failed", str(exc))
-            await self._notify(item.chat_id, f"Orchestra: request {item.id} cannot run: {exc}")
+            await self._problem(item, f"Orchestra: request {item.id} cannot run: {exc}")
         except Exception as exc:
             log.exception("orchestra.dispatch_failed", extra={"command_id": item.id})
             await self._fail(item, type(exc).__name__, str(exc)[:500])
-            await self._notify(item.chat_id, f"Orchestra: request {item.id} failed safely; inspect its audit record.")
+            await self._problem(item, f"Orchestra: request {item.id} failed safely; inspect its audit record.")
         return True
+
+    def _is_owner(self, user_id: int) -> bool:
+        # Without the shared OperatorSet (older wiring, tests) every controller counts as an owner.
+        return self.roles.is_owner(user_id) if self.roles is not None else user_id in self.operator_ids
+
+    def _plain(self, item: ClaimedCommand) -> bool:
+        """A campaign command from anyone but an owner: no ids, queue lines or English in its replies."""
+        return item.command == "campaign" and not self._is_owner(item.user_id)
+
+    async def _problem(self, item: ClaimedCommand, technical: str) -> None:
+        """Owners get the technical line; a normal user a plain status, and the owners the details."""
+        if not self._plain(item):
+            await self._notify(item.chat_id, technical)
+            return
+        await self._notify(item.chat_id, NOTHING)
+        for owner in sorted(self.roles.owners if self.roles is not None else ()):
+            if owner != item.chat_id:
+                await self._notify(owner, f"{technical} (telegram:{item.user_id})")
 
     async def _dispatch(self, item: ClaimedCommand) -> dict[str, Any]:
         """Plan or apply the command; the store finishes it in the same transaction."""
@@ -113,18 +139,24 @@ class OrchestraDispatcher:
             raise ValueError("campaigns are not available in this service")
         action, value = parse_campaign(item.arguments)
         created: str | None = None
+        user_reply: str | None = None  # what a non-owner sees; None: the status message says it
         if action == "status":
             campaign = await self.campaigns.latest_for_chat(item.chat_id)
             if own_only and campaign is not None and campaign.requested_by != item.user_id:
                 campaign = None
             result = {"status": "finished", "campaign_id": campaign.id if campaign else None, "reply": campaign_status(campaign)}
+            user_reply = user_campaign_status(campaign)
         elif action == "cancel" and own_only and not await self._owns(value, item.user_id):
             log.warning("orchestra.campaign_cancel_refused", extra={"command_id": item.id, "user_id": item.user_id})
             result = {"status": "refused", "campaign_id": value, "reply": f"Можно остановить только свою кампанию; {value} не ваша или не найдена."}
+            user_reply = NOT_STOPPABLE
         elif action == "cancel":
             cancelled = await self.campaigns.cancel(value, actor)
             reply = f"Кампания {value} остановлена." if cancelled else f"Кампания {value} не найдена или уже завершена."
             result = {"status": "cancelled" if cancelled else "unchanged", "campaign_id": value, "reply": reply}
+            # A user stops a search with «стоп»: the control plane already said «Поиск остановлен.»
+            # and the status message turns final, so only a search that had already ended gets a line.
+            user_reply = NOT_STOPPABLE if not cancelled else None if own_only else DONE
         else:
             # Intake queues "mode=<vertical> city=<name> <task>": the person's choices override detection.
             goal, vertical, city = parse_campaign_goal(value)
@@ -138,7 +170,7 @@ class OrchestraDispatcher:
             if created is not None:  # the command was cancelled meanwhile: so is its campaign
                 await self.campaigns.cancel(created, DISPATCHER_ACTOR)
             raise
-        return result
+        return {**result, "user_reply": user_reply}
 
     async def _owns(self, campaign_id: str, user_id: int) -> bool:
         assert self.campaigns is not None
@@ -188,6 +220,13 @@ def campaign_status(campaign: Campaign | None) -> str:
         return "В этом чате ещё нет кампаний. Начните: /campaign <что и где искать>"
     reason = f" ({campaign.stop_reason})" if campaign.stop_reason and campaign.state in ("failed", "paused_verification") else ""
     return f"Кампания {campaign.id}: {_STATE_NAMES.get(campaign.state, campaign.state)}{reason}\n{campaign.plan.goal}"
+
+
+def user_campaign_status(campaign: Campaign | None) -> str:
+    """``/campaign status`` for a non-owner: one of the user-safe labels."""
+    if campaign is None:
+        return NOTHING
+    return DONE if campaign.state in TERMINAL_STATES else campaign_label(campaign.state)
 
 
 def _summary(result: dict[str, Any]) -> str:

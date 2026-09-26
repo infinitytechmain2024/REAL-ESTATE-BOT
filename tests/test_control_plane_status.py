@@ -55,7 +55,7 @@ async def test_non_operators_only_learn_the_bot_is_online(user_id: int | None) -
     store = MemoryControlPlaneStore()
     store.snapshot = StatusSnapshot(sources_active=5, voice_cost_usd_30d=Decimal("1.5"))
     reply = await control(store).handle_text(status(2, user_id))
-    assert reply and reply.text == "Control plane is online. Detailed status is shown to operators only."
+    assert reply and reply.text.startswith("Эта команда недоступна.") and "5" not in reply.text
 
 
 @pytest.mark.asyncio

@@ -296,10 +296,11 @@ async def test_text_command_to_sequential_batch_to_analysis_to_one_digest_per_ve
         # Deterministic filters keep irrelevant posts and verticals away from the model.
         assert sorted(analyzer.calls) == sorted([(RENT_POST.canonical_url, "real_estate"), (INVEST_POST.canonical_url, "investors")])
         bodies = dict((b.split("\n")[0], b) for _, b in telegram.messages)
-        assert set(bodies) == {"🏠 Real Estate proposition", "📈 Investor lead"}
-        estate = bodies["🏠 Real Estate proposition"]
-        assert "Location: Madrid" in estate and "Price signals: 1200 EUR/month" in estate and RENT_POST.canonical_url in estate
-        assert f"Original post: {INVEST_POST.canonical_url}" in bodies["📈 Investor lead"]
+        assert set(bodies) == {"🏠 Недвижимость", "📈 Инвестиции"}
+        estate = bodies["🏠 Недвижимость"]
+        assert "Локация: Madrid" in estate and "Цена: 1200 EUR/month" in estate and f"Ссылка: {RENT_POST.canonical_url}" in estate
+        assert f"Ссылка: {INVEST_POST.canonical_url}" in bodies["📈 Инвестиции"]
+        assert estate.endswith(f"Оригинал (es):\n{RENT_POST.body_text}")
         assert {c for c, _ in telegram.messages} == {OWNER}
         states = dict(await pool.fetch("select platform_post_id, state from collected_posts"))
         assert states == {"fb-rent-1": "analysed", "fb-invest-1": "analysed", "fb-noise-1": "rejected"}
@@ -340,7 +341,7 @@ async def test_voice_command_is_transcribed_confirmed_and_applied(pool) -> None:
         actors = {r[0] for r in await pool.fetch("select actor from orchestration_audit_log where entity_type='monitoring_sources'")}
         assert f"telegram:{OPERATOR}" in actors
         # A voice note from someone without control never reaches the provider or the Orchestra.
-        assert "operators only" in await system.voice(user=777)
+        assert "после одобрения доступа" in await system.voice(user=777)
         assert await pool.fetchval("select count(*) from orchestration_commands") == 1
 
 
@@ -435,7 +436,7 @@ async def test_website_and_instagram_commands_reach_their_own_workers(pool) -> N
     telegram = Telegram()
     result = await analyse(None, AnalysisPipeline(FakeAnalyzer()), telegram.send, analysis_settings())
     assert len(result["findings"]) == 2
-    assert {b.split("\n")[0] for _, b in telegram.messages} == {"📈 Investor lead", "🏠 Real Estate proposition"}
+    assert {b.split("\n")[0] for _, b in telegram.messages} == {"📈 Инвестиции", "🏠 Недвижимость"}
 
 
 @pytest.mark.asyncio
@@ -629,7 +630,7 @@ def campaign_runner(pool, messenger: FakeMessenger) -> CampaignRunner:
                                          link("rentmadrid", "Madrid rent", "3 posts a week")]})
     discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, FakeReader(), sleep=Sleeps(), now=lambda: NOW)
     return CampaignRunner(campaigns, PostgresRunStore(pool, SafetyLimits()), messenger, discovery,
-                          config=RunnerConfig(window_cooldown_seconds=0, analysis_grace_seconds=600))
+                          config=RunnerConfig(window_cooldown_seconds=0, analysis_grace_seconds=600), owner_ids={OPERATOR})
 
 
 async def start_campaign(pool) -> str:
@@ -681,6 +682,8 @@ async def test_campaign_from_command_to_streamed_finding_and_completion(pool) ->
     findings = messenger.findings()
     assert len(findings) == 1 and RENT_POST.canonical_url in findings[0]
     assert findings[0].endswith("🔎 Найдено: 1 · ищу дальше")
+    assert findings[0].startswith("🏠 Недвижимость") and "Location" not in findings[0]
+    assert f"Оригинал (es):\n{RENT_POST.body_text}\n\n🔎" in findings[0]
     assert {chat for chat, _, _ in messenger.sent} == {OPERATOR}
     assert tuple(await pool.fetchrow("select state, stop_reason from campaigns")) == ("completed", "queue_exhausted")
     assert await pool.fetchval("select state from findings") == "delivered"
@@ -856,10 +859,10 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         assert question.text.startswith("В каком городе искать?")
         assert await pool.fetchval("select step from user_task_drafts where telegram_user_id=$1", user) == "city"
         summary = await control.handle_text(message("Мадрид"))
-        assert "Город: Madrid" in summary.text and "Сделка: аренда" in summary.text
+        assert "Город: Мадрид" in summary.text and "Сделка: аренда" in summary.text
         assert await pool.fetchval("select count(*) from orchestration_commands") == 0  # nothing without Запустить
 
-        assert "поставлена в очередь" in (await control.handle_callback(user, "task:launch", chat_id=user)).text
+        assert (await control.handle_callback(user, "task:launch", chat_id=user)).text.startswith("Принято. Начинаю поиск.")
         assert "устарела" in (await control.handle_callback(user, "task:launch", chat_id=user)).text
         assert await pool.fetchval("select count(*) from orchestration_commands") == 1
         assert (await pool.fetchval("select arguments from orchestration_commands")).startswith("mode=real_estate city=Madrid ")
@@ -869,7 +872,8 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         assert len(owner_notices) == 1 and owner_notices[0].startswith("Пользователь Unknown, ID 777 запустил кампанию: ")
         row = await pool.fetchrow("select requested_by, telegram_chat_id, plan->>'vertical', plan->>'location', plan->'constraints'->>'deal' from campaigns")
         assert tuple(row) == (user, user, "real_estate", "Madrid", "rent")
-        assert "запланирована" in notices[-1][1] and notices[-1][0] == user
+        # No queue or campaign ids for a user: the runner's status message carries the progress.
+        assert [text for chat, text in notices if chat == user] == []
         draft = await pool.fetchrow("select step, draft::text, launched_at from user_task_drafts where telegram_user_id=$1", user)
         assert draft[0] == "idle" and draft[1] == "{}" and draft[2] is not None
         actors = await pool.fetch("select actor from orchestration_audit_log where entity_type='orchestration_commands' and action='insert'")
@@ -893,7 +897,7 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         question = await control.handle_text(message("квартиры в аренду в Мадриде или Валенсии до 900 €"))
         assert "несколько городов" in question.text
         valencia = next(b.callback_data for b in question.buttons if b.text == "Валенсия")
-        assert "Город: Valencia" in (await control.handle_callback(user, valencia, chat_id=user)).text
+        assert "Город: Валенсия" in (await control.handle_callback(user, valencia, chat_id=user)).text
         await control.handle_callback(user, "task:launch", chat_id=user)
         assert await dispatcher.process_once()
         row = await pool.fetchrow("select source_text, plan->>'vertical', plan->>'location' from campaigns where requested_by=$1 "
@@ -909,7 +913,7 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         assert await pool.fetchval("select count(*) from orchestration_commands") == 3
 
         # Still no operator commands for a user; the Orchestra refuses them even if queued.
-        assert "Only operators" in (await control.handle_text(message("/run website https://example.org"))).text
+        assert "недоступна" in (await control.handle_text(message("/run website https://example.org"))).text
         await dispatcher.enqueue(ConfirmedCommand("pause", "all", user, user, next(MESSAGE_IDS)))
         assert await dispatcher.process_once()
         assert await pool.fetchval("select error_code from orchestration_commands where command='pause'") == "not_operator"

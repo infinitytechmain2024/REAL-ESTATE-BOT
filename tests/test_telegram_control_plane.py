@@ -70,8 +70,9 @@ async def test_any_user_and_chat_can_use_the_open_control_plane() -> None:
     )
     first = await control.handle_text(message(message_id=10, user_id=999, chat_id=999))
     second = await control.handle_text(message(message_id=11, user_id=None, chat_id=-100123))
-    assert first and "online" in first.text
-    assert second and "online" in second.text
+    # Strangers learn nothing technical: one Russian line.
+    assert first and first.text.startswith("Эта команда недоступна.")
+    assert second and second.text.startswith("Эта команда недоступна.")
 
 
 @pytest.mark.asyncio
@@ -161,7 +162,7 @@ async def test_state_change_without_sending_user_is_rejected_safely() -> None:
         lambda _: None,
     )
     response = await control.handle_text(message(12, "/run group-a", user_id=None, chat_id=-100123))
-    assert response and "require a Telegram user identity" in response.text
+    assert response and response.text.startswith("Эта команда недоступна.")
 
 
 @pytest.mark.asyncio
@@ -174,10 +175,10 @@ async def test_non_operators_can_read_status_but_not_change_state() -> None:
 
     control = ControlPlane(settings(), store, FakeTranscriber(TranscriptResult("", None, None, "small")), sink)
     status = await control.handle_text(message(20, "/status", user_id=999))
-    assert status and "online" in status.text
+    assert status and status.text.startswith("Эта команда недоступна.")
     for number, command in enumerate(("/run website https://example.org", "/pause all", "/resume all", "/cancel all", "confirm 0123456789")):
         refused = await control.handle_text(message(21 + number, command, user_id=999))
-        assert refused and "Only operators" in refused.text and "user ID is 999" in refused.text
+        assert refused and refused.text.startswith("Эта команда недоступна.") and "999" not in refused.text
     assert store.confirmations == {} and received == []
 
 
@@ -191,7 +192,7 @@ async def test_a_removed_operator_cannot_use_an_already_issued_token() -> None:
 
     demoted = ControlPlaneSettings(telegram_token="123:test", database_url="postgresql://example")
     refused = await ControlPlane(demoted, store, transcriber, lambda _: None).handle_text(message(31, f"confirm {token}"))
-    assert refused and "Only operators" in refused.text
+    assert refused and refused.text.startswith("Эта команда недоступна.")
     assert token in store.confirmations
 
 

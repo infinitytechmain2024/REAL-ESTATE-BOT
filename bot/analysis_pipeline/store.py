@@ -4,6 +4,7 @@ import hashlib
 import json
 from typing import Any
 
+from .formatters import finding_payload
 from .models import Evidence
 from .openrouter import PROMPT_VERSION
 
@@ -74,15 +75,7 @@ class PostgresAnalysisStore:
             )
             if not held:
                 return None
-            payload = {
-                "schema_version": "analysis-v1",
-                "summary": outcome.result.summary,
-                "location": outcome.result.location,
-                "price_signals": outcome.result.price_signals,
-                "original_post_link": evidence.canonical_url,
-                "related_links": outcome.result.related_links,
-                "formatted": outcome.formatted,
-            }
+            payload = {**finding_payload(outcome.result, evidence), "formatted": outcome.formatted}
             key = hashlib.sha256(f"{vertical}:{evidence.post_id}".encode()).hexdigest()
             row = await c.fetchrow(
                 """insert into findings(vertical,source_id,post_id,finding_type,dedupe_key,structured_payload,confidence,state,analysis_metadata)

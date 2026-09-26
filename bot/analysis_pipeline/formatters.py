@@ -1,26 +1,53 @@
 from __future__ import annotations
 
+from typing import Any
+
+from .cards import CardTask, render_card
 from .models import AnalysisResult, Evidence
 
-
-def real_estate(result: AnalysisResult, evidence: Evidence) -> str:
-    links = "\n".join(f"• {x}" for x in [evidence.canonical_url, *result.related_links][:6])
-    prices = ", ".join(result.price_signals) or "not stated"
-    return f"🏠 Real Estate proposition\nLocation: {result.location or 'not stated'}\nPrice signals: {prices}\nConfidence: {result.confidence:.0%}\n\n{result.summary}\n\nLinks:\n{links}"
+PAYLOAD_VERSION = "analysis-v3"
 
 
-def investors(result: AnalysisResult, evidence: Evidence) -> str:
-    comments = (
-        "\n".join(f"• {x[:300]}" for x in evidence.comments[:5])
-        or "• No relevant comments collected"
+def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any]:
+    """What ``findings.structured_payload`` stores (besides ``formatted``); the card is rebuilt from it."""
+    return {
+        "schema_version": PAYLOAD_VERSION,
+        "summary": result.summary,
+        "summary_ru": result.summary_ru,
+        "source_language": result.source_language,
+        "location": result.location,
+        "price_signals": result.price_signals,
+        "price_amount": result.price_amount,
+        "price_currency": result.price_currency,
+        "deal_type": result.deal_type,
+        "property_type": result.property_type,
+        "rooms": result.rooms,
+        "who": result.who,
+        "original_post_link": evidence.canonical_url,
+        "related_links": result.related_links,
+    }
+
+
+def _card(result: AnalysisResult, evidence: Evidence, vertical: str, language: str | None) -> str:
+    return render_card(
+        finding_payload(result, evidence),
+        original=evidence.text,
+        task=CardTask(vertical=vertical),
+        vertical=vertical,
+        language=language,
+        confidence=result.confidence,
     )
-    profile = (
-        f"\nPublic profile context: {evidence.profile_extract}" if evidence.profile_extract else ""
-    )
-    return f"📈 Investor lead\nConfidence: {result.confidence:.0%}\n\n{result.summary}\n\nOriginal post: {evidence.canonical_url}\nRelevant comments:\n{comments}{profile}"
+
+
+def real_estate(result: AnalysisResult, evidence: Evidence, language: str | None = None) -> str:
+    return _card(result, evidence, "real_estate", language)
+
+
+def investors(result: AnalysisResult, evidence: Evidence, language: str | None = None) -> str:
+    return _card(result, evidence, "investors", language)
 
 
 def digest(vertical: str, entries: list[str]) -> str:
     if not entries:
-        return f"No new {vertical.replace('_', ' ')} findings."
+        return "Новых находок нет."
     return "\n\n".join(entries)

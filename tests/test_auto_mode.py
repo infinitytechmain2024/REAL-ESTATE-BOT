@@ -100,8 +100,8 @@ async def test_everyone_else_keeps_the_confirm_flow() -> None:
     control, sink = plane()
     for body, _, _ in AUTO_COMMANDS:
         assert "Confirmation required" in await say(control, UNLISTED, body)  # operator, but not listed
-        assert "Only operators" in await say(control, HELPER, body)  # listed, but a helper
-        assert "Only operators" in await say(control, STRANGER, body)  # listed, but a stranger
+        assert "недоступна" in await say(control, HELPER, body)  # listed, but a helper
+        assert "недоступна" in await say(control, STRANGER, body)  # listed, but a stranger
     assert sink.envelopes == []
     # Auto mode off (the .env default): owners confirm like everybody else.
     control, sink = plane(auto=False)
@@ -130,8 +130,10 @@ async def test_auto_switch_is_owner_only_and_survives_a_restart() -> None:
     store = MemorySettingsStore()
     control, sink = plane(auto=False, store=store)
     assert "off (AUTO_MODE default" in await say(control, OWNER, "/auto status")
-    for user in (LISTED, UNLISTED, HELPER, STRANGER):
+    for user in (LISTED, UNLISTED):
         assert await say(control, user, "/auto on") == "Only an owner can switch auto mode."
+    for user in (HELPER, STRANGER):  # no English, no detail: the command is simply not theirs
+        assert (await say(control, user, "/auto on")).startswith("Эта команда недоступна.")
     assert store.values == {}
     assert (await say(control, OWNER, "/auto on")).startswith("Auto mode is on")
     assert store.values["auto_mode"][:2] == ("on", OWNER)
@@ -158,8 +160,9 @@ async def test_free_text_from_an_auto_operator_becomes_a_campaign() -> None:
     assert "Не понял город" in unclear and "например «квартиры в аренду в Мадриде»" in unclear
     assert "/campaign cancel" in await say(control, OWNER, f"cancel {GOAL}")
     assert len(sink.envelopes) == 1
-    for user in (UNLISTED, HELPER, STRANGER):
-        assert (await say(control, user, GOAL)).startswith("Send /help for control-plane commands")
+    assert (await say(control, UNLISTED, GOAL)).startswith("Send /help for control-plane commands")
+    assert (await say(control, HELPER, GOAL)).startswith("Привет! 👋 Вы помощник.")
+    assert (await say(control, STRANGER, GOAL)).startswith("Привет! 👋 Я бот")
     off, sink = plane(auto=False)
     assert (await say(off, OWNER, GOAL)).startswith("Send /help for control-plane commands") and sink.envelopes == []
 
@@ -178,7 +181,7 @@ async def test_voice_goal_and_spoken_command_from_an_auto_operator() -> None:
     assert reply and "Не понял" in reply.text and sink.envelopes == []
     # Voice keeps its own checks: a helper is refused before any transcription.
     reply = await control.handle_voice(voice(HELPER), download)
-    assert reply and "operators only" in reply.text
+    assert reply and reply.text.startswith("Голосовые сообщения недоступны.")
 
 
 @pytest.mark.asyncio

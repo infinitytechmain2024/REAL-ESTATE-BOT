@@ -18,6 +18,15 @@ class AnalysisResult(BaseModel):
     related_links: list[str] = Field(default_factory=list, max_length=10)
     category: Literal["real_estate", "investors", "other"]
     reason: str = Field(max_length=300)
+    # analysis-v3: what a Russian finding card and the budget rule need, from the same call.
+    summary_ru: str | None = Field(default=None, max_length=1500)
+    source_language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}$")
+    price_amount: float | None = Field(default=None, ge=0)
+    price_currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    deal_type: Literal["rent", "sale"] | None = None
+    property_type: Literal["apartment", "room", "house", "studio", "land", "commercial", "other"] | None = None
+    rooms: int | None = Field(default=None, ge=0, le=50)
+    who: str | None = Field(default=None, max_length=200)
 
 
 class Evidence(BaseModel):

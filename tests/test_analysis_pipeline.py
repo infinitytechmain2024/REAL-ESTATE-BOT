@@ -78,7 +78,7 @@ async def test_pipeline_filters_before_model_and_formats():
     rejected = await p.process(evidence(text="tiny"), "real_estate")
     assert not rejected.accepted and a.calls == 0
     accepted = await p.process(evidence(), "real_estate")
-    assert accepted.accepted and a.calls == 1 and "Real Estate proposition" in accepted.formatted
+    assert accepted.accepted and a.calls == 1 and accepted.formatted.startswith("🏠 Недвижимость")
 
 
 def test_strict_model_response_rejects_extra_fields():
@@ -109,9 +109,9 @@ def test_both_formatters_and_empty_digest():
         category="investors",
         reason="x",
     )
-    assert "Investor lead" in investors(r, evidence(comments=["Interested investor"]))
-    assert digest("real_estate", []) == "No new real estate findings."
-    assert "Real Estate proposition" in real_estate(
+    assert investors(r, evidence(comments=["Interested investor"])).startswith("📈 Инвестиции")
+    assert digest("real_estate", []) == "Новых находок нет."
+    assert "🏠 Недвижимость" in real_estate(
         r.model_copy(update={"category": "real_estate"}), evidence()
     )
 
