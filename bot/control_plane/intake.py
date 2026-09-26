@@ -43,6 +43,7 @@ from bot.campaign.architect import (
     plan_campaign,
 )
 from bot.campaign.models import CampaignPlan
+from bot.control_plane.details import details, property_type
 from bot.control_plane.models import Button, CommandEnvelope, IncomingMessage, Reply
 
 log = logging.getLogger(__name__)
@@ -335,8 +336,12 @@ def summary(draft: Draft, plan: CampaignPlan, technical: bool = False) -> Reply:
     else:
         deal = plan.constraints.get("deal")
         lines.append(f"Сделка: {DEAL_TEXT.get(str(deal), 'не важно')}")
+        if kind := property_type(draft.task):
+            lines.append(f"Тип: {kind}")
         price = plan.constraints.get("max_price")
         lines.append(f"Бюджет: {f'до {price} €' if price else 'не указан'}")
+        if wishes := details(draft.task):
+            lines.append(f"Пожелания: {', '.join(wishes)}")
     if technical:
         limits = plan.limits
         lines += [

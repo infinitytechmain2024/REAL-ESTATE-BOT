@@ -56,7 +56,7 @@ def _place(canonical: str, es: str, en: str, ru: str, uk: str, ru_loc: str, uk_l
 
 GAZETTEER: tuple[_Place, ...] = (
     _place("Madrid", "Madrid", "Madrid", "Мадрид", "Мадрид", "Мадриде", "Мадриді",
-           ("madrid",), ("мадрид",)),
+           ("madrid", "madryd"), ("мадрид", "мадрід")),
     _place("Barcelona", "Barcelona", "Barcelona", "Барселона", "Барселона", "Барселоне", "Барселоні",
            ("barcelona", "bcn"), ("барселон",)),
     _place("Valencia", "Valencia", "Valencia", "Валенсия", "Валенсія", "Валенсии", "Валенсії",

@@ -85,8 +85,9 @@ async def test_a_clear_request_skips_every_question() -> None:
     control, sink, _ = plane()
     await press(control, USER, "mode:real_estate")
     reply = await say(control, USER, "снять квартиру в Мадриде до 1200 €")
-    assert reply.text.splitlines()[:5] == [
-        "Проверьте задачу:", "Режим: 🏡 Участки и объекты", "Город: Мадрид", "Сделка: аренда", "Бюджет: до 1200 €",
+    assert reply.text.splitlines()[:6] == [
+        "Проверьте задачу:", "Режим: 🏡 Участки и объекты", "Город: Мадрид", "Сделка: аренда", "Тип: квартира",
+        "Бюджет: до 1200 €",
     ]
     assert [b.text for b in reply.buttons] == ["Запустить", "Изменить", "Отмена"]
     assert "?" not in reply.text.replace("Всё верно?", "")
