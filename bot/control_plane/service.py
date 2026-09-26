@@ -37,14 +37,25 @@ TRANSCRIPTION_ERROR_REPLIES = {
     "empty_transcript": "No speech was detected in that voice message.",
 }
 STATE_CHANGING = frozenset({"run", "pause", "resume", "cancel", "campaign"})
-USER_HELP = (
-    "Вы пользователь. Как дать задачу:\n"
-    "1. Выберите режим (кнопки ниже или /mode).\n"
-    "2. Опишите задачу текстом или голосом, например «квартиры в аренду в Мадриде до 1200 €».\n"
-    "3. Ответьте на уточняющие вопросы, если бот их задаст.\n"
-    "4. Проверьте сводку и нажмите «Запустить» — без этого ничего не запускается.\n\n"
-    "Статус: /campaign status. Остановить свою кампанию: /campaign cancel <id>. "
-    "Сбросить черновик: напишите «Отмена»."
+GREETING = (
+    "Привет! 👋 Я помогу найти недвижимость и инвесторов.\n\n"
+    "Как это работает:\n"
+    "1️⃣ Выберите режим кнопкой ниже.\n"
+    "2️⃣ Опишите, что ищете, текстом или голосом. Например: «квартиры в аренду в Мадриде до 1200 €».\n"
+    "3️⃣ Если чего-то не хватает, я задам пару уточняющих вопросов.\n"
+    "4️⃣ Проверьте сводку и нажмите «Запустить». Без этого поиск не начнётся.\n\n"
+    "Найденные варианты я пришлю сюда. Передумали — напишите «Отмена»."
+)
+USER_HELP = GREETING
+HELPER_GREETING = (
+    "Привет! 👋 Вы помощник.\n\n"
+    "Когда для входа в Facebook понадобится человек (капча или проверка), я пришлю сообщение "
+    "с кнопкой. Откройте по ней браузер и пройдите проверку — больше ничего делать не нужно."
+)
+GUEST_GREETING = (
+    "Привет! 👋 Я бот для поиска недвижимости и инвесторов.\n\n"
+    "Чтобы начать, нажмите «Запросить доступ» ниже. Когда заявку одобрят, я пришлю сообщение, "
+    "и можно будет давать задачи."
 )
 
 
@@ -229,6 +240,13 @@ class ControlPlane:
             return mode_menu()
         if command in {"help", "start"}:
             role = self.operators.role(message.user_id)
+            if command == "start" and role != "owner":
+                # Only the owner sees the command list; everyone else gets a plain greeting.
+                if role == "helper":
+                    return Reply(HELPER_GREETING)
+                if self._may_give_tasks(message.user_id):
+                    return mode_menu(GREETING)
+                return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
             if role == "user":
                 return mode_menu(USER_HELP) if command == "start" or not await self.intake.mode(message.user_id) else Reply(USER_HELP)
             if role == "helper":

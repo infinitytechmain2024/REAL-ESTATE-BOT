@@ -1,6 +1,6 @@
 """Access requests from Telegram, decided by an owner, with a role.
 
-Someone without access gets a "Request access" button. The owners
+Someone without access gets a "Запросить доступ" (request access) button. The owners
 (TELEGRAM_OPERATOR_IDS in .env) receive the request with "Approve as helper",
 "Approve as user", "Approve as operator" and "Deny" buttons. A helper only
 handles human verification (log in, CAPTCHA, checkpoint); a user picks a mode
@@ -66,7 +66,7 @@ class AccessDesk:
 
     @staticmethod
     def button() -> Button:
-        return Button("Request access", callback_data="access:request")
+        return Button("Запросить доступ", callback_data="access:request")
 
     async def load(self) -> None:
         self.operators.replace_approved(await self.store.approved_roles())
