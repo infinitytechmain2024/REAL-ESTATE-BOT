@@ -23,6 +23,9 @@ class ControlPlaneSettings:
     stt_timeout_seconds: float = 60.0
     # Reused from the analysis pipeline; never logged or echoed.
     openrouter_api_key: str = field(default="", repr=False)
+    # AI task understanding in intake (bot/control_plane/understanding.py); needs the key above.
+    intake_model: str = "openai/gpt-4o-mini"
+    intake_timeout_seconds: float = 20.0
     # Live browser for logins and checkpoints. Empty public URL disables it.
     live_view_public_url: str = ""
     live_view_open_minutes: int = 20
@@ -62,6 +65,8 @@ class ControlPlaneSettings:
             stt_max_audio_seconds=_bounded_int("STT_MAX_AUDIO_SECONDS", 300, 1, 1800),
             stt_timeout_seconds=float(_bounded_int("STT_TIMEOUT_SECONDS", 60, 1, 300)),
             openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", "").strip(),
+            intake_model=os.environ.get("OPENROUTER_INTAKE_MODEL", "").strip() or "openai/gpt-4o-mini",
+            intake_timeout_seconds=float(_bounded_int("OPENROUTER_INTAKE_TIMEOUT_SECONDS", 20, 1, 120)),
             live_view_public_url=_public_url(os.environ.get("LIVE_VIEW_PUBLIC_URL", "")),
             live_view_open_minutes=_bounded_int("LIVE_VIEW_OPEN_MINUTES", 20, 5, 60),
             live_view_request_minutes=_bounded_int("LIVE_VIEW_REQUEST_MINUTES", 60, 10, 1440),

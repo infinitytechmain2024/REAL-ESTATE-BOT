@@ -85,8 +85,9 @@ async def test_a_clear_request_skips_every_question() -> None:
     control, sink, _ = plane()
     await press(control, USER, "mode:real_estate")
     reply = await say(control, USER, "снять квартиру в Мадриде до 1200 €")
-    assert reply.text.splitlines()[:5] == [
-        "Проверьте задачу:", "Режим: 🏡 Участки и объекты", "Город: Мадрид", "Сделка: аренда", "Бюджет: до 1200 €",
+    assert reply.text.splitlines()[:6] == [
+        "Проверьте задачу:", "Режим: 🏡 Участки и объекты", "Город: Мадрид", "Сделка: аренда", "Тип: квартира",
+        "Бюджет: до 1200 €",
     ]
     assert [b.text for b in reply.buttons] == ["Запустить", "Изменить", "Отмена"]
     assert "?" not in reply.text.replace("Всё верно?", "")
@@ -148,7 +149,9 @@ async def test_launch_queues_the_campaign_and_the_user_reply_is_plain_russian() 
     summary = await say(control, USER, "снять квартиру в Мадриде до 1200 €")
     assert_clean(summary)
     launched = await press(control, USER, "task:launch")
-    assert launched.text == "Принято. Начинаю поиск. Найденные варианты пришлю сюда.\nЧтобы остановить поиск, напишите «стоп»."
+    assert launched.text == ("Принято. Начинаю поиск. Найденные варианты пришлю сюда.\n"
+                             "Чтобы остановить поиск, нажмите кнопку ниже или напишите «стоп».")
+    assert [(b.text, b.callback_data) for b in launched.buttons] == [("Остановить поиск", "search:stop")]
     assert_clean(launched)
     [envelope] = sink.envelopes
     assert envelope.command == "campaign" and envelope.arguments.startswith("mode=real_estate city=Madrid ")

@@ -108,6 +108,9 @@ services:
       STT_MAX_AUDIO_BYTES: ${STT_MAX_AUDIO_BYTES:-20971520}
       STT_MAX_AUDIO_SECONDS: ${STT_MAX_AUDIO_SECONDS:-300}
       STT_TIMEOUT_SECONDS: ${STT_TIMEOUT_SECONDS:-60}
+      # AI task understanding in intake (same key); without it tasks are read by rules.
+      OPENROUTER_INTAKE_MODEL: ${OPENROUTER_INTAKE_MODEL:-openai/gpt-4o-mini}
+      OPENROUTER_INTAKE_TIMEOUT_SECONDS: ${OPENROUTER_INTAKE_TIMEOUT_SECONDS:-20}
       # Live browser for Facebook logins/checkpoints (bot/control_plane/live_view.py).
       # Empty LIVE_VIEW_PUBLIC_URL keeps the feature off.
       LIVE_VIEW_PUBLIC_URL: ${LIVE_VIEW_PUBLIC_URL:-}

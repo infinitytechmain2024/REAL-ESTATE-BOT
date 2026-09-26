@@ -35,6 +35,7 @@ from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import PostgresControlPlaneStore, PostgresLiveViewStore
 from bot.control_plane.stt import OpenRouterTranscriber
+from bot.control_plane.understanding import OpenRouterUnderstanding
 from bot.operators import OperatorSet
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import ConfirmedCommand
@@ -126,6 +127,13 @@ async def run() -> None:
         )
     else:
         logging.getLogger(__name__).warning("telegram.control.stt_disabled", extra={"hint": "set OPENROUTER_API_KEY; voice messages are refused"})
+    understander: OpenRouterUnderstanding | None = None
+    if settings.openrouter_api_key:
+        understander = OpenRouterUnderstanding(api_key=settings.openrouter_api_key, model=settings.intake_model,
+                                               timeout_seconds=settings.intake_timeout_seconds)
+    else:
+        logging.getLogger(__name__).warning("telegram.control.understanding_disabled",
+                                            extra={"hint": "set OPENROUTER_API_KEY; tasks are read by rules"})
 
     browser = BrowserLiveClient(settings.browser_session_url, settings.browser_session_api_token)
     live = LiveViewCoordinator(
@@ -144,7 +152,8 @@ async def run() -> None:
     control = ControlPlane(settings, store, transcriber, enqueue, live, access, PostgresSettingsStore(store), PostgresIntakeStore(store),
                            offers=PostgresOfferDesk(orchestra_store.pool) if orchestra_store.pool else None,
                            # «стоп»: finds the person's running campaign; the Orchestra cancels it.
-                           campaigns=PostgresCampaignStore(orchestra_store.pool) if orchestra_store.pool else None)
+                           campaigns=PostgresCampaignStore(orchestra_store.pool) if orchestra_store.pool else None,
+                           understander=understander)
     for user_id in sorted(settings.auto_operator_user_ids):
         if not operators.can_control(user_id):
             # Not refused at startup (approvals change at runtime), but never auto-eligible meanwhile.
@@ -208,6 +217,8 @@ async def run() -> None:
         await store.close()
         if transcriber is not None:
             await transcriber.aclose()
+        if understander is not None:
+            await understander.aclose()
         await bot.session.close()
 
 

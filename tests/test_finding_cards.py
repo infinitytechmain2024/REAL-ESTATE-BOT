@@ -55,9 +55,9 @@ def test_spanish_source_gives_russian_card_and_the_spanish_original() -> None:
     assert "Цена: 1 200 € в месяц" in card and "Локация: Madrid, Lavapiés" in card
     assert "Сделка: аренда" in card and "Тип: квартира" in card and "Уверенность: высокая" in card
     assert f"Ссылка: {LINK}" in card and "Источник: Facebook" in card
-    assert card.endswith(f"Оригинал (es):\n{ES_POST}")
-    # The Russian text comes before the original block.
-    assert card.index("Кратко:") < card.index("Оригинал (es):")
+    assert card.endswith("Язык оригинала: испанский")
+    # The post itself (with Facebook's own buttons) is never quoted.
+    assert ES_POST not in card and "Оригинал (" not in card
 
 
 def test_russian_source_gives_russian_body_and_russian_original() -> None:
@@ -69,7 +69,7 @@ def test_russian_source_gives_russian_body_and_russian_original() -> None:
     }
     card = render_card(payload, original=RU_POST, confidence=0.6)
     assert "Кратко: Сдаётся комната в районе Усера" in card and "Уверенность: средняя" in card
-    assert card.endswith(f"Оригинал (ru):\n{RU_POST}")
+    assert card.endswith("Язык оригинала: русский") and RU_POST not in card
 
 
 def test_no_english_labels_or_raw_numbers_anywhere() -> None:
@@ -79,7 +79,7 @@ def test_no_english_labels_or_raw_numbers_anywhere() -> None:
         render_card({"summary": "x", "price_signals": ["450 EUR/month"], "original_post_link": LINK}, original=ES_POST),
     ]
     for card in cards:
-        head = card.split("\nОригинал")[0]  # the original post itself may be in any language
+        head = card
         assert not ENGLISH_LABELS.search(head), head
         assert "0.91" not in head and "91%" not in head and "analysis" not in head and "None" not in head
     assert "Уверенность: низкая" in cards[1] and "Кто: Fondo Norte" in cards[1] and cards[1].startswith("📈 Инвестиции")
@@ -110,20 +110,19 @@ def test_an_old_payload_without_the_new_fields_still_renders() -> None:
     }
     card = render_card(old, original="Alquilo piso en Madrid, 900 euros al mes.", language="es", confidence=0.85)
     assert "Цена: 900 EUR/month" in card and "Локация: Madrid" in card and "Кратко: Piso en Madrid" in card
-    assert card.endswith("Оригинал (es):\nAlquilo piso en Madrid, 900 euros al mes.")
+    assert card.endswith("Язык оригинала: испанский") and "Alquilo" not in card
     assert "Real Estate" not in card and "Location" not in card
     # No original text stored: the summary stands in; the language is guessed from it.
     assert render_card({"summary": "Alquilo habitación en Madrid"}, language="unknown").endswith(
-        "Оригинал (es):\nAlquilo habitación en Madrid")
+        "Язык оригинала: испанский")
     # A Ukrainian post the keyword filter called "ru".
-    assert "Оригинал (uk):" in render_card({"summary": "x"}, original="Здаю кімнату в Мадриді", language="ru")
+    assert "Язык оригинала: украинский" in render_card({"summary": "x"}, original="Здаю кімнату в Мадриді", language="ru")
 
 
 def test_a_long_post_is_trimmed_to_one_telegram_message() -> None:
     long_post = "Alquilo piso en Madrid. " * 600
     card = render_card(es_payload(summary_ru="Очень длинный текст. " * 200), original=long_post)
-    assert len(card) <= MAX_CARD_CHARS and card.rstrip().endswith("…")
-    assert "Оригинал (es):\nAlquilo piso en Madrid." in card
+    assert len(card) <= MAX_CARD_CHARS and "Alquilo piso" not in card
     assert len(f"{card}\n\n🔎 Найдено: 100 · ищу дальше") <= 4096
 
 
@@ -180,7 +179,7 @@ async def test_pipeline_digest_and_campaign_stream_use_the_same_card() -> None:
                         published_at=datetime.now(UTC))
     outcome = await AnalysisPipeline(SpanishAnalyzer()).process(evidence, "real_estate")
     assert outcome.accepted and outcome.formatted == real_estate(outcome.result, evidence, "es")
-    assert outcome.formatted.endswith(f"Оригинал (es):\n{ES_POST}")
+    assert outcome.formatted.endswith("Язык оригинала: испанский")
     payload = {**finding_payload(outcome.result, evidence), "formatted": outcome.formatted}
     assert payload["schema_version"] == "analysis-v3" and payload["price_amount"] == 1200.0
 
@@ -190,6 +189,6 @@ async def test_pipeline_digest_and_campaign_stream_use_the_same_card() -> None:
     card = finding_card(campaign, StreamFinding("f1", outcome.formatted, stored, ES_POST, "es", 0.88, "real_estate"))
     assert plan.constraints["max_price"] == 1300 and plan.constraints["deal"] == "rent"
     assert card.splitlines()[1:4] == ["Цена: 1 200 € в месяц", "Сделка: аренда", "Тип: квартира"]
-    assert "Кратко: Сдаётся квартира" in card and card.endswith(f"Оригинал (es):\n{ES_POST}")
+    assert "Кратко: Сдаётся квартира" in card and card.endswith("Язык оригинала: испанский")
     # A finding without a payload (legacy memory store) is sent as its text.
     assert finding_card(campaign, StreamFinding("f2", "🏠 text")) == "🏠 text"

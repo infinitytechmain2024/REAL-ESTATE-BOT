@@ -29,7 +29,8 @@ turn «до 1200 €» and a bare «1200 €» into it; the currency is always E
 Other constraints
 -----------------
 * Deal type: when both the request and the listing name one (rent/sale) and
-  they differ, the listing is other.
+  they differ, the listing is excluded: filed, never offered, never sent (a
+  buyer never wants rentals, even among the "farther" variants).
 * Location: the listing's location mentions a known city (the architect's
   gazetteer) and not the requested one -> other. An unknown or unrecognised
   location never downgrades a listing.
@@ -49,7 +50,7 @@ BUDGET_TOLERANCE = 0.10
 SIMILAR_CEILING = 0.25
 DEFAULT_CURRENCY = "EUR"
 
-Bucket = Literal["exact", "similar", "other"]
+Bucket = Literal["exact", "similar", "other", "excluded"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -113,7 +114,7 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
     payload = payload or {}
     deal = payload.get("deal_type")
     if request.deal and deal in ("rent", "sale") and deal != request.deal:
-        return Match("other", math.inf)
+        return Match("excluded", math.inf)
     if request.location and isinstance(payload.get("location"), str):
         places = find_places(payload["location"])
         if places and request.location not in places:

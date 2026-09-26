@@ -6,6 +6,7 @@ detailed status or may change acquisition state.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -17,6 +18,7 @@ from bot.control_plane.access import SETTINGS_BUTTON, AccessDesk, label
 from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
 from bot.control_plane.intake import (
     CANCEL_WORDS,
+    STOP_CALLBACK,
     IntakeStore,
     MemoryIntakeStore,
     TaskIntake,
@@ -33,6 +35,7 @@ from bot.control_plane.models import (
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import ControlPlaneStore
 from bot.control_plane.stt import Transcriber, TranscriptionError
+from bot.control_plane.understanding import Understander
 from bot.control_plane.voice_commands import clean_transcript, spoken_command
 from bot.operators import ROLES, OperatorSet
 
@@ -110,6 +113,7 @@ class ControlPlane:
         intake_store: IntakeStore | None = None,
         offers: near.OfferDesk | None = None,
         campaigns: CampaignStore | None = None,
+        understander: Understander | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
@@ -123,8 +127,9 @@ class ControlPlane:
                              operators=self.operators, auto_operator_ids=settings.auto_operator_user_ids)
         # Mode choice and task intake (bot/control_plane/intake.py); launching always needs "Запустить".
         # Only the owner sees planner details and queue ids in intake replies.
+        # ``understander`` reads tasks with AI; None (tests, no key) keeps the deterministic rules.
         self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners,
-                                 technical=self._is_owner)
+                                 technical=self._is_owner, understander=understander)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""
@@ -172,10 +177,13 @@ class ControlPlane:
     def _stale_button(self, user_id: int | None) -> Reply:
         return Reply("This button is no longer valid." if self._can_control(user_id) else STALE_BUTTON)
 
-    async def _stop_search(self, message: IncomingMessage) -> Reply:
+    async def _stop_search(self, message: IncomingMessage, *, button: bool = False) -> Reply:
         """Cancel the person's running campaign in this chat through the Orchestra's ``campaign cancel``.
 
         Only the requester (or an owner) may stop it; the Orchestra checks ownership again.
+        A «Остановить поиск» tap has no message of its own: its idempotency key is
+        derived from the campaign, so a double tap queues one cancel and an old
+        button still stops a newer search.
         """
         assert message.user_id is not None
         campaign = None
@@ -189,8 +197,9 @@ class ControlPlane:
                 or (campaign.requested_by != message.user_id and not self._is_owner(message.user_id))):
             return Reply(NO_ACTIVE_SEARCH)
         try:
+            key = _button_key(campaign.id) if button else message.message_id
             await self.command_sink(CommandEnvelope("campaign", f"cancel {campaign.id}", message.chat_id,
-                                                    message.user_id, message.message_id))
+                                                    message.user_id, key))
         except Exception:  # noqa: BLE001 - nothing was queued; the person may try again
             log.warning("telegram.control.stop_failed", extra={"user_id": message.user_id})
             return Reply(STOP_FAILED)
@@ -209,10 +218,15 @@ class ControlPlane:
     async def handle_callback(self, user_id: int | None, data: str, display_name: str | None = None, username: str | None = None,
                               chat_id: int | None = None) -> Reply:
         """Inline buttons: ``live:done|cancel:<id>``, ``live:approve:<code>``, ``access:request``,
-        ``access:helper|user|operator|deny:<id>``, ``set:...`` (owner settings), ``mode:<mode>``, ``task:<action>[:<value>]``
-        and ``near:yes|no:similar|other:<campaign id>``."""
+        ``access:helper|user|operator|deny:<id>``, ``set:...`` (owner settings), ``mode:<mode>``, ``task:<action>[:<value>]``,
+        ``search:stop`` (the same as typing «стоп») and ``near:yes|no:similar|other:<campaign id>``."""
         kind, _, rest = data.partition(":")
         action, _, target = rest.partition(":")
+        if data == STOP_CALLBACK:
+            if user_id is None or not self._may_give_tasks(user_id):
+                return Reply(STALE_BUTTON)
+            chat = chat_id if chat_id is not None else user_id
+            return await self._stop_search(IncomingMessage(chat_id=chat, user_id=user_id, message_id=0), button=True)
         if kind == near.CALLBACK_KIND:
             return await self._near_match_answer(user_id, action, target)
         if kind in {"mode", "task"}:
@@ -518,6 +532,11 @@ class ControlPlane:
             return None
         log.warning("telegram.control.not_operator", extra={"chat_id": message.chat_id, "user_id": message.user_id})
         return self._not_available(message.user_id)
+
+
+def _button_key(campaign_id: str) -> int:
+    """A negative message id (Telegram's are positive) unique to the campaign: the Orchestra's idempotency key."""
+    return -int(hashlib.sha256(f"stop:{campaign_id}".encode()).hexdigest()[:15], 16) - 1
 
 
 def _is_cancel(arguments: str) -> bool:
