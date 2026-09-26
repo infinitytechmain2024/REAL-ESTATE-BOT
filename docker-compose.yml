@@ -376,6 +376,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
+      # Owners see technical campaign status; everyone else user-safe labels.
+      TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}
       BROWSER_SESSION_URL: http://browser:8090
       BROWSER_SESSION_API_TOKEN: ${BROWSER_SESSION_API_TOKEN:?set BROWSER_SESSION_API_TOKEN in .env}
       FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP: ${FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP:-15}

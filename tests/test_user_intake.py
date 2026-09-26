@@ -244,8 +244,10 @@ async def test_several_cities_ask_to_choose_one() -> None:
     arguments = sink.envelopes[0].arguments
     assert arguments.startswith("mode=real_estate city=Barcelona ")
     assert "Мадриде или Барселоне" in arguments  # the task itself is kept as written
-    _, _, notices = await dispatch(claimed("campaign", arguments))
-    assert "Barcelona" in notices[-1]
+    _, campaigns, notices = await dispatch(claimed("campaign", arguments))
+    [campaign] = campaigns.campaigns.values()
+    assert campaign.plan.location == "Barcelona"
+    assert notices == []  # a user gets no campaign id; the runner's status message follows
 
 
 @pytest.mark.asyncio
@@ -422,7 +424,8 @@ async def test_the_dispatcher_accepts_a_users_campaign_and_nothing_else() -> Non
     assert (campaign.requested_by, campaign.chat_id, campaign.plan.vertical, campaign.plan.location) == (USER, USER, "real_estate", "Madrid")
     states = [(state, code) for _, state, _, code in store.completed]
     assert states == [(CommandState.FINISHED, None), (CommandState.FINISHED, None)] + [(CommandState.FAILED, "not_operator")] * 4
-    assert any(campaign.id in n and "Кампания" in n for n in notices)
+    assert not any(campaign.id in n or "Кампания" in n for n in notices)
+    assert "Ищу…" in notices  # /campaign status, user-safe
 
 
 @pytest.mark.asyncio
@@ -436,8 +439,8 @@ async def test_a_user_cancels_and_sees_only_their_own_campaigns() -> None:
     _, _, notices = await dispatch(claimed("campaign", f"cancel {theirs}"), claimed("campaign", f"cancel {mine}"), group_status,
                                    campaigns=campaigns)
     assert campaigns.campaigns[theirs].state == "planned" and campaigns.campaigns[mine].state == "cancelled"
-    assert any("только свою" in n for n in notices) and any(f"Кампания {mine} остановлена" in n for n in notices)
-    assert "ещё нет кампаний" in notices[-1] and shared not in notices[-1]
+    assert notices == ["Поиск завершён.", "Пока ничего подходящего не нашёл."]  # no ids, no other people's campaigns
+    assert shared not in notices[-1]
     # An operator still cancels any campaign.
     _, _, _ = await dispatch(claimed("campaign", f"cancel {theirs}", user=OPERATOR), campaigns=campaigns)
     assert campaigns.campaigns[theirs].state == "cancelled"

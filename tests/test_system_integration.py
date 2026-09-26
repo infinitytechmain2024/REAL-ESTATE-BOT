@@ -629,7 +629,7 @@ def campaign_runner(pool, messenger: FakeMessenger) -> CampaignRunner:
                                          link("rentmadrid", "Madrid rent", "3 posts a week")]})
     discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, FakeReader(), sleep=Sleeps(), now=lambda: NOW)
     return CampaignRunner(campaigns, PostgresRunStore(pool, SafetyLimits()), messenger, discovery,
-                          config=RunnerConfig(window_cooldown_seconds=0, analysis_grace_seconds=600))
+                          config=RunnerConfig(window_cooldown_seconds=0, analysis_grace_seconds=600), owner_ids={OPERATOR})
 
 
 async def start_campaign(pool) -> str:
@@ -869,7 +869,8 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         assert len(owner_notices) == 1 and owner_notices[0].startswith("Пользователь Unknown, ID 777 запустил кампанию: ")
         row = await pool.fetchrow("select requested_by, telegram_chat_id, plan->>'vertical', plan->>'location', plan->'constraints'->>'deal' from campaigns")
         assert tuple(row) == (user, user, "real_estate", "Madrid", "rent")
-        assert "запланирована" in notices[-1][1] and notices[-1][0] == user
+        # No queue or campaign ids for a user: the runner's status message carries the progress.
+        assert [text for chat, text in notices if chat == user] == []
         draft = await pool.fetchrow("select step, draft::text, launched_at from user_task_drafts where telegram_user_id=$1", user)
         assert draft[0] == "idle" and draft[1] == "{}" and draft[2] is not None
         actors = await pool.fetch("select actor from orchestration_audit_log where entity_type='orchestration_commands' and action='insert'")

@@ -19,7 +19,9 @@ campaign_findings), so a restart continues where it stopped.
 * Findings from the campaign's batches are sent to the campaign chat one by
   one, exactly once (``campaign_findings``); the analysis digest skips them.
 * One Telegram message per campaign shows the live status; it is edited only
-  when the text changes.
+  when the text changes. Owners (TELEGRAM_OPERATOR_IDS) see the technical line;
+  anyone else sees only the short labels of ``status_text`` (no ids, windows or
+  group counts).
 * After the last window the runner waits (bounded) for analysis, then
   completes the campaign. A campaign cancelled from outside has its in-flight
   batch cancelled through the ordinary batch cancel.
@@ -32,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -42,6 +44,7 @@ import httpx
 
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, Window
+from .status_text import campaign_label
 from .store import CampaignStore
 
 log = logging.getLogger(__name__)
@@ -141,9 +144,13 @@ class CampaignRunner:
         *,
         config: RunnerConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        owner_ids: Collection[int] = frozenset(),
     ) -> None:
+        """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
+        status; everyone else sees only the user-safe labels of ``status_text``."""
         self.campaigns, self.store, self.messenger, self.discovery = campaigns, store, messenger, discovery
         self.config, self.now = config or RunnerConfig(), now
+        self.owner_ids = frozenset(owner_ids)
 
     async def tick(self) -> int:
         """Advance every open (or just finished) campaign by one step; returns how many were seen."""
@@ -348,7 +355,7 @@ class CampaignRunner:
     async def _show(self, campaign: Campaign, line: str) -> None:
         """Keep one status message per campaign; edit it only when the text changes."""
         current = await self.campaigns.get(campaign.id) or campaign
-        text = f"🎯 {current.plan.goal}\n{line or STOPPED}"
+        text = await self._status_text(current, line)
         run = await self.store.get_run(current.id)
         if current.status_message_id is not None and run.status_text == text:
             return
@@ -364,6 +371,15 @@ class CampaignRunner:
             log.warning("campaign.status_update_failed", extra={"campaign_id": current.id})
             return
         await self.store.save_run(current.id, replace(await self.store.get_run(current.id), status_text=text))
+
+    async def _status_text(self, campaign: Campaign, line: str) -> str:
+        """Owners get the technical line; anyone else one short label, never ids, windows or counts."""
+        if campaign.requested_by in self.owner_ids:
+            return f"🎯 {campaign.plan.goal}\n{line or STOPPED}"
+        if campaign.state in TERMINAL_STATES:
+            return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id))
+        checking = line == ANALYSIS and bool(await self.store.pending_analysis(campaign.id))
+        return campaign_label(campaign.state, checking=checking)
 
     async def _new_status(self, campaign: Campaign, text: str) -> None:
         message_id = await self.messenger.send(campaign.chat_id, text)
@@ -404,7 +420,7 @@ async def main() -> None:
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
     runner = CampaignRunner(campaigns, PostgresRunStore(pool, settings.safety_limits()), messenger, discovery,
-                            config=settings.runner_config())
+                            config=settings.runner_config(), owner_ids=settings.owner_ids())
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds})
     try:
         await runner.serve(settings.poll_seconds)
