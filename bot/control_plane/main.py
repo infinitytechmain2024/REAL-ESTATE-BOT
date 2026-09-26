@@ -7,6 +7,9 @@ import logging
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -16,6 +19,7 @@ from aiogram.types import (
 from aiohttp import web
 
 from bot.campaign.store import PostgresCampaignStore
+from bot.control_plane import menu
 from bot.control_plane.access import AccessDesk, PostgresAccessStore
 from bot.control_plane.auto import PostgresSettingsStore
 from bot.control_plane.intake import PostgresIntakeStore
@@ -38,6 +42,22 @@ from bot.orchestra.store import PostgresOrchestraStore
 
 def _incoming(message: Message) -> IncomingMessage:
     return IncomingMessage(chat_id=message.chat.id, user_id=message.from_user.id if message.from_user else None, message_id=message.message_id, text=message.text, voice_file_id=message.voice.file_id if message.voice else None, voice_size=message.voice.file_size if message.voice else None, voice_duration_seconds=message.voice.duration if message.voice else None)
+
+
+async def _set_menus(bot: Bot, owners: frozenset[int]) -> None:
+    """Only «Начать» for everyone; the full command list in each owner's chat."""
+    def commands(items: tuple[tuple[str, str], ...]) -> list[BotCommand]:
+        return [BotCommand(command=c, description=d) for c, d in items]
+
+    try:
+        await bot.set_my_commands(commands(menu.EVERYONE), scope=BotCommandScopeDefault())
+    except Exception:  # noqa: BLE001 - a menu is cosmetic; the bot must still start
+        logging.getLogger(__name__).warning("telegram.menu.default_failed")
+    for owner in sorted(owners):
+        try:
+            await bot.set_my_commands(commands(menu.OWNER), scope=BotCommandScopeChat(chat_id=owner))
+        except Exception:  # noqa: BLE001 - e.g. the owner never opened the bot
+            logging.getLogger(__name__).warning("telegram.menu.owner_failed", extra={"owner": owner})
 
 
 def _markup(reply: Reply) -> InlineKeyboardMarkup | None:
@@ -170,6 +190,7 @@ async def run() -> None:
     await web.TCPSite(gate, "0.0.0.0", settings.live_view_port).start()
     watcher_stop = asyncio.Event()
     watcher_task = asyncio.create_task(live.run_forever(settings.live_view_poll_seconds, watcher_stop), name="live-view-watcher")
+    await _set_menus(bot, frozenset(settings.operator_user_ids))
     try:
         await telegram_dispatcher.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
