@@ -24,7 +24,12 @@ from bot.control_plane.intake import (
     TaskIntake,
     mode_menu,
 )
-from bot.control_plane.live_view import LiveViewCoordinator, LiveViewUnavailable, is_session_id
+from bot.control_plane.live_view import (
+    PLATFORM_NAMES,
+    LiveViewCoordinator,
+    LiveViewUnavailable,
+    is_session_id,
+)
 from bot.control_plane.models import (
     CommandEnvelope,
     IncomingMessage,
@@ -245,6 +250,8 @@ class ControlPlane:
             return self._stale_button(user_id)
         if kind == "set" and self.access is not None:
             return await self.access.settings(user_id, action, target)
+        if kind == "login":
+            return await self._login_button(user_id, chat_id, action, target)
         if kind == "live" and user_id not in self.operators:
             # The logged-in browser is staff-only; a forwarded button tells a user or stranger nothing.
             return Reply(STALE_BUTTON)
@@ -257,6 +264,21 @@ class ControlPlane:
             return await self.live.finish(session_id, user_id, done=action == "done")
         except LiveViewUnavailable as exc:
             return Reply(f"Could not close the browser: {exc}.")
+
+    async def _login_button(self, user_id: int | None, chat_id: int | None, action: str, platform: str) -> Reply:
+        """Settings «🔐 Вход в соцсети» (owners only): ``login:list``, ``login:go:<platform>`` = /login <platform>."""
+        if not self._is_owner(user_id):
+            return Reply(STALE_BUTTON)
+        if self.live is None:
+            return Reply("Живой браузер недоступен в этом сервисе.")
+        if action == "list":
+            return await self.live.login_panel()
+        if action != "go" or platform not in PLATFORM_NAMES:
+            return Reply(STALE_BUTTON)
+        if chat_id is not None and chat_id != user_id:
+            # Telegram shows Mini App buttons in private chats only.
+            return Reply("Откройте вход в личном чате с ботом.")
+        return await self.live.login(user_id, platform, f"{platform}-main")
 
     async def _near_match_answer(self, user_id: int | None, action: str, target: str) -> Reply:
         """Only the campaign's requester (or an owner) answers, and only once; the runner acts on it."""
@@ -417,7 +439,7 @@ class ControlPlane:
                 return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
             text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
                     "/campaign <goal> | status | cancel <id>, "
-                    "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>.")
+                    "/login [facebook|instagram|tiktok|linkedin] [profile-name]. Confirm changes with: confirm <token>.")
             if role == "owner":
                 text += " Owners: /settings (roles with buttons), /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
             if self.auto.eligible(message.user_id):

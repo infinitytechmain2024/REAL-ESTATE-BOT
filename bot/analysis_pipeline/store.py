@@ -118,14 +118,16 @@ class PostgresAnalysisStore:
         )
 
     async def campaign_finding_ids(self, finding_ids: list[str]) -> set[str]:
-        """The findings among ``finding_ids`` whose post came from a campaign's Facebook batch."""
+        """The findings among ``finding_ids`` whose post came from a campaign's Facebook batch or social search."""
         rows = await self._pool().fetch(
             """select f.id::text as id from findings f
                  join collected_posts p on p.id=f.post_id
-                 join acquisition_runs r on r.id=p.acquisition_run_id
-                 join acquisition_batch_items i on i.id=r.batch_item_id
-                 join acquisition_batches b on b.id=i.batch_id
-                where f.id = any($1::uuid[]) and b.campaign_id is not null""",
+                where f.id = any($1::uuid[])
+                  and (exists (select 1 from acquisition_runs r
+                                 join acquisition_batch_items i on i.id=r.batch_item_id
+                                 join acquisition_batches b on b.id=i.batch_id
+                                where r.id=p.acquisition_run_id and b.campaign_id is not null)
+                       or exists (select 1 from campaign_social_posts sp where sp.post_id=p.id))""",
             finding_ids,
         )
         return {r["id"] for r in rows}

@@ -86,7 +86,11 @@ class FakePage:
         self.url = url
         self.active_navigations -= 1
 
-    async def evaluate(self, _: str) -> dict[str, object]:
+    async def evaluate(self, script: str, *args: object) -> object:
+        if args:  # the social result-card script, called with the platform
+            return [{"kind": "post", "url": f"https://www.{args[0]}.com/x", "text": "card"}]
+        if "og_title" in script:
+            return {"og_title": "", "og_description": "", "og_url": "", "description": "", "time": None}
         return {"url": self.url, "title": "Facebook", "text": "", "posts": []}
 
 
@@ -94,6 +98,10 @@ class FakeBrowser:
     def __init__(self) -> None:
         self.pages = [FakePage()]
         self.closed = False
+        self.jar: list[dict[str, object]] = []
+
+    async def cookies(self) -> list[dict[str, object]]:
+        return self.jar
 
     async def new_page(self) -> FakePage:
         page = FakePage()
@@ -371,3 +379,45 @@ async def test_snapshot_extracts_bounded_group_links_with_their_result_cards() -
             assert all(len(g["name"]) == 200 and len(g["card"]) <= 400 for g in group_links)
         finally:
             await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_social_snapshots_scroll_a_bounded_number_of_times_and_report_cards_and_login(tmp_path: Path) -> None:
+    browsers: list[FakeBrowser] = []
+
+    async def launch(_: Path) -> FakeBrowser:
+        browsers.append(FakeBrowser())
+        return browsers[-1]
+
+    manager = BrowserSessionManager(FakeRedis(), profile_root=tmp_path / "p", screenshot_root=tmp_path / "s",
+                                    lease_seconds=30, renew_seconds=5, launcher=launch)  # type: ignore[arg-type]
+    linkedin = await manager.acquire(ProfileRequest("profile_li", "li", "linkedin"))
+    result = await manager.snapshot(linkedin, "https://www.linkedin.com/search/results/content/?keywords=x",
+                                    timeout_ms=1_000, scrolls=2)
+    assert result["items"] and result["meta"]["og_title"] == "" and result["logged_in"] is False
+    assert browsers[0].pages[0].mouse.scrolls == 2
+    with pytest.raises(ValueError):  # at most SOCIAL_MAX_SCROLLS
+        await manager.snapshot(linkedin, "https://www.linkedin.com/feed/", timeout_ms=1_000, scrolls=9)
+    with pytest.raises(ValueError):  # LinkedIn profiles stay on LinkedIn
+        await manager.snapshot(linkedin, "https://www.facebook.com/", timeout_ms=1_000)
+    browsers[0].jar.append({"name": "li_at", "value": "secret", "domain": ".www.linkedin.com", "expires": -1})
+    assert await manager.logged_in(linkedin) is True
+    assert "secret" not in repr(await manager.snapshot(linkedin, "https://www.linkedin.com/feed/", timeout_ms=1_000))
+    await manager.release(linkedin)
+
+
+def test_login_cookie_rules_per_platform() -> None:
+    from bot.browser_session.manager import signed_in
+
+    now = 1_000_000.0
+    live = {"value": "v", "expires": now + 60}
+    assert signed_in([{"name": "c_user", "domain": ".facebook.com", **live}], "facebook", now=now) is True
+    assert signed_in([{"name": "sessionid", "domain": ".instagram.com", **live}], "instagram", now=now) is True
+    assert signed_in([{"name": "sid_tt", "domain": ".tiktok.com", **live}], "tiktok", now=now) is True
+    assert signed_in([{"name": "li_at", "domain": ".linkedin.com", **live}], "linkedin", now=now) is True
+    # Wrong site, expired, empty, or a cookie that exists logged out too.
+    assert signed_in([{"name": "sessionid", "domain": ".tiktok.com.evil.io", **live}], "tiktok", now=now) is False
+    assert signed_in([{"name": "li_at", "domain": ".linkedin.com", "value": "v", "expires": now - 1}], "linkedin", now=now) is False
+    assert signed_in([{"name": "c_user", "domain": ".facebook.com", "value": "", "expires": -1}], "facebook", now=now) is False
+    assert signed_in([{"name": "datr", "domain": ".facebook.com", **live}], "facebook", now=now) is False
+    assert signed_in([], "website") is None

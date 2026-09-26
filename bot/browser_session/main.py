@@ -61,7 +61,8 @@ def create_app(manager: BrowserSessionManager, token: str, live: LiveViewControl
         body = await request.json()
         try:
             result = await manager.snapshot(
-                handle(body), body["url"], timeout_ms=int(body.get("timeout_ms", 30_000))
+                handle(body), body["url"], timeout_ms=int(body.get("timeout_ms", 30_000)),
+                scrolls=int(body.get("scrolls", 0)),
             )
         except (PermissionError, ValueError) as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
@@ -88,6 +89,15 @@ def create_app(manager: BrowserSessionManager, token: str, live: LiveViewControl
     async def live_status(_: web.Request) -> web.Response:
         return web.json_response(live.status())
 
+    async def live_check(request: web.Request) -> web.Response:
+        """Whether the open live window's profile is signed in (a boolean, never a cookie)."""
+        body = await request.json()
+        try:
+            signed = await live.logged_in(str(body.get("profile_id", "")))
+        except LiveViewError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        return web.json_response({"logged_in": signed})
+
     async def shutdown(_: web.Application) -> None:
         await live.stop()
         await manager.close()
@@ -96,6 +106,7 @@ def create_app(manager: BrowserSessionManager, token: str, live: LiveViewControl
     app.router.add_post("/v1/live", live_start)
     app.router.add_delete("/v1/live", live_stop)
     app.router.add_get("/v1/live", live_status)
+    app.router.add_post("/v1/live/check", live_check)
     app.router.add_post("/v1/sessions", acquire)
     app.router.add_delete("/v1/sessions", release)
     app.router.add_post("/v1/sessions/screenshot", screenshot)

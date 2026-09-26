@@ -300,6 +300,14 @@ class PostgresLiveViewStore:
         )
         return [_live_session(r) for r in rows]
 
+    async def platform_states(self) -> dict[str, str]:
+        rows = await self._pool().fetch(  # type: ignore[attr-defined]
+            """select distinct on (platform) platform, state from public.browser_profiles
+                where deleted_at is null
+                order by platform, state = 'ready' desc, state = 'in_use' desc, created_at"""
+        )
+        return {r["platform"]: r["state"] for r in rows}
+
 
 class MemoryLiveViewStore:
     """Test double with the same rules as the Postgres store."""
@@ -361,3 +369,10 @@ class MemoryLiveViewStore:
     async def expired_live_views(self) -> list[LiveSession]:
         now = datetime.now(UTC)
         return [s for s in self.sessions.values() if s.state in {"requested", "open"} and s.expires_at <= now]
+
+    async def platform_states(self) -> dict[str, str]:
+        order = {"ready": 0, "in_use": 1}
+        states: dict[str, str] = {}
+        for profile in sorted(self.profiles.values(), key=lambda p: order.get(p.state, 2)):
+            states.setdefault(profile.platform, profile.state)
+        return states

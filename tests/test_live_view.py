@@ -62,6 +62,11 @@ class FakeBrowser:
     async def is_open(self, profile_id: str) -> bool:
         return self.window == profile_id
 
+    signed_in: bool | None = True  # what the browser service's login check answers
+
+    async def logged_in(self, profile_id: str) -> bool | None:
+        return self.signed_in if self.window == profile_id else None
+
 
 def coordinator(store: MemoryLiveViewStore | None = None, browser: FakeBrowser | None = None, notifier=None, public_url: str = "https://1-2-3-4.sslip.io") -> LiveViewCoordinator:
     return LiveViewCoordinator(
@@ -101,7 +106,7 @@ async def test_login_creates_the_profile_and_offers_the_mini_app() -> None:
     reply = await coordinator(store).login(OPERATOR, "facebook", "facebook-main")
     session = next(iter(store.sessions.values()))
     assert session.reason == "login" and session.profile.name == "facebook-main"
-    assert [b.text for b in reply.buttons] == ["Open browser", "Done, I am logged in", "Close"]
+    assert [b.text for b in reply.buttons] == ["Открыть браузер", "Готово, я вошёл", "Закрыть"]
     assert reply.buttons[0].web_app_url == f"https://1-2-3-4.sslip.io/live/{session.id}/"
     assert reply.buttons[1].callback_data == f"live:done:{session.id}"
     # Asking again reuses the open request rather than stacking a second one.
@@ -135,7 +140,7 @@ async def test_open_starts_the_browser_once_and_done_saves_the_profile() -> None
 
     # Done before anyone opened the window is refused.
     early = await live.finish(session_id, OPERATOR, done=True)
-    assert "Open the browser" in early.text and store.sessions[session_id].state == "requested"
+    assert "Сначала откройте браузер" in early.text and store.sessions[session_id].state == "requested"
 
     assert await live.open(session_id, OPERATOR) == "pw1"
     assert await live.open(session_id, OPERATOR) == "pw1"  # reopening the page reuses the window
@@ -181,7 +186,7 @@ async def test_cancel_leaves_the_profile_untouched() -> None:
     session_id = next(iter(store.sessions))
     await live.open(session_id, OPERATOR)
     reply = await live.finish(session_id, OPERATOR, done=False)
-    assert "left as provisioned" in reply.text
+    assert "(provisioned)" in reply.text
     assert store.sessions[session_id].state == "cancelled" and not store.completed and browser.stopped
     assert "Only operators" in (await live.finish(session_id, STRANGER, done=False)).text
 

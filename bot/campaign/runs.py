@@ -72,6 +72,21 @@ class StreamFinding:
     vertical: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SocialActivity:
+    """Social network search for a campaign (``bot.social_search``, migration 022).
+
+    ``searching``: the platform a query runs on right now; ``pending``: more
+    queries are to come (the runner waits for them, bounded, before it
+    completes); ``notes``: technical lines for owners only.
+    """
+
+    searching: str | None = None
+    query: str | None = None
+    pending: bool = False
+    notes: tuple[str, ...] = ()
+
+
 RECOVERY_ACTOR = "campaign:runner:recovery"
 
 
@@ -105,6 +120,7 @@ class RunStore(Protocol):
     async def open_offer(self, campaign_id: str, bucket: str) -> bool: ...
     async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None: ...
     async def drop_offer(self, campaign_id: str, bucket: str) -> None: ...
+    async def social_activity(self, campaign_id: str) -> SocialActivity: ...
 
 
 def _distance(value: float | None) -> float | None:
@@ -306,10 +322,7 @@ class PostgresRunStore:
                        f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical
                   from findings f
                   join collected_posts p on p.id = f.post_id
-                  join acquisition_runs r on r.id = p.acquisition_run_id
-                  join acquisition_batch_items i on i.id = r.batch_item_id
-                  join acquisition_batches b on b.id = i.batch_id
-                 where b.campaign_id = $1::uuid and f.state in ('ready', 'delivery_failed')
+                 where {_IN_CAMPAIGN} and f.state in ('ready', 'delivery_failed')
                    and not exists (select 1 from campaign_findings cf where cf.finding_id = f.id)
                  order by f.created_at, f.id limit {int(limit)}""",
             campaign_id,
@@ -378,6 +391,18 @@ class PostgresRunStore:
         return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
                               r["confidence"], r["vertical"]) for r in rows]
 
+    async def social_activity(self, campaign_id: str) -> SocialActivity:
+        rows = await self.pool.fetch(
+            """select platform, state, current_query, note from campaign_social_state
+                where campaign_id = $1::uuid order by platform""", campaign_id)
+        running = next((r for r in rows if r["state"] == "running"), None)
+        return SocialActivity(
+            searching=running["platform"] if running else None,
+            query=running["current_query"] if running else None,
+            pending=any(r["state"] in ("pending", "running") for r in rows),
+            notes=tuple(r["note"] for r in rows if r["note"]),
+        )
+
     async def claim_held(self, campaign_id: str, finding_id: str) -> int | None:
         """Take the send slot of a held finding (held -> sending); None if it is not held any more."""
         async with self.pool.acquire() as conn, conn.transaction():
@@ -427,11 +452,16 @@ async def _sent_count(conn: asyncpg.Connection[asyncpg.Record], campaign_id: str
         campaign_id))
 
 
-_CAMPAIGN_POSTS = """from collected_posts p
-      join acquisition_runs r on r.id = p.acquisition_run_id
-      join acquisition_batch_items i on i.id = r.batch_item_id
-      join acquisition_batches b on b.id = i.batch_id
-     where b.campaign_id = $1::uuid"""
+# A post belongs to a campaign through its Facebook batch (acquisition_runs ->
+# batch items -> acquisition_batches.campaign_id) or through the social search
+# that found it (campaign_social_posts, migration 022).
+_IN_CAMPAIGN = """(exists (select 1 from acquisition_runs r
+                      join acquisition_batch_items i on i.id = r.batch_item_id
+                      join acquisition_batches b on b.id = i.batch_id
+                     where r.id = p.acquisition_run_id and b.campaign_id = $1::uuid)
+          or exists (select 1 from campaign_social_posts sp where sp.post_id = p.id and sp.campaign_id = $1::uuid))"""
+_CAMPAIGN_POSTS = f"""from collected_posts p
+     where {_IN_CAMPAIGN}"""
 
 
 async def _set_actor(conn: asyncpg.Connection[asyncpg.Record], actor: str) -> None:
@@ -485,6 +515,7 @@ class MemoryRunStore:
         self.buckets: dict[str, tuple[str, float | None]] = {}  # finding -> (bucket, distance)
         self.held: dict[str, dict[str, None]] = {}  # cid -> held finding ids, in filing order
         self.desk = MemoryOfferDesk()  # the control plane's side of campaign_offers
+        self.social: dict[str, SocialActivity] = {}  # cid -> social search activity
 
     async def recover_discovery_profile(self) -> int:
         items = getattr(self.campaigns, "campaigns", {})
@@ -593,6 +624,9 @@ class MemoryRunStore:
 
     async def pending_analysis(self, campaign_id: str) -> int:
         return self.normalised.get(campaign_id, 0)
+
+    async def social_activity(self, campaign_id: str) -> SocialActivity:
+        return self.social.get(campaign_id, SocialActivity())
 
     async def unstreamed_findings(self, campaign_id: str, limit: int) -> list[StreamFinding]:
         done = self.streamed.get(campaign_id, {})

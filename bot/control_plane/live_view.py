@@ -42,7 +42,12 @@ START_URLS = {
     "facebook": "https://www.facebook.com/",
     "instagram": "https://www.instagram.com/",
     "tiktok": "https://www.tiktok.com/",
+    "linkedin": "https://www.linkedin.com/login",
 }
+PLATFORM_NAMES = {"facebook": "Facebook", "instagram": "Instagram", "tiktok": "TikTok", "linkedin": "LinkedIn"}
+NOT_LOGGED_IN = "Вход не найден. Войдите в аккаунт в окне и нажмите «Готово»."
+CHECK_FAILED = ("Не удалось проверить вход: окно браузера не отвечает. Откройте браузер ещё раз, "
+                "войдите и нажмите «Готово», или нажмите «Закрыть» и начните вход заново.")
 PROFILE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 
 
@@ -55,12 +60,18 @@ class LiveViewStore(Protocol):
     async def complete_verification(self, profile: LiveProfile, actor: str) -> None: ...
     async def profiles_needing_human(self, cooldown_seconds: int) -> list[LiveProfile]: ...
     async def expired_live_views(self) -> list[LiveSession]: ...
+    async def platform_states(self) -> dict[str, str]:
+        """platform -> the most usable profile state (ready, else in_use, else any)."""
+        ...
 
 
 class LiveBrowser(Protocol):
     async def start(self, profile: LiveProfile, url: str, minutes: int) -> str: ...
     async def stop(self, profile_id: str) -> None: ...
     async def is_open(self, profile_id: str) -> bool: ...
+    async def logged_in(self, profile_id: str) -> bool | None:
+        """Whether the open window's profile is signed in; None when it cannot be checked."""
+        ...
 
 
 class LiveViewUnavailable(RuntimeError):
@@ -102,6 +113,17 @@ class BrowserLiveClient:
         except httpx.HTTPError:
             return False
         return response.status_code == 200 and response.json().get("profile_id") == profile_id
+
+    async def logged_in(self, profile_id: str) -> bool | None:
+        """The browser service reads the login cookie's presence in the open window; never its value."""
+        try:
+            response = await self._client.post(f"{self._url}/check", json={"profile_id": profile_id}, headers=self._headers)
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        value = response.json().get("logged_in")
+        return value if isinstance(value, bool) else None
 
     async def stop(self, profile_id: str) -> None:
         try:
@@ -154,41 +176,41 @@ class LiveViewCoordinator:
 
     def request_reply(self, session: LiveSession, user_id: int | None = None) -> Reply:
         profile = session.profile
+        platform = PLATFORM_NAMES.get(profile.platform, profile.platform)
         why = (
-            f"Profile {profile.name} ({profile.platform}) needs a login."
+            f"Нужен вход в {platform}: профиль {profile.name}."
             if session.reason == "login"
-            else f"{profile.platform.capitalize()} asked for verification on profile {profile.name}; collection on it is paused."
+            else f"{platform} попросил проверку на профиле {profile.name}; сбор на нём приостановлен."
         )
         url = f"{self.config.public_url.rstrip('/')}/live/{session.id}/"
         # The same page in Safari or a desktop browser (full size): it names the
         # recipient, who must approve that browser from Telegram before it opens.
-        browser = (f"\n\nEasier on a big screen: copy this link into Safari or another browser; you will confirm it "
-                   f"here in Telegram before it opens. Do not forward it.\n{url}?for={user_id}") if user_id else ""
+        browser = (f"\n\nНа большом экране удобнее: скопируйте ссылку в Safari или другой браузер; перед открытием "
+                   f"я попрошу подтвердить это здесь, в Telegram. Не пересылайте её.\n{url}?for={user_id}") if user_id else ""
         return Reply(
-            f"{why}\n\nOpen the browser, log in or pass the check yourself, then press Done. "
-            f"The window stays open for {self.config.open_minutes} minutes; this request lapses in "
-            f"{self.config.request_minutes} minutes.{browser}",
+            f"{why}\n\nОткройте браузер, войдите в аккаунт или пройдите проверку сами, затем нажмите «Готово, я вошёл». "
+            f"Окно открыто {self.config.open_minutes} мин.; запрос действует {self.config.request_minutes} мин.{browser}",
             (
-                Button("Open browser", web_app_url=url),
-                Button("Done, I am logged in", callback_data=f"live:done:{session.id}"),
-                Button("Close", callback_data=f"live:cancel:{session.id}"),
+                Button("Открыть браузер", web_app_url=url),
+                Button("Готово, я вошёл", callback_data=f"live:done:{session.id}"),
+                Button("Закрыть", callback_data=f"live:cancel:{session.id}"),
             ),
         )
 
     async def login(self, user_id: int | None, platform: str, name: str) -> Reply:
         if not self.is_operator(user_id):
-            return Reply("Only operators can log a browser profile in.")
+            return Reply("Входить в профили браузера могут только операторы (Only operators).")
         if not self.enabled:
-            return Reply("The live browser is not configured: set LIVE_VIEW_PUBLIC_URL (see .env.example).")
+            return Reply("Живой браузер не настроен (not configured): задайте LIVE_VIEW_PUBLIC_URL, см. .env.example.")
         if platform not in START_URLS:
-            return Reply(f"Platform must be one of: {', '.join(sorted(START_URLS))}.")
+            return Reply(f"Платформа должна быть одной из (Platform must be one of): {', '.join(sorted(START_URLS))}.")
         if not 1 <= len(name) <= 64 or not set(name) <= PROFILE_NAME_CHARS:
-            return Reply("Profile name may contain only a-z, 0-9, '_' and '-'.")
+            return Reply("Имя профиля (Profile name): только a-z, 0-9, '_' и '-'.")
         profile = await self.store.ensure_profile(platform, name, f"telegram:{user_id}")
         if profile.platform != platform:
-            return Reply(f"Profile {name} belongs to {profile.platform}, not {platform}.")
+            return Reply(f"Профиль {name} относится к {profile.platform}, а не к {platform}.")
         if profile.state in {"disabled", "retired", "in_use"}:
-            return Reply(f"Profile {name} is {profile.state}; it cannot be opened now.")
+            return Reply(f"Профиль {name} сейчас {profile.state}; открыть его нельзя. Попробуйте позже.")
         session, _ = await self.store.request_live_view(profile, "login", f"telegram:{user_id}", self.config.request_minutes * 60)
         return self.request_reply(session, user_id)
 
@@ -267,13 +289,20 @@ class LiveViewCoordinator:
 
     async def finish(self, session_id: str, user_id: int | None, *, done: bool) -> Reply:
         if not self.is_operator(user_id):
-            return Reply("Only operators can close a browser session.")
+            return Reply("Закрывать окно браузера могут только операторы (Only operators).")
         async with self._lock:
             session = await self.store.get_live_view(session_id)
             if session is None or session.state not in {"requested", "open"}:
-                return Reply("This browser session is already closed.")
+                return Reply("Это окно браузера уже закрыто (already closed).")
             if done and session.state != "open":
-                return Reply("Open the browser and log in first, then press Done.")
+                return Reply("Сначала откройте браузер и войдите в аккаунт, затем нажмите «Готово».")
+            if done:
+                # The profile becomes ready only with a real login in it; the window stays open otherwise.
+                signed = await self.browser.logged_in(session.profile.id)
+                if signed is False:
+                    return Reply(NOT_LOGGED_IN)
+                if signed is None and session.profile.platform in PLATFORM_NAMES:
+                    return Reply(CHECK_FAILED)
             if session.state == "open":
                 # Closing the browser writes the login into the profile.
                 await self.browser.stop(session.profile.id)
@@ -282,9 +311,22 @@ class LiveViewCoordinator:
             if done:
                 await self.store.complete_verification(session.profile, actor)
             await self.store.close_live_view(session_id, "completed" if done else "cancelled", actor)
+        platform = PLATFORM_NAMES.get(session.profile.platform, session.profile.platform)
         if done:
-            return Reply(f"Saved. Profile {session.profile.name} is ready; paused {session.profile.platform} sources are active again.")
-        return Reply(f"Closed. Profile {session.profile.name} was left as {session.profile.state}.")
+            return Reply(f"Сохранено: вход в {platform} выполнен, профиль {session.profile.name} готов (is ready). "
+                         "Приостановленный сбор продолжится.")
+        return Reply(f"Закрыто (Closed). Профиль {session.profile.name} оставлен как был ({session.profile.state}).")
+
+    async def login_panel(self) -> Reply:
+        """«🔐 Вход в соцсети»: one button per platform with its login status; a tap starts /login <platform>."""
+        states = await self.store.platform_states()
+        buttons = tuple(
+            Button(f"{name} — {'✅ вошёл' if states.get(platform) in {'ready', 'in_use'} else '⚠️ нужен вход'}",
+                   callback_data=f"login:go:{platform}")
+            for platform, name in PLATFORM_NAMES.items()
+        )
+        return Reply("🔐 Вход в соцсети\n\nВыберите сеть: я открою окно браузера, вы войдёте в аккаунт сами "
+                     "и нажмёте «Готово, я вошёл». Логин и пароль бот не видит и не хранит.", buttons)
 
     async def tick(self) -> None:
         """Expire lapsed sessions, then ask operators about profiles that need a human."""

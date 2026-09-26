@@ -33,10 +33,12 @@ class BrowserSessionClient:
         })
         return BrowserLease(profile_id, str(data["session_token"]))
 
-    async def snapshot(self, lease: BrowserLease, url: str, timeout_ms: int) -> dict[str, Any]:
-        return await self._request("POST", "/v1/sessions/snapshot", {
-            "profile_id": lease.profile_id, "session_token": lease.token, "url": url, "timeout_ms": timeout_ms,
-        }, timeout_seconds=timeout_ms / 1000 + SNAPSHOT_OVERHEAD_SECONDS)
+    async def snapshot(self, lease: BrowserLease, url: str, timeout_ms: int, *, scrolls: int = 0) -> dict[str, Any]:
+        body: dict[str, Any] = {"profile_id": lease.profile_id, "session_token": lease.token, "url": url, "timeout_ms": timeout_ms}
+        if scrolls:
+            body["scrolls"] = scrolls  # social search pages: bounded scrolls with pauses (Browser Session Manager)
+        return await self._request("POST", "/v1/sessions/snapshot", body,
+                                   timeout_seconds=timeout_ms / 1000 + SNAPSHOT_OVERHEAD_SECONDS + 3 * scrolls)
 
     async def screenshot(self, lease: BrowserLease) -> bytes:
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)

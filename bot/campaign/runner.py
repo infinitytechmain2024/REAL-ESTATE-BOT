@@ -153,10 +153,12 @@ class RunnerConfig:
     analysis_grace_seconds: float = 600
     refusal_retry_seconds: float = 300
     max_stream_per_step: int = 20
+    # After the last window, how long the campaign waits for social network searches still to come.
+    social_grace_seconds: float = 1800
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
-                or not 1 <= self.max_stream_per_step <= 100):
+                or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100):
             raise ValueError("unsafe campaign runner settings")
 
 
@@ -341,6 +343,8 @@ class CampaignRunner:
         waited = (now - run.drain_started_at).total_seconds()
         if await self.store.pending_analysis(campaign.id) and waited < self.config.analysis_grace_seconds:
             return ANALYSIS
+        if waited < self.config.social_grace_seconds and (await self.store.social_activity(campaign.id)).pending:
+            return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
         await self._stream(campaign)
         await self.campaigns.set_state(campaign.id, "completed", ACTOR, reason=reason)
         return ANALYSIS
@@ -465,21 +469,31 @@ class CampaignRunner:
 
     async def _status_text(self, campaign: Campaign, line: str) -> str:
         """Owners get the technical line; anyone else one short label, never ids, windows or counts."""
-        web = await self._web(campaign.id) if campaign.state not in TERMINAL_STATES else None
+        terminal = campaign.state in TERMINAL_STATES
+        web = await self._web(campaign.id) if not terminal else None
         web_active = web is not None and web.active
+        social = await self.store.social_activity(campaign.id) if not terminal else None
         if campaign.requested_by in self.owner_ids:
             text = f"🎯 {campaign.plan.goal}\n{line or STOPPED}"
             if web_active and web.line and web.line != line:
                 text += f"\n{web.line}"
+            if social is not None:
+                if social.searching:
+                    query = f" · «{social.query}»" if social.query else ""
+                    text += f"\nСоцсети: {social.searching}{query}"
+                text += "".join(f"\n{note}" for note in social.notes)
             return text
-        if campaign.state in TERMINAL_STATES:
+        if terminal:
             return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id))
         if line.startswith("Сейчас: Facebook · ") and line.endswith("ищу дальше"):
             return FACEBOOK
         if web_active:
             return user_status("site", site=web.host) if web.host else user_status("web")
         checking = line == ANALYSIS and bool(await self.store.pending_analysis(campaign.id))
-        return campaign_label(campaign.state, checking=checking)
+        # A network search is shown while Facebook itself is idle (between windows, waiting, at the end).
+        facebook_busy = line == SEARCHING or line.startswith("Сейчас: Facebook")
+        searching = social.searching if social is not None and not facebook_busy else None
+        return campaign_label(campaign.state, checking=checking, social=searching)
 
     async def _web(self, campaign_id: str) -> Any:
         """The web stage's status, or None (no web stage, or it could not be read: never blocks the runner)."""
@@ -554,18 +568,26 @@ async def main() -> None:
     runner = CampaignRunner(campaigns, PostgresRunStore(pool, settings.safety_limits()), messenger, discovery,
                             config=settings.runner_config(), owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None)
-    log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None})
+    social, generator = _social_worker(settings, pool, campaigns)
+    log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
+                                             "social_platforms": list(social.config.platforms) if social else []})
+    stop = asyncio.Event()
     try:
-        if web is None:
-            await runner.serve(settings.poll_seconds)
-        else:
+        # Each stage is its own loop: a slow site or network never delays Facebook work, and the reverse.
+        tasks = [runner.serve(settings.poll_seconds, stop)]
+        if web is not None:
             worker, poll, _closers = web
-            # The web stage is its own loop: a slow site never delays Facebook work, and the reverse.
-            await asyncio.gather(runner.serve(settings.poll_seconds), worker.serve(poll))
+            tasks.append(worker.serve(poll, stop))
+        if social is not None:
+            tasks.append(social.serve(settings.social_poll_seconds, stop))
+        await asyncio.gather(*tasks)
     finally:
+        stop.set()
         if web is not None:
             for close in web[2]:
                 await close()
+        if generator is not None:
+            await generator.aclose()
         await messenger.aclose()
         await pool.close()
 
@@ -599,6 +621,31 @@ async def _web_stage(campaigns: CampaignStore, pool: Any) -> tuple[Any, float, l
                              config=config)
     closers = [searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
     return worker, settings.poll_seconds, closers
+
+
+def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[Any, Any]:
+    """The social search worker when SOCIAL_SEARCH_PLATFORMS lists a platform (and the browser is reachable)."""
+    config = settings.social_config()
+    if not config.platforms:
+        return None, None
+    if not settings.browser_token:
+        log.warning("campaign.runner.social_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
+        return None, None
+    from bot.facebook_collector.browser import BrowserSessionClient
+    from bot.social_search.queries import OpenRouterQueryGenerator, QueryPlanner
+    from bot.social_search.store import PostgresSocialStore
+    from bot.social_search.worker import SocialSearchWorker
+
+    generator = None
+    if settings.openrouter_api_key:
+        generator = OpenRouterQueryGenerator(api_key=settings.openrouter_api_key, model=settings.social_model,
+                                             timeout_seconds=settings.social_model_timeout_seconds)
+    else:
+        log.warning("campaign.runner.social_queries_without_ai", extra={"hint": "set OPENROUTER_API_KEY"})
+    # The browser's API answers after navigation, the bounded wait for results and the scrolls.
+    browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
+    worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config)
+    return worker, generator
 
 
 if __name__ == "__main__":
