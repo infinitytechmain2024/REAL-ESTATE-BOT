@@ -530,3 +530,33 @@ async def test_only_the_owner_sees_commands_on_start() -> None:
     stranger = await say(control, STRANGER, "/start")
     assert stranger.text.startswith("Привет") and "/" not in stranger.text
     assert callbacks(stranger) == ["access:request"]
+
+
+@pytest.mark.asyncio
+async def test_owner_settings_switch_roles_with_buttons() -> None:
+    control, _, outbox = plane()
+    assert "set:list" in callbacks(await say(control, OWNER, "/start"))
+    assert "set:list" not in callbacks(await say(control, OPERATOR, "/start"))
+    listing = await press(control, OWNER, "set:list")
+    assert f"set:user:{HELPER}" in callbacks(listing)
+    card = await press(control, OWNER, f"set:user:{HELPER}")
+    assert "Сейчас: Помощник" in card.text
+    assert [b.text for b in card.buttons][:3] == ["Пользователь", "✓ Помощник", "Оператор"]
+    # A helper becomes a normal user: the role changes at once and they are told in Russian.
+    card = await press(control, OWNER, f"set:role:{HELPER}:user")
+    assert "Сейчас: Пользователь" in card.text and control.operators.role(HELPER) == "user"
+    assert "теперь вы пользователь" in outbox.to(HELPER)[-1].text
+    assert (await say(control, HELPER, "/start")).text.startswith("Привет! 👋 Я помогу")
+    # Removing access asks first.
+    ask = await press(control, OWNER, f"set:del:{HELPER}")
+    assert callbacks(ask) == [f"set:delok:{HELPER}", f"set:user:{HELPER}"]
+    done = await press(control, OWNER, f"set:delok:{HELPER}")
+    assert done.text.startswith("Доступ удалён") and control.operators.role(HELPER) is None
+    # Only an owner, never on an owner, never with a forged role.
+    assert "только владельцу" in (await press(control, OPERATOR, "set:list")).text
+    assert "только владельцу" in (await press(control, USER, f"set:role:{USER}:operator")).text
+    assert control.operators.role(USER) == "user"
+    assert "устарела" in (await press(control, OWNER, f"set:role:{OWNER}:helper")).text
+    await press(control, OWNER, f"set:role:{USER}:admin")
+    assert control.operators.role(USER) == "user"
+    assert (await say(control, OWNER, "/settings")).text.startswith("⚙️ Настройки")

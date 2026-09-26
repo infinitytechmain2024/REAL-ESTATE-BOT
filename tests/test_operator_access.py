@@ -166,7 +166,7 @@ async def test_owners_list_change_and_revoke() -> None:
 
     changed = await control.handle_text(text(OWNER, f"/role {HELPER} operator"))
     assert changed and changed.text == f"{HELPER} is now a operator."
-    assert HELPER in desk.operators.controllers and "now a operator" in outbox.to(HELPER)[-1].text
+    assert HELPER in desk.operators.controllers and "теперь вы оператор" in outbox.to(HELPER)[-1].text
     for bad in ("/role", f"/role {HELPER} admin", f"/role {OWNER} helper", f"/role {STRANGER} helper"):
         reply = await control.handle_text(text(OWNER, bad))
         assert reply and "now a" not in reply.text, bad

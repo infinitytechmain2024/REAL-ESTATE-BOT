@@ -10,7 +10,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from bot.campaign.architect import InvalidGoal, plan_campaign
-from bot.control_plane.access import AccessDesk, label
+from bot.control_plane.access import SETTINGS_BUTTON, AccessDesk, label
 from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
 from bot.control_plane.intake import IntakeStore, MemoryIntakeStore, TaskIntake, mode_menu
 from bot.control_plane.live_view import LiveViewCoordinator, LiveViewUnavailable, is_session_id
@@ -112,7 +112,7 @@ class ControlPlane:
     async def handle_callback(self, user_id: int | None, data: str, display_name: str | None = None, username: str | None = None,
                               chat_id: int | None = None) -> Reply:
         """Inline buttons: ``live:done|cancel:<id>``, ``live:approve:<code>``, ``access:request``,
-        ``access:helper|user|operator|deny:<id>``, ``mode:<mode>`` and ``task:<action>[:<value>]``."""
+        ``access:helper|user|operator|deny:<id>``, ``set:...`` (owner settings), ``mode:<mode>`` and ``task:<action>[:<value>]``."""
         kind, _, rest = data.partition(":")
         action, _, target = rest.partition(":")
         if kind in {"mode", "task"}:
@@ -129,6 +129,8 @@ class ControlPlane:
             if action in {*ROLES, "deny"}:
                 return await self.access.decide(user_id, target, None if action == "deny" else action)
             return Reply("This button is no longer valid.")
+        if kind == "set" and self.access is not None:
+            return await self.access.settings(user_id, action, target)
         if kind == "live" and action == "approve" and self.live is not None:
             return self.live.approve_browser(target, user_id)
         session_id = target
@@ -257,7 +259,7 @@ class ControlPlane:
                         "/campaign <goal> | status | cancel <id>, "
                         "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>.")
                 if role == "owner":
-                    text += " Owners: /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
+                    text += " Owners: /settings (roles with buttons), /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
                 if self.auto.eligible(message.user_id):
                     text += ("\n\nAuto mode (when an owner turns it on): just write or say the goal, e.g. "
                              "«квартиры в аренду в Мадриде»; /campaign, /run, /pause and /resume are queued "
@@ -266,10 +268,15 @@ class ControlPlane:
                     text += "\n\nYou have no access yet; press the button to ask for it."
                 if command == "start" and self._can_control(message.user_id):
                     text += "\n\nИли выберите режим и опишите задачу: бот уточнит детали и попросит подтвердить «Запустить»."
-                    return mode_menu(text)
+                    menu = mode_menu(text)
+                    if role == "owner" and self.access is not None:
+                        return Reply(menu.text, (*menu.buttons, SETTINGS_BUTTON))
+                    return menu
             return self._with_access_button(Reply(text), message.user_id)
         if command == "role":
             return await self.access.set_role(message.user_id, arguments) if self.access else Reply("Unknown command. Send /help.")
+        if command == "settings":
+            return await self.access.settings(message.user_id) if self.access else Reply("Unknown command. Send /help.")
         if command == "operators":
             return await self.access.list(message.user_id) if self.access else Reply("Unknown command. Send /help.")
         if command == "revoke":

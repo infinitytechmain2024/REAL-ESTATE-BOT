@@ -51,6 +51,16 @@ ROLE_TEXT = {
 }
 
 
+ROLE_RU = {"user": "Пользователь", "helper": "Помощник", "operator": "Оператор"}
+ROLE_CHANGED = {
+    "user": "Ваш доступ изменён: теперь вы пользователь. Нажмите /start, выберите режим и опишите задачу.",
+    "helper": ("Ваш доступ изменён: теперь вы помощник. Когда для входа в Facebook понадобится человек, "
+               "я пришлю сообщение с кнопкой."),
+    "operator": "Ваш доступ изменён: теперь вы оператор. Отправьте /help, чтобы увидеть команды.",
+}
+SETTINGS_BUTTON = Button("⚙️ Настройки", callback_data="set:list")
+
+
 USER_WELCOME = ("Доступ открыт: вы пользователь. Нажмите /start, выберите режим и опишите задачу — "
                 "бот уточнит детали и попросит подтвердить запуск кнопкой «Запустить».")
 
@@ -135,11 +145,17 @@ class AccessDesk:
         user_id, role = int(parts[0]), parts[1].lower()
         if user_id in self.operators.owners:
             return Reply("Owners are set in .env (TELEGRAM_OPERATOR_IDS) and always have full access.")
-        if not await self.store.set_role(user_id, role):
+        if not await self._apply_role(user_id, role):
             return Reply(f"{user_id} is not an approved person.")
-        self.operators.set(user_id, role)
-        await self._tell(user_id, f"Your access changed: you are now a {ROLE_TEXT[role]}.")
         return Reply(f"{user_id} is now a {role}.")
+
+    async def _apply_role(self, user_id: int, role: str) -> bool:
+        if not await self.store.set_role(user_id, role):
+            return False
+        self.operators.set(user_id, role)
+        log.info("telegram.access.role_changed", extra={"user_id": user_id, "role": role})
+        await self._tell(user_id, ROLE_CHANGED[role])
+        return True
 
     async def _tell(self, user_id: int, text: str) -> None:
         if self.notify is None:
@@ -165,12 +181,81 @@ class AccessDesk:
         user_id = int(argument.strip())
         if user_id in self.operators.owners:
             return Reply("Owners are set in .env (TELEGRAM_OPERATOR_IDS) and cannot be revoked here.")
-        if not await self.store.revoke(user_id, owner_id):  # type: ignore[arg-type]
+        if not await self._apply_revoke(user_id, owner_id):  # type: ignore[arg-type]
             return Reply(f"{user_id} is not an approved operator.")
+        return Reply(f"Revoked: {user_id}.")
+
+    async def _apply_revoke(self, user_id: int, owner_id: int) -> bool:
+        if not await self.store.revoke(user_id, owner_id):
+            return False
         self.operators.discard(user_id)
         log.info("telegram.access.revoked", extra={"user_id": user_id, "owner": owner_id})
         await self._tell(user_id, "Your access was revoked.")
-        return Reply(f"Revoked: {user_id}.")
+        return True
+
+    # --- settings panel: the owner changes roles with buttons (``set:...`` callbacks) ---------
+
+    async def settings(self, owner_id: int | None, action: str = "list", target: str = "") -> Reply:
+        """``set:list``, ``set:user:<id>``, ``set:role:<id>:<role>``, ``set:del:<id>``, ``set:delok:<id>``."""
+        if not self.operators.is_owner(owner_id):
+            return Reply("Настройки доступны только владельцу.")
+        if action == "list":
+            return await self._settings_list()
+        uid_text, _, role = target.partition(":")
+        if not uid_text.isdigit() or int(uid_text) in self.operators.owners:
+            return Reply("Эта кнопка устарела.", (SETTINGS_BUTTON,))
+        user_id = int(uid_text)
+        if action == "role" and role in ROLES:
+            await self._apply_role(user_id, role)
+        elif action == "del":
+            person = await self._person(user_id)
+            if person is None:
+                return await self._settings_list()
+            return Reply(f"Удалить доступ для {person[0]}? Человек сможет запросить доступ заново.", (
+                Button("🗑 Да, удалить", callback_data=f"set:delok:{user_id}"),
+                Button("Отмена", callback_data=f"set:user:{user_id}"),
+            ))
+        elif action == "delok":
+            removed = await self._apply_revoke(user_id, owner_id)  # type: ignore[arg-type]
+            listing = await self._settings_list()
+            return Reply(("Доступ удалён.\n\n" if removed else "") + listing.text, listing.buttons)
+        elif action != "user":
+            return Reply("Эта кнопка устарела.", (SETTINGS_BUTTON,))
+        return await self._settings_card(user_id)
+
+    async def _person(self, user_id: int) -> tuple[str, str] | None:
+        for uid, name, username, role in await self.store.operators():
+            if uid == user_id:
+                return label(name, username, uid), role
+        return None
+
+    async def _settings_list(self) -> Reply:
+        rows = await self.store.operators()
+        if not rows:
+            return Reply("⚙️ Настройки\n\nОдобренных аккаунтов пока нет.")
+        buttons = tuple(
+            Button(f"{name or username or uid} — {ROLE_RU.get(role, role)}", callback_data=f"set:user:{uid}")
+            for uid, name, username, role in rows
+        )
+        return Reply("⚙️ Настройки\n\nВыберите аккаунт, чтобы сменить его роль или удалить доступ.", buttons)
+
+    async def _settings_card(self, user_id: int) -> Reply:
+        person = await self._person(user_id)
+        if person is None:
+            return await self._settings_list()
+        who, current = person
+        buttons = tuple(
+            Button(("✓ " if role == current else "") + ROLE_RU[role], callback_data=f"set:role:{user_id}:{role}")
+            for role in ("user", "helper", "operator")
+        )
+        return Reply(
+            f"{who}\nСейчас: {ROLE_RU.get(current, current)}.\n\n"
+            "Пользователь — выбирает режим и даёт задачи на поиск.\n"
+            "Помощник — только проходит проверки Facebook (капча, вход).\n"
+            "Оператор — задачи, проверки и управление сбором.",
+            (*buttons, Button("🗑 Удалить доступ", callback_data=f"set:del:{user_id}"),
+             Button("← Все аккаунты", callback_data="set:list")),
+        )
 
 
 def _is_uuid(value: str) -> bool:
