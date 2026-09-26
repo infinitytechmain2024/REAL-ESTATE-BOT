@@ -149,7 +149,9 @@ async def test_launch_queues_the_campaign_and_the_user_reply_is_plain_russian() 
     summary = await say(control, USER, "снять квартиру в Мадриде до 1200 €")
     assert_clean(summary)
     launched = await press(control, USER, "task:launch")
-    assert launched.text == "Принято. Начинаю поиск. Найденные варианты пришлю сюда.\nЧтобы остановить поиск, напишите «стоп»."
+    assert launched.text == ("Принято. Начинаю поиск. Найденные варианты пришлю сюда.\n"
+                             "Чтобы остановить поиск, нажмите кнопку ниже или напишите «стоп».")
+    assert [(b.text, b.callback_data) for b in launched.buttons] == [("Остановить поиск", "search:stop")]
     assert_clean(launched)
     [envelope] = sink.envelopes
     assert envelope.command == "campaign" and envelope.arguments.startswith("mode=real_estate city=Madrid ")
