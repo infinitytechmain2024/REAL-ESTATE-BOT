@@ -232,7 +232,8 @@ async def test_campaign_notices_to_a_non_owner_are_user_safe(role: str) -> None:
     notices = await dispatch("status", campaigns, roles)
     assert notices == [(10, SEARCHING)]
     notices = await dispatch(f"cancel {campaign.id}", campaigns, roles)
-    assert notices == [(10, DONE)]
+    # A user was already told «Поиск остановлен.» by the control plane; an operator hears it here.
+    assert notices == ([] if role == "user" else [(10, DONE)])
     assert (await campaigns.get(campaign.id)).state == "cancelled"
 
     notices = await dispatch(GOAL, BrokenCampaigns(), roles)

@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 Notifier = Callable[[int, str], Awaitable[None]]
 MAX_BACKOFF_SECONDS = 30.0
 REAP_INTERVAL_SECONDS = 60.0
+NOT_STOPPABLE = "Этот поиск уже завершён или недоступен."
 
 
 class OrchestraDispatcher:
@@ -148,11 +149,14 @@ class OrchestraDispatcher:
         elif action == "cancel" and own_only and not await self._owns(value, item.user_id):
             log.warning("orchestra.campaign_cancel_refused", extra={"command_id": item.id, "user_id": item.user_id})
             result = {"status": "refused", "campaign_id": value, "reply": f"Можно остановить только свою кампанию; {value} не ваша или не найдена."}
+            user_reply = NOT_STOPPABLE
         elif action == "cancel":
             cancelled = await self.campaigns.cancel(value, actor)
             reply = f"Кампания {value} остановлена." if cancelled else f"Кампания {value} не найдена или уже завершена."
             result = {"status": "cancelled" if cancelled else "unchanged", "campaign_id": value, "reply": reply}
-            user_reply = DONE
+            # A user stops a search with «стоп»: the control plane already said «Поиск остановлен.»
+            # and the status message turns final, so only a search that had already ended gets a line.
+            user_reply = NOT_STOPPABLE if not cancelled else None if own_only else DONE
         else:
             # Intake queues "mode=<vertical> city=<name> <task>": the person's choices override detection.
             goal, vertical, city = parse_campaign_goal(value)

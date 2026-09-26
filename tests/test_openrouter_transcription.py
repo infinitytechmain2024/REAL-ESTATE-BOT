@@ -240,7 +240,7 @@ async def test_unauthorized_voice_is_neither_downloaded_nor_sent(user_id: int | 
 
     reply = await control.handle_voice(voice(user_id=user_id), download)
 
-    assert reply and "operators only" in reply.text
+    assert reply and reply.text.startswith("Голосовые задачи доступны") and "одобрения доступа" in reply.text
     assert recorder.requests == [] and download.calls == 0
     assert store.failures[(22, 1)].error_code == "not_operator"
 

@@ -44,13 +44,6 @@ class AccessStore(Protocol):
     async def operators(self) -> list[tuple[int, str | None, str | None, str]]: ...
 
 
-ROLE_TEXT = {
-    "helper": "helper (verification only: log in, CAPTCHA, checkpoint)",
-    "user": "user (Пользователь: choose a mode, describe a search task, press Запустить)",
-    "operator": "operator (verification and control of collection)",
-}
-
-
 ROLE_RU = {"user": "Пользователь", "helper": "Помощник", "operator": "Оператор"}
 ROLE_CHANGED = {
     "user": "Ваш доступ изменён: теперь вы пользователь. Нажмите /start, выберите режим и опишите задачу.",
@@ -61,6 +54,14 @@ ROLE_CHANGED = {
 SETTINGS_BUTTON = Button("⚙️ Настройки", callback_data="set:list")
 
 
+# What the person who asked hears (always Russian, never technical); owners keep the English details.
+GRANTED = {
+    "helper": ("Доступ открыт: вы помощник. Когда для входа в Facebook понадобится человек (капча или проверка), "
+               "я пришлю сообщение с кнопкой."),
+    "operator": "Доступ открыт: вы оператор. Отправьте /help, чтобы увидеть команды.",
+}
+DECLINED = "Заявка на доступ отклонена."
+REVOKED = "Ваш доступ отозван."
 USER_WELCOME = ("Доступ открыт: вы пользователь. Нажмите /start, выберите режим и опишите задачу — "
                 "бот уточнит детали и попросит подтвердить запуск кнопкой «Запустить».")
 
@@ -83,14 +84,14 @@ class AccessDesk:
 
     async def request(self, user_id: int | None, display_name: str | None, username: str | None) -> Reply:
         if user_id is None:
-            return Reply("Access can only be requested from a Telegram account.")
+            return Reply("Доступ можно запросить только из личного аккаунта Telegram.")
         if self.operators.has_access(user_id):
-            return Reply("You already have access.")
+            return Reply("У вас уже есть доступ. Нажмите /start.")
         request, status = await self.store.open_request(user_id, display_name, username, DENY_COOLDOWN)
         if status == "pending":
-            return Reply("Your request is already waiting for an owner's decision.")
+            return Reply("Заявка уже отправлена. Я напишу, когда её рассмотрят.")
         if status == "recently_denied" or request is None:
-            return Reply("Your last request was declined. You can ask again later.")
+            return Reply("Прошлая заявка отклонена. Попробуйте позже.")
         text = (
             f"Access request: {label(display_name, username, user_id)}.\n\n"
             "A helper only gets verification tasks (log in, CAPTCHA, checkpoint); an operator can also start, "
@@ -115,12 +116,12 @@ class AccessDesk:
             except Exception:  # noqa: BLE001 - one owner who never started the bot must not stop the rest
                 log.warning("telegram.access.notify_failed", extra={"owner": owner})
         log.info("telegram.access.requested", extra={"user_id": user_id, "owners_notified": sent})
-        return Reply("Request sent. You will get a message when an owner decides.")
+        return Reply("Заявка отправлена. Я напишу, когда её рассмотрят.")
 
     async def decide(self, owner_id: int | None, request_id: str, role: str | None) -> Reply:
         """``role`` is ``helper``, ``user`` or ``operator`` to approve, ``None`` to deny."""
         if not self.operators.is_owner(owner_id):
-            return Reply("Only an owner can decide access requests.")
+            return Reply("Решать заявки может только владелец.")
         if not _is_uuid(request_id) or (role is not None and role not in ROLES):
             return Reply("This button is no longer valid.")
         decided = await self.store.decide(request_id, role, owner_id)  # type: ignore[arg-type]
@@ -131,9 +132,7 @@ class AccessDesk:
             self.operators.set(decided.user_id, role)
         log.info("telegram.access.decided", extra={"user_id": decided.user_id, "role": role, "owner": owner_id})
         await self._tell(decided.user_id, (
-            USER_WELCOME if role == "user"
-            else f"Access granted as {ROLE_TEXT[role]}. Send /help to see what you can do." if role
-            else "Your access request was declined."))
+            USER_WELCOME if role == "user" else GRANTED[role] if role else DECLINED))
         return Reply(f"Approved as {role}: {who}." if role else f"Denied: {who}.")
 
     async def set_role(self, owner_id: int | None, argument: str) -> Reply:
@@ -190,7 +189,7 @@ class AccessDesk:
             return False
         self.operators.discard(user_id)
         log.info("telegram.access.revoked", extra={"user_id": user_id, "owner": owner_id})
-        await self._tell(user_id, "Your access was revoked.")
+        await self._tell(user_id, REVOKED)
         return True
 
     # --- settings panel: the owner changes roles with buttons (``set:...`` callbacks) ---------

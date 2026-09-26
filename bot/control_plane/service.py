@@ -8,12 +8,20 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from bot.campaign import offers as near
 from bot.campaign.architect import InvalidGoal, plan_campaign
+from bot.campaign.models import TERMINAL_STATES
 from bot.control_plane.access import SETTINGS_BUTTON, AccessDesk, label
 from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
-from bot.control_plane.intake import IntakeStore, MemoryIntakeStore, TaskIntake, mode_menu
+from bot.control_plane.intake import (
+    CANCEL_WORDS,
+    IntakeStore,
+    MemoryIntakeStore,
+    TaskIntake,
+    mode_menu,
+)
 from bot.control_plane.live_view import LiveViewCoordinator, LiveViewUnavailable, is_session_id
 from bot.control_plane.models import (
     CommandEnvelope,
@@ -27,6 +35,9 @@ from bot.control_plane.store import ControlPlaneStore
 from bot.control_plane.stt import Transcriber, TranscriptionError
 from bot.control_plane.voice_commands import clean_transcript, spoken_command
 from bot.operators import ROLES, OperatorSet
+
+if TYPE_CHECKING:
+    from bot.campaign.store import CampaignStore
 
 log = logging.getLogger(__name__)
 CommandSink = Callable[[CommandEnvelope], Awaitable[object]]
@@ -68,6 +79,22 @@ GUEST_GREETING = (
     "Чтобы начать, нажмите «Запросить доступ» ниже. Когда заявку одобрят, я пришлю сообщение, "
     "и можно будет давать задачи."
 )
+# What anyone who may not use a technical command hears instead (no ids, no English).
+USER_NOT_AVAILABLE = "Эта команда недоступна. Опишите, что ищете, — я начну поиск."
+HELPER_NOT_AVAILABLE = ("Эта команда недоступна. Когда для входа в Facebook понадобится человек, "
+                        "я пришлю сообщение с кнопкой.")
+NOT_AVAILABLE = "Эта команда недоступна."
+VOICE_NO_ACCESS = "Голосовые задачи доступны только после одобрения доступа."
+GUEST_NOT_AVAILABLE = "Эта команда недоступна. Чтобы начать, нажмите «Запросить доступ»."
+VOICE_GUEST = "Голосовые задачи доступны после одобрения доступа. Нажмите «Запросить доступ»."
+VOICE_HELPER = ("Голосовые сообщения недоступны. Когда для входа в Facebook понадобится человек, "
+                "я пришлю сообщение с кнопкой.")
+STALE_BUTTON = "Эта кнопка устарела."
+# Stopping one's own search without an id: «стоп» (or «Отмена» with no task being written).
+STOP_WORDS = frozenset({"стоп", "stop", "остановить", "остановить поиск", "останови поиск", "стоп поиск", "хватит"})
+SEARCH_STOPPED = "Поиск остановлен."
+NO_ACTIVE_SEARCH = "Сейчас нет активного поиска."
+STOP_FAILED = "Не получилось остановить поиск. Попробуйте ещё раз."
 
 
 class ControlPlane:
@@ -82,11 +109,14 @@ class ControlPlane:
         settings_store: SettingsStore | None = None,
         intake_store: IntakeStore | None = None,
         offers: near.OfferDesk | None = None,
+        campaigns: CampaignStore | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
         # «Одобрить» / «Нет» under the runner's «show similar options?» question (bot/campaign/offers.py).
         self.offers = offers
+        # Read-only here: finds the person's running campaign for «стоп»; the Orchestra cancels it.
+        self.campaigns = campaigns
         # Owners from .env plus operators they approved; shared and live.
         self.operators = access.operators if access else OperatorSet(settings.operator_user_ids)
         self.auto = AutoMode(settings_store or MemorySettingsStore(), default=settings.auto_mode,
@@ -128,6 +158,54 @@ class ControlPlane:
             return reply
         return Reply(reply.text, (*reply.buttons, self.access.button()))
 
+    def _not_available(self, user_id: int | None) -> Reply:
+        """A technical command from anyone who may not use it: one short Russian line, per role."""
+        role = self.operators.role(user_id)
+        if role == "user":
+            return Reply(USER_NOT_AVAILABLE)
+        if role == "helper":
+            return Reply(HELPER_NOT_AVAILABLE)
+        if self.access is None:  # no request button to point at
+            return Reply(NOT_AVAILABLE)
+        return self._with_access_button(Reply(GUEST_NOT_AVAILABLE), user_id)
+
+    def _stale_button(self, user_id: int | None) -> Reply:
+        return Reply("This button is no longer valid." if self._can_control(user_id) else STALE_BUTTON)
+
+    async def _stop_search(self, message: IncomingMessage) -> Reply:
+        """Cancel the person's running campaign in this chat through the Orchestra's ``campaign cancel``.
+
+        Only the requester (or an owner) may stop it; the Orchestra checks ownership again.
+        """
+        assert message.user_id is not None
+        campaign = None
+        if self.campaigns is not None:
+            try:
+                campaign = await self.campaigns.latest_for_chat(message.chat_id)
+            except Exception:  # noqa: BLE001 - a database hiccup must not break the bot
+                log.warning("telegram.control.stop_lookup_failed", extra={"user_id": message.user_id})
+                return Reply(STOP_FAILED)
+        if (campaign is None or campaign.state in TERMINAL_STATES
+                or (campaign.requested_by != message.user_id and not self._is_owner(message.user_id))):
+            return Reply(NO_ACTIVE_SEARCH)
+        try:
+            await self.command_sink(CommandEnvelope("campaign", f"cancel {campaign.id}", message.chat_id,
+                                                    message.user_id, message.message_id))
+        except Exception:  # noqa: BLE001 - nothing was queued; the person may try again
+            log.warning("telegram.control.stop_failed", extra={"user_id": message.user_id})
+            return Reply(STOP_FAILED)
+        log.info("telegram.control.stop_requested", extra={"user_id": message.user_id, "campaign_id": campaign.id})
+        return Reply(SEARCH_STOPPED)
+
+    async def _wants_stop(self, message: IncomingMessage, text: str) -> bool:
+        """«стоп»; or «Отмена» when no task is being written (then it means the draft)."""
+        if not self._may_give_tasks(message.user_id):
+            return False
+        word = text.casefold().strip(".! ")
+        if word in STOP_WORDS:
+            return True
+        return word in CANCEL_WORDS and not await self.intake.drafting(message.user_id)  # type: ignore[arg-type]
+
     async def handle_callback(self, user_id: int | None, data: str, display_name: str | None = None, username: str | None = None,
                               chat_id: int | None = None) -> Reply:
         """Inline buttons: ``live:done|cancel:<id>``, ``live:approve:<code>``, ``access:request``,
@@ -150,14 +228,17 @@ class ControlPlane:
                 return await self.access.request(user_id, display_name, username)
             if action in {*ROLES, "deny"}:
                 return await self.access.decide(user_id, target, None if action == "deny" else action)
-            return Reply("This button is no longer valid.")
+            return self._stale_button(user_id)
         if kind == "set" and self.access is not None:
             return await self.access.settings(user_id, action, target)
+        if kind == "live" and user_id not in self.operators:
+            # The logged-in browser is staff-only; a forwarded button tells a user or stranger nothing.
+            return Reply(STALE_BUTTON)
         if kind == "live" and action == "approve" and self.live is not None:
             return self.live.approve_browser(target, user_id)
         session_id = target
         if kind != "live" or action not in {"done", "cancel"} or not is_session_id(session_id) or self.live is None:
-            return Reply("This button is no longer valid.")
+            return self._stale_button(user_id)
         try:
             return await self.live.finish(session_id, user_id, done=action == "done")
         except LiveViewUnavailable as exc:
@@ -180,7 +261,7 @@ class ControlPlane:
 
     async def handle_text(self, message: IncomingMessage) -> Reply | None:
         if not await self.store.claim_message(message):
-            return Reply("Duplicate update ignored.")
+            return self._duplicate(message.user_id)
         return await self._handle_command(message, message.text or "")
 
     async def handle_voice(self, message: IncomingMessage, download: AudioDownload) -> Reply | None:
@@ -191,13 +272,16 @@ class ControlPlane:
         configuration and Telegram's declared size/duration never cost money.
         """
         if not await self.store.claim_message(message):
-            return Reply("Duplicate update ignored.")
+            return self._duplicate(message.user_id)
         # Voice costs money per second, so it is limited to operators and
         # approved users; text commands such as /status stay open to everyone.
         if not self._may_give_tasks(message.user_id):
             await self._voice_refused(message, "not_operator")
-            identity = f" Your Telegram user ID is {message.user_id}." if message.user_id is not None else ""
-            return self._with_access_button(Reply(f"Voice messages are transcribed for operators only; please send text instead.{identity}"), message.user_id)
+            if self.operators.role(message.user_id) == "helper":
+                return Reply(VOICE_HELPER)
+            if self.access is None:
+                return Reply(VOICE_NO_ACCESS)
+            return self._with_access_button(Reply(VOICE_GUEST), message.user_id)
         owner = self._is_owner(message.user_id)
 
         def refuse(code: str, english: str) -> Reply:
@@ -237,16 +321,21 @@ class ControlPlane:
         # The stored transcript stays exactly as returned; only the reply and
         # the command see the cleaned text.
         text = clean_transcript(transcript.text)
-        command = spoken_command(text)
+        # Spoken commands (status, pause all, ...) are for those who control collection; a user's words are a task.
+        command = spoken_command(text) if self._can_control(message.user_id) else None
         command_reply = await self._handle_command(message, command or text)
         if not owner:
             # The transcript is internal: nobody but the owner ever sees it echoed back.
             # Operators still see which command a short phrase was mapped to.
-            heard = f"Understood as: {command}\n\n" if command and self._can_control(message.user_id) else ""
+            heard = f"Understood as: {command}\n\n" if command else ""
             return Reply(heard + command_reply.text, command_reply.buttons)
         confidence = f", confidence {transcript.confidence:.0%}" if transcript.confidence is not None else ""
         heard = f"\nUnderstood as: {command}" if command else ""
         return Reply(f"Transcript ({transcript.language or 'unknown'}{confidence}):\n{text}{heard}\n\n{command_reply.text}", command_reply.buttons)
+
+    def _duplicate(self, user_id: int | None) -> Reply | None:
+        """Telegram re-delivered an update: operators hear about it, everyone else hears nothing."""
+        return Reply("Duplicate update ignored.") if self._can_control(user_id) else None
 
     async def _voice_refused(self, message: IncomingMessage, code: str, *, status: int | None = None) -> None:
         transcriber = self.transcriber
@@ -265,20 +354,30 @@ class ControlPlane:
             token = text.split(maxsplit=1)[1].strip()
             confirmed = await self.store.consume_confirmation(message, token)
             if confirmed is None:
+                if not self._can_control(message.user_id):
+                    return Reply("Подтверждение устарело. Чтобы остановить поиск, напишите «стоп».")
                 return Reply("Confirmation is invalid, expired, or belongs to another operator.")
             command, arguments, confirmation_id = confirmed
             if not self._can_control(message.user_id) and not (command == "campaign" and _is_cancel(arguments)):
                 # A user only ever confirms stopping a campaign; the Orchestra checks it is theirs.
-                return self._operator_refusal(message) or Reply("Confirmation is invalid.")
+                return self._operator_refusal(message) or Reply(USER_NOT_AVAILABLE)
             receipt = await self.command_sink(CommandEnvelope(command, arguments, message.chat_id, message.user_id or 0, message.message_id, confirmation_id))
+            if not self._can_control(message.user_id):
+                return Reply(SEARCH_STOPPED)
             command_id = getattr(receipt, "command_id", None)
             suffix = f" Queue id: {command_id}." if command_id else ""
             return Reply(f"Confirmed: /{command}. Safely queued for bounded orchestration.{suffix}")
         if not text.startswith("/"):
+            if text and await self._wants_stop(message, text):
+                return await self._stop_search(message)
             if text and await self.auto.applies_to(message.user_id):
                 return await self._auto_goal(message, text)
             if text and (self._is_user(message.user_id) or (self._can_control(message.user_id) and await self.intake.mode(message.user_id))):
                 return await self.intake.on_text(message, text)
+            if not self._can_control(message.user_id):
+                if self.operators.role(message.user_id) == "helper":
+                    return Reply(HELPER_GREETING)
+                return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
             return Reply("Send /help for control-plane commands. State-changing commands require confirmation.")
         command_line = text[1:].split(maxsplit=1)
         command = command_line[0].split("@", 1)[0].lower()
@@ -299,27 +398,27 @@ class ControlPlane:
             if role == "user":
                 return mode_menu(USER_HELP) if command == "start" or not await self.intake.mode(message.user_id) else Reply(USER_HELP)
             if role == "helper":
-                text = ("You are a helper: when a Facebook login, CAPTCHA or checkpoint needs a person, you get a message "
-                        "with a button to open the browser. You can also send /login [facebook|instagram|tiktok] [profile-name].")
-            else:
-                text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
-                        "/campaign <goal> | status | cancel <id>, "
-                        "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>.")
-                if role == "owner":
-                    text += " Owners: /settings (roles with buttons), /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
-                if self.auto.eligible(message.user_id):
-                    text += ("\n\nAuto mode (when an owner turns it on): just write or say the goal, e.g. "
-                             "«квартиры в аренду в Мадриде»; /campaign, /run, /pause and /resume are queued "
-                             "without confirmation, /cancel still asks.")
-                elif role is None:
-                    text += "\n\nYou have no access yet; press the button to ask for it."
-                if command == "start" and self._can_control(message.user_id):
-                    text += "\n\nИли выберите режим и опишите задачу: бот уточнит детали и попросит подтвердить «Запустить»."
-                    menu = mode_menu(text)
-                    if role == "owner" and self.access is not None:
-                        return Reply(menu.text, (*menu.buttons, SETTINGS_BUTTON))
-                    return menu
-            return self._with_access_button(Reply(text), message.user_id)
+                return Reply(HELPER_GREETING)
+            if role is None:
+                return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
+            text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
+                    "/campaign <goal> | status | cancel <id>, "
+                    "/login [facebook|instagram|tiktok] [profile-name]. Confirm changes with: confirm <token>.")
+            if role == "owner":
+                text += " Owners: /settings (roles with buttons), /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
+            if self.auto.eligible(message.user_id):
+                text += ("\n\nAuto mode (when an owner turns it on): just write or say the goal, e.g. "
+                         "«квартиры в аренду в Мадриде»; /campaign, /run, /pause and /resume are queued "
+                         "without confirmation, /cancel still asks.")
+            if command == "start" and self._can_control(message.user_id):
+                text += "\n\nИли выберите режим и опишите задачу: бот уточнит детали и попросит подтвердить «Запустить»."
+                menu = mode_menu(text)
+                if role == "owner" and self.access is not None:
+                    return Reply(menu.text, (*menu.buttons, SETTINGS_BUTTON))
+                return menu
+            return Reply(text)
+        if command in {"role", "settings", "operators", "revoke", "auto"} and not self._can_control(message.user_id):
+            return self._not_available(message.user_id)
         if command == "role":
             return await self.access.set_role(message.user_id, arguments) if self.access else Reply("Unknown command. Send /help.")
         if command == "settings":
@@ -329,8 +428,8 @@ class ControlPlane:
         if command == "revoke":
             return await self.access.revoke(message.user_id, arguments) if self.access else Reply("Unknown command. Send /help.")
         if command == "login":
-            if self._is_user(message.user_id):  # users never open the logged-in browser
-                return self._operator_refusal(message) or Reply("Only operators can do that.")
+            if message.user_id not in self.operators:  # users and strangers never open the logged-in browser
+                return self._not_available(message.user_id)
             if self.live is None:
                 return Reply("The live browser is not available in this service.")
             if message.chat_id != message.user_id:
@@ -345,11 +444,11 @@ class ControlPlane:
         if command == "auto":
             return await self.auto.command(message.user_id, arguments)
         if command not in STATE_CHANGING:
-            return Reply("Unknown command. Send /help.")
+            return Reply("Unknown command. Send /help.") if self._can_control(message.user_id) else self._not_available(message.user_id)
         # Telegram channel posts may not have a sending user. Confirmation
         # tokens must stay bound to a concrete Telegram identity.
         if message.user_id is None:
-            return Reply("State-changing commands require a Telegram user identity.")
+            return self._not_available(None)
         if self._is_user(message.user_id):
             return await self._user_campaign(message, command, arguments)
         if (refusal := self._operator_refusal(message)) is not None:
@@ -371,16 +470,16 @@ class ControlPlane:
         """Users: /campaign status, /campaign cancel <id> (confirmed), and a goal goes through intake."""
         assert message.user_id is not None
         if command != "campaign":
-            return self._operator_refusal(message) or Reply("Only operators can do that.")
+            return self._not_available(message.user_id)
         goal = arguments.strip()
         if not goal:
-            return Reply("Используйте /campaign status, /campaign cancel <id> или просто опишите задачу.")
+            return Reply("Опишите, что ищете, — я начну поиск. Чтобы остановить поиск, напишите «стоп».")
         if goal.lower() == "status":
             await self.command_sink(CommandEnvelope(command, "status", message.chat_id, message.user_id, message.message_id))
-            return Reply("Статус кампании запрошен.")
+            return Reply("Проверяю, как идёт поиск.")
         if _is_cancel(goal):
-            token = await self.store.create_confirmation(message, command, goal, ttl_seconds=self.settings.confirmation_ttl_seconds)
-            return Reply(f"Остановить кампанию? Ответьте точно: confirm {token} (действует {self.settings.confirmation_ttl_seconds // 60} мин.).")
+            # Users never see campaign ids: «cancel» (with or without one) stops their running search.
+            return await self._stop_search(message)
         return await self.intake.on_text(message, goal)
 
     async def _auto_goal(self, message: IncomingMessage, text: str) -> Reply:
@@ -406,7 +505,7 @@ class ControlPlane:
         # /status is open to everyone, but queue sizes, sources and spend are
         # operational detail: only operators see them.
         if not self._can_control(message.user_id):
-            return self._with_access_button(Reply("Control plane is online. Detailed status is shown to operators only."), message.user_id)
+            return self._not_available(message.user_id)
         try:
             snapshot = await self.store.status_snapshot()
         except Exception as exc:  # noqa: BLE001 - a status read must never break the bot
@@ -418,11 +517,7 @@ class ControlPlane:
         if self._can_control(message.user_id):
             return None
         log.warning("telegram.control.not_operator", extra={"chat_id": message.chat_id, "user_id": message.user_id})
-        identity = f" Your Telegram user ID is {message.user_id}." if message.user_id is not None else ""
-        return self._with_access_button(
-            Reply(f"Only operators can run, pause, resume, or cancel acquisition; /status and /help are open to everyone.{identity}"),
-            message.user_id,
-        )
+        return self._not_available(message.user_id)
 
 
 def _is_cancel(arguments: str) -> bool:

@@ -398,7 +398,7 @@ async def test_the_window_opens_in_safari_only_after_its_recipient_approves_in_t
 
         waiting = await client.get(f"/live/{session_id}/wait", headers=pending, allow_redirects=False)
         assert waiting.status == 200 and "Check Telegram" in await waiting.text()
-        assert "Only the person" in (await control.handle_callback(STRANGER, approve)).text
+        assert (await control.handle_callback(STRANGER, approve)).text == "Эта кнопка устарела."  # staff only
         assert "Approved" in (await control.handle_callback(OPERATOR, approve)).text
 
         opened = await client.get(f"/live/{session_id}/wait", headers=pending, allow_redirects=False)

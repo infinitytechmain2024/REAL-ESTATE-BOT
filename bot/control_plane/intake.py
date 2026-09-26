@@ -353,6 +353,7 @@ def summary(draft: Draft, plan: CampaignPlan, technical: bool = False) -> Reply:
 
 
 LAUNCHED = "Принято. Начинаю поиск. Найденные варианты пришлю сюда."
+STOP_HINT = "Чтобы остановить поиск, напишите «стоп»."
 NOT_UNDERSTOOD = {"city": "Не понял город. ", "budget": "Не понял сумму. "}
 
 
@@ -376,6 +377,11 @@ class TaskIntake:
     async def mode(self, user_id: int) -> str | None:
         draft = await self.store.get(user_id)
         return draft.mode if draft else None
+
+    async def drafting(self, user_id: int) -> bool:
+        """A task is being written (a question or the summary is on screen) and has not expired."""
+        draft = await self.store.get(user_id)
+        return draft is not None and draft.step != "idle" and not draft.expired(self.now())
 
     async def choose_mode(self, user_id: int, chat_id: int, mode: str) -> Reply:
         if mode not in MODES:
@@ -519,4 +525,4 @@ class TaskIntake:
                 log.warning("telegram.intake.owner_notice_failed", extra={"user_id": user_id})
         if self.technical(user_id):
             return Reply(f"{LAUNCHED}\nQueue id: {command_id}. Статус: /campaign status. Остановить: /campaign cancel <id>.")
-        return Reply(LAUNCHED)
+        return Reply(f"{LAUNCHED}\n{STOP_HINT}")

@@ -88,14 +88,14 @@ async def test_a_stranger_sees_the_request_button_wherever_access_is_refused() -
 async def test_a_request_goes_to_every_owner_once_with_role_choices() -> None:
     control, _, outbox = plane()
     reply = await control.handle_callback(STRANGER, "access:request", "Ann Smith", "ann")
-    assert "Request sent" in reply.text
+    assert reply.text == "Заявка отправлена. Я напишу, когда её рассмотрят."
     for owner in (OWNER, SECOND_OWNER):
         [notice] = outbox.to(owner)
         assert "Ann Smith (@ann), ID 99" in notice.text
         assert [b.text for b in notice.buttons] == ["Approve as helper", "Approve as user (Пользователь)", "Approve as operator", "Deny"]
     again = await control.handle_callback(STRANGER, "access:request", "Ann Smith", "ann")
-    assert "already waiting" in again.text and len(outbox.sent) == 2
-    assert "already have" in (await control.handle_callback(OWNER, "access:request")).text
+    assert "Заявка уже отправлена" in again.text and len(outbox.sent) == 2
+    assert "уже есть доступ" in (await control.handle_callback(OWNER, "access:request")).text
 
 
 # --- deciding -------------------------------------------------------------------------------
@@ -106,12 +106,12 @@ async def test_only_an_owner_decides_and_only_once() -> None:
     control, desk, outbox = plane()
     await control.handle_callback(STRANGER, "access:request", "Ann", None)
     rid = request_id(outbox.to(OWNER)[0])
-    assert "Only an owner" in (await control.handle_callback(STRANGER, f"access:operator:{rid}")).text
+    assert "только владелец" in (await control.handle_callback(STRANGER, f"access:operator:{rid}")).text
     assert STRANGER not in desk.operators
     assert (await control.handle_callback(OWNER, f"access:helper:{rid}")).text == "Approved as helper: Ann, ID 99."
     assert "already decided" in (await control.handle_callback(SECOND_OWNER, f"access:operator:{rid}")).text
     assert desk.operators.role(STRANGER) == "helper"
-    assert "Access granted as helper" in outbox.to(STRANGER)[-1].text
+    assert "Доступ открыт: вы помощник" in outbox.to(STRANGER)[-1].text
     for bad in ("access:helper:not-a-uuid", "access:admin:" + rid, "access:"):
         assert "no longer valid" in (await control.handle_callback(OWNER, bad)).text
 
@@ -121,11 +121,11 @@ async def test_a_helper_verifies_but_does_not_control() -> None:
     control, desk, outbox = plane()
     await approve(control, outbox, HELPER, "helper")
     help_text = await control.handle_text(text(HELPER, "/help"))
-    assert help_text and "You are a helper" in help_text.text and not help_text.buttons
+    assert help_text and "Вы помощник" in help_text.text and not help_text.buttons
     refused = await control.handle_text(text(HELPER, "/run website https://example.org"))
-    assert refused and "Only operators" in refused.text and not refused.buttons  # no pointless request button
+    assert refused and "недоступна" in refused.text and not refused.buttons  # no pointless request button
     status = await control.handle_text(text(HELPER, "/status"))
-    assert status and "operators only" in status.text
+    assert status and "недоступна" in status.text
     assert HELPER in desk.operators and HELPER not in desk.operators.controllers
 
 
@@ -145,12 +145,12 @@ async def test_a_denial_is_final_for_a_day() -> None:
     control, desk, outbox = plane()
     await control.handle_callback(STRANGER, "access:request", "Ann", None)
     assert (await control.handle_callback(OWNER, f"access:deny:{request_id(outbox.to(OWNER)[0])}")).text.startswith("Denied")
-    assert STRANGER not in desk.operators and "declined" in outbox.to(STRANGER)[-1].text
-    assert "declined" in (await control.handle_callback(STRANGER, "access:request")).text
+    assert STRANGER not in desk.operators and "отклонена" in outbox.to(STRANGER)[-1].text
+    assert "отклонена" in (await control.handle_callback(STRANGER, "access:request")).text
     store: MemoryAccessStore = desk.store  # type: ignore[assignment]
     for rid in store.decided_at:
         store.decided_at[rid] = datetime.now(UTC) - timedelta(days=2)
-    assert "Request sent" in (await control.handle_callback(STRANGER, "access:request")).text
+    assert "Заявка отправлена" in (await control.handle_callback(STRANGER, "access:request")).text
 
 
 # --- managing --------------------------------------------------------------------------------
@@ -162,7 +162,7 @@ async def test_owners_list_change_and_revoke() -> None:
     await approve(control, outbox, HELPER, "helper")
     listing = await control.handle_text(text(OWNER, "/operators"))
     assert listing and "Ann (@ann), ID 21: helper" in listing.text
-    assert "Only an owner" in (await control.handle_text(text(HELPER, "/operators"))).text  # type: ignore[union-attr]
+    assert "недоступна" in (await control.handle_text(text(HELPER, "/operators"))).text  # type: ignore[union-attr]
 
     changed = await control.handle_text(text(OWNER, f"/role {HELPER} operator"))
     assert changed and changed.text == f"{HELPER} is now a operator."
@@ -172,10 +172,10 @@ async def test_owners_list_change_and_revoke() -> None:
         assert reply and "now a" not in reply.text, bad
 
     assert "cannot be revoked" in (await control.handle_text(text(OWNER, f"/revoke {SECOND_OWNER}"))).text  # type: ignore[union-attr]
-    assert "Only an owner" in (await control.handle_text(text(HELPER, f"/revoke {HELPER}"))).text  # type: ignore[union-attr]
+    assert "Only an owner" in (await control.handle_text(text(HELPER, f"/revoke {HELPER}"))).text  # an operator by now  # type: ignore[union-attr]
     revoked = await control.handle_text(text(OWNER, f"/revoke {HELPER}"))
     assert revoked and revoked.text == f"Revoked: {HELPER}."
-    assert HELPER not in desk.operators and "revoked" in outbox.to(HELPER)[-1].text
+    assert HELPER not in desk.operators and "отозван" in outbox.to(HELPER)[-1].text
     after = await control.handle_text(text(HELPER, "/help"))
     assert after and after.buttons[-1].callback_data == "access:request"
 

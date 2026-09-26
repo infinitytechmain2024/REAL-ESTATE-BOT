@@ -142,7 +142,9 @@ async def run() -> None:
     if not live.enabled:
         logging.getLogger(__name__).warning("telegram.control.live_view_disabled", extra={"hint": "set LIVE_VIEW_PUBLIC_URL to an https:// origin"})
     control = ControlPlane(settings, store, transcriber, enqueue, live, access, PostgresSettingsStore(store), PostgresIntakeStore(store),
-                           offers=PostgresOfferDesk(orchestra_store.pool) if orchestra_store.pool else None)
+                           offers=PostgresOfferDesk(orchestra_store.pool) if orchestra_store.pool else None,
+                           # «стоп»: finds the person's running campaign; the Orchestra cancels it.
+                           campaigns=PostgresCampaignStore(orchestra_store.pool) if orchestra_store.pool else None)
     for user_id in sorted(settings.auto_operator_user_ids):
         if not operators.can_control(user_id):
             # Not refused at startup (approvals change at runtime), but never auto-eligible meanwhile.

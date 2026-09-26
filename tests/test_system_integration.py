@@ -341,7 +341,7 @@ async def test_voice_command_is_transcribed_confirmed_and_applied(pool) -> None:
         actors = {r[0] for r in await pool.fetch("select actor from orchestration_audit_log where entity_type='monitoring_sources'")}
         assert f"telegram:{OPERATOR}" in actors
         # A voice note from someone without control never reaches the provider or the Orchestra.
-        assert "operators only" in await system.voice(user=777)
+        assert "после одобрения доступа" in await system.voice(user=777)
         assert await pool.fetchval("select count(*) from orchestration_commands") == 1
 
 
@@ -913,7 +913,7 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         assert await pool.fetchval("select count(*) from orchestration_commands") == 3
 
         # Still no operator commands for a user; the Orchestra refuses them even if queued.
-        assert "Only operators" in (await control.handle_text(message("/run website https://example.org"))).text
+        assert "недоступна" in (await control.handle_text(message("/run website https://example.org"))).text
         await dispatcher.enqueue(ConfirmedCommand("pause", "all", user, user, next(MESSAGE_IDS)))
         assert await dispatcher.process_once()
         assert await pool.fetchval("select error_code from orchestration_commands where command='pause'") == "not_operator"

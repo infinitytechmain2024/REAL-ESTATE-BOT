@@ -113,7 +113,7 @@ async def test_an_owner_approves_a_request_as_user_and_can_change_it_with_role()
     assert reply.text.startswith("Approved as user")
     assert operators.role(STRANGER) == "user" and STRANGER not in operators
     assert "/start" in outbox.to(STRANGER)[-1].text
-    assert "already have" in (await control.handle_callback(STRANGER, "access:request")).text
+    assert "уже есть доступ" in (await control.handle_callback(STRANGER, "access:request")).text
 
     assert (await say(control, OWNER, f"/role {STRANGER} operator")).text == f"{STRANGER} is now a operator."
     assert operators.can_control(STRANGER)
@@ -131,9 +131,8 @@ async def test_a_user_cannot_use_operator_commands() -> None:
         reply = await say(control, USER, body)
         assert not reply.text.startswith(("Confirmation required", "Approved", "Auto mode is on")), body
         assert "access:request" not in callbacks(reply), body
-    assert "Only operators" in (await say(control, USER, "/run website https://example.org")).text
-    assert "Detailed status is shown to operators only" in (await say(control, USER, "/status")).text
-    assert "Only operators" in (await say(control, USER, "/login")).text
+    for body in ("/run website https://example.org", "/status", "/login"):
+        assert (await say(control, USER, body)).text == "Эта команда недоступна. Опишите, что ищете, — я начну поиск."
     assert not await control.auto.applies_to(USER)
     assert sink.envelopes == []
 
@@ -346,13 +345,11 @@ async def test_campaign_goal_from_a_user_goes_through_intake_and_operators_keep_
     await press(control, USER, "mode:real_estate")
     assert "Проверьте задачу" in (await say(control, USER, "/campaign квартиры в аренду в Мадриде до 1200 €")).text
     assert sink.envelopes == []
-    assert (await say(control, USER, "/campaign status")).text == "Статус кампании запрошен."
+    assert (await say(control, USER, "/campaign status")).text == "Проверяю, как идёт поиск."
     assert sink.envelopes[-1].arguments == "status"
-    cancel = await say(control, USER, "/campaign cancel 123")
-    assert "confirm" in cancel.text
-    token = cancel.text.split("confirm ", 1)[1].split()[0]
-    assert (await say(control, USER, f"confirm {token}")).text.startswith("Confirmed: /campaign")
-    assert sink.envelopes[-1].arguments == "cancel 123"
+    # Users never see campaign ids: «/campaign cancel» stops their running search (none here), no token.
+    assert (await say(control, USER, "/campaign cancel 123")).text == "Сейчас нет активного поиска."
+    assert sink.envelopes[-1].arguments == "status"
     assert "Confirmation required for /campaign" in (await say(control, OPERATOR, "/campaign квартиры в Мадриде")).text
 
 
@@ -371,7 +368,7 @@ async def test_a_voice_task_from_a_user_goes_through_intake() -> None:
     too_long = IncomingMessage(USER, USER, next(_ids), voice_file_id="v", voice_size=100, voice_duration_seconds=10_000)
     assert "слишком длинное" in (await control.handle_voice(too_long, download)).text  # type: ignore[union-attr]
     stranger = IncomingMessage(STRANGER, STRANGER, next(_ids), voice_file_id="v", voice_size=100, voice_duration_seconds=3)
-    assert "operators only" in (await control.handle_voice(stranger, download)).text  # type: ignore[union-attr]
+    assert "после одобрения доступа" in (await control.handle_voice(stranger, download)).text  # type: ignore[union-attr]
 
 
 def test_answer_parsers() -> None:
@@ -439,7 +436,7 @@ async def test_a_user_cancels_and_sees_only_their_own_campaigns() -> None:
     _, _, notices = await dispatch(claimed("campaign", f"cancel {theirs}"), claimed("campaign", f"cancel {mine}"), group_status,
                                    campaigns=campaigns)
     assert campaigns.campaigns[theirs].state == "planned" and campaigns.campaigns[mine].state == "cancelled"
-    assert notices == ["Поиск завершён.", "Пока ничего подходящего не нашёл."]  # no ids, no other people's campaigns
+    assert notices == ["Этот поиск уже завершён или недоступен.", "Пока ничего подходящего не нашёл."]  # no ids, no other people's campaigns
     assert shared not in notices[-1]
     # An operator still cancels any campaign.
     _, _, _ = await dispatch(claimed("campaign", f"cancel {theirs}", user=OPERATOR), campaigns=campaigns)
