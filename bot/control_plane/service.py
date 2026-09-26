@@ -36,6 +36,16 @@ TRANSCRIPTION_ERROR_REPLIES = {
     "empty_audio": "The voice message was empty.",
     "empty_transcript": "No speech was detected in that voice message.",
 }
+# Everyone but the owner hears about voice problems in plain Russian, without technical detail.
+VOICE_REPLIES_RU = {
+    "stt_not_configured": "Голосовые сообщения сейчас недоступны. Напишите задачу текстом.",
+    "too_large": "Голосовое сообщение слишком большое. Запишите покороче или напишите текстом.",
+    "too_long": "Голосовое сообщение слишком длинное. Запишите покороче или напишите текстом.",
+    "download_failed": "Не удалось получить голосовое сообщение. Попробуйте ещё раз или напишите текстом.",
+    "empty_audio": "Голосовое сообщение пустое. Попробуйте ещё раз или напишите текстом.",
+    "empty_transcript": "Не удалось разобрать речь. Попробуйте ещё раз или напишите текстом.",
+    "failed": "Не удалось распознать голосовое сообщение. Попробуйте ещё раз или напишите текстом.",
+}
 STATE_CHANGING = frozenset({"run", "pause", "resume", "cancel", "campaign"})
 GREETING = (
     "Привет! 👋 Я помогу найти недвижимость и инвесторов.\n\n"
@@ -78,7 +88,9 @@ class ControlPlane:
         self.auto = AutoMode(settings_store or MemorySettingsStore(), default=settings.auto_mode,
                              operators=self.operators, auto_operator_ids=settings.auto_operator_user_ids)
         # Mode choice and task intake (bot/control_plane/intake.py); launching always needs "Запустить".
-        self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners)
+        # Only the owner sees planner details and queue ids in intake replies.
+        self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners,
+                                 technical=self._is_owner)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""
@@ -92,6 +104,9 @@ class ControlPlane:
                 await self.access.notify(owner, Reply(text))
             except Exception:  # noqa: BLE001 - one unreachable owner must not stop the rest
                 log.warning("telegram.control.owner_notice_failed", extra={"owner": owner})
+
+    def _is_owner(self, user_id: int | None) -> bool:
+        return self.operators.role(user_id) == "owner"
 
     def _is_user(self, user_id: int | None) -> bool:
         """The ``user`` role: mode, tasks and their own campaigns only."""
@@ -161,45 +176,55 @@ class ControlPlane:
             await self._voice_refused(message, "not_operator")
             identity = f" Your Telegram user ID is {message.user_id}." if message.user_id is not None else ""
             return self._with_access_button(Reply(f"Voice messages are transcribed for operators only; please send text instead.{identity}"), message.user_id)
+        owner = self._is_owner(message.user_id)
+
+        def refuse(code: str, english: str) -> Reply:
+            return Reply(english if owner else VOICE_REPLIES_RU.get(code, VOICE_REPLIES_RU["failed"]))
+
         if self.transcriber is None:
             await self._voice_refused(message, "stt_not_configured")
-            return Reply("Voice transcription is not configured. Please send text.")
+            return refuse("stt_not_configured", "Voice transcription is not configured. Please send text.")
         max_bytes, max_seconds = self.settings.stt_max_audio_bytes, self.settings.stt_max_audio_seconds
         if (message.voice_size or 0) > max_bytes:
             await self._voice_refused(message, "too_large")
-            return Reply(f"Voice message is too large; maximum is {max_bytes / 1_048_576:g} MB.")
+            return refuse("too_large", f"Voice message is too large; maximum is {max_bytes / 1_048_576:g} MB.")
         if (message.voice_duration_seconds or 0) > max_seconds:
             await self._voice_refused(message, "too_long")
-            return Reply(f"Voice message is too long; maximum is {max_seconds} seconds.")
+            return refuse("too_long", f"Voice message is too long; maximum is {max_seconds} seconds.")
         try:
             audio = await download()
         except Exception as exc:  # noqa: BLE001 - any download failure ends this message
             log.warning("telegram.control.voice_download_failed", extra={"error": type(exc).__name__})
             await self._voice_refused(message, "download_failed")
-            return Reply("I could not download that voice message from Telegram. Please try again or send text.")
+            return refuse("download_failed", "I could not download that voice message from Telegram. Please try again or send text.")
         if len(audio) > max_bytes:
             await self._voice_refused(message, "too_large")
-            return Reply(f"Voice message is too large; maximum is {max_bytes / 1_048_576:g} MB.")
+            return refuse("too_large", f"Voice message is too large; maximum is {max_bytes / 1_048_576:g} MB.")
         try:
             transcript = await self.transcriber.transcribe(audio, filename="voice.ogg")
         except TranscriptionError as exc:
             log.warning("telegram.control.transcription_failed", extra={"error_code": exc.code, "status": exc.status})
             await self._voice_refused(message, exc.code, status=exc.status)
             detail = TRANSCRIPTION_ERROR_REPLIES.get(exc.code, "The transcription service returned an error.")
-            return Reply(f"I could not transcribe that voice message. {detail} It was not retried; please send text or try again.")
+            return refuse(exc.code, f"I could not transcribe that voice message. {detail} It was not retried; please send text or try again.")
         await self.store.save_transcript(message, transcript)
         log.info(
             "telegram.control.transcribed",
             extra={"model": transcript.model, "language": transcript.language, "cost_usd": transcript.cost_usd, "audio_seconds": transcript.audio_seconds},
         )
-        confidence = f", confidence {transcript.confidence:.0%}" if transcript.confidence is not None else ""
         # The stored transcript stays exactly as returned; only the reply and
         # the command see the cleaned text.
         text = clean_transcript(transcript.text)
         command = spoken_command(text)
         command_reply = await self._handle_command(message, command or text)
+        if not owner:
+            # The transcript is internal: nobody but the owner ever sees it echoed back.
+            # Operators still see which command a short phrase was mapped to.
+            heard = f"Understood as: {command}\n\n" if command and self._can_control(message.user_id) else ""
+            return Reply(heard + command_reply.text, command_reply.buttons)
+        confidence = f", confidence {transcript.confidence:.0%}" if transcript.confidence is not None else ""
         heard = f"\nUnderstood as: {command}" if command else ""
-        return Reply(f"Transcript ({transcript.language or 'unknown'}{confidence}):\n{text}{heard}\n\n{command_reply.text}")
+        return Reply(f"Transcript ({transcript.language or 'unknown'}{confidence}):\n{text}{heard}\n\n{command_reply.text}", command_reply.buttons)
 
     async def _voice_refused(self, message: IncomingMessage, code: str, *, status: int | None = None) -> None:
         transcriber = self.transcriber

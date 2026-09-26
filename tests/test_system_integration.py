@@ -856,10 +856,10 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         assert question.text.startswith("В каком городе искать?")
         assert await pool.fetchval("select step from user_task_drafts where telegram_user_id=$1", user) == "city"
         summary = await control.handle_text(message("Мадрид"))
-        assert "Город: Madrid" in summary.text and "Сделка: аренда" in summary.text
+        assert "Город: Мадрид" in summary.text and "Сделка: аренда" in summary.text
         assert await pool.fetchval("select count(*) from orchestration_commands") == 0  # nothing without Запустить
 
-        assert "поставлена в очередь" in (await control.handle_callback(user, "task:launch", chat_id=user)).text
+        assert (await control.handle_callback(user, "task:launch", chat_id=user)).text.startswith("Принято. Начинаю поиск.")
         assert "устарела" in (await control.handle_callback(user, "task:launch", chat_id=user)).text
         assert await pool.fetchval("select count(*) from orchestration_commands") == 1
         assert (await pool.fetchval("select arguments from orchestration_commands")).startswith("mode=real_estate city=Madrid ")
@@ -893,7 +893,7 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         question = await control.handle_text(message("квартиры в аренду в Мадриде или Валенсии до 900 €"))
         assert "несколько городов" in question.text
         valencia = next(b.callback_data for b in question.buttons if b.text == "Валенсия")
-        assert "Город: Valencia" in (await control.handle_callback(user, valencia, chat_id=user)).text
+        assert "Город: Валенсия" in (await control.handle_callback(user, valencia, chat_id=user)).text
         await control.handle_callback(user, "task:launch", chat_id=user)
         assert await dispatcher.process_once()
         row = await pool.fetchrow("select source_text, plan->>'vertical', plan->>'location' from campaigns where requested_by=$1 "

@@ -185,7 +185,7 @@ async def test_a_task_written_before_choosing_a_mode_is_kept() -> None:
     reply = await say(control, USER, "инвесторы для стартапа в Барселоне")
     assert "Сначала выберите режим" in reply.text and "mode:investors" in callbacks(reply)
     summary = await press(control, USER, "mode:investors")
-    assert "Проверьте задачу" in summary.text and "Barcelona" in summary.text
+    assert "Проверьте задачу" in summary.text and "Город: Барселона" in summary.text
 
 
 # --- intake ------------------------------------------------------------------------------
@@ -201,11 +201,19 @@ async def with_mode(mode: str = "real_estate") -> tuple[ControlPlane, Sink]:
 async def test_a_complete_task_goes_straight_to_the_summary() -> None:
     control, sink = await with_mode()
     reply = await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")
-    assert "Проверьте задачу" in reply.text
-    for line in ("Город: Madrid", "Сделка: аренда", "Бюджет: до 1200 €", "Языки поиска: ES, EN, RU, UK", "Группы: до 40, окнами по 20"):
+    assert reply.text.startswith("Проверьте задачу")
+    for line in ("Город: Мадрид", "Сделка: аренда", "Бюджет: до 1200 €"):
         assert line in reply.text, line
+    # A user sees no planner internals; the owner does.
+    for noise in ("Языки поиска", "окнами", "Цель:", "real_estate", "Madrid", "/"):
+        assert noise not in reply.text, noise
     assert callbacks(reply) == ["task:launch", "task:edit", "task:cancel"]
     assert sink.envelopes == []  # nothing runs without "Запустить"
+
+    await press(control, OWNER, "mode:real_estate")
+    owner = await say(control, OWNER, "квартиры в аренду в Мадриде до 1200 €")
+    for line in ("Город: Мадрид", "Цель: real_estate · Madrid", "Языки поиска: ES, EN, RU, UK", "Группы: до 40, окнами по 20"):
+        assert line in owner.text, line
 
 
 @pytest.mark.asyncio
@@ -216,12 +224,12 @@ async def test_a_missing_city_is_asked_and_a_typed_or_pressed_answer_is_accepted
     assert len(question.buttons) == 9 and callbacks(question)[-1] == "task:cancel"
     assert "Не понял город" in (await say(control, USER, "где-нибудь у моря")).text
     summary = await say(control, USER, "Валенсия")
-    assert "Город: Valencia" in summary.text
+    assert "Город: Валенсия" in summary.text
 
     control, _ = await with_mode()
     question = await say(control, USER, "квартиры в аренду до 1000 евро")
     madrid = next(b.callback_data for b in question.buttons if b.text == "Мадрид")
-    assert "Город: Madrid" in (await press(control, USER, madrid)).text  # type: ignore[arg-type]
+    assert "Город: Мадрид" in (await press(control, USER, madrid)).text  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -231,7 +239,7 @@ async def test_several_cities_ask_to_choose_one() -> None:
     assert "несколько городов" in question.text
     assert [b.text for b in question.buttons] == ["Мадрид", "Барселона", "Отмена"]
     summary = await press(control, USER, callbacks(question)[1])
-    assert "Город: Barcelona" in summary.text
+    assert "Город: Барселона" in summary.text
     await press(control, USER, "task:launch")
     arguments = sink.envelopes[0].arguments
     assert arguments.startswith("mode=real_estate city=Barcelona ")
@@ -244,10 +252,11 @@ async def test_several_cities_ask_to_choose_one() -> None:
 async def test_the_deal_is_asked_for_real_estate_only_and_the_budget_can_be_skipped() -> None:
     control, _ = await with_mode()
     deal = await say(control, USER, "квартиры в Малаге")
-    assert deal.text == "Аренда или покупка?"
+    # Both missing fields in one message; the first one has buttons.
+    assert deal.text.startswith("Уточните, пожалуйста:\n1. Аренда или покупка?\n2. Какой бюджет?")
     assert callbacks(deal) == ["task:deal:rent", "task:deal:sale", "task:deal:any", "task:cancel"]
     budget = await press(control, USER, "task:deal:sale")
-    assert budget.text.startswith("Бюджет?") and callbacks(budget) == ["task:budget:skip", "task:cancel"]
+    assert budget.text.startswith("Какой бюджет?") and callbacks(budget) == ["task:budget:skip", "task:cancel"]
     summary = await press(control, USER, "task:budget:skip")
     assert "Сделка: покупка" in summary.text and "Бюджет: не указан" in summary.text
     assert "Эта кнопка устарела" in (await press(control, USER, "task:deal:rent")).text
@@ -264,11 +273,15 @@ async def test_the_deal_is_asked_for_real_estate_only_and_the_budget_can_be_skip
 @pytest.mark.asyncio
 async def test_never_more_than_three_questions() -> None:
     control, _ = await with_mode()
-    asked = [await say(control, USER, "жильё")]
-    while "Проверьте задачу" not in asked[-1].text:
-        answer = {"В каком": "Севилья", "Аренда": "аренда", "Бюджет": "пропустить"}
-        asked.append(await say(control, USER, next(v for k, v in answer.items() if asked[-1].text.startswith(k))))
-    assert len(asked) - 1 == MAX_QUESTIONS
+    first = await say(control, USER, "жильё")
+    questions = [line for line in first.text.splitlines() if line[:2] in {"1.", "2.", "3.", "4."}]
+    assert len(questions) == MAX_QUESTIONS  # city, deal and budget, all in one message
+    # Answered one at a time, only the still-open questions come back.
+    second = await say(control, USER, "Севилья")
+    assert "В каком городе" not in second.text and "Аренда или покупка?" in second.text
+    third = await say(control, USER, "аренда")
+    assert third.text.startswith("Какой бюджет?")
+    assert "Проверьте задачу" in (await say(control, USER, "пропустить")).text
 
     # A clarifier that always wants more is still capped by the slots it may ask.
     draft = Draft(USER, USER, "real_estate", task="жильё", city="Madrid", deal="any", asked=["city", "deal", "budget"])
@@ -298,7 +311,7 @@ async def test_launch_queues_exactly_one_campaign_for_the_user_and_their_chat() 
     task = text(USER, "квартиры в аренду в Мадриде до 1200 €")
     await control.handle_text(task)
     launched = await press(control, USER, "task:launch")
-    assert "поставлена в очередь" in launched.text
+    assert launched.text.startswith("Принято. Начинаю поиск.")
     assert "устарела" in (await press(control, USER, "task:launch")).text  # double tap
     [envelope] = sink.envelopes
     assert (envelope.command, envelope.chat_id, envelope.user_id, envelope.message_id, envelope.auto) == ("campaign", USER, USER, task.message_id, False)
@@ -321,7 +334,7 @@ async def test_a_failed_enqueue_keeps_the_summary_for_another_try() -> None:
     await intake.choose_mode(USER, USER, "real_estate")
     await intake.on_text(text(USER, "квартиры в аренду в Мадриде до 1200 €"), "квартиры в аренду в Мадриде до 1200 €")
     assert "Не удалось" in (await intake.on_button(USER, USER, "launch", "")).text
-    assert "поставлена в очередь" in (await intake.on_button(USER, USER, "launch", "")).text
+    assert "Принято" in (await intake.on_button(USER, USER, "launch", "")).text
     assert len(calls) == 2
 
 
@@ -350,11 +363,11 @@ async def test_a_voice_task_from_a_user_goes_through_intake() -> None:
         return b"OggS"
 
     reply = await control.handle_voice(IncomingMessage(USER, USER, next(_ids), voice_file_id="v", voice_size=100, voice_duration_seconds=3), download)
-    assert reply and "Проверьте задачу" in reply.text and "Город: Madrid" in reply.text
+    assert reply and "Проверьте задачу" in reply.text and "Город: Мадрид" in reply.text
     assert sink.envelopes == []
     # Size checks still apply before anything is downloaded; strangers stay refused.
     too_long = IncomingMessage(USER, USER, next(_ids), voice_file_id="v", voice_size=100, voice_duration_seconds=10_000)
-    assert "too long" in (await control.handle_voice(too_long, download)).text  # type: ignore[union-attr]
+    assert "слишком длинное" in (await control.handle_voice(too_long, download)).text  # type: ignore[union-attr]
     stranger = IncomingMessage(STRANGER, STRANGER, next(_ids), voice_file_id="v", voice_size=100, voice_duration_seconds=3)
     assert "operators only" in (await control.handle_voice(stranger, download)).text  # type: ignore[union-attr]
 
