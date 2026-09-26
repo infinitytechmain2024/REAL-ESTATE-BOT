@@ -37,7 +37,6 @@ from bot.campaign.architect import (
 )
 from bot.campaign.models import CampaignPlan
 from bot.control_plane.models import Button, CommandEnvelope, IncomingMessage, Reply
-from bot.models.enums import Mode
 
 log = logging.getLogger(__name__)
 CommandSink = Callable[[CommandEnvelope], Awaitable[object]]
@@ -45,8 +44,8 @@ OwnerNotice = Callable[[str], Awaitable[None]]
 
 # mode (the plan's vertical) -> button title from the old bot
 MODES: dict[str, str] = {
-    "real_estate": Mode.LAND.title,
-    "investors": Mode.INVESTORS.title,
+    "real_estate": "🏡 Участки и объекты",
+    "investors": "💼 Инвесторы и компании",
 }
 DRAFT_TTL = timedelta(hours=24)
 MAX_QUESTIONS = 3
