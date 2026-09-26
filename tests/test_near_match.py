@@ -70,7 +70,7 @@ def test_unknown_price_currency_deal_and_city() -> None:
     assert classify(listing(52_000, currency="USD"), MADRID_50K).bucket == "other"
     assert classify(listing(52_000, currency="€"), MADRID_50K).bucket == "exact"
     assert classify(listing(52_000, currency=None), MADRID_50K).bucket == "exact"  # taken as the requested one
-    assert classify(listing(52_000, deal="rent"), MADRID_50K).bucket == "other"
+    assert classify(listing(52_000, deal="rent"), MADRID_50K).bucket == "excluded"
     assert classify(listing(52_000, deal=None), MADRID_50K).bucket == "exact"
     assert classify(listing(52_000, location="Barcelona, Gràcia"), MADRID_50K).bucket == "other"
     assert classify(listing(52_000, location="Centro, cerca del metro"), MADRID_50K).bucket == "exact"
@@ -420,3 +420,19 @@ async def test_postgres_holds_similar_until_approved_and_answers_once(pool) -> N
         await pool.execute("update campaign_findings set state='held' where finding_id=$1::uuid", ids["f52"])
     assert not await store.hold_finding(cid, ids["f52"], "similar", 0.2)
     assert await store.claim_finding(cid, ids["f90"]) is None
+
+
+async def test_a_rental_for_a_purchase_is_never_offered_or_sent() -> None:
+    campaigns, store, messenger, runner, cid, control = await setup()
+    add(store, cid, "rent", 900, deal="rent")
+    add(store, cid, "f90", 90_000)
+    await runner.tick()
+    assert store.buckets["rent"][0] == "excluded"
+    await campaigns.set_state(cid, "completed", "campaign:test")
+    await runner.tick()
+    assert [text for _, text, _ in messenger.asks] == ["Показать более далёкие варианты?"]
+    await press(control, USER, messenger.asks[0][2][0][1])
+    for _ in range(3):
+        await runner.tick()
+    assert len(cards(messenger)) == 1 and "90 000" in cards(messenger)[0]
+    assert not any("rent" in card for card in cards(messenger))

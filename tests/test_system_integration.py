@@ -300,7 +300,7 @@ async def test_text_command_to_sequential_batch_to_analysis_to_one_digest_per_ve
         estate = bodies["🏠 Недвижимость"]
         assert "Локация: Madrid" in estate and "Цена: 1200 EUR/month" in estate and f"Ссылка: {RENT_POST.canonical_url}" in estate
         assert f"Ссылка: {INVEST_POST.canonical_url}" in bodies["📈 Инвестиции"]
-        assert estate.endswith(f"Оригинал (es):\n{RENT_POST.body_text}")
+        assert estate.endswith("Язык оригинала: испанский") and RENT_POST.body_text not in estate
         assert {c for c, _ in telegram.messages} == {OWNER}
         states = dict(await pool.fetch("select platform_post_id, state from collected_posts"))
         assert states == {"fb-rent-1": "analysed", "fb-invest-1": "analysed", "fb-noise-1": "rejected"}
@@ -683,7 +683,7 @@ async def test_campaign_from_command_to_streamed_finding_and_completion(pool) ->
     assert len(findings) == 1 and RENT_POST.canonical_url in findings[0]
     assert findings[0].endswith("🔎 Найдено: 1 · ищу дальше")
     assert findings[0].startswith("🏠 Недвижимость") and "Location" not in findings[0]
-    assert f"Оригинал (es):\n{RENT_POST.body_text}\n\n🔎" in findings[0]
+    assert "Язык оригинала: испанский\n\n🔎" in findings[0] and RENT_POST.body_text not in findings[0]
     assert {chat for chat, _, _ in messenger.sent} == {OPERATOR}
     assert tuple(await pool.fetchrow("select state, stop_reason from campaigns")) == ("completed", "queue_exhausted")
     assert await pool.fetchval("select state from findings") == "delivered"

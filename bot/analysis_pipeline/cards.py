@@ -3,14 +3,16 @@
 One pure function, ``render_card``, used by the analysis digest and by the
 campaign runner (which streams each finding to the requester). It reads the
 stored ``findings.structured_payload`` (any schema version; old payloads
-without the analysis-v3 fields still render) plus the post's original text and
+without the analysis-v3 fields still render), the post's text (only to guess
+its language) and
 an optional task, and returns plain text:
 
 * Russian labels only; a field that is unknown is left out;
 * the order of the fields follows the task (a budget puts Цена first, a rent or
   sale request puts Сделка/Тип first, investors see Кто first);
-* the main text is the Russian summary, then always ``Оригинал (<lang>):``
-  with the post text, trimmed so the whole card fits one Telegram message.
+* the main text is the Russian summary; the card names the original language
+  («Язык оригинала: испанский») but never quotes the post (its text carries
+  Facebook's own buttons such as «Показать оригинал»).
 
 No ids, model names, prompts or English system text reach the card.
 """
@@ -116,6 +118,12 @@ def _trim(text: str, limit: int) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
+LANGUAGE_NAMES = {
+    "es": "испанский", "en": "английский", "ru": "русский", "uk": "украинский", "ca": "каталанский",
+    "fr": "французский", "de": "немецкий", "it": "итальянский", "pt": "португальский", "pl": "польский",
+}
+
+
 def render_card(
     payload: Mapping[str, Any],
     *,
@@ -126,7 +134,7 @@ def render_card(
     confidence: float | None = None,
     limit: int = MAX_CARD_CHARS,
 ) -> str:
-    """Build the Russian card for one finding; always ends with the original post block."""
+    """Build the Russian card for one finding; it names the original language, never quotes the post."""
     task = task or CardTask(vertical=vertical or "real_estate")
     kind = vertical or ("investors" if task.vertical == "investors" else "real_estate")
     investors = kind == "investors"
@@ -182,13 +190,11 @@ def render_card(
         tail.append("Ещё ссылки:\n" + "\n".join(f"• {x}" for x in links))
     if tail:
         parts.append("\n".join(tail))
-    body = "\n\n".join(parts)
 
-    label = f"Оригинал ({lang}):" if lang else "Оригинал:"
-    room = limit - len(body) - len(label) - 3
-    if room < 40 and summary:
-        # A very long summary gives way so the original always fits.
-        parts[1] = f"Кратко: {_trim(summary, max(80, len(summary) - (40 - room)))}"
-        body = "\n\n".join(parts)
-        room = limit - len(body) - len(label) - 3
-    return f"{body}\n\n{label}\n{_trim(original_text, max(room, 1))}"[:limit]
+    if lang:
+        language_line = f"Язык оригинала: {LANGUAGE_NAMES.get(lang, lang)}"
+        if tail:
+            parts[-1] += "\n" + language_line
+        else:
+            parts.append(language_line)
+    return "\n\n".join(parts)[:limit]
