@@ -23,7 +23,7 @@ ENTRY_POINTS = {
     "agent-reach.Dockerfile": ["bot.agent_reach.main", "bot.agent_reach.worker"],
     "analysis-pipeline.Dockerfile": ["bot.analysis_pipeline.main"],
     "browser-session.Dockerfile": ["bot.browser_session.main"],
-    "campaign-runner.Dockerfile": ["bot.campaign.runner"],
+    "campaign-runner.Dockerfile": ["bot.campaign.runner", "bot.web_search.worker", "bot.web_search.settings"],
     "facebook-collector.Dockerfile": ["bot.facebook_collector.main", "bot.facebook_collector.runner"],
     "scrapling-connector.Dockerfile": ["bot.scrapling_connector.main", "bot.scrapling_connector.worker"],
     "telegram-control.Dockerfile": ["bot.control_plane.main"],

@@ -26,8 +26,11 @@ campaign_findings), so a restart continues where it stopped.
   when the text changes. Owners (TELEGRAM_OPERATOR_IDS) see the technical line;
   anyone else sees only the short labels of ``status_text`` (no ids, windows or
   group counts).
-* After the last window the runner waits (bounded) for analysis, then
-  completes the campaign. A campaign cancelled from outside has its in-flight
+* The website stage (``bot.web_search``) runs beside all of this in the same
+  service; while it is still searching the campaign does not complete, and
+  its site shows in the status («Ищу на сайте <host>…» for non-owners).
+* After the last window (and the web stage) the runner waits (bounded) for
+  analysis, then completes the campaign. A campaign cancelled from outside has its in-flight
   batch cancelled through the ordinary batch cancel.
 
 Only one campaign uses Facebook at a time: no discovery or window starts
@@ -51,7 +54,7 @@ from bot.analysis_pipeline.cards import CardTask, render_card
 from . import offers
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
-from .status_text import campaign_label
+from .status_text import FACEBOOK, campaign_label, user_status
 from .store import CampaignStore
 from .tolerance import HELD_BUCKETS, Request, classify, money, price_of, request_for
 
@@ -138,6 +141,12 @@ class Discovery(Protocol):
     async def run(self, campaign_id: str) -> object: ...
 
 
+class WebProgress(Protocol):
+    """The website stage's progress (``bot.web_search.store``): ``active``, ``host``, owners' ``line``."""
+
+    async def web_status(self, campaign_id: str) -> Any: ...
+
+
 @dataclass(frozen=True)
 class RunnerConfig:
     window_cooldown_seconds: float = 120
@@ -162,12 +171,15 @@ class CampaignRunner:
         config: RunnerConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         owner_ids: Collection[int] = frozenset(),
+        web: WebProgress | None = None,
     ) -> None:
         """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
-        status; everyone else sees only the user-safe labels of ``status_text``."""
+        status; everyone else sees only the user-safe labels of ``status_text``. ``web``: the
+        website stage's progress, when that stage runs."""
         self.campaigns, self.store, self.messenger, self.discovery = campaigns, store, messenger, discovery
         self.config, self.now = config or RunnerConfig(), now
         self.owner_ids = frozenset(owner_ids)
+        self.web = web
 
     async def tick(self) -> int:
         """Advance every open (or just finished) campaign by one step; returns how many were seen."""
@@ -317,7 +329,10 @@ class CampaignRunner:
         return f"Сейчас: Facebook · окно {start.window_no} ждёт запуска"
 
     async def _drain(self, campaign: Campaign, run: RunState, reason: str) -> str:
-        """Give the analysis worker a bounded chance to finish the last posts, then complete."""
+        """Wait for the web stage, give the analysis worker a bounded chance to finish, then complete."""
+        web = await self._web(campaign.id)
+        if web is not None and web.active:
+            return web.line or "сайты: поиск"
         now = self.now()
         if run.drain_started_at is None:
             run = replace(run, drain_started_at=now)
@@ -450,12 +465,31 @@ class CampaignRunner:
 
     async def _status_text(self, campaign: Campaign, line: str) -> str:
         """Owners get the technical line; anyone else one short label, never ids, windows or counts."""
+        web = await self._web(campaign.id) if campaign.state not in TERMINAL_STATES else None
+        web_active = web is not None and web.active
         if campaign.requested_by in self.owner_ids:
-            return f"🎯 {campaign.plan.goal}\n{line or STOPPED}"
+            text = f"🎯 {campaign.plan.goal}\n{line or STOPPED}"
+            if web_active and web.line and web.line != line:
+                text += f"\n{web.line}"
+            return text
         if campaign.state in TERMINAL_STATES:
             return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id))
+        if line.startswith("Сейчас: Facebook · ") and line.endswith("ищу дальше"):
+            return FACEBOOK
+        if web_active:
+            return user_status("site", site=web.host) if web.host else user_status("web")
         checking = line == ANALYSIS and bool(await self.store.pending_analysis(campaign.id))
         return campaign_label(campaign.state, checking=checking)
+
+    async def _web(self, campaign_id: str) -> Any:
+        """The web stage's status, or None (no web stage, or it could not be read: never blocks the runner)."""
+        if self.web is None:
+            return None
+        try:
+            return await self.web.web_status(campaign_id)
+        except Exception:  # noqa: BLE001 - a status read must not stop Facebook work
+            log.warning("campaign.web_status_failed", extra={"campaign_id": campaign_id})
+            return None
 
     async def _new_status(self, campaign: Campaign, text: str) -> None:
         message_id = await self.messenger.send(campaign.chat_id, text)
@@ -506,7 +540,7 @@ async def main() -> None:
     from .store import PostgresCampaignStore
 
     settings = CampaignRunnerSettings()
-    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=4)
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=6)
     messenger = TelegramMessenger(settings.telegram_token)
     campaigns = PostgresCampaignStore(pool)
     discovery = None
@@ -516,14 +550,55 @@ async def main() -> None:
         discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, reader)
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
+    web = await _web_stage(campaigns, pool)
     runner = CampaignRunner(campaigns, PostgresRunStore(pool, settings.safety_limits()), messenger, discovery,
-                            config=settings.runner_config(), owner_ids=settings.owner_ids())
-    log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds})
+                            config=settings.runner_config(), owner_ids=settings.owner_ids(),
+                            web=web[0].store if web else None)
+    log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None})
     try:
-        await runner.serve(settings.poll_seconds)
+        if web is None:
+            await runner.serve(settings.poll_seconds)
+        else:
+            worker, poll, _closers = web
+            # The web stage is its own loop: a slow site never delays Facebook work, and the reverse.
+            await asyncio.gather(runner.serve(settings.poll_seconds), worker.serve(poll))
     finally:
+        if web is not None:
+            for close in web[2]:
+                await close()
         await messenger.aclose()
         await pool.close()
+
+
+async def _web_stage(campaigns: CampaignStore, pool: Any) -> tuple[Any, float, list[Any]] | None:
+    """The website search worker (bot.web_search), unless WEB_SEARCH_ENABLED=false."""
+    from bot.web_search.fetcher import PageFetcher
+    from bot.web_search.queries import FallbackQueryGenerator, OpenRouterQueryGenerator
+    from bot.web_search.searxng import SearxngClient
+    from bot.web_search.settings import WebSearchSettings
+    from bot.web_search.store import PostgresWebStore
+    from bot.web_search.worker import WebSearchWorker
+
+    settings = WebSearchSettings()
+    if not settings.enabled:
+        log.warning("campaign.web_search_disabled")
+        return None
+    config = settings.config()
+    searcher = SearxngClient(settings.searxng_url, timeout_seconds=settings.searxng_timeout_seconds,
+                             max_results=config.results_per_query)
+    fetcher = PageFetcher(user_agent=settings.user_agent, request_timeout_seconds=settings.request_timeout_seconds,
+                          max_content_bytes=settings.max_content_bytes, host_interval_seconds=settings.host_interval_seconds,
+                          proxy_url=settings.proxy_url or None)
+    model = None
+    if settings.openrouter_api_key:
+        model = OpenRouterQueryGenerator(api_key=settings.openrouter_api_key, model=settings.query_model,
+                                         timeout_seconds=settings.query_timeout_seconds)
+    else:
+        log.warning("campaign.web_search_template_queries", extra={"hint": "set OPENROUTER_API_KEY"})
+    worker = WebSearchWorker(campaigns, PostgresWebStore(pool), searcher, fetcher, FallbackQueryGenerator(model),
+                             config=config)
+    closers = [searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
+    return worker, settings.poll_seconds, closers
 
 
 if __name__ == "__main__":

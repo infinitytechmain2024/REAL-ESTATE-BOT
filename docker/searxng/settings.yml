@@ -1,0 +1,97 @@
+# SearXNG for the campaigns' website stage (bot/web_search), run from the
+# official image `searxng/searxng` by the `searxng` service in docker-compose.yml.
+#
+# Minimal on purpose: layered on the upstream defaults (`use_default_settings`),
+# JSON output only, limiter off (only the campaign-runner on the private
+# backend network talks to it), no UI features. The secret comes from
+# SEARXNG_SECRET (docker/searxng/entrypoint.sh makes a random one if unset).
+# The `#__PROXIES__` line below is replaced by an `outgoing.proxies` block when
+# WEB_SEARCH_PROXY_URL is set.
+
+use_default_settings:
+  engines:
+    keep_only:
+      - google
+      - bing
+      - duckduckgo
+      - brave
+      - startpage
+      - mojeek
+      - qwant
+
+general:
+  debug: false
+  instance_name: "real-estate-bot-web-search"
+  enable_metrics: false
+
+search:
+  # Upstream ships formats: [html], which makes /search?format=json answer 403.
+  formats:
+    - json
+  safe_search: 0
+  autocomplete: ""
+  favicon_resolver: ""
+  default_lang: "auto"
+  ban_time_on_fail: 5
+  max_ban_time_on_fail: 120
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  base_url: false
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  secret_key: "overridden-by-SEARXNG_SECRET"
+  method: "GET"
+
+valkey:
+  url: false
+
+ui:
+  static_use_hash: false
+  query_in_title: false
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+  pool_connections: 50
+  pool_maxsize: 10
+  enable_http2: true
+#__PROXIES__
+
+plugins:
+  searx.plugins.calculator.SXNGPlugin:
+    active: false
+  searx.plugins.hash_plugin.SXNGPlugin:
+    active: false
+  searx.plugins.self_info.SXNGPlugin:
+    active: false
+  searx.plugins.unit_converter.SXNGPlugin:
+    active: false
+  searx.plugins.tracker_url_remover.SXNGPlugin:
+    active: true
+
+engines:
+  # keep_only preserves upstream `disabled` flags; some of these ship disabled.
+  - name: google
+    disabled: false
+    timeout: 6.0
+  - name: bing
+    disabled: false
+    timeout: 6.0
+  - name: duckduckgo
+    disabled: false
+    timeout: 6.0
+  - name: brave
+    disabled: false
+    timeout: 6.0
+  - name: startpage
+    disabled: false
+    timeout: 7.0
+  - name: mojeek
+    disabled: false
+    timeout: 6.0
+  - name: qwant
+    disabled: false
+    timeout: 6.0
