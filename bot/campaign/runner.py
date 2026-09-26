@@ -18,6 +18,10 @@ campaign_findings), so a restart continues where it stopped.
   until the verification flow requeues it; nothing is bypassed or retried here.
 * Findings from the campaign's batches are sent to the campaign chat one by
   one, exactly once (``campaign_findings``); the analysis digest skips them.
+  Each finding is filed in one bucket (``tolerance``): exact ones are sent at
+  once; similar and other ones are held and sent only after the requester
+  answers «Одобрить» to the once-per-bucket question (``offers``), which the
+  Telegram control plane records in ``campaign_offers``.
 * One Telegram message per campaign shows the live status; it is edited only
   when the text changes. Owners (TELEGRAM_OPERATOR_IDS) see the technical line;
   anyone else sees only the short labels of ``status_text`` (no ids, windows or
@@ -34,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -44,10 +48,12 @@ import httpx
 
 from bot.analysis_pipeline.cards import CardTask, render_card
 
+from . import offers
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
 from .status_text import campaign_label
 from .store import CampaignStore
+from .tolerance import HELD_BUCKETS, Request, classify, money, price_of, request_for
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +83,9 @@ class TelegramError(RuntimeError):
 class Messenger(Protocol):
     async def send(self, chat_id: int, text: str) -> int: ...
     async def edit(self, chat_id: int, message_id: int, text: str) -> None: ...
+    async def send_buttons(self, chat_id: int, text: str, buttons: Sequence[tuple[str, str]]) -> int:
+        """A message with one row of inline callback buttons: (label, callback data)."""
+        ...
 
 
 class TelegramMessenger:
@@ -88,6 +97,12 @@ class TelegramMessenger:
 
     async def send(self, chat_id: int, text: str) -> int:
         data = await self._call("sendMessage", {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True})
+        return int(data["result"]["message_id"])
+
+    async def send_buttons(self, chat_id: int, text: str, buttons: Sequence[tuple[str, str]]) -> int:
+        markup = {"inline_keyboard": [[{"text": label, "callback_data": data} for label, data in buttons]]}
+        data = await self._call("sendMessage", {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True,
+                                                "reply_markup": markup})
         return int(data["result"]["message_id"])
 
     async def edit(self, chat_id: int, message_id: int, text: str) -> None:
@@ -339,20 +354,79 @@ class CampaignRunner:
     # -- Telegram --
 
     async def _stream(self, campaign: Campaign) -> None:
-        """Send each new finding of the campaign once, oldest first."""
+        """Send each new exact finding once, oldest first; hold the rest and ask about them once."""
         active = campaign.state not in TERMINAL_STATES
+        request = campaign_request(campaign)
         for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step):
+            match = classify(finding.payload, request, vertical=finding.vertical)
+            if match.bucket != "exact":
+                await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance)
+                continue
             count = await self.store.claim_finding(campaign.id, finding.id)
             if count is None:
                 continue
-            tail = f"🔎 Найдено: {count} · ищу дальше" if active else f"🔎 Найдено: {count}"
-            try:
-                message_id = await self.messenger.send(campaign.chat_id, f"{finding_card(campaign, finding)}\n\n{tail}")
-            except Exception:  # noqa: BLE001 - Telegram down: give the slot back, retry next tick
-                log.warning("campaign.finding_send_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
-                await self.store.release_finding(finding.id)
+            if not await self._send_card(campaign, finding, count, active):
                 return
-            await self.store.finding_sent(finding.id, message_id)
+        await self._near_matches(campaign, request, active)
+
+    async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool) -> bool:
+        tail = f"🔎 Найдено: {count} · ищу дальше" if active else f"🔎 Найдено: {count}"
+        try:
+            message_id = await self.messenger.send(campaign.chat_id, f"{finding_card(campaign, finding)}\n\n{tail}")
+        except Exception:  # noqa: BLE001 - Telegram down: give the slot back, retry next tick
+            log.warning("campaign.finding_send_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
+            await self.store.release_finding(finding.id)
+            return False
+        await self.store.finding_sent(finding.id, message_id)
+        return True
+
+    async def _near_matches(self, campaign: Campaign, request: Request, active: bool) -> None:
+        """Held similar/other findings: stream an approved bucket, or ask about it once (see ``offers``)."""
+        states: dict[str, str | None] = {}
+        for bucket in HELD_BUCKETS:
+            state = states[bucket] = await self.store.offer_state(campaign.id, bucket)
+            if state == "approved":
+                for finding in await self.store.held_findings(campaign.id, bucket, self.config.max_stream_per_step):
+                    count = await self.store.claim_held(campaign.id, finding.id)
+                    if count is not None and not await self._send_card(campaign, finding, count, active):
+                        return
+                continue
+            if state is not None:  # asked and waiting, or declined: never sent
+                continue
+            held = await self.store.held_findings(campaign.id, bucket, 1)
+            if not held:
+                continue
+            exact = await self.store.exact_count(campaign.id)
+            if bucket == "similar":
+                ask = not active or exact == 0
+            else:  # farther ones: after the search, once the similar question is out of the way
+                ask = not active and states["similar"] != "asked" and not (
+                    states["similar"] is None and await self.store.held_findings(campaign.id, "similar", 1))
+            if ask:
+                await self._ask(campaign, bucket, request, held[0], exact_found=exact > 0)
+                states[bucket] = await self.store.offer_state(campaign.id, bucket)
+
+    async def _ask(self, campaign: Campaign, bucket: offers.OfferBucket, request: Request, closest: StreamFinding,
+                   *, exact_found: bool) -> None:
+        if not await self.store.open_offer(campaign.id, bucket):
+            return
+        if bucket == "similar":
+            price = price_of(closest.payload)
+            text = offers.similar_question(
+                money(price, request.currency) if price is not None else None,
+                money(request.amount, request.currency) if request.amount is not None else None,
+                exact_found=exact_found,
+            )
+        else:
+            text = offers.OTHER_QUESTION
+        try:
+            message_id = await self.messenger.send_buttons(campaign.chat_id, text, offers.buttons(bucket, campaign.id))
+        except Exception:  # noqa: BLE001 - Telegram down: ask again next tick
+            log.warning("campaign.offer_send_failed", extra={"campaign_id": campaign.id, "bucket": bucket})
+            await self.store.drop_offer(campaign.id, bucket)
+            return
+        await self.store.offer_sent(campaign.id, bucket, message_id)
+        log.info("campaign.offer_asked", extra={"campaign_id": campaign.id, "bucket": bucket})
 
     async def _show(self, campaign: Campaign, line: str) -> None:
         """Keep one status message per campaign; edit it only when the text changes."""
@@ -394,6 +468,11 @@ class CampaignRunner:
         if campaign.state == "failed":
             return f"{STOPPED} · ошибка: {campaign.stop_reason or 'unknown'}"
         return STOPPED if not found else f"{STOPPED} · найдено {found}"
+
+
+def campaign_request(campaign: Campaign) -> Request:
+    """What the campaign asked for, for ``tolerance.classify``."""
+    return request_for(campaign.plan.constraints, location=campaign.plan.location, vertical=campaign.plan.vertical)
 
 
 def finding_card(campaign: Campaign, finding: StreamFinding) -> str:

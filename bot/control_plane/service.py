@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
+from bot.campaign import offers as near
 from bot.campaign.architect import InvalidGoal, plan_campaign
 from bot.control_plane.access import SETTINGS_BUTTON, AccessDesk, label
 from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
@@ -80,9 +81,12 @@ class ControlPlane:
         access: AccessDesk | None = None,
         settings_store: SettingsStore | None = None,
         intake_store: IntakeStore | None = None,
+        offers: near.OfferDesk | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
+        # «Одобрить» / «Нет» under the runner's «show similar options?» question (bot/campaign/offers.py).
+        self.offers = offers
         # Owners from .env plus operators they approved; shared and live.
         self.operators = access.operators if access else OperatorSet(settings.operator_user_ids)
         self.auto = AutoMode(settings_store or MemorySettingsStore(), default=settings.auto_mode,
@@ -127,9 +131,12 @@ class ControlPlane:
     async def handle_callback(self, user_id: int | None, data: str, display_name: str | None = None, username: str | None = None,
                               chat_id: int | None = None) -> Reply:
         """Inline buttons: ``live:done|cancel:<id>``, ``live:approve:<code>``, ``access:request``,
-        ``access:helper|user|operator|deny:<id>``, ``set:...`` (owner settings), ``mode:<mode>`` and ``task:<action>[:<value>]``."""
+        ``access:helper|user|operator|deny:<id>``, ``set:...`` (owner settings), ``mode:<mode>``, ``task:<action>[:<value>]``
+        and ``near:yes|no:similar|other:<campaign id>``."""
         kind, _, rest = data.partition(":")
         action, _, target = rest.partition(":")
+        if kind == near.CALLBACK_KIND:
+            return await self._near_match_answer(user_id, action, target)
         if kind in {"mode", "task"}:
             if user_id is None or not self._may_give_tasks(user_id):
                 return self._with_access_button(Reply("Задачи могут давать только одобренные пользователи."), user_id)
@@ -155,6 +162,21 @@ class ControlPlane:
             return await self.live.finish(session_id, user_id, done=action == "done")
         except LiveViewUnavailable as exc:
             return Reply(f"Could not close the browser: {exc}.")
+
+    async def _near_match_answer(self, user_id: int | None, action: str, target: str) -> Reply:
+        """Only the campaign's requester (or an owner) answers, and only once; the runner acts on it."""
+        parsed = near.parse_callback(action, target)
+        if parsed is None or self.offers is None or user_id is None:
+            return Reply(near.reply_for("unknown", "similar"))
+        approve, bucket, campaign_id = parsed
+        try:
+            decision = await self.offers.decide(campaign_id, bucket, approve=approve, user_id=user_id,
+                                                owner=self._is_owner(user_id))
+        except Exception:  # noqa: BLE001 - a database hiccup must not break the bot; the button stays usable
+            log.warning("telegram.control.offer_failed", extra={"user_id": user_id})
+            return Reply("Не получилось сохранить ответ. Попробуйте ещё раз.")
+        log.info("telegram.control.offer_answered", extra={"user_id": user_id, "bucket": bucket, "decision": decision})
+        return Reply(near.reply_for(decision, bucket))
 
     async def handle_text(self, message: IncomingMessage) -> Reply | None:
         if not await self.store.claim_message(message):
