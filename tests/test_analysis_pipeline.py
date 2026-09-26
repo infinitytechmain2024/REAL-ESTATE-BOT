@@ -123,14 +123,13 @@ def test_idempotency_key_is_stable():
     assert finding_key(evidence(), "real_estate") != finding_key(evidence(), "investors")
 
 
-def test_a_long_digest_is_split_into_telegram_sized_messages_not_truncated():
-    from bot.analysis_pipeline.main import MAX_MESSAGE_CHARS, split_digest
+def test_every_finding_is_its_own_message():
+    from bot.analysis_pipeline.main import MAX_MESSAGE_CHARS, one_per_message
 
-    entries = [(f"f{n}", "x" * 1500) for n in range(7)]
-    chunks = split_digest(entries)
-    assert [fid for chunk in chunks for fid, _ in chunk] == [f"f{n}" for n in range(7)]
-    assert all(sum(len(t) for _, t in chunk) + 2 * (len(chunk) - 1) <= MAX_MESSAGE_CHARS for chunk in chunks)
-    assert len(chunks) == 4
+    entries = [(f"f{n}", "x" * 5000 if n == 0 else f"card {n}") for n in range(3)]
+    chunks = one_per_message(entries)
+    assert [[fid for fid, _ in chunk] for chunk in chunks] == [["f0"], ["f1"], ["f2"]]
+    assert len(chunks[0][0][1]) == MAX_MESSAGE_CHARS and chunks[1][0][1] == "card 1"
 
 
 @pytest.mark.parametrize(

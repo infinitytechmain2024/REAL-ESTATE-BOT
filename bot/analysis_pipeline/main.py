@@ -17,23 +17,13 @@ from .telegram import send_digest
 
 log = logging.getLogger(__name__)
 Sender = Callable[[int, str], Awaitable[int]]
-# Telegram's hard limit is 4096; a digest is split, never truncated.
+# Telegram's hard limit is 4096; a card is built to fit, this is the last guard.
 MAX_MESSAGE_CHARS = 3900
 
 
-def split_digest(entries: list[tuple[str, str]], limit: int = MAX_MESSAGE_CHARS) -> list[list[tuple[str, str]]]:
-    """Group (finding id, text) entries into messages that each fit Telegram."""
-    chunks: list[list[tuple[str, str]]] = []
-    size = 0
-    for fid, text in entries:
-        text = text[:limit]
-        if chunks and size + 2 + len(text) <= limit:
-            chunks[-1].append((fid, text))
-            size += 2 + len(text)
-        else:
-            chunks.append([(fid, text)])
-            size = len(text)
-    return chunks
+def one_per_message(entries: list[tuple[str, str]], limit: int = MAX_MESSAGE_CHARS) -> list[list[tuple[str, str]]]:
+    """Each finding is its own Telegram message: one card, one message."""
+    return [[(fid, text[:limit])] for fid, text in entries]
 
 
 async def deliver(store, chat_id: int, send: Sender) -> int:
@@ -107,7 +97,7 @@ async def run_once(store=None, pipeline: AnalysisPipeline | None = None, send: S
             # A campaign's findings are streamed to its own chat by the campaign runner.
             streamed = await store.campaign_finding_ids(saved) if saved else set()
             for vertical, entries in formatted.items():
-                for chunk in split_digest([e for e in entries if e[0] not in streamed]):
+                for chunk in one_per_message([e for e in entries if e[0] not in streamed]):
                     await store.save_digest(s.telegram_chat_id, vertical, [fid for fid, _ in chunk], digest(vertical, [t for _, t in chunk]))
             token = s.telegram_token
             await deliver(store, s.telegram_chat_id, send or (lambda chat, body: send_digest(token, chat, body)))
