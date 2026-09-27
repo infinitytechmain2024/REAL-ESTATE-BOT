@@ -12,6 +12,12 @@ first, plain ``json_object`` on HTTP 400, drift normalised before use, one
 request, a hard timeout. Without a key, or on any failure, the deterministic
 ``fallback_queries`` builds queries from the plan's seeds, so a round never
 depends on the model. The task text is data, never instructions.
+
+``localise`` makes every query carry the campaign's place (city or region):
+a keyword query without it gets the city appended, a hashtag gets the city
+glued on or is dropped. For a Spanish target a Russian or Ukrainian query
+must carry the Spanish name in Latin letters, and Spanish and English
+queries come first.
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
+
+from bot.campaign import geo
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -153,7 +161,9 @@ def fallback_queries(context: QueryContext, platform: str, used: Collection[tupl
     """Queries from the plan's seeds and the task's topic, without a model. Deterministic."""
     words = _topic_words(context)
     candidates: list[SocialQuery | None] = []
-    alias = {lang: context.location_aliases.get(lang, context.location) for lang in LANGUAGES}
+    spanish = geo.country_of(context.location) == "ES"
+    alias = {lang: context.location_aliases.get("es" if spanish and lang in ("ru", "uk") else lang, context.location)
+             for lang in LANGUAGES}
     building = any(w in context.task.casefold() for w in _BUILD)
     for lang in LANGUAGES:
         phrases = [*words.get(lang, []), *context.seeds.get(lang, [])]
@@ -186,6 +196,39 @@ def fallback_queries(context: QueryContext, platform: str, used: Collection[tupl
             if by_kind.get(kind):
                 mixed.append(by_kind[kind].pop(0))
     return _unique(mixed, used, count)
+
+
+# --- the place in every query -----------------------------------------------------------------
+
+_CYRILLIC = re.compile(r"[а-яёіїєґ]", re.IGNORECASE)
+_LANGUAGE_RANK = {"es": 0, "en": 1, None: 2, "ru": 3, "uk": 4}
+
+
+def localise(queries: Iterable[SocialQuery], context: QueryContext) -> list[SocialQuery]:
+    """Queries that name the campaign's place; repaired or dropped (see the module notes)."""
+    names = geo.place_names(context.location, context.location_aliases)
+    latin = geo.latin_place_names(context.location, context.location_aliases)
+    spanish = geo.country_of(context.location) == "ES"
+    out: list[SocialQuery] = []
+    for query in queries:
+        cyrillic = query.language in ("ru", "uk") or bool(_CYRILLIC.search(query.text))
+        needed = latin if spanish and cyrillic else names
+        if geo.mentions_place(query.text, needed):
+            out.append(query)
+            continue
+        language = "es" if spanish and (cyrillic or query.language is None) else query.language
+        place = context.location_aliases.get(language or "es") or context.location
+        if query.kind == "hashtag":
+            if spanish and _CYRILLIC.search(query.text):
+                continue  # a Cyrillic hashtag with a Latin place glued on is nobody's tag
+            fixed = normalise_query(query.platform, "hashtag", f"{query.text}{place}", query.language)
+        else:
+            fixed = normalise_query(query.platform, query.kind, f"{query.text} {place}", query.language)
+        if fixed is not None and geo.mentions_place(fixed.text, needed):
+            out.append(fixed)
+    if spanish:
+        out.sort(key=lambda q: _LANGUAGE_RANK.get(q.language, 2))
+    return out
 
 
 # --- the model -----------------------------------------------------------------------------
@@ -235,8 +278,9 @@ Rules:
   in Spain; one or two per other language.
 - Say what sellers, owners, agencies or investors actually write in their posts, not what the buyer asks:
   "parcela en venta", "terreno urbanizable", "vendo terreno", "se vende parcela".
-- Include the place (city, suburbs, region) in most queries; vary it (Madrid, sur de Madrid, Comunidad de Madrid,
-  a suburb name) when the task says "suburbs" or "near".
+- EVERY query must include the place (city or region, optionally a suburb); vary it (Madrid, sur de Madrid,
+  Comunidad de Madrid, a suburb plus Madrid) when the task says "suburbs" or "near". A hashtag glues it on
+  (terrenomadrid). For Spain a Russian or Ukrainian query must use the Spanish place name in Latin letters.
 - Short: 1-5 words; a hashtag is one word.
 - Nothing illegal, no personal data, no names of private people.
 
@@ -355,10 +399,12 @@ class QueryPlanner:
         found: list[SocialQuery] = []
         if self.generator is not None:
             try:
-                found = _unique(await self.generator.generate(context, platform, used_texts, count), used, count)
+                generated = await self.generator.generate(context, platform, used_texts, count)
+                found = _unique(localise(generated, context), used, count)
             except Exception as exc:  # noqa: BLE001 - the fallback keeps the round going
                 log.warning("social.queries.model_failed %s", getattr(exc, "code", type(exc).__name__))
         if len(found) < count:
             taken = {*used, *((q.kind, q.key) for q in found)}
-            found += fallback_queries(context, platform, taken, count - len(found))
+            more = localise(fallback_queries(context, platform, taken, count * 3), context)
+            found += _unique(more, taken, count - len(found))
         return found

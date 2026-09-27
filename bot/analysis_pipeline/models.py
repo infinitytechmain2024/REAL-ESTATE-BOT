@@ -27,6 +27,10 @@ class AnalysisResult(BaseModel):
     property_type: Literal["apartment", "room", "house", "studio", "land", "commercial", "other"] | None = None
     rooms: int | None = Field(default=None, ge=0, le=50)
     who: str | None = Field(default=None, max_length=200)
+    # analysis-v4: only a concrete single offer may reach users; where it is and how big.
+    listing_kind: Literal["offer", "catalog", "wanted", "other"] | None = None
+    country: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
+    area_m2: float | None = Field(default=None, gt=0, le=100_000_000)
 
 
 class Evidence(BaseModel):

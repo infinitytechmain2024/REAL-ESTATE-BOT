@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import WINDOW_SIZE
 from .offers import MemoryOffer, MemoryOfferDesk
+from .relevance import Relevance
 
 if TYPE_CHECKING:
     import asyncpg
@@ -121,6 +122,10 @@ class RunStore(Protocol):
     async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None: ...
     async def drop_offer(self, campaign_id: str, bucket: str) -> None: ...
     async def social_activity(self, campaign_id: str) -> SocialActivity: ...
+    # the AI relevance verdict, once per finding (migration 023, ``relevance``)
+    async def relevance(self, campaign_id: str, finding_id: str) -> Relevance | None: ...
+    async def save_relevance(self, campaign_id: str, finding_id: str, relevance: Relevance) -> None: ...
+    async def relevance_calls(self, campaign_id: str) -> int: ...
 
 
 def _distance(value: float | None) -> float | None:
@@ -436,6 +441,23 @@ class PostgresRunStore:
             campaign_id, bucket, message_id,
         )
 
+    async def relevance(self, campaign_id: str, finding_id: str) -> Relevance | None:
+        row = await self.pool.fetchrow(
+            """select verdict, reason, deviation, model from campaign_finding_relevance
+                where finding_id = $1::uuid and campaign_id = $2::uuid""", finding_id, campaign_id)
+        return Relevance(row["verdict"], row["reason"], row["deviation"], row["model"]) if row else None
+
+    async def save_relevance(self, campaign_id: str, finding_id: str, relevance: Relevance) -> None:
+        await self.pool.execute(
+            """insert into campaign_finding_relevance (finding_id, campaign_id, verdict, reason, deviation, model)
+               values ($1::uuid, $2::uuid, $3, $4, $5, $6) on conflict do nothing""",
+            finding_id, campaign_id, relevance.verdict, relevance.reason[:300],
+            (relevance.deviation or None) and relevance.deviation[:120], (relevance.model or None) and relevance.model[:120])
+
+    async def relevance_calls(self, campaign_id: str) -> int:
+        return int(await self.pool.fetchval(
+            "select count(*) from campaign_finding_relevance where campaign_id = $1::uuid", campaign_id))
+
     async def drop_offer(self, campaign_id: str, bucket: str) -> None:
         """The question could not be sent: free the slot so the next tick asks again."""
         await self.pool.execute(
@@ -516,6 +538,7 @@ class MemoryRunStore:
         self.held: dict[str, dict[str, None]] = {}  # cid -> held finding ids, in filing order
         self.desk = MemoryOfferDesk()  # the control plane's side of campaign_offers
         self.social: dict[str, SocialActivity] = {}  # cid -> social search activity
+        self.relevances: dict[tuple[str, str], Relevance] = {}  # (cid, finding) -> stored AI verdict
 
     async def recover_discovery_profile(self) -> int:
         items = getattr(self.campaigns, "campaigns", {})
@@ -703,3 +726,12 @@ class MemoryRunStore:
         offer = self.desk.offers.get((campaign_id, bucket))
         if offer is not None and offer.state == "asked" and offer.message_id is None:
             del self.desk.offers[(campaign_id, bucket)]
+
+    async def relevance(self, campaign_id: str, finding_id: str) -> Relevance | None:
+        return self.relevances.get((campaign_id, finding_id))
+
+    async def save_relevance(self, campaign_id: str, finding_id: str, relevance: Relevance) -> None:
+        self.relevances.setdefault((campaign_id, finding_id), relevance)
+
+    async def relevance_calls(self, campaign_id: str) -> int:
+        return sum(1 for cid, _ in self.relevances if cid == campaign_id)

@@ -56,6 +56,11 @@ class CampaignRunnerSettings(BaseSettings):
     social_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_SOCIAL_MODEL")
     social_model_timeout_seconds: int = Field(default=20, ge=1, le=120, validation_alias="OPENROUTER_SOCIAL_TIMEOUT_SECONDS")
 
+    # The AI relevance check of each campaign finding (bot/campaign/relevance.py); 0 calls: rules only.
+    relevance_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_MATCH_MODEL")
+    relevance_timeout_seconds: int = Field(default=15, ge=1, le=120, validation_alias="OPENROUTER_MATCH_TIMEOUT_SECONDS")
+    relevance_max_calls: int = Field(default=200, ge=0, le=10_000, validation_alias="CAMPAIGN_RELEVANCE_MAX_CALLS")
+
     def social_config(self):  # -> bot.social_search.worker.SocialConfig (imported lazily)
         from bot.social_search.worker import SocialConfig, parse_platforms
 
@@ -79,7 +84,8 @@ class CampaignRunnerSettings(BaseSettings):
         return RunnerConfig(window_cooldown_seconds=self.window_cooldown_seconds,
                             analysis_grace_seconds=self.analysis_grace_seconds,
                             refusal_retry_seconds=self.refusal_retry_seconds,
-                            social_grace_seconds=self.social_grace_seconds)
+                            social_grace_seconds=self.social_grace_seconds,
+                            max_relevance_calls=self.relevance_max_calls)
 
 
     def owner_ids(self) -> frozenset[int]:

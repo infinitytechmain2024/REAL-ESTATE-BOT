@@ -132,9 +132,11 @@ def test_confidence_words() -> None:
 
 
 def test_parse_result_accepts_the_new_schema_and_drifted_variants() -> None:
-    assert PROMPT_VERSION == "analysis-v3"
+    assert PROMPT_VERSION == "analysis-v4"
     assert set(RESULT_SCHEMA["required"]) == set(RESULT_SCHEMA["properties"])
     assert {"summary_ru", "source_language", "price_amount", "price_currency"} <= set(RESULT_SCHEMA["required"])
+    assert {"listing_kind", "country", "area_m2"} <= set(RESULT_SCHEMA["required"])
+    assert RESULT_SCHEMA["properties"]["listing_kind"]["enum"] == ["offer", "catalog", "wanted", "other"]
     exact = {
         "relevant": True, "confidence": 0.9, "summary": "Piso en Lavapiés", "location": "Madrid", "price_signals": ["1.200 €"],
         "related_links": [], "category": "real_estate", "reason": "offer", "summary_ru": "Квартира в Лавапьес",
@@ -160,6 +162,34 @@ def test_parse_result_accepts_the_new_schema_and_drifted_variants() -> None:
                                     "category", "reason")}
     result = parse_result(json.dumps(legacy))
     assert result.summary_ru is None and result.price_amount is None and result.source_language is None
+    assert (result.listing_kind, result.country, result.area_m2) == (None, None, None)
+
+
+def test_analysis_v4_listing_kind_country_and_area_with_drift() -> None:
+    base = {
+        "relevant": True, "confidence": 0.9, "summary": "Parcela", "location": "Boadilla del Monte", "price_signals": [],
+        "related_links": [], "category": "real_estate", "reason": "offer",
+    }
+    exact = parse_result(json.dumps({**base, "listing_kind": "catalog", "country": "ES", "area_m2": 2500}))
+    assert (exact.listing_kind, exact.country, exact.area_m2) == ("catalog", "ES", 2500.0)
+    drifted = parse_result(json.dumps({**base, "listing_kind": "Search results page", "country": "Spain",
+                                       "area_m2": "2.500 m²"}))
+    assert (drifted.listing_kind, drifted.country, drifted.area_m2) == ("catalog", "ES", 2500.0)
+    wanted = parse_result(json.dumps({**base, "listing_kind": "WANTED", "country": "uk", "area_m2": -3}))
+    assert (wanted.listing_kind, wanted.country, wanted.area_m2) == ("wanted", "GB", None)
+    odd = parse_result(json.dumps({**base, "listing_kind": "banana", "country": "Atlantis", "area_m2": "grande"}))
+    assert (odd.listing_kind, odd.country, odd.area_m2) == ("other", None, None)
+    single = parse_result(json.dumps({**base, "listing_kind": "a single listing", "country": None, "area_m2": None}))
+    assert single.listing_kind == "offer"
+
+
+def test_an_old_payload_without_the_v4_fields_still_renders_and_is_an_offer() -> None:
+    from bot.campaign.tolerance import Request, classify
+
+    old = es_payload()
+    assert "listing_kind" not in old
+    assert render_card(old, original=ES_POST).startswith("🏠 Недвижимость")
+    assert classify(old, Request(amount=1300, deal="rent", location="Madrid")).bucket == "exact"
 
 
 class SpanishAnalyzer:
@@ -169,7 +199,7 @@ class SpanishAnalyzer:
             "price_signals": ["1.200 € al mes"], "related_links": [], "category": vertical, "reason": "offer",
             "summary_ru": "Сдаётся квартира с двумя спальнями в Лавапьес за 1200 € в месяц.", "source_language": "es",
             "price_amount": 1200, "price_currency": "EUR", "deal_type": "rent", "property_type": "apartment",
-            "rooms": 2, "who": None,
+            "rooms": 2, "who": None, "listing_kind": "offer", "country": "es", "area_m2": "85 m²",
         }, ensure_ascii=False))
 
 
@@ -181,7 +211,8 @@ async def test_pipeline_digest_and_campaign_stream_use_the_same_card() -> None:
     assert outcome.accepted and outcome.formatted == real_estate(outcome.result, evidence, "es")
     assert outcome.formatted.endswith("Язык оригинала: испанский")
     payload = {**finding_payload(outcome.result, evidence), "formatted": outcome.formatted}
-    assert payload["schema_version"] == "analysis-v3" and payload["price_amount"] == 1200.0
+    assert payload["schema_version"] == "analysis-v4" and payload["price_amount"] == 1200.0
+    assert (payload["listing_kind"], payload["country"], payload["area_m2"]) == ("offer", "ES", 85.0)
 
     plan = plan_campaign("Найди квартиры в аренду в Мадриде до 1300 евро")
     campaign = Campaign("c1", plan, "running", 1, 1, "goal", None, None, datetime.now(UTC))

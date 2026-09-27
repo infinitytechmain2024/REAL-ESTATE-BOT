@@ -18,12 +18,14 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`022_social_search.sql` in order. It records SHA-256 checksums in
+`023_campaign_finding_relevance.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
 `022_social_search.sql` adds LinkedIn profiles and social network search
 (TikTok, Instagram, LinkedIn) bookkeeping.
+`023_campaign_finding_relevance.sql` stores the once-per-finding AI verdict
+(match / near / reject) of a campaign finding against the campaign's task.
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their

@@ -10,7 +10,13 @@ drift normalised before use, one request, a hard timeout, the key never logged.
 ``TemplateQueryGenerator`` is the deterministic fallback (no key, or the model
 failed): portal, property and deal words per language around the city names.
 
-Whatever produced them, ``dedupe`` drops a query whose meaning is already
+Whatever produced them, ``localise`` makes every query carry the campaign's
+place (city or region; repaired by appending the city, dropped if that does
+not fit), and for a Spanish target lets a Russian or Ukrainian query through
+only with the Spanish place name in Latin letters («купить участок Madrid»),
+at most a quarter of a round: the rest is Spanish and English.
+
+``dedupe`` drops a query whose meaning is already
 covered: same words after case/accents/stop-words/word-endings are folded
 (``query_key``), or a token overlap of ``SIMILARITY`` or more with a used one.
 """
@@ -26,12 +32,14 @@ from typing import Any, Protocol
 
 import httpx
 
+from bot.campaign import geo
+
 from .models import QUERY_LANGUAGES, GeneratedQuery
 from .urls import SPAIN_PORTALS, UKRAINE_PORTALS
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-PROMPT_VERSION = "web-queries-v1"
+PROMPT_VERSION = "web-queries-v2"
 MAX_QUERY_CHARS = 120
 MAX_USED_IN_PROMPT = 120
 SIMILARITY = 0.75
@@ -127,6 +135,25 @@ class QueryTask:
     def ukrainian(self) -> bool:
         return self.location.casefold() in ("kyiv", "kiev", "київ", "киев")
 
+    @property
+    def country(self) -> str | None:
+        return "UA" if self.ukrainian else geo.country_of(self.location)
+
+    @property
+    def spanish(self) -> bool:
+        return self.country == "ES"
+
+    @property
+    def search_language(self) -> str | None:
+        """What SearXNG gets as ``language`` for every query of this campaign (None: the query's own)."""
+        return "es-ES" if self.spanish else None
+
+    def place_alias(self, language: str | None) -> str:
+        """The place name a query in ``language`` carries; Spanish targets use the Spanish name in ru/uk too."""
+        if self.spanish and language in ("ru", "uk", None):
+            language = "es"
+        return self.location_aliases.get(language or "es") or self.location
+
     def portals(self) -> tuple[str, ...]:
         if self.vertical == "investors":
             return ()
@@ -183,6 +210,9 @@ Rules:
 - Keep each query short (3-9 words, at most 100 characters), the way people type into a search engine.
   No quotes, no OR/AND operators, no explanations.
 - Never invent requirements the task does not state.
+- EVERY query must name the place: the city or its region (Madrid, Comunidad de Madrid), optionally with a
+  suburb. For a city in Spain write mostly Spanish, then English; a Russian or Ukrainian query must still carry
+  the Spanish place name in Latin letters ("купить участок Madrid").
 
 Example task: "участок от 1000 м² под застройку в пригороде Мадрида, покупка" ->
 {{"queries": [{{"text": "terreno urbanizable afueras Madrid 1000 m2", "language": "es"}},
@@ -223,6 +253,47 @@ def parse_queries(content: str) -> list[GeneratedQuery]:
     if not queries:
         raise ValueError("no queries")
     return queries
+
+
+_CYRILLIC = re.compile(r"[а-яёіїєґ]", re.IGNORECASE)
+
+
+def localise(queries: list[GeneratedQuery], task: QueryTask) -> list[GeneratedQuery]:
+    """Every query names the campaign's place; repaired by appending it, else dropped (see the module notes)."""
+    names = geo.place_names(task.location, task.location_aliases)
+    latin = geo.latin_place_names(task.location, task.location_aliases)
+    out: list[GeneratedQuery] = []
+    for query in queries:
+        text = clean_query(query.text)
+        if text is None:
+            continue
+        needed = latin if task.spanish and _cyrillic(query) else names
+        if not geo.mentions_place(text, needed):
+            text = clean_query(f"{text} {task.place_alias(query.language)}")
+            if text is None or not geo.mentions_place(text, needed):
+                continue
+        out.append(GeneratedQuery(text, query.language))
+    return out
+
+
+def _cyrillic(query: GeneratedQuery) -> bool:
+    return query.language in ("ru", "uk") or bool(_CYRILLIC.search(query.text))
+
+
+def local_round(candidates: list[GeneratedQuery], task: QueryTask, used: list[str], count: int) -> list[GeneratedQuery]:
+    """``count`` new localised queries; for Spain Russian/Ukrainian ones take at most a quarter of them."""
+    fresh = dedupe(localise(candidates, task), used, limit=max(len(candidates), 1))
+    if task.spanish:
+        cap = max(1, count // 4)
+        kept: list[GeneratedQuery] = []
+        for query in fresh:
+            if _cyrillic(query):
+                if cap <= 0:
+                    continue
+                cap -= 1
+            kept.append(query)
+        fresh = kept
+    return fresh[:count]
 
 
 class OpenRouterQueryGenerator:
@@ -331,7 +402,7 @@ class TemplateQueryGenerator:
     model = "template"
 
     async def generate(self, task: QueryTask, *, used: list[str], count: int) -> list[GeneratedQuery]:
-        return dedupe(list(self.candidates(task)), used, limit=count)
+        return local_round(list(self.candidates(task)), task, used, count)
 
     def candidates(self, task: QueryTask) -> list[GeneratedQuery]:
         kind = task_kind(task)
@@ -342,7 +413,7 @@ class TemplateQueryGenerator:
         portals = task.portals()
         main = languages[0] if languages else "es"
         for lang in languages:
-            city = task.location_aliases.get(lang) or task.location
+            city = task.place_alias(lang)
             for term in _KIND_TERMS[kind].get(lang, ()):
                 for deal_word in _DEAL_TERMS.get(deal, _DEAL_TERMS[None]).get(lang, ("",)):
                     out.append(GeneratedQuery(" ".join(p for p in (term, deal_word, city) if p), lang))
@@ -351,7 +422,7 @@ class TemplateQueryGenerator:
         size = _size(task.task_text)
         if size and kind != "investors":
             for lang in languages:
-                city = task.location_aliases.get(lang) or task.location
+                city = task.place_alias(lang)
                 for term in _KIND_TERMS[kind].get(lang, ())[:2]:
                     out.append(GeneratedQuery(f"{term} {size} m2 {city}", lang))
         city = task.location_aliases.get(main) or task.location
@@ -400,7 +471,7 @@ class FallbackQueryGenerator:
         kept: list[GeneratedQuery] = []
         if self.primary is not None:
             try:
-                kept = dedupe(await self.primary.generate(task, used=used, count=count), used, limit=count)
+                kept = local_round(await self.primary.generate(task, used=used, count=count), task, used, count)
             except QueryGenerationError as exc:
                 log.warning("web_search.query_generation_failed %s %s", exc.code, exc.status)
         if len(kept) < count:
