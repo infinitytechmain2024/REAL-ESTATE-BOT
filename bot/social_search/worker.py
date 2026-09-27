@@ -92,8 +92,10 @@ class SocialConfig:
 
 
 def parse_platforms(raw: str) -> tuple[str, ...]:
-    """``tiktok, instagram,linkedin`` -> ordered unique platforms; anything unknown stops startup."""
+    """``tiktok, instagram,linkedin`` -> ordered unique platforms; ``off`` -> none; anything unknown stops startup."""
     platforms: list[str] = []
+    if raw.strip().lower() in {"off", "none", "false", "0"}:
+        return ()
     for part in raw.replace(",", " ").split():
         name = part.strip().lower()
         if name not in SOCIAL_PLATFORMS:

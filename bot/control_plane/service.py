@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from bot.campaign import offers as near
 from bot.campaign.architect import InvalidGoal, plan_campaign
 from bot.campaign.models import TERMINAL_STATES
-from bot.control_plane.access import SETTINGS_BUTTON, AccessDesk, label
+from bot.control_plane.access import LOGIN_BUTTON, SETTINGS_BUTTON, AccessDesk, label
 from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
 from bot.control_plane.intake import (
     CANCEL_WORDS,
@@ -450,7 +450,7 @@ class ControlPlane:
                 text += "\n\nИли выберите режим и опишите задачу: бот уточнит детали и попросит подтвердить «Запустить»."
                 menu = mode_menu(text)
                 if role == "owner" and self.access is not None:
-                    return Reply(menu.text, (*menu.buttons, SETTINGS_BUTTON))
+                    return Reply(menu.text, (*menu.buttons, LOGIN_BUTTON, SETTINGS_BUTTON))
                 return menu
             return Reply(text)
         if command in {"role", "settings", "operators", "revoke", "auto"} and not self._can_control(message.user_id):

@@ -31,12 +31,22 @@ from bot.campaign import geo
 from bot.campaign.models import TERMINAL_STATES, Campaign
 from bot.campaign.store import CampaignStore
 
-from .extract import listing_links, looks_like_index, parse_html, post_text
+from .extract import (
+    MIN_INDEX_LINKS,
+    Link,
+    ParsedPage,
+    listing_links,
+    looks_like_index,
+    parse_html,
+    post_text,
+)
 from .fetcher import FetchError, PageFetcher
 from .models import Candidate, PageResult, QueuedUrl
 from .queries import QueryGenerator, QueryTask, localise
+from .render import Renderer, RenderError
 from .searxng import Searcher, SearchError
 from .store import BUSY, WebStore
+from .structured import Structured, facts_block, from_jsonld, structured
 from .urls import classify_url, fetchable, host_of, url_key
 
 log = logging.getLogger(__name__)
@@ -61,6 +71,7 @@ class WebSearchConfig:
     lease_seconds: int = 300
     max_post_chars: int = 8000
     page_runtime_seconds: int = 60
+    max_renders_per_campaign: int = 15
     blocked_hosts: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
@@ -70,7 +81,8 @@ class WebSearchConfig:
                 and 0 <= self.max_links_per_index <= 30 and 1 <= self.pages_per_tick <= 20
                 and 1 <= self.max_pages_per_day <= 10_000 and 1 <= self.max_queries_per_day <= 5_000
                 and 1 <= self.max_rounds <= 50 and 5 <= self.max_minutes_per_campaign <= 7 * 24 * 60
-                and 60 <= self.lease_seconds <= 3600 and 1 <= self.page_runtime_seconds <= 600):
+                and 60 <= self.lease_seconds <= 3600 and 1 <= self.page_runtime_seconds <= 600
+                and 0 <= self.max_renders_per_campaign <= 200):
             raise ValueError("unsafe web search limits")
 
 
@@ -90,12 +102,15 @@ class WebSearchWorker:
         fetcher: PageFetcher,
         generator: QueryGenerator,
         *,
+        renderer: Renderer | None = None,
         config: WebSearchConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.campaigns, self.store, self.searcher, self.fetcher, self.generator = (
             campaigns, store, searcher, fetcher, generator)
         self.config, self.now = config or WebSearchConfig(), now
+        self.renderer = renderer
+        self.renders: dict[str, int] = {}   # browser reads per campaign (this process)
         self.token = str(uuid.uuid4())
 
     async def tick(self) -> int:
@@ -238,12 +253,13 @@ class WebSearchWorker:
             budget -= 1
             pages += 1
             await self.store.set_progress(campaign.id, url.host, self._line(None, pages, f"сайт {url.host}"))
-            result, children = await self._read(url)
+            result, children = await self._read(campaign.id, url)
             await self.store.finish_fetch(ticket, result)
             if children:
                 await self.store.enqueue(campaign.id, children)
 
-    async def _read(self, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
+    async def _read(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
+        """Plain HTTP first; Scrapling reads the site's JSON-LD; the browser only when HTTP showed nothing."""
         cfg = self.config
         try:
             page = await asyncio.wait_for(self.fetcher.fetch(url.url), timeout=cfg.page_runtime_seconds)
@@ -252,15 +268,51 @@ class WebSearchWorker:
         except TimeoutError:
             return PageResult(False, url.kind, url.url, error="timeout"), []
         parsed = parse_html(page.html, page.url)
-        kind = classify_url(page.url) if url.kind == "unknown" else url.kind
-        if url.depth == 0 and (kind == "index" or (kind == "unknown" and looks_like_index(parsed, page.url))):
-            links = listing_links(parsed, page.url, limit=cfg.max_links_per_index, extra_blocked=cfg.blocked_hosts)
-            children = [Candidate(link, url_key(link), host_of(link), 1, "listing") for link in links]
-            return PageResult(True, "index", page.url, parsed.title), children
+        result, children = self._page(url, page.url, parsed, structured(page.html, page.url))
+        if not self._wants_render(campaign_id, result, children):
+            return result, children
+        self.renders[campaign_id] = self.renders.get(campaign_id, 0) + 1
+        try:
+            rendered = await asyncio.wait_for(self.renderer.render(page.url), timeout=cfg.page_runtime_seconds)
+        except (RenderError, TimeoutError) as exc:
+            log.info("web_search.render_skipped %s", getattr(exc, "code", "timeout"), extra={"campaign_id": campaign_id})
+            return result, children
+        seen = ParsedPage(rendered.title or parsed.title, parsed.description, rendered.text,
+                          tuple(Link(href, text) for href, text in rendered.links))
+        again, more = self._page(url, rendered.url, seen, from_jsonld(rendered.jsonld, rendered.url))
+        log.info("web_search.rendered", extra={"campaign_id": campaign_id, "ok": again.ok, "links": len(more)})
+        return (again, more) if again.ok and (again.kind == "listing" or more) else (result, children)
+
+    def _wants_render(self, campaign_id: str, result: PageResult, children: list[Candidate]) -> bool:
+        """Only a page the site served (HTTP 200) but drew with JavaScript: no text, or a list without links."""
+        if self.renderer is None or self.renders.get(campaign_id, 0) >= self.config.max_renders_per_campaign:
+            return False
+        return (not result.ok and result.error == "no_readable_text") or (result.kind == "index" and not children)
+
+    def _page(self, url: QueuedUrl, final_url: str, parsed: ParsedPage,
+              data: Structured) -> tuple[PageResult, list[Candidate]]:
+        cfg = self.config
+        kind = classify_url(final_url) if url.kind == "unknown" else url.kind
+        if url.depth == 0:
+            host = host_of(final_url)
+            from_json = [u for u in data.item_urls if host_of(u) == host and url_key(u) != url_key(final_url)
+                         and fetchable(u, cfg.blocked_hosts)]
+            if kind == "index" or (kind == "unknown" and (looks_like_index(parsed, final_url)
+                                                          or len(from_json) >= MIN_INDEX_LINKS)):
+                links: list[str] = []
+                for link in [*from_json, *listing_links(parsed, final_url, limit=cfg.max_links_per_index,
+                                                        extra_blocked=cfg.blocked_hosts)]:
+                    if len(links) < cfg.max_links_per_index and url_key(link) not in {url_key(x) for x in links}:
+                        links.append(link)
+                children = [Candidate(link, url_key(link), host_of(link), 1, "listing") for link in links]
+                return PageResult(True, "index", final_url, parsed.title), children
         text = post_text(parsed, limit=cfg.max_post_chars)
+        facts = data.listing_for(final_url)
+        if facts:  # the site's own figures (price, area, address) as JSON, on top of the visible text
+            text = f"{facts_block(facts)}\n{text}".strip()[:cfg.max_post_chars]
         if len(text) < MIN_POST_CHARS:
-            return PageResult(False, "listing", page.url, parsed.title, error="no_readable_text"), []
-        return PageResult(True, "listing", page.url, parsed.title, text), []
+            return PageResult(False, "listing", final_url, parsed.title, error="no_readable_text"), []
+        return PageResult(True, "listing", final_url, parsed.title, text), []
 
     # -- bookkeeping --
 

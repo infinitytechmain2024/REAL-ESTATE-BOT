@@ -548,8 +548,8 @@ async def test_only_the_owner_sees_commands_on_start() -> None:
 @pytest.mark.asyncio
 async def test_owner_settings_switch_roles_with_buttons() -> None:
     control, _, outbox = plane()
-    assert "set:list" in callbacks(await say(control, OWNER, "/start"))
-    assert "set:list" not in callbacks(await say(control, OPERATOR, "/start"))
+    assert {"set:list", "login:list"} <= set(callbacks(await say(control, OWNER, "/start")))
+    assert not {"set:list", "login:list"} & set(callbacks(await say(control, OPERATOR, "/start")))
     listing = await press(control, OWNER, "set:list")
     assert f"set:user:{HELPER}" in callbacks(listing)
     card = await press(control, OWNER, f"set:user:{HELPER}")

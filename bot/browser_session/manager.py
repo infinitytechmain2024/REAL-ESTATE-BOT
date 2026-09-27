@@ -30,6 +30,7 @@ FEED_SCROLL_PAUSE_MS = 1_500
 # pause with jitter, so a page is read like a person skimming it.
 SOCIAL_PLATFORMS = frozenset({"tiktok", "instagram", "linkedin"})
 SOCIAL_WAIT_MS = 8_000
+WEBSITE_SETTLE_MS = 10_000
 SOCIAL_MAX_SCROLLS = 5
 SOCIAL_SCROLL_PAUSE_MS = (1_200, 2_600)
 SOCIAL_ITEM_SELECTORS = {
@@ -310,8 +311,12 @@ class BrowserSessionManager:
                 await self._settle_feed(page)
             elif platform in SOCIAL_PLATFORMS and scrolls:  # a search page; a post page or the login window needs no wait
                 await self._settle_social(page, platform, scrolls)
+            elif platform == "website":
+                await self._settle_website(page, timeout_ms)
             self._touch(handle.profile_id)
             result = await self._extract(page)
+            if platform == "website":  # a listing site drawn by JavaScript: its links and JSON-LD (bot/web_search)
+                result.update(await page.evaluate(_WEBSITE_JS))
             if platform in SOCIAL_PLATFORMS:
                 result["items"] = await page.evaluate(_SOCIAL_ITEMS_JS, platform)
                 result["meta"] = await page.evaluate(_SOCIAL_META_JS)
@@ -331,6 +336,12 @@ class BrowserSessionManager:
         if platform not in LOGIN_COOKIES or not hasattr(browser, "cookies"):
             return None
         return signed_in(list(await browser.cookies()), platform)
+
+    @staticmethod
+    async def _settle_website(page: Any, timeout_ms: int) -> None:
+        """Give a JavaScript-drawn page a moment to finish loading (bounded; never fails the snapshot)."""
+        with suppress(Exception):  # pages that never go idle are read as they are
+            await page.wait_for_load_state("networkidle", timeout=min(WEBSITE_SETTLE_MS, timeout_ms))
 
     @staticmethod
     async def _settle_social(page: Any, platform: str, scrolls: int) -> None:
@@ -575,3 +586,13 @@ _SOCIAL_META_JS = """() => {
   return {og_title: meta('og:title'), og_description: meta('og:description'), og_url: meta('og:url'),
           description: meta('description'), time: time ? time.dateTime : null};
 }"""
+
+
+# A public website read by bot/web_search: its links and its JSON-LD blocks, bounded.
+_WEBSITE_JS = """() => ({
+  links: Array.from(document.querySelectorAll('a[href]')).slice(0, 400)
+    .map(a => ({url: a.href, text: (a.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 200)}))
+    .filter(item => /^https?:/.test(item.url)),
+  jsonld: Array.from(document.querySelectorAll('script[type="application/ld+json"]')).slice(0, 20)
+    .map(node => (node.textContent || '').slice(0, 200000)),
+})"""

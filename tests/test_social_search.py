@@ -322,7 +322,7 @@ RESULTS = {"https://www.tiktok.com/": TIKTOK_SEARCH}
 
 
 async def test_social_search_is_off_by_default() -> None:
-    assert SocialConfig().platforms == () and parse_platforms("") == ()
+    assert SocialConfig().platforms == () and parse_platforms("") == () == parse_platforms("off")
     assert parse_platforms(" TikTok, linkedin tiktok") == ("tiktok", "linkedin")
     with pytest.raises(ValueError):
         parse_platforms("tiktok,myspace")

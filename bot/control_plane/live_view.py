@@ -326,7 +326,8 @@ class LiveViewCoordinator:
             for platform, name in PLATFORM_NAMES.items()
         )
         return Reply("🔐 Вход в соцсети\n\nВыберите сеть: я открою окно браузера, вы войдёте в аккаунт сами "
-                     "и нажмёте «Готово, я вошёл». Логин и пароль бот не видит и не хранит.", buttons)
+                     "и нажмёте «Готово, я вошёл». Логин и пароль бот не видит и не хранит.\n\n"
+                     "Instagram, TikTok и LinkedIn: поиск по задаче идёт в тех сетях, где выполнен вход.", buttons)
 
     async def tick(self) -> None:
         """Expire lapsed sessions, then ask operators about profiles that need a human."""
