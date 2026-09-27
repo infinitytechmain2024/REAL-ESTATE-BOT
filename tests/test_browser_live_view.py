@@ -40,6 +40,12 @@ class FakeManager:
     def touch(self, handle: str) -> None:
         self.touches += 1
 
+    async def logged_in(self, handle: str) -> bool | None:
+        self.events.append(("logged_in", handle))
+        return self.signed_in
+
+    signed_in: bool | None = False
+
     async def release(self, handle: str) -> None:
         self.events.append(("release", handle))
         self.owned.discard(handle.split(":", 1)[1])
@@ -167,3 +173,30 @@ async def test_a_viewer_that_does_not_start_is_an_error_and_frees_the_profile() 
         await live.start(REQUEST, "https://www.facebook.com/", 5)
     assert viewers == ["start", "stop:['viewer']"]
     assert manager.events[-1] == ("release", "handle:profile-1") and live.status() == {}
+
+
+@pytest.mark.asyncio
+async def test_the_login_check_reads_only_the_open_window_and_answers_a_boolean() -> None:
+    manager, viewers = FakeManager(), []
+    live = controller(manager, viewers)
+    app = create_app(manager, "t" * 32, live)  # type: ignore[arg-type]
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    auth = {"Authorization": "Bearer " + "t" * 32}
+    body = {"profile_id": "profile-9", "profile_name": "linkedin-main", "platform": "linkedin",
+            "url": "https://www.linkedin.com/login", "minutes": 5}
+    try:
+        # No window open for that profile: 409, nothing checked.
+        assert (await client.post("/v1/live/check", json={"profile_id": "profile-9"}, headers=auth)).status == 409
+        assert (await client.post("/v1/live", json=body, headers=auth)).status == 200
+        assert (await client.post("/v1/live/check", json={"profile_id": "profile-9"})).status == 401
+        checked = await client.post("/v1/live/check", json={"profile_id": "profile-9"}, headers=auth)
+        assert checked.status == 200 and await checked.json() == {"logged_in": False}
+        manager.signed_in = True
+        checked = await client.post("/v1/live/check", json={"profile_id": "profile-9"}, headers=auth)
+        assert await checked.json() == {"logged_in": True}
+        assert (await client.post("/v1/live/check", json={"profile_id": "other"}, headers=auth)).status == 409
+        assert ("logged_in", "handle:profile-9") in manager.events
+    finally:
+        await live.stop()
+        await client.close()

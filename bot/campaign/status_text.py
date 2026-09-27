@@ -15,16 +15,21 @@ ACCEPTED = "Принято. Начинаю поиск."
 SEARCHING = "Ищу…"
 FACEBOOK = "Ищу в Facebook…"
 WEB = "Ищу в интернете…"
+TIKTOK = "Ищу в TikTok…"
+INSTAGRAM = "Ищу в Instagram…"
+LINKEDIN = "Ищу в LinkedIn…"
+SOCIAL: dict[str, str] = {"tiktok": TIKTOK, "instagram": INSTAGRAM, "linkedin": LINKEDIN}
 CHECKING = "Нашёл вариант, проверяю…"
 DONE = "Поиск завершён."
 NOTHING = "Пока ничего подходящего не нашёл."
 
-FIXED_STATUSES: frozenset[str] = frozenset({ACCEPTED, SEARCHING, FACEBOOK, WEB, CHECKING, DONE, NOTHING})
+FIXED_STATUSES: frozenset[str] = frozenset({ACCEPTED, SEARCHING, FACEBOOK, WEB, TIKTOK, INSTAGRAM, LINKEDIN,
+                                            CHECKING, DONE, NOTHING})
 _SITE_PREFIX, _SITE_SUFFIX = "Ищу на сайте ", "…"
 _SITE_NAME = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9.\-]{0,39}$")  # a host or brand, no spaces
 
 Stage = Literal[
-    "accepted", "planning", "discovery", "facebook", "web", "site", "checking",
+    "accepted", "planning", "discovery", "facebook", "web", "site", "social", "checking",
     "verification", "waiting", "error", "finished",
 ]
 
@@ -42,8 +47,9 @@ def site_status(name: str | None) -> str:
     return f"{_SITE_PREFIX}{name}{_SITE_SUFFIX}" if name and _SITE_NAME.match(name) else WEB
 
 
-def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebook_started: bool = False) -> str:
-    """Map an internal stage to the user-safe label.
+def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebook_started: bool = False,
+                platform: str | None = None) -> str:
+    """Map an internal stage to the user-safe label (``social``: «Ищу в TikTok…» for ``platform``).
 
     ``verification``/``waiting``/``error`` never say why: they keep the nearest
     working label (Facebook once the Facebook phase started, otherwise «Ищу…»).
@@ -58,6 +64,8 @@ def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebo
         return WEB
     if stage == "site":
         return site_status(site)
+    if stage == "social":
+        return SOCIAL.get(platform or "", SEARCHING)
     if stage == "checking":
         return CHECKING
     if stage == "finished":
@@ -65,12 +73,15 @@ def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebo
     return FACEBOOK if facebook_started else SEARCHING
 
 
-def campaign_label(state: str, *, found: int = 0, checking: bool = False) -> str:
-    """The user-safe label for a campaign in ``state`` (``found``: findings already sent)."""
+def campaign_label(state: str, *, found: int = 0, checking: bool = False, social: str | None = None) -> str:
+    """The user-safe label for a campaign in ``state`` (``found``: findings already sent;
+    ``social``: the network searched right now while Facebook is idle)."""
     if state in _TERMINAL_STATES:
         return user_status("finished", found=found)
     if checking:
         return CHECKING
+    if social in SOCIAL:
+        return user_status("social", platform=social)
     stage = _ACTIVE_STATES.get(state, "waiting")
     return user_status(stage, facebook_started=state in ("running", "paused_verification"))  # type: ignore[arg-type]
 

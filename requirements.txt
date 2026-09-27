@@ -9,7 +9,8 @@ aiohttp==3.13.2
 pydantic==2.12.4
 pydantic-settings==2.13.1
 
-httpx[http2]==0.28.1
+# socks: WEB_SEARCH_PROXY_URL may be a socks5:// proxy (bot/web_search/fetcher.py).
+httpx[http2,socks]==0.28.1
 
 # HTML -> clean text extraction for the pages we fetch from search results.
 # trafilatura brings its own lxml-based fallbacks; SearXNG already pins lxml.

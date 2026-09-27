@@ -29,7 +29,8 @@ from tests.test_orchestra_dispatcher import FakeStore, claimed
 
 USER, OWNER, CHAT = 7, 99, -100
 ALLOWED = {"Принято. Начинаю поиск.", "Ищу…", "Ищу в Facebook…", "Ищу в интернете…", "Нашёл вариант, проверяю…",
-           "Поиск завершён.", "Пока ничего подходящего не нашёл."}
+           "Поиск завершён.", "Пока ничего подходящего не нашёл.",
+           "Ищу в TikTok…", "Ищу в Instagram…", "Ищу в LinkedIn…"}
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", re.I)
 FORBIDDEN = ("window", "окно", "20", "batch", "campaign", "Кампания", "кампания", "orchestra", "Orchestra",
              "/campaign", "групп", "Queue", "Пауза", "verification", "🎯")
@@ -40,7 +41,7 @@ def assert_user_safe(text: str) -> None:
     assert not UUID.search(text), text
     for word in FORBIDDEN:
         assert word not in text, (word, text)
-    assert [w for w in LATIN_WORD.findall(text) if w != "Facebook"] == [], text
+    assert [w for w in LATIN_WORD.findall(text) if w not in {"Facebook", "TikTok", "Instagram", "LinkedIn"}] == [], text
 
 
 class FlakyMessenger(FakeMessenger):
@@ -253,3 +254,48 @@ async def test_campaign_notices_to_the_owner_stay_technical() -> None:
     (campaign,) = campaigns.campaigns.values()
     assert notices[0] == (10, "Orchestra: processing campaign request cmd-1.")
     assert notices[-1] == (10, f"Кампания {campaign.id} запланирована: {campaign.plan.goal}")
+
+
+# --- social networks (bot.social_search) -----------------------------------------------------
+
+
+def test_social_labels_are_allowed_and_carry_no_technical_text() -> None:
+    from bot.campaign.status_text import INSTAGRAM, LINKEDIN, TIKTOK
+
+    assert (TIKTOK, INSTAGRAM, LINKEDIN) == ("Ищу в TikTok…", "Ищу в Instagram…", "Ищу в LinkedIn…")
+    for platform, label in (("tiktok", TIKTOK), ("instagram", INSTAGRAM), ("linkedin", LINKEDIN)):
+        assert user_status("social", platform=platform) == label
+        assert campaign_label("running", social=platform) == label and is_user_status(label)
+        assert_user_safe(label)
+        # Checking a finding and the end of the search win over the network label.
+        assert campaign_label("running", social=platform, checking=True) == CHECKING
+        assert campaign_label("completed", social=platform, found=1) == DONE
+    assert user_status("social", platform="myspace") == SEARCHING
+    assert campaign_label("running", social="myspace") == FACEBOOK
+    assert not is_user_status("Ищу в TikTok · #terrenomadrid…")
+
+
+async def test_a_user_sees_the_network_while_facebook_is_idle_and_owners_see_the_query_and_notes() -> None:
+    from bot.campaign.runs import SocialActivity
+
+    campaigns, store, messenger, _clock, runner, plan = build()
+    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
+    await runner.tick()  # discovery, first window waits for facebook-runner
+    store.social[cid] = SocialActivity(searching="tiktok", query="terrenomadrid", pending=True,
+                                       notes=("instagram: нет готового профиля — войдите через /login instagram",))
+    await runner.tick()
+    assert timeline(messenger)[-1] == "Ищу в Facebook…"  # Facebook reads a window: its label stays
+    store.finish_batch(next(b for _, b, s in store.windows[cid] if s == "active"))
+    await runner.tick()  # the window closed; Facebook idles through the cooldown
+    assert timeline(messenger)[-1] == "Ищу в TikTok…"
+    for text in statuses(messenger):
+        assert text in ALLOWED, text
+        assert "профил" not in text and "terrenomadrid" not in text
+
+    owner_campaigns, owner_store, owner_messenger, _, owner_runner, owner_plan = build()
+    oid = await owner_campaigns.create(owner_plan, chat_id=CHAT, requested_by=OWNER, source_text=GOAL, actor="t")
+    owner_store.social[oid] = SocialActivity(searching="linkedin", query="business angel Madrid", pending=True,
+                                             notes=("tiktok: нет готового профиля — войдите через /login tiktok",))
+    await owner_runner.tick()
+    shown = timeline(owner_messenger)[-1]
+    assert "Соцсети: linkedin · «business angel Madrid»" in shown and "/login tiktok" in shown

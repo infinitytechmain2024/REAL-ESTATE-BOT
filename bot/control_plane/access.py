@@ -52,6 +52,8 @@ ROLE_CHANGED = {
     "operator": "Ваш доступ изменён: теперь вы оператор. Отправьте /help, чтобы увидеть команды.",
 }
 SETTINGS_BUTTON = Button("⚙️ Настройки", callback_data="set:list")
+# Opens the per-network login panel (bot/control_plane/live_view.py, ``login:list``).
+LOGIN_BUTTON = Button("🔐 Вход в соцсети", callback_data="login:list")
 
 
 # What the person who asked hears (always Russian, never technical); owners keep the English details.
@@ -231,12 +233,12 @@ class AccessDesk:
     async def _settings_list(self) -> Reply:
         rows = await self.store.operators()
         if not rows:
-            return Reply("⚙️ Настройки\n\nОдобренных аккаунтов пока нет.")
+            return Reply("⚙️ Настройки\n\nОдобренных аккаунтов пока нет.", (LOGIN_BUTTON,))
         buttons = tuple(
             Button(f"{name or username or uid} — {ROLE_RU.get(role, role)}", callback_data=f"set:user:{uid}")
             for uid, name, username, role in rows
         )
-        return Reply("⚙️ Настройки\n\nВыберите аккаунт, чтобы сменить его роль или удалить доступ.", buttons)
+        return Reply("⚙️ Настройки\n\nВыберите аккаунт, чтобы сменить его роль или удалить доступ.", (*buttons, LOGIN_BUTTON))
 
     async def _settings_card(self, user_id: int) -> Reply:
         person = await self._person(user_id)

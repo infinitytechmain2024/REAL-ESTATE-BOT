@@ -20,8 +20,8 @@ minutes="${4:-20}"
 env_file="${ENV_FILE:-.env}"
 local_port=6090  # on the operator's own computer
 
-case "$platform" in facebook|instagram|tiktok|website) ;; *)
-  echo "platform must be facebook, instagram, tiktok, or website" >&2; exit 2 ;;
+case "$platform" in facebook|instagram|tiktok|linkedin|website) ;; *)
+  echo "platform must be facebook, instagram, tiktok, linkedin, or website" >&2; exit 2 ;;
 esac
 # Interpolated into SQL below, so only a safe identifier is accepted.
 [[ "$profile_name" =~ ^[a-z0-9_-]{1,64}$ ]] || {

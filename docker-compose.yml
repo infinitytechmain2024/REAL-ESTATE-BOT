@@ -367,6 +367,9 @@ services:
     # Drives /campaign goals: discovery, then windows of at most 20 groups as
     # ordinary Facebook batches that facebook-runner executes (same quotas and
     # breakers as /run), live status and findings in the campaign's chat.
+    # In parallel, its website stage (bot/web_search) searches the web for
+    # every campaign through the internal `searxng` service and reads the
+    # public listing pages it finds (docs/WEB_SEARCH.md).
     build:
       context: .
       dockerfile: docker/campaign-runner.Dockerfile
@@ -375,6 +378,8 @@ services:
       postgres:
         condition: service_healthy
       browser:
+        condition: service_started
+      searxng:
         condition: service_started
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
@@ -395,11 +400,88 @@ services:
       SAFETY_BREAKER_FAILURES: ${SAFETY_BREAKER_FAILURES:-3}
       SAFETY_BREAKER_CHALLENGES: ${SAFETY_BREAKER_CHALLENGES:-2}
       SAFETY_BREAKER_WINDOW_HOURS: ${SAFETY_BREAKER_WINDOW_HOURS:-6}
-    # `backend` reaches PostgreSQL and the browser; `egress` sends Telegram messages.
+      # Website stage (bot/web_search/settings.py; defaults match it).
+      WEB_SEARCH_ENABLED: ${WEB_SEARCH_ENABLED:-true}
+      WEB_SEARCH_SEARXNG_URL: http://searxng:8080
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_WEB_QUERY_MODEL: ${OPENROUTER_WEB_QUERY_MODEL:-openai/gpt-4o-mini}
+      WEB_SEARCH_QUERIES_PER_ROUND: ${WEB_SEARCH_QUERIES_PER_ROUND:-12}
+      WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN: ${WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN:-40}
+      WEB_SEARCH_RESULTS_PER_QUERY: ${WEB_SEARCH_RESULTS_PER_QUERY:-10}
+      WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN: ${WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN:-60}
+      WEB_SEARCH_MAX_PAGES_PER_HOST: ${WEB_SEARCH_MAX_PAGES_PER_HOST:-12}
+      WEB_SEARCH_MAX_LINKS_PER_INDEX: ${WEB_SEARCH_MAX_LINKS_PER_INDEX:-10}
+      WEB_SEARCH_MAX_PAGES_PER_DAY: ${WEB_SEARCH_MAX_PAGES_PER_DAY:-400}
+      WEB_SEARCH_MAX_QUERIES_PER_DAY: ${WEB_SEARCH_MAX_QUERIES_PER_DAY:-300}
+      WEB_SEARCH_MAX_MINUTES_PER_CAMPAIGN: ${WEB_SEARCH_MAX_MINUTES_PER_CAMPAIGN:-240}
+      WEB_SEARCH_HOST_INTERVAL_SECONDS: ${WEB_SEARCH_HOST_INTERVAL_SECONDS:-5}
+      WEB_SEARCH_BLOCKED_HOSTS: ${WEB_SEARCH_BLOCKED_HOSTS:-}
+      WEB_SEARCH_POLL_SECONDS: ${WEB_SEARCH_POLL_SECONDS:-15}
+      # Optional outbound proxy/VPN for page fetches (and SearXNG, below).
+      WEB_SEARCH_PROXY_URL: ${WEB_SEARCH_PROXY_URL:-}
+      # Social network search (bot/social_search): off while SOCIAL_SEARCH_PLATFORMS is empty.
+      SOCIAL_SEARCH_PLATFORMS: ${SOCIAL_SEARCH_PLATFORMS:-}
+      SOCIAL_SEARCH_QUERIES_PER_DAY: ${SOCIAL_SEARCH_QUERIES_PER_DAY:-20}
+      SOCIAL_SEARCH_ITEMS_PER_QUERY: ${SOCIAL_SEARCH_ITEMS_PER_QUERY:-12}
+      SOCIAL_SEARCH_QUERIES_PER_ROUND: ${SOCIAL_SEARCH_QUERIES_PER_ROUND:-4}
+      SOCIAL_SEARCH_MAX_ROUNDS: ${SOCIAL_SEARCH_MAX_ROUNDS:-3}
+      SOCIAL_SEARCH_PAUSE_SECONDS: ${SOCIAL_SEARCH_PAUSE_SECONDS:-120}
+      SOCIAL_SEARCH_JITTER_SECONDS: ${SOCIAL_SEARCH_JITTER_SECONDS:-90}
+      SOCIAL_SEARCH_OPEN_POSTS_PER_QUERY: ${SOCIAL_SEARCH_OPEN_POSTS_PER_QUERY:-4}
+      SOCIAL_SEARCH_SCROLLS: ${SOCIAL_SEARCH_SCROLLS:-2}
+      SOCIAL_SEARCH_QUERY_REUSE_DAYS: ${SOCIAL_SEARCH_QUERY_REUSE_DAYS:-7}
+      SOCIAL_SEARCH_RATE_LIMIT_COOLDOWN_HOURS: ${SOCIAL_SEARCH_RATE_LIMIT_COOLDOWN_HOURS:-6}
+      SOCIAL_SEARCH_POLL_SECONDS: ${SOCIAL_SEARCH_POLL_SECONDS:-15}
+      CAMPAIGN_SOCIAL_GRACE_SECONDS: ${CAMPAIGN_SOCIAL_GRACE_SECONDS:-1800}
+      OPENROUTER_SOCIAL_MODEL: ${OPENROUTER_SOCIAL_MODEL:-openai/gpt-4o-mini}
+    # `backend` reaches PostgreSQL, the browser and SearXNG; `egress` sends
+    # Telegram messages, calls OpenRouter and reads public web pages.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
     read_only: true
     tmpfs: [/tmp]
+
+  searxng:
+    # Metasearch for the campaigns' website stage: the official image with
+    # docker/searxng/settings.yml (JSON output only, limiter off). No host
+    # port: only services on the private backend network reach it; it joins
+    # egress to query the search engines. SEARXNG_SECRET may stay empty (a
+    # random one is made at start); WEB_SEARCH_PROXY_URL, when set, routes its
+    # outgoing requests too.
+    image: searxng/searxng:${SEARXNG_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/bot-searxng/entrypoint.sh"]
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-}
+      SEARXNG_LIMITER: "false"
+      SEARXNG_PUBLIC_INSTANCE: "false"
+      WEB_SEARCH_PROXY_URL: ${WEB_SEARCH_PROXY_URL:-}
+    volumes:
+      - ./docker/searxng:/opt/bot-searxng:ro
+    networks: [backend, egress]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+
+  # Optional VPN for the web stage (docs/WEB_SEARCH.md): uncomment, fill the
+  # WireGuard values in .env, then set WEB_SEARCH_PROXY_URL=http://gluetun:8888.
+  # gluetun:
+  #   image: qmcgaw/gluetun:latest
+  #   restart: unless-stopped
+  #   cap_add: [NET_ADMIN]
+  #   devices: ["/dev/net/tun:/dev/net/tun"]
+  #   environment:
+  #     VPN_SERVICE_PROVIDER: ${GLUETUN_VPN_PROVIDER:-custom}
+  #     VPN_TYPE: wireguard
+  #     WIREGUARD_PRIVATE_KEY: ${GLUETUN_WIREGUARD_PRIVATE_KEY:-}
+  #     WIREGUARD_ADDRESSES: ${GLUETUN_WIREGUARD_ADDRESSES:-}
+  #     WIREGUARD_PUBLIC_KEY: ${GLUETUN_WIREGUARD_PUBLIC_KEY:-}
+  #     WIREGUARD_ENDPOINT_IP: ${GLUETUN_WIREGUARD_ENDPOINT_IP:-}
+  #     WIREGUARD_ENDPOINT_PORT: ${GLUETUN_WIREGUARD_ENDPOINT_PORT:-51820}
+  #     HTTPPROXY: "on"
+  #     HTTPPROXY_LISTENING_ADDRESS: ":8888"
+  #   # `backend`: the campaign-runner and SearXNG reach its proxy; `egress`: the tunnel.
+  #   networks: [backend, egress]
 
   verification:
     # Human-in-the-loop verification (bot/verification). Operators open it as

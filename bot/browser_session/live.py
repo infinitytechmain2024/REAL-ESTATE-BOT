@@ -109,6 +109,16 @@ class LiveViewController:
             log.info("browser_session.live_view_started", extra={"profile_id": request.profile_id, "minutes": minutes})
             return {"profile_id": request.profile_id, "password": password, "expires_at": view.expires_at}
 
+    async def logged_in(self, profile_id: str) -> bool | None:
+        """Whether the open window's profile holds a live login cookie (None: no rule for its platform)."""
+        view = self._current
+        if view is None or view.profile_id != profile_id:
+            raise LiveViewError("no live window is open for this profile")
+        try:
+            return await self.manager.logged_in(view.handle)
+        except PermissionError as exc:
+            raise LiveViewError("the live window lost its browser session") from exc
+
     async def stop(self, profile_id: str | None = None) -> bool:
         async with self._lock:
             view = self._current

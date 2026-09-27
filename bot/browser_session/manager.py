@@ -25,6 +25,44 @@ MAX_NAVIGATION_MS = 60_000
 FEED_WAIT_MS = 10_000
 FEED_SCROLLS = 3
 FEED_SCROLL_PAUSE_MS = 1_500
+# Social search result pages (TikTok, Instagram, LinkedIn): a bounded wait for
+# the first result card and a bounded number of scrolls, each followed by a
+# pause with jitter, so a page is read like a person skimming it.
+SOCIAL_PLATFORMS = frozenset({"tiktok", "instagram", "linkedin"})
+SOCIAL_WAIT_MS = 8_000
+SOCIAL_MAX_SCROLLS = 5
+SOCIAL_SCROLL_PAUSE_MS = (1_200, 2_600)
+SOCIAL_ITEM_SELECTORS = {
+    "tiktok": 'a[href*="/video/"], a[href*="/photo/"]',
+    "instagram": 'a[href*="/p/"], a[href*="/reel/"]',
+    "linkedin": '[data-urn*="urn:li:activity:"], [data-id*="urn:li:activity:"], a[href*="/in/"], a[href*="/company/"]',
+}
+# The cookie that exists only while an account is signed in, per platform.
+# Only its presence is reported, never its value.
+LOGIN_COOKIES: dict[str, tuple[str, frozenset[str]]] = {
+    "facebook": ("facebook.com", frozenset({"c_user"})),
+    "instagram": ("instagram.com", frozenset({"sessionid"})),
+    "tiktok": ("tiktok.com", frozenset({"sessionid", "sid_tt"})),
+    "linkedin": ("linkedin.com", frozenset({"li_at"})),
+}
+
+
+def signed_in(cookies: list[dict[str, Any]], platform: str, *, now: float | None = None) -> bool | None:
+    """Whether ``cookies`` hold a live login cookie of ``platform``; None for a platform without a rule."""
+    rule = LOGIN_COOKIES.get(platform)
+    if rule is None:
+        return None
+    host, names = rule
+    moment = time.time() if now is None else now
+    for cookie in cookies:
+        domain = str(cookie.get("domain") or "").lstrip(".").lower()
+        if not (domain == host or domain.endswith("." + host)) or cookie.get("name") not in names:
+            continue
+        expires = cookie.get("expires")
+        if not cookie.get("value") or (isinstance(expires, int | float) and 0 < expires <= moment):
+            continue
+        return True
+    return False
 
 
 
@@ -220,7 +258,7 @@ class BrowserSessionManager:
         os.chmod(image, 0o600)
         return image
 
-    async def snapshot(self, handle: SessionHandle, url: str, *, timeout_ms: int = 30_000) -> dict[str, Any]:
+    async def snapshot(self, handle: SessionHandle, url: str, *, timeout_ms: int = 30_000, scrolls: int = 0) -> dict[str, Any]:
         """Return a bounded DOM snapshot through the owner of the leased browser.
 
         This deliberately exposes no arbitrary JavaScript, CDP endpoint, cookies,
@@ -237,6 +275,7 @@ class BrowserSessionManager:
             "facebook": {"facebook.com", "www.facebook.com", "m.facebook.com"},
             "instagram": {"instagram.com", "www.instagram.com"},
             "tiktok": {"tiktok.com", "www.tiktok.com", "m.tiktok.com"},
+            "linkedin": {"linkedin.com", "www.linkedin.com"},
         }
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("snapshot URL must be HTTPS with a hostname")
@@ -259,6 +298,8 @@ class BrowserSessionManager:
             raise ValueError("snapshot profile platform is unsupported")
         if not 1_000 <= timeout_ms <= MAX_NAVIGATION_MS:
             raise ValueError(f"timeout_ms must be between 1000 and {MAX_NAVIGATION_MS}")
+        if not 0 <= scrolls <= SOCIAL_MAX_SCROLLS:
+            raise ValueError(f"scrolls must be between 0 and {SOCIAL_MAX_SCROLLS}")
         self._touch(handle.profile_id)
         async with self._page_locks[handle.profile_id]:
             browser = owned[2]
@@ -267,8 +308,44 @@ class BrowserSessionManager:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             if platform == "facebook":
                 await self._settle_feed(page)
+            elif platform in SOCIAL_PLATFORMS and scrolls:  # a search page; a post page or the login window needs no wait
+                await self._settle_social(page, platform, scrolls)
             self._touch(handle.profile_id)
-            return await self._extract(page)
+            result = await self._extract(page)
+            if platform in SOCIAL_PLATFORMS:
+                result["items"] = await page.evaluate(_SOCIAL_ITEMS_JS, platform)
+                result["meta"] = await page.evaluate(_SOCIAL_META_JS)
+                result["logged_in"] = await self._signed_in(browser, platform)
+            return result
+
+    async def logged_in(self, handle: SessionHandle) -> bool | None:
+        """Whether the leased profile holds a live login for its platform (cookie presence only)."""
+        owned = self._sessions.get(handle.profile_id)
+        if not owned or owned[0].token != handle.token:
+            raise PermissionError("session token does not own this profile")
+        self._touch(handle.profile_id)
+        return await self._signed_in(owned[2], self._platforms.get(handle.profile_id, ""))
+
+    @staticmethod
+    async def _signed_in(browser: Any, platform: str) -> bool | None:
+        if platform not in LOGIN_COOKIES or not hasattr(browser, "cookies"):
+            return None
+        return signed_in(list(await browser.cookies()), platform)
+
+    @staticmethod
+    async def _settle_social(page: Any, platform: str, scrolls: int) -> None:
+        """A bounded wait for the first result, then ``scrolls`` scrolls with jittered pauses."""
+        import random
+
+        try:
+            await page.wait_for_selector(SOCIAL_ITEM_SELECTORS[platform], timeout=SOCIAL_WAIT_MS)
+        except Exception as exc:
+            if type(exc).__name__ != "TimeoutError":
+                raise
+            return  # no results, a login wall or a challenge: the caller classifies the page
+        for _ in range(scrolls):
+            await page.mouse.wheel(0, random.randint(1_400, 2_400))
+            await page.wait_for_timeout(random.randint(*SOCIAL_SCROLL_PAUSE_MS))
 
     @staticmethod
     async def _settle_feed(page: Any) -> None:
@@ -435,3 +512,66 @@ class BrowserSessionManager:
         playwright = await async_playwright().start()
         context = await playwright.chromium.launch_persistent_context(str(profile_dir), **LAUNCH_OPTIONS)
         return _ManagedContext(context, playwright)
+
+
+# Raw result cards of a social search page. Python (bot.social_search.adapters)
+# validates and normalises every URL; this only collects candidates: at most
+# 40, each with its card text, image alt text, author line and time.
+_SOCIAL_ITEMS_JS = """(platform) => (() => {
+  const squash = (value, limit) => (value || '').replace(/\\s+/g, ' ').trim().slice(0, limit);
+  const bare = (href) => (href || '').split('#')[0].split('?')[0];
+  const out = [];
+  const seen = new Set();
+  const cardOf = (el, selector) => {
+    let node = el, best = el;
+    for (let depth = 0; depth < 8 && node.parentElement; depth++) {
+      node = node.parentElement;
+      const keys = new Set(Array.from(node.querySelectorAll(selector)).map(a => bare(a.href)));
+      if (keys.size > 1) break;
+      best = node;
+      if (node.matches('li, article, [role="listitem"]')) break;
+    }
+    return best;
+  };
+  const push = (kind, url, card, author, when) => {
+    if (!url || seen.has(url) || out.length >= 40) return;
+    seen.add(url);
+    const img = card.querySelector ? card.querySelector('img[alt]') : null;
+    const time = card.querySelector ? card.querySelector('time') : null;
+    out.push({
+      kind, url,
+      text: squash(card.innerText, 3000),
+      alt: squash(img ? img.alt : '', 1000),
+      author: squash(author, 200),
+      time: when || (time ? (time.dateTime || squash(time.innerText, 60)) : null),
+    });
+  };
+  const anchors = (selector, kind) => {
+    for (const a of document.querySelectorAll(selector)) push(kind, bare(a.href), cardOf(a, selector), '', null);
+  };
+  if (platform === 'tiktok') anchors('a[href*="/video/"], a[href*="/photo/"]', 'post');
+  if (platform === 'instagram') anchors('a[href*="/p/"], a[href*="/reel/"]', 'post');
+  if (platform === 'linkedin') {
+    for (const el of document.querySelectorAll('[data-urn*="urn:li:activity:"], [data-id*="urn:li:activity:"]')) {
+      const urn = el.getAttribute('data-urn') || el.getAttribute('data-id') || '';
+      const actor = el.querySelector('.update-components-actor__title, .update-components-actor__name');
+      const sub = el.querySelector('.update-components-actor__sub-description');
+      push('post', urn, el, actor ? actor.innerText : '', sub ? squash(sub.innerText, 60) : null);
+    }
+    anchors('a[href*="/in/"]', 'person');
+    anchors('a[href*="/company/"]', 'company');
+  }
+  return out;
+})()"""
+
+# Open Graph fields of a single post page (Instagram and TikTok put the author,
+# the date and the caption there) and the first <time>.
+_SOCIAL_META_JS = """() => {
+  const meta = (key) => {
+    const node = document.querySelector(`meta[property="${key}"], meta[name="${key}"]`);
+    return node ? (node.getAttribute('content') || '').slice(0, 3000) : '';
+  };
+  const time = document.querySelector('time[datetime]');
+  return {og_title: meta('og:title'), og_description: meta('og:description'), og_url: meta('og:url'),
+          description: meta('description'), time: time ? time.dateTime : null};
+}"""

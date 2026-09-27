@@ -37,6 +37,37 @@ class CampaignRunnerSettings(BaseSettings):
     breaker_challenges: int = Field(default=2, ge=1, le=20, validation_alias="SAFETY_BREAKER_CHALLENGES")
     breaker_window_hours: int = Field(default=6, ge=1, le=72, validation_alias="SAFETY_BREAKER_WINDOW_HOURS")
 
+    # Social network search (bot/social_search): off unless platforms are listed.
+    social_platforms_raw: str = Field(default="", validation_alias="SOCIAL_SEARCH_PLATFORMS")
+    social_queries_per_day: int = Field(default=20, ge=1, le=200, validation_alias="SOCIAL_SEARCH_QUERIES_PER_DAY")
+    social_items_per_query: int = Field(default=12, ge=1, le=30, validation_alias="SOCIAL_SEARCH_ITEMS_PER_QUERY")
+    social_queries_per_round: int = Field(default=4, ge=1, le=10, validation_alias="SOCIAL_SEARCH_QUERIES_PER_ROUND")
+    social_max_rounds: int = Field(default=3, ge=1, le=20, validation_alias="SOCIAL_SEARCH_MAX_ROUNDS")
+    social_pause_seconds: int = Field(default=120, ge=20, le=3600, validation_alias="SOCIAL_SEARCH_PAUSE_SECONDS")
+    social_jitter_seconds: int = Field(default=90, ge=0, le=3600, validation_alias="SOCIAL_SEARCH_JITTER_SECONDS")
+    social_detail_per_query: int = Field(default=4, ge=0, le=10, validation_alias="SOCIAL_SEARCH_OPEN_POSTS_PER_QUERY")
+    social_scrolls: int = Field(default=2, ge=1, le=5, validation_alias="SOCIAL_SEARCH_SCROLLS")
+    social_reuse_days: int = Field(default=7, ge=0, le=90, validation_alias="SOCIAL_SEARCH_QUERY_REUSE_DAYS")
+    social_cooldown_hours: int = Field(default=6, ge=1, le=168, validation_alias="SOCIAL_SEARCH_RATE_LIMIT_COOLDOWN_HOURS")
+    social_poll_seconds: int = Field(default=15, ge=5, le=600, validation_alias="SOCIAL_SEARCH_POLL_SECONDS")
+    social_grace_seconds: int = Field(default=1800, ge=0, le=86_400, validation_alias="CAMPAIGN_SOCIAL_GRACE_SECONDS")
+    # AI queries use the same OpenRouter key as the analysis; without it the deterministic fallback is used.
+    openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY", repr=False)
+    social_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_SOCIAL_MODEL")
+    social_model_timeout_seconds: int = Field(default=20, ge=1, le=120, validation_alias="OPENROUTER_SOCIAL_TIMEOUT_SECONDS")
+
+    def social_config(self):  # -> bot.social_search.worker.SocialConfig (imported lazily)
+        from bot.social_search.worker import SocialConfig, parse_platforms
+
+        return SocialConfig(
+            platforms=parse_platforms(self.social_platforms_raw), queries_per_day=self.social_queries_per_day,
+            items_per_query=self.social_items_per_query, queries_per_round=self.social_queries_per_round,
+            max_rounds=self.social_max_rounds, pause_seconds=float(self.social_pause_seconds),
+            jitter_seconds=float(self.social_jitter_seconds), detail_per_query=self.social_detail_per_query,
+            scrolls=self.social_scrolls, reuse_days=self.social_reuse_days,
+            rate_limit_cooldown_seconds=self.social_cooldown_hours * 3600.0,
+        )
+
     def safety_limits(self) -> SafetyLimits:
         return SafetyLimits(
             facebook_batches_per_day=self.facebook_batches_per_day, facebook_groups_per_day=self.facebook_groups_per_day,
@@ -47,7 +78,8 @@ class CampaignRunnerSettings(BaseSettings):
     def runner_config(self) -> RunnerConfig:
         return RunnerConfig(window_cooldown_seconds=self.window_cooldown_seconds,
                             analysis_grace_seconds=self.analysis_grace_seconds,
-                            refusal_retry_seconds=self.refusal_retry_seconds)
+                            refusal_retry_seconds=self.refusal_retry_seconds,
+                            social_grace_seconds=self.social_grace_seconds)
 
 
     def owner_ids(self) -> frozenset[int]:
