@@ -27,6 +27,9 @@ FIXED_STATUSES: frozenset[str] = frozenset({ACCEPTED, SEARCHING, FACEBOOK, WEB, 
                                             CHECKING, DONE, NOTHING})
 _SITE_PREFIX, _SITE_SUFFIX = "Ищу на сайте ", "…"
 _SITE_NAME = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9.\-]{0,39}$")  # a host or brand, no spaces
+_GROUP_PREFIX, _GROUP_SUFFIX = "Ищу в группе Facebook «", "»…"
+MAX_GROUP_CHARS = 60
+_GROUP_UNSAFE = re.compile(r"[«»<>\"`\n\r\t]|https?://|www\.|/", re.IGNORECASE)
 
 Stage = Literal[
     "accepted", "planning", "discovery", "facebook", "web", "site", "social", "checking",
@@ -45,6 +48,16 @@ def site_status(name: str | None) -> str:
         name = name.split("://", 1)[1]
     name = name.split("/", 1)[0].removeprefix("www.")
     return f"{_SITE_PREFIX}{name}{_SITE_SUFFIX}" if name and _SITE_NAME.match(name) else WEB
+
+
+def group_status(name: str | None) -> str:
+    """«Ищу в группе Facebook «<название>»…» for a readable group name; an id, a link or junk is «Ищу в Facebook…»."""
+    name = " ".join((name or "").split())
+    if len(name) > MAX_GROUP_CHARS:
+        name = name[:MAX_GROUP_CHARS - 1].rstrip() + "…"
+    if not name or _GROUP_UNSAFE.search(name) or not re.search(r"[^\W\d_]", name):
+        return FACEBOOK
+    return f"{_GROUP_PREFIX}{name}{_GROUP_SUFFIX}"
 
 
 def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebook_started: bool = False,
@@ -92,4 +105,6 @@ def is_user_status(text: str) -> bool:
         return True
     if text.startswith(_SITE_PREFIX) and text.endswith(_SITE_SUFFIX):
         return site_status(text[len(_SITE_PREFIX):-len(_SITE_SUFFIX)]) == text
+    if text.startswith(_GROUP_PREFIX) and text.endswith(_GROUP_SUFFIX):
+        return group_status(text[len(_GROUP_PREFIX):-len(_GROUP_SUFFIX)]) == text
     return False

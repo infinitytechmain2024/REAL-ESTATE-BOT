@@ -31,6 +31,7 @@ USER, OWNER, CHAT = 7, 99, -100
 ALLOWED = {"Принято. Начинаю поиск.", "Ищу…", "Ищу в Facebook…", "Ищу в интернете…", "Нашёл вариант, проверяю…",
            "Поиск завершён.", "Пока ничего подходящего не нашёл.",
            "Ищу в TikTok…", "Ищу в Instagram…", "Ищу в LinkedIn…"}
+GROUP_4 = "Ищу в группе Facebook «Group 4»…"  # the group being read, by its name
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", re.I)
 FORBIDDEN = ("window", "окно", "20", "batch", "campaign", "Кампания", "кампания", "orchestra", "Orchestra",
              "/campaign", "групп", "Queue", "Пауза", "verification", "🎯")
@@ -38,6 +39,9 @@ LATIN_WORD = re.compile(r"[A-Za-z]{2,}")
 
 
 def assert_user_safe(text: str) -> None:
+    if text.startswith("Ищу в группе Facebook «"):  # the group's own name, checked by group_status
+        assert is_user_status(text), text
+        return
     assert not UUID.search(text), text
     for word in FORBIDDEN:
         assert word not in text, (word, text)
@@ -137,10 +141,10 @@ async def test_a_normal_user_sees_only_allowed_statuses_through_a_whole_search()
     cid = await full_search(runner, campaigns, store, clock, plan, USER)
     assert (await campaigns.get(cid)).state == "completed"
     shown = statuses(messenger)
-    assert shown and all(text in ALLOWED for text in shown), shown
+    assert shown and all(text in ALLOWED or text == GROUP_4 for text in shown), shown
     for text in shown:
         assert_user_safe(text)
-    assert timeline(messenger) == [SEARCHING, FACEBOOK, CHECKING, DONE]
+    assert timeline(messenger) == [SEARCHING, FACEBOOK, GROUP_4, FACEBOOK, CHECKING, DONE]
     sent_statuses = [t for _, _, t in messenger.sent if "🔎" not in t]
     # One status message at a time: it moved below the card and the old one was deleted.
     assert len(sent_statuses) - len(messenger.deleted) == 1, (sent_statuses, messenger.deleted)
@@ -303,3 +307,15 @@ async def test_a_user_sees_the_network_while_facebook_is_idle_and_owners_see_the
     await owner_runner.tick()
     shown = timeline(owner_messenger)[-1]
     assert "Соцсети: linkedin · «business angel Madrid»" in shown and "/login tiktok" in shown
+
+
+def test_the_group_being_read_is_named_only_when_the_name_is_safe() -> None:
+    from bot.campaign.status_text import group_status
+
+    assert group_status("Pisos en Madrid · alquiler") == "Ищу в группе Facebook «Pisos en Madrid · alquiler»…"
+    assert is_user_status(group_status("Недвижимость Испании"))
+    for junk in (None, "", "123456789012345", "https://www.facebook.com/groups/x", "<b>x</b>", "a/b", "«x»"):
+        assert group_status(junk) == FACEBOOK, junk
+    long = group_status("Квартиры " * 20)
+    assert long.endswith("…»…") and len(long) < 100 and is_user_status(long)
+    assert not is_user_status("Ищу в группе Facebook «https://x»…")

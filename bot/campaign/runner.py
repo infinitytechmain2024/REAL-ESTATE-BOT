@@ -56,7 +56,7 @@ from . import offers
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
-from .status_text import FACEBOOK, campaign_label, user_status
+from .status_text import campaign_label, group_status, user_status
 from .store import CampaignStore
 from .tolerance import (
     HELD_BUCKETS,
@@ -614,8 +614,9 @@ class CampaignRunner:
             return text
         if terminal:
             return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id))
-        if line.startswith("Сейчас: Facebook · ") and line.endswith("ищу дальше"):
-            return FACEBOOK
+        if line.startswith("Сейчас: Facebook · ") and line.endswith(" · ищу дальше"):
+            # The group being read right now, by its name (like «Ищу на сайте fotocasa.es…» for sites).
+            return group_status(line.removeprefix("Сейчас: Facebook · ").removesuffix(" · ищу дальше"))
         if web_active:
             return user_status("site", site=web.host) if web.host else user_status("web")
         checking = line == ANALYSIS and bool(await self.store.pending_analysis(campaign.id))
