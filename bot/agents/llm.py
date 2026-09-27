@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 
 class LLMError(RuntimeError):
@@ -33,6 +34,26 @@ class OpenRouterJSON:
     async def aclose(self) -> None:
         if self._owns:
             await self._client.aclose()
+
+    async def unknown_models(self, models: list[str], *, url: str = MODELS_URL) -> list[str]:
+        """Which of ``models`` OpenRouter's catalogue does not list. A ``~`` alias (e.g. ``~typesafe/jev-latest``)
+        is resolved by OpenRouter itself and only its family is checked. Raises LLMError when the catalogue is
+        unreachable."""
+        try:
+            response = await self._client.get(url, headers=self._headers)
+            response.raise_for_status()
+            listed = {str(m.get("id")) for m in response.json().get("data", []) if isinstance(m, dict)}
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            raise LLMError(f"catalogue:{type(exc).__name__}") from exc
+        unknown = []
+        for model in models:
+            if model.startswith("~"):
+                family = model[1:].rsplit("-latest", 1)[0]
+                if not any(item.startswith(family) for item in listed):
+                    unknown.append(model)
+            elif model not in listed:
+                unknown.append(model)
+        return unknown
 
     async def complete(self, model: str, system: str, user: str, *, schema: dict[str, Any] | None = None,
                        name: str = "result", max_tokens: int = 1500) -> str:

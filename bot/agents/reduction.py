@@ -305,6 +305,18 @@ async def main() -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=settings.concurrency + 2)
     llm = OpenRouterJSON(settings.openrouter_api_key, timeout_seconds=settings.timeout_seconds)
     models = {"claude": settings.claude_model, "jev": settings.jev_model}
+    try:
+        unknown = await llm.unknown_models(list(models.values()))
+    except LLMError as exc:
+        unknown = []
+        log.warning("reduction.catalogue_unreachable %s", exc.code)
+    if unknown:
+        # A wrong id would fail every call: stay idle with one clear line in the log instead.
+        log.error("reduction.unknown_models %s: set OPENROUTER_CLAUDE_MODEL / OPENROUTER_JEV_MODEL "
+                  "to ids from https://openrouter.ai/api/v1/models", unknown)
+        await llm.aclose()
+        await pool.close()
+        await asyncio.Event().wait()
     agent = ReductionAgent(ClaudeExtractor(llm, settings.claude_model), JevDecider(llm, settings.jev_model))
     worker = ReductionWorker(agent, PostgresReductionStore(pool), PostgresCampaignStore(pool),
                              config=settings.config(), models=models)

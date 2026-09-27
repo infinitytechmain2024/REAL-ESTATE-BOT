@@ -260,8 +260,10 @@ async def test_parallel_agents_never_share_a_post() -> None:
 def test_settings_stay_idle_until_switched_on_with_both_models() -> None:
     assert ReductionSettings(_env_file=None).missing() == ["AGENT_REDUCTION_ENABLED"]
     on = ReductionSettings(_env_file=None, AGENT_REDUCTION_ENABLED=True, DATABASE_URL="postgresql://x",
-                           OPENROUTER_API_KEY="k", OPENROUTER_CLAUDE_MODEL="anthropic/x")
-    assert on.missing() == ["OPENROUTER_JEV_MODEL"]
+                           OPENROUTER_API_KEY="k")
+    assert on.missing() == [] and (on.claude_model, on.jev_model) == ("anthropic/claude-opus-5.5", "~typesafe/jev-latest")
+    assert ReductionSettings(_env_file=None, AGENT_REDUCTION_ENABLED=True, DATABASE_URL="postgresql://x",
+                             OPENROUTER_API_KEY="k", OPENROUTER_JEV_MODEL="").missing() == ["OPENROUTER_JEV_MODEL"]
     with pytest.raises(ValueError):
         ReductionConfig(mode="live")
 
@@ -302,3 +304,16 @@ async def test_postgres_claims_once_takes_over_lapsed_claims_and_stores_the_trac
     assert await store.calls_today() == 1
     with pytest.raises(Exception):  # noqa: B017 - a done row needs its action
         await pool.execute("update agent_reductions set action = null where post_id = $1::uuid", a.post_id)
+
+
+async def test_models_are_checked_against_the_openrouter_catalogue() -> None:
+    catalogue = {"data": [{"id": "anthropic/claude-opus-5.5"}, {"id": "typesafe/jev-1.13"}]}
+    llm = OpenRouterJSON("k", client=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _r: httpx.Response(200, json=catalogue))))
+    assert await llm.unknown_models(["anthropic/claude-opus-5.5", "~typesafe/jev-latest"]) == []
+    assert await llm.unknown_models(["anthropic/claude-nope", "~other/jev-latest"]) == [
+        "anthropic/claude-nope", "~other/jev-latest"]
+    down = OpenRouterJSON("k", client=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _r: httpx.Response(503))))
+    with pytest.raises(LLMError, match="catalogue"):
+        await down.unknown_models(["x"])

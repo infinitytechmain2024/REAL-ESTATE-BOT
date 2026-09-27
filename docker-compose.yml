@@ -367,7 +367,7 @@ services:
     # Hybrid pipeline SA-2 Reduction agents (docs/HYBRID_AGENTS.md), SHADOW mode:
     # Claude extracts each campaign post, Jev decides at once, the gate files it;
     # every decision is stored in agent_reductions and nothing is sent. Idle until
-    # AGENT_REDUCTION_ENABLED=true and both OpenRouter model ids are set.
+    # AGENT_REDUCTION_ENABLED=true; idle too (one log line) if OpenRouter does not list a model.
     # Scale with: docker compose up -d --scale reduction-worker=2
     build:
       context: .
@@ -381,8 +381,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       AGENT_REDUCTION_ENABLED: ${AGENT_REDUCTION_ENABLED:-false}
-      OPENROUTER_CLAUDE_MODEL: ${OPENROUTER_CLAUDE_MODEL:-}
-      OPENROUTER_JEV_MODEL: ${OPENROUTER_JEV_MODEL:-}
+      OPENROUTER_CLAUDE_MODEL: ${OPENROUTER_CLAUDE_MODEL:-anthropic/claude-opus-5.5}
+      OPENROUTER_JEV_MODEL: ${OPENROUTER_JEV_MODEL:-~typesafe/jev-latest}
       AGENT_REDUCTION_CONCURRENCY: ${AGENT_REDUCTION_CONCURRENCY:-4}
       AGENT_REDUCTION_BATCH: ${AGENT_REDUCTION_BATCH:-5}
       AGENT_REDUCTION_POLL_SECONDS: ${AGENT_REDUCTION_POLL_SECONDS:-15}

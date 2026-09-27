@@ -14,9 +14,9 @@ class ReductionSettings(BaseSettings):
     enabled: bool = Field(default=False, validation_alias="AGENT_REDUCTION_ENABLED")
     database_url: str = Field(default="", validation_alias="DATABASE_URL")
     openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
-    # OpenRouter model ids, e.g. an anthropic/… id for Claude and the Jev id: check /api/v1/models.
-    claude_model: str = Field(default="", validation_alias="OPENROUTER_CLAUDE_MODEL")
-    jev_model: str = Field(default="", validation_alias="OPENROUTER_JEV_MODEL")
+    # OpenRouter model ids; checked against https://openrouter.ai/api/v1/models at start.
+    claude_model: str = Field(default="anthropic/claude-opus-5.5", validation_alias="OPENROUTER_CLAUDE_MODEL")
+    jev_model: str = Field(default="~typesafe/jev-latest", validation_alias="OPENROUTER_JEV_MODEL")
     timeout_seconds: float = Field(default=45, ge=5, le=180, validation_alias="AGENT_REDUCTION_TIMEOUT_SECONDS")
     poll_seconds: float = Field(default=15, ge=2, le=600, validation_alias="AGENT_REDUCTION_POLL_SECONDS")
     batch: int = Field(default=5, ge=1, le=50, validation_alias="AGENT_REDUCTION_BATCH")
