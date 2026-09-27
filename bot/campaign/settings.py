@@ -38,7 +38,7 @@ class CampaignRunnerSettings(BaseSettings):
     breaker_window_hours: int = Field(default=6, ge=1, le=72, validation_alias="SAFETY_BREAKER_WINDOW_HOURS")
 
     # Social network search (bot/social_search): off unless platforms are listed.
-    social_platforms_raw: str = Field(default="", validation_alias="SOCIAL_SEARCH_PLATFORMS")
+    social_platforms_raw: str = Field(default="instagram,tiktok,linkedin", validation_alias="SOCIAL_SEARCH_PLATFORMS")
     social_queries_per_day: int = Field(default=20, ge=1, le=200, validation_alias="SOCIAL_SEARCH_QUERIES_PER_DAY")
     social_items_per_query: int = Field(default=12, ge=1, le=30, validation_alias="SOCIAL_SEARCH_ITEMS_PER_QUERY")
     social_queries_per_round: int = Field(default=4, ge=1, le=10, validation_alias="SOCIAL_SEARCH_QUERIES_PER_ROUND")

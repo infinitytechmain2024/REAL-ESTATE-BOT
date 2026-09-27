@@ -424,8 +424,8 @@ services:
       WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN: ${WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN:-15}
       # Optional outbound proxy/VPN for page fetches (and SearXNG, below).
       WEB_SEARCH_PROXY_URL: ${WEB_SEARCH_PROXY_URL:-}
-      # Social network search (bot/social_search): off while SOCIAL_SEARCH_PLATFORMS is empty.
-      SOCIAL_SEARCH_PLATFORMS: ${SOCIAL_SEARCH_PLATFORMS:-}
+      # Social network search (bot/social_search): every listed network where a profile is logged in; "off" = none.
+      SOCIAL_SEARCH_PLATFORMS: ${SOCIAL_SEARCH_PLATFORMS:-instagram,tiktok,linkedin}
       SOCIAL_SEARCH_QUERIES_PER_DAY: ${SOCIAL_SEARCH_QUERIES_PER_DAY:-20}
       SOCIAL_SEARCH_ITEMS_PER_QUERY: ${SOCIAL_SEARCH_ITEMS_PER_QUERY:-12}
       SOCIAL_SEARCH_QUERIES_PER_ROUND: ${SOCIAL_SEARCH_QUERIES_PER_ROUND:-4}
