@@ -48,12 +48,16 @@ class FakeMessenger:
         self.edits: list[tuple[int, int, str]] = []
         self.gone = False
         self.fail = 0
+        self.deleted: list[tuple[int, int]] = []
+        self.timeline: list[str] = []  # status texts in the order they were shown (sent or edited)
 
     async def send(self, chat_id: int, text: str) -> int:
         if self.fail:
             self.fail -= 1
             raise httpx.ConnectError("telegram unreachable")
         self.sent.append((chat_id, len(self.sent) + 1, text))
+        if "🔎" not in text:  # send() carries cards and status messages only
+            self.timeline.append(text)
         return len(self.sent)
 
     async def edit(self, chat_id: int, message_id: int, text: str) -> None:
@@ -61,12 +65,16 @@ class FakeMessenger:
             self.gone = False
             raise MessageGone("message to edit not found")
         self.edits.append((chat_id, message_id, text))
+        self.timeline.append(text)
+
+    async def delete(self, chat_id: int, message_id: int) -> None:
+        self.deleted.append((chat_id, message_id))
 
     def findings(self) -> list[str]:
         return [t for _, _, t in self.sent if "🔎" in t]
 
     def statuses(self) -> list[str]:
-        return [t for _, _, t in self.sent if t.startswith("🎯")] + [t for _, _, t in self.edits]
+        return list(self.timeline)
 
 
 class FakeDiscovery:
@@ -439,3 +447,25 @@ async def test_startup_frees_a_profile_left_in_use_by_a_crashed_discovery_and_re
     assert store.recovered == ["campaign:runner:recovery"]
     await runner.tick()
     assert discovery.calls == [cid] and (await campaigns.get(cid)).state == "running"
+
+
+async def test_the_status_moves_below_each_new_card_and_the_old_one_is_deleted() -> None:
+    campaigns, store, messenger, _, _, runner, plan = make()
+    cid = await create(campaigns, plan)
+    await runner.tick()
+    first_status = (await campaigns.get(cid)).status_message_id
+    await runner.tick()
+    assert messenger.deleted == []  # no card: the status stays and is only edited
+
+    store.add_finding(cid, "f1", "🏠 first")
+    await runner.tick()
+    after_first = (await campaigns.get(cid)).status_message_id
+    kinds = ["card" if "🔎" in t else "status" if t.startswith("🎯") else "other" for _, _, t in messenger.sent]
+    assert kinds[-2:] == ["card", "status"]  # the status is the last message in the chat
+    assert messenger.deleted == [(CHAT, first_status)] and after_first != first_status
+
+    store.add_finding(cid, "f2", "🏠 second")
+    await runner.tick()
+    assert messenger.deleted[-1] == (CHAT, after_first)
+    assert [t for _, _, t in messenger.sent][-1].startswith("🎯")
+    assert (await campaigns.get(cid)).status_message_id == messenger.sent[-1][1]

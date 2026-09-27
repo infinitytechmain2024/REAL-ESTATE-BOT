@@ -343,8 +343,24 @@ def mode_menu(text: str = "Выберите режим:") -> Reply:
     return Reply(text, tuple(Button(title, callback_data=f"mode:{mode}") for mode, title in MODES.items()))
 
 
-def _cancel_button() -> Button:
-    return Button("Отмена", callback_data="task:cancel")
+# The bottom (reply) keyboard: the control buttons stay at hand below the chat, not under one message.
+# A tap sends the label as a message; ``key_command`` turns it back into the command.
+LAUNCH_KEY = "▶️ Запустить"
+EDIT_KEY = "✏️ Изменить"
+CANCEL_KEY = "❌ Отмена"
+STOP_KEY = "⏹ Остановить поиск"
+NEW_SEARCH_KEY = "🔍 Новый поиск"
+DRAFT_KEYBOARD: tuple[tuple[str, ...], ...] = ((CANCEL_KEY,),)
+TASK_KEYBOARD: tuple[tuple[str, ...], ...] = ((LAUNCH_KEY, EDIT_KEY), (CANCEL_KEY,))
+SEARCH_KEYBOARD: tuple[tuple[str, ...], ...] = ((STOP_KEY,),)
+IDLE_KEYBOARD: tuple[tuple[str, ...], ...] = ((NEW_SEARCH_KEY,),)
+_KEY_COMMANDS = {LAUNCH_KEY: "запустить", EDIT_KEY: "изменить", CANCEL_KEY: "отмена", STOP_KEY: "остановить поиск",
+                 NEW_SEARCH_KEY: "новый поиск"}
+
+
+def key_command(text: str) -> str | None:
+    """The plain command of a bottom-keyboard label («⏹ Остановить поиск» -> «остановить поиск»), else None."""
+    return _KEY_COMMANDS.get(text.strip())
 
 
 def parse_deal(text: str) -> str | None:
@@ -400,12 +416,8 @@ def summary(draft: Draft, plan: CampaignPlan, technical: bool = False) -> Reply:
             f"Языки поиска: {', '.join(lang.upper() for lang in plan.languages)}",
             f"Группы: до {limits.max_groups}, окнами по {limits.window_size}",
         ]
-    lines += ["", "Всё верно? Нажмите «Запустить», чтобы начать поиск."]
-    return Reply("\n".join(lines), (
-        Button("Запустить", callback_data="task:launch"),
-        Button("Изменить", callback_data="task:edit"),
-        _cancel_button(),
-    ))
+    lines += ["", "Всё верно? Нажмите «Запустить» внизу, чтобы начать поиск."]
+    return Reply("\n".join(lines), keyboard=TASK_KEYBOARD)
 
 
 def quotes(text: str, source: str, n: int = 7) -> bool:
@@ -443,16 +455,12 @@ def ai_summary(draft: Draft, ai: TaskUnderstanding, plan: CampaignPlan, technica
             f"Языки поиска: {', '.join(lang.upper() for lang in plan.languages)}",
             f"Группы: до {limits.max_groups}, окнами по {limits.window_size}",
         ]
-    lines += ["", "Всё верно? Нажмите «Запустить», чтобы начать поиск."]
-    return Reply("\n".join(lines), (
-        Button("Запустить", callback_data="task:launch"),
-        Button("Изменить", callback_data="task:edit"),
-        _cancel_button(),
-    ))
+    lines += ["", "Всё верно? Нажмите «Запустить» внизу, чтобы начать поиск."]
+    return Reply("\n".join(lines), keyboard=TASK_KEYBOARD)
 
 
 LAUNCHED = "Принято. Начинаю поиск. Найденные варианты пришлю сюда."
-STOP_HINT = "Чтобы остановить поиск, нажмите кнопку ниже или напишите «стоп»."
+STOP_HINT = "Чтобы остановить поиск, нажмите «Остановить поиск» внизу или напишите «стоп»."
 STOP_CALLBACK = "search:stop"
 # Words that show an AI question already covers a critical slot.
 _ASKS_ABOUT = {
@@ -509,7 +517,8 @@ class TaskIntake:
             draft.asked, draft.pending, draft.answers, draft.ai = [], [], [], None
             return await self._start(draft)
         await self.store.save(draft)
-        return Reply(f"Режим: {MODES[mode]}.\nОпишите задачу текстом или голосом, например {EXAMPLES[mode]}.")
+        return Reply(f"Режим: {MODES[mode]}.\nОпишите задачу текстом или голосом, например {EXAMPLES[mode]}.",
+                     keyboard=DRAFT_KEYBOARD)
 
     async def on_text(self, message: IncomingMessage, text: str) -> Reply:
         assert message.user_id is not None
@@ -720,7 +729,7 @@ class TaskIntake:
                 text = "\n".join(["Уточните, пожалуйста:", *(f"{n}. {q}" for n, q in enumerate(texts, 1)),
                                   "Можно ответить одним сообщением."])
             buttons = tuple(Button(label, callback_data=f"task:{first}:{value}") for label, value in options)
-            return Reply(prefix + text, (*buttons, _cancel_button()))
+            return Reply(prefix + text, buttons, keyboard=None if buttons else DRAFT_KEYBOARD)
         try:
             plan = draft.plan()
         except InvalidGoal as exc:
@@ -730,11 +739,11 @@ class TaskIntake:
         await self.store.save(draft)
         model = getattr(self.understander, "model", "")
         reply = ai_summary(draft, ai, plan, self.technical(draft.user_id), model)
-        return Reply(prefix + reply.text, reply.buttons)
+        return replace(reply, text=prefix + reply.text)
 
     async def _cancel(self, draft: Draft) -> Reply:
         await self.store.save(draft.fresh())
-        return Reply("Черновик удалён. Опишите новую задачу, когда будете готовы.")
+        return Reply("Черновик удалён. Опишите новую задачу, когда будете готовы.", keyboard=IDLE_KEYBOARD)
 
     async def _advance(self, draft: Draft, prefix: str = "") -> Reply:
         try:
@@ -749,12 +758,12 @@ class TaskIntake:
             draft.asked += [slot for slot in slots if slot not in draft.asked]
             await self.store.save(draft)
             buttons = tuple(Button(text, callback_data=f"task:{question.slot}:{value}") for text, value in question.options)
-            return Reply(prefix + question.text, (*buttons, _cancel_button()))
+            return Reply(prefix + question.text, buttons, keyboard=None if buttons else DRAFT_KEYBOARD)
         assert plan is not None
         draft.step, draft.pending = "summary", []
         await self.store.save(draft)
         reply = summary(draft, plan, self.technical(draft.user_id))
-        return Reply(prefix + reply.text, reply.buttons)
+        return replace(reply, text=prefix + reply.text)
 
     async def _launch(self, user_id: int, who: str | None) -> Reply:
         current = await self.store.get(user_id)
@@ -786,5 +795,5 @@ class TaskIntake:
                 log.warning("telegram.intake.owner_notice_failed", extra={"user_id": user_id})
         if self.technical(user_id):
             return Reply(f"{LAUNCHED}\nQueue id: {command_id}. Статус: /campaign status. Остановить: /campaign cancel <id>.",
-                         (stop_button(),))
-        return Reply(f"{LAUNCHED}\n{STOP_HINT}", (stop_button(),))
+                         keyboard=SEARCH_KEYBOARD)
+        return Reply(f"{LAUNCHED}\n{STOP_HINT}", keyboard=SEARCH_KEYBOARD)

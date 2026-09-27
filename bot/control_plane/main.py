@@ -13,7 +13,10 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     WebAppInfo,
 )
 from aiohttp import web
@@ -62,9 +65,15 @@ async def _set_menus(bot: Bot, owners: frozenset[int]) -> None:
             logging.getLogger(__name__).warning("telegram.menu.owner_failed", extra={"owner": owner})
 
 
-def _markup(reply: Reply) -> InlineKeyboardMarkup | None:
+def _markup(reply: Reply) -> InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None:
+    """Inline buttons under the message; else the bottom keyboard (``Reply.keyboard``), set or removed."""
     if not reply.buttons:
-        return None
+        if reply.keyboard is None:
+            return None
+        if not reply.keyboard:
+            return ReplyKeyboardRemove()
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=label) for label in row] for row in reply.keyboard],
+                                   resize_keyboard=True, is_persistent=True)
     rows = [
         [InlineKeyboardButton(text=b.text, web_app=WebAppInfo(url=b.web_app_url))]
         if b.web_app_url

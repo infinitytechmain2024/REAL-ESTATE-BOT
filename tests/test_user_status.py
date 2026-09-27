@@ -64,8 +64,8 @@ def build(*, owners: frozenset[int] = frozenset({OWNER}), groups: int = 20, mess
 
 
 def statuses(messenger: FakeMessenger) -> list[str]:
-    """Every status text sent or edited in (findings excluded)."""
-    return [t for _, _, t in messenger.sent if "🔎" not in t] + [t for _, _, t in messenger.edits]
+    """Every status text sent or edited in (findings excluded), in the order shown."""
+    return list(messenger.timeline)
 
 
 def timeline(messenger: FakeMessenger) -> list[str]:
@@ -141,7 +141,9 @@ async def test_a_normal_user_sees_only_allowed_statuses_through_a_whole_search()
     for text in shown:
         assert_user_safe(text)
     assert timeline(messenger) == [SEARCHING, FACEBOOK, CHECKING, DONE]
-    assert len([t for _, _, t in messenger.sent if "🔎" not in t]) == 1, "one status message per search"
+    sent_statuses = [t for _, _, t in messenger.sent if "🔎" not in t]
+    # One status message at a time: it moved below the card and the old one was deleted.
+    assert len(sent_statuses) - len(messenger.deleted) == 1, (sent_statuses, messenger.deleted)
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
 
 
@@ -199,7 +201,9 @@ async def test_a_failing_status_edit_never_breaks_the_run() -> None:
     cid = await full_search(runner, campaigns, store, clock, plan, USER)
     assert (await campaigns.get(cid)).state == "completed"
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
-    assert [t for _, _, t in messenger.sent if "🔎" not in t] == [SEARCHING]
+    # Edits fail, but the status still moved below the card once (sent anew, the old one deleted).
+    assert [t for _, _, t in messenger.sent if "🔎" not in t] == [SEARCHING, CHECKING]
+    assert len(messenger.deleted) == 1
 
 
 # --- the Orchestra's /campaign notices -----------------------------------------------------

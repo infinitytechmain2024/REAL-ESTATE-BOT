@@ -8,6 +8,7 @@ from bot.campaign import InvalidGoal, MemoryCampaignStore, plan_campaign
 from bot.control_plane.access import AccessDesk, MemoryAccessStore
 from bot.control_plane.intake import (
     MAX_QUESTIONS,
+    TASK_KEYBOARD,
     Draft,
     MemoryIntakeStore,
     Question,
@@ -206,7 +207,7 @@ async def test_a_complete_task_goes_straight_to_the_summary() -> None:
     # A user sees no planner internals; the owner does.
     for noise in ("Языки поиска", "окнами", "Цель:", "real_estate", "Madrid", "/"):
         assert noise not in reply.text, noise
-    assert callbacks(reply) == ["task:launch", "task:edit", "task:cancel"]
+    assert reply.keyboard == TASK_KEYBOARD
     assert sink.envelopes == []  # nothing runs without "Запустить"
 
     await press(control, OWNER, "mode:real_estate")
@@ -220,7 +221,7 @@ async def test_a_missing_city_is_asked_and_a_typed_or_pressed_answer_is_accepted
     control, _ = await with_mode()
     question = await say(control, USER, "квартиры в аренду до 1000 евро")
     assert question.text.startswith("В каком городе искать?")
-    assert len(question.buttons) == 9 and callbacks(question)[-1] == "task:cancel"
+    assert len(question.buttons) == 8 and "task:cancel" not in callbacks(question)
     assert "Не понял город" in (await say(control, USER, "где-нибудь у моря")).text
     summary = await say(control, USER, "Валенсия")
     assert "Город: Валенсия" in summary.text
@@ -236,7 +237,7 @@ async def test_several_cities_ask_to_choose_one() -> None:
     control, sink = await with_mode()
     question = await say(control, USER, "снять квартиру в Мадриде или Барселоне до 900 €")
     assert "несколько городов" in question.text
-    assert [b.text for b in question.buttons] == ["Мадрид", "Барселона", "Отмена"]
+    assert [b.text for b in question.buttons] == ["Мадрид", "Барселона"]
     summary = await press(control, USER, callbacks(question)[1])
     assert "Город: Барселона" in summary.text
     await press(control, USER, "task:launch")
@@ -255,9 +256,9 @@ async def test_the_deal_is_asked_for_real_estate_only_and_the_budget_can_be_skip
     deal = await say(control, USER, "квартиры в Малаге")
     # Both missing fields in one message; the first one has buttons.
     assert deal.text.startswith("Уточните, пожалуйста:\n1. Аренда или покупка?\n2. Какой бюджет?")
-    assert callbacks(deal) == ["task:deal:rent", "task:deal:sale", "task:deal:any", "task:cancel"]
+    assert callbacks(deal) == ["task:deal:rent", "task:deal:sale", "task:deal:any"]
     budget = await press(control, USER, "task:deal:sale")
-    assert budget.text.startswith("Какой бюджет?") and callbacks(budget) == ["task:budget:skip", "task:cancel"]
+    assert budget.text.startswith("Какой бюджет?") and callbacks(budget) == ["task:budget:skip"]
     summary = await press(control, USER, "task:budget:skip")
     assert "Сделка: покупка" in summary.text and "Бюджет: не указан" in summary.text
     assert "Эта кнопка устарела" in (await press(control, USER, "task:deal:rent")).text

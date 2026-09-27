@@ -18,7 +18,7 @@ import pytest
 
 from bot.campaign import plan_campaign
 from bot.campaign.architect import MAX_TEXT_CHARS
-from bot.control_plane.intake import Draft, quotes
+from bot.control_plane.intake import SEARCH_KEYBOARD, TASK_KEYBOARD, Draft, quotes
 from bot.control_plane.models import IncomingMessage, Reply
 from bot.control_plane.service import NO_ACTIVE_SEARCH, SEARCH_STOPPED, ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
@@ -79,7 +79,7 @@ def with_ai(ai: FakeAI, transcriber: FakeTranscriber | None = None):  # type: ig
 
 
 def assert_summary_buttons(reply: Reply) -> None:
-    assert callbacks(reply) == ["task:launch", "task:edit", "task:cancel"], reply.text
+    assert reply.keyboard == TASK_KEYBOARD, reply.text
 
 
 # --- the land-plot case --------------------------------------------------------------------
@@ -98,7 +98,7 @@ async def test_a_ukrainian_voice_land_task_is_a_plot_not_a_room() -> None:
         "Ищем земельный участок под застройку в пригороде Мадрида, покупка.\n"
         "Площадь от 1000 м².\n"
         "Дополнительно: с домом или без, до метро 5 минут на машине.\n\n"
-        "Всё верно? Нажмите «Запустить», чтобы начать поиск."
+        "Всё верно? Нажмите «Запустить» внизу, чтобы начать поиск."
     )
     assert "комнат" not in reply.text
     for word in ("шукаємо", "ділянку", "передмісті", "хвилин", "будинком"):
@@ -146,7 +146,7 @@ async def test_a_missing_city_is_asked_by_the_ai_and_the_answer_goes_back_to_it(
     await press(control, USER, "mode:real_estate")
     question = await say(control, USER, "ищу участок под застройку, покупка")
     assert question.text == "В каком городе или рядом с каким городом искать участок? Выберите или напишите."
-    assert callbacks(question)[0] == "task:city:0" and callbacks(question)[-1] == "task:cancel"
+    assert callbacks(question)[0] == "task:city:0" and "task:cancel" not in callbacks(question)
     summary = await say(control, USER, "под Мадридом")
     assert summary.text.startswith("Проверьте задачу:\nИщем земельный участок")
     assert_summary_buttons(summary)
@@ -197,7 +197,7 @@ async def test_the_deal_is_asked_once_and_optional_questions_can_be_skipped() ->
     ai.results = [TaskUnderstanding(city="Madrid", deal="rent", property_type="apartment",
                                     questions=["Какой бюджет?"], summary_ru="Снять квартиру в Мадриде.")]
     only_budget = await press(control, USER, "task:deal:rent")
-    assert only_budget.text == "Какой бюджет?" and callbacks(only_budget) == ["task:ask:skip", "task:cancel"]
+    assert only_budget.text == "Какой бюджет?" and callbacks(only_budget) == ["task:ask:skip"]
     calls = len(ai.calls)
     summary = await press(control, USER, "task:ask:skip")
     assert summary.text.startswith("Проверьте задачу:\nСнять квартиру в Мадриде.") and len(ai.calls) == calls
@@ -317,9 +317,31 @@ async def test_the_launch_reply_carries_the_stop_button() -> None:
     await say(control, USER, UK_VOICE)
     launched = await press(control, USER, "task:launch")
     assert launched.text == ("Принято. Начинаю поиск. Найденные варианты пришлю сюда.\n"
-                             "Чтобы остановить поиск, нажмите кнопку ниже или напишите «стоп».")
-    assert callbacks(launched) == ["search:stop"] and len(b"search:stop") <= 64
-    assert launched.buttons[0].text == "Остановить поиск"
+                             "Чтобы остановить поиск, нажмите «Остановить поиск» внизу или напишите «стоп».")
+    assert launched.keyboard == SEARCH_KEYBOARD and not launched.buttons
+
+
+@pytest.mark.asyncio
+async def test_bottom_keyboard_taps_launch_stop_cancel_and_start_a_new_search() -> None:
+    from bot.control_plane.intake import (
+        DRAFT_KEYBOARD,
+        IDLE_KEYBOARD,
+        LAUNCH_KEY,
+        NEW_SEARCH_KEY,
+        STOP_KEY,
+    )
+
+    control, sink, _ = with_ai(FakeAI(LAND))
+    assert (await press(control, USER, "mode:real_estate")).keyboard == DRAFT_KEYBOARD
+    summary = await say(control, USER, UK_VOICE)
+    assert summary.keyboard == TASK_KEYBOARD
+    launched = await say(control, USER, LAUNCH_KEY)  # the tap sends its label as a message
+    assert launched.text.startswith("Принято. Начинаю поиск.") and launched.keyboard == SEARCH_KEYBOARD
+    assert [e.command for e in sink.envelopes] == ["campaign"]
+    stopped = await say(control, USER, STOP_KEY)
+    assert stopped.keyboard == IDLE_KEYBOARD
+    fresh = await say(control, USER, NEW_SEARCH_KEY)
+    assert [b.callback_data for b in fresh.buttons][:1] == ["mode:real_estate"]
 
 
 # --- the OpenRouter client -----------------------------------------------------------------
@@ -434,3 +456,17 @@ def test_control_plane_accepts_an_understander() -> None:
     ai = FakeAI(LAND)
     control = ControlPlane(settings, MemoryControlPlaneStore(), None, sink, understander=ai)
     assert control.intake.understander is ai
+
+
+def test_the_bottom_keyboard_is_rendered_set_or_removed() -> None:
+    from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+
+    from bot.control_plane.main import _markup
+    from bot.control_plane.models import Button, Reply
+
+    markup = _markup(Reply("x", keyboard=TASK_KEYBOARD))
+    assert isinstance(markup, ReplyKeyboardMarkup) and markup.resize_keyboard and markup.is_persistent
+    assert [[b.text for b in row] for row in markup.keyboard] == [list(row) for row in TASK_KEYBOARD]
+    assert isinstance(_markup(Reply("x", keyboard=())), ReplyKeyboardRemove)
+    assert _markup(Reply("x")) is None
+    assert isinstance(_markup(Reply("x", (Button("Одобрить", callback_data="near:yes"),))), InlineKeyboardMarkup)
