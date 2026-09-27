@@ -89,6 +89,8 @@ class FakePage:
     async def evaluate(self, script: str, *args: object) -> object:
         if args:  # the social result-card script, called with the platform
             return [{"kind": "post", "url": f"https://www.{args[0]}.com/x", "text": "card"}]
+        if "jsonld" in script:  # a public website: its links and JSON-LD
+            return {"links": [{"url": "https://example.com/a", "text": "A"}], "jsonld": ['{"@type": "House"}']}
         if "og_title" in script:
             return {"og_title": "", "og_description": "", "og_url": "", "description": "", "time": None}
         return {"url": self.url, "title": "Facebook", "text": "", "posts": []}
@@ -219,6 +221,19 @@ async def test_snapshot_supports_only_scoped_public_platforms_and_safe_website_h
     website = await manager.acquire(ProfileRequest("profile_web", "web", "website"))
     with pytest.raises(ValueError):
         await manager.snapshot(website, "https://127.0.0.1/private", timeout_ms=1_000)
+    await manager.release(website)
+
+
+@pytest.mark.asyncio
+async def test_website_snapshot_adds_links_and_jsonld(manager: BrowserSessionManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def public(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        return [(0, 0, 0, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", public)
+    website = await manager.acquire(ProfileRequest("profile_web", "web", "website"))
+    snapshot = await manager.snapshot(website, "https://example.com/listing", timeout_ms=1_000)
+    assert snapshot["links"] == [{"url": "https://example.com/a", "text": "A"}]
+    assert snapshot["jsonld"] == ['{"@type": "House"}']
     await manager.release(website)
 
 

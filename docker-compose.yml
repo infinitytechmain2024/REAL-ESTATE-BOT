@@ -369,7 +369,9 @@ services:
     # breakers as /run), live status and findings in the campaign's chat.
     # In parallel, its website stage (bot/web_search) searches the web for
     # every campaign through the internal `searxng` service and reads the
-    # public listing pages it finds (docs/WEB_SEARCH.md).
+    # public listing pages it finds (docs/WEB_SEARCH.md): Scrapling reads each
+    # site's own JSON-LD (price, area, address), and a page drawn by JavaScript
+    # is read once more in the `browser` service (the Agent Reach path).
     build:
       context: .
       dockerfile: docker/campaign-runner.Dockerfile
@@ -417,6 +419,9 @@ services:
       WEB_SEARCH_HOST_INTERVAL_SECONDS: ${WEB_SEARCH_HOST_INTERVAL_SECONDS:-5}
       WEB_SEARCH_BLOCKED_HOSTS: ${WEB_SEARCH_BLOCKED_HOSTS:-}
       WEB_SEARCH_POLL_SECONDS: ${WEB_SEARCH_POLL_SECONDS:-15}
+      WEB_SEARCH_RENDER_ENABLED: ${WEB_SEARCH_RENDER_ENABLED:-true}
+      WEB_SEARCH_RENDER_TIMEOUT_SECONDS: ${WEB_SEARCH_RENDER_TIMEOUT_SECONDS:-30}
+      WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN: ${WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN:-15}
       # Optional outbound proxy/VPN for page fetches (and SearXNG, below).
       WEB_SEARCH_PROXY_URL: ${WEB_SEARCH_PROXY_URL:-}
       # Social network search (bot/social_search): off while SOCIAL_SEARCH_PLATFORMS is empty.

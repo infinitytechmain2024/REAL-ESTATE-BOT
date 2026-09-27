@@ -37,7 +37,26 @@
    поиска портала (список объявлений) не сохраняется: из неё берутся ссылки на
    конкретные объявления того же сайта (не больше
    `WEB_SEARCH_MAX_LINKS_PER_INDEX`), и читаются они.
-5. **Объявление → находка.** Текст объявления записывается в
+5. **Scrapling: данные сайта в JSON** (`bot/web_search/structured.py`).
+   Порталы кладут объявления в разметку schema.org JSON-LD
+   (`RealEstateListing`, `Offer`, `Apartment`, `House`, `ItemList` …) и
+   OpenGraph. Парсер Scrapling (`Selector`, без запросов и браузера) достаёт их
+   в плоский JSON: `title`, `url`, `price`, `currency`, `area_m2`, `rooms`,
+   `address`, `property_type`, `deal`, `description`. Строка
+   «JSON-LD: {…}» ставится в начало текста объявления, и анализ
+   сверяет точные цифры сайта с задачей. Ссылки из `ItemList` на странице
+   поиска портала идут в очередь первыми.
+6. **Браузер для страниц на JavaScript** (`bot/web_search/render.py`, путь
+   Agent Reach). Если сайт отдал страницу (HTTP 200), но в ней нет текста
+   объявления или в списке нет ссылок, страница читается ещё раз в сервисе
+   `browser`: отдельный профиль `web-search-render` без входа в аккаунты,
+   только публичные адреса, одна страница на аренду, таймаут
+   `WEB_SEARCH_RENDER_TIMEOUT_SECONDS`, не больше
+   `WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN` страниц на кампанию. Из браузера
+   берутся текст, ссылки и JSON-LD. Отказ сайта (403/429) и запрет в
+   `robots.txt` соблюдаются: такие страницы в браузере не открываются.
+   Выключить: `WEB_SEARCH_RENDER_ENABLED=false`.
+7. **Объявление → находка.** Текст объявления записывается в
    `collected_posts` так же, как пост из Facebook: сайт — это
    `monitoring_sources` (platform `website`), чтение — `acquisition_runs`
    внутри веб-пакета кампании (`acquisition_batches.campaign_id`). Дальше всё

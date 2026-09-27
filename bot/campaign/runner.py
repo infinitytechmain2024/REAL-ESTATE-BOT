@@ -634,7 +634,7 @@ async def main() -> None:
         discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, reader)
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
-    web = await _web_stage(campaigns, pool)
+    web = await _web_stage(campaigns, pool, settings)
     judge = None
     if settings.openrouter_api_key and settings.relevance_max_calls > 0:
         from .relevance import OpenRouterRelevanceJudge
@@ -672,8 +672,12 @@ async def main() -> None:
         await pool.close()
 
 
-async def _web_stage(campaigns: CampaignStore, pool: Any) -> tuple[Any, float, list[Any]] | None:
-    """The website search worker (bot.web_search), unless WEB_SEARCH_ENABLED=false."""
+async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) -> tuple[Any, float, list[Any]] | None:
+    """The website search worker (bot.web_search), unless WEB_SEARCH_ENABLED=false.
+
+    Pages drawn by JavaScript are read once more in the Browser Session Manager
+    (the Agent Reach path) unless WEB_SEARCH_RENDER_ENABLED=false.
+    """
     from bot.web_search.fetcher import PageFetcher
     from bot.web_search.queries import FallbackQueryGenerator, OpenRouterQueryGenerator
     from bot.web_search.searxng import SearxngClient
@@ -697,8 +701,15 @@ async def _web_stage(campaigns: CampaignStore, pool: Any) -> tuple[Any, float, l
                                          timeout_seconds=settings.query_timeout_seconds)
     else:
         log.warning("campaign.web_search_template_queries", extra={"hint": "set OPENROUTER_API_KEY"})
+    renderer = None
+    if settings.render_enabled and runner_settings.browser_token:
+        from bot.facebook_collector.browser import BrowserSessionClient
+        from bot.web_search.render import BrowserRenderer
+
+        renderer = BrowserRenderer(BrowserSessionClient(runner_settings.browser_url, runner_settings.browser_token),
+                                   timeout_seconds=settings.render_timeout_seconds)
     worker = WebSearchWorker(campaigns, PostgresWebStore(pool), searcher, fetcher, FallbackQueryGenerator(model),
-                             config=config)
+                             renderer=renderer, config=config)
     closers = [searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
     return worker, settings.poll_seconds, closers
 

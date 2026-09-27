@@ -38,6 +38,10 @@ class WebSearchSettings(BaseSettings):
     request_timeout_seconds: float = Field(default=20, ge=3, le=120, validation_alias="WEB_SEARCH_REQUEST_TIMEOUT_SECONDS")
     max_content_bytes: int = Field(default=2_000_000, ge=10_000, le=10_000_000, validation_alias="WEB_SEARCH_MAX_CONTENT_BYTES")
     host_interval_seconds: float = Field(default=5, ge=1, le=300, validation_alias="WEB_SEARCH_HOST_INTERVAL_SECONDS")
+    # Pages drawn by JavaScript (HTTP 200 but empty): read once more in the browser (the Agent Reach path).
+    render_enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_ENABLED")
+    render_timeout_seconds: float = Field(default=30, ge=5, le=60, validation_alias="WEB_SEARCH_RENDER_TIMEOUT_SECONDS")
+    max_renders_per_campaign: int = Field(default=15, ge=0, le=200, validation_alias="WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN")
     # Optional outbound proxy/VPN for page fetches (http://, https://, socks5://). Never logged.
     proxy_url: str = Field(default="", validation_alias="WEB_SEARCH_PROXY_URL")
 
@@ -53,4 +57,5 @@ class WebSearchSettings(BaseSettings):
             max_pages_per_day=self.max_pages_per_day, max_queries_per_day=self.max_queries_per_day,
             max_minutes_per_campaign=self.max_minutes_per_campaign, blocked_hosts=self.blocked_hosts(),
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),
+            max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
         )
