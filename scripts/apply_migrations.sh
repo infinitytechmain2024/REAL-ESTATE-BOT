@@ -51,7 +51,8 @@ for migration_path in bot/services/db/migrations/001_init.sql \
                       bot/services/db/migrations/020_campaign_excluded_findings.sql \
                       bot/services/db/migrations/021_campaign_web_search.sql \
                       bot/services/db/migrations/022_social_search.sql \
-                      bot/services/db/migrations/023_campaign_finding_relevance.sql 024_agent_findings.sql; do
+                      bot/services/db/migrations/023_campaign_finding_relevance.sql \
+                      bot/services/db/migrations/024_agent_findings.sql; do
   migration="$(basename "$migration_path")"
   digest="$(checksum "$migration_path")"
   existing="$("${compose[@]}" exec -T postgres sh -ec \
