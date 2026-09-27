@@ -363,6 +363,36 @@ services:
     read_only: true
     tmpfs: [/tmp]
 
+  reduction-worker:
+    # Hybrid pipeline SA-2 Reduction agents (docs/HYBRID_AGENTS.md), SHADOW mode:
+    # Claude extracts each campaign post, Jev decides at once, the gate files it;
+    # every decision is stored in agent_reductions and nothing is sent. Idle until
+    # AGENT_REDUCTION_ENABLED=true and both OpenRouter model ids are set.
+    # Scale with: docker compose up -d --scale reduction-worker=2
+    build:
+      context: .
+      dockerfile: docker/campaign-runner.Dockerfile
+    command: ["python", "-m", "bot.agents.reduction"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      AGENT_REDUCTION_ENABLED: ${AGENT_REDUCTION_ENABLED:-false}
+      OPENROUTER_CLAUDE_MODEL: ${OPENROUTER_CLAUDE_MODEL:-}
+      OPENROUTER_JEV_MODEL: ${OPENROUTER_JEV_MODEL:-}
+      AGENT_REDUCTION_CONCURRENCY: ${AGENT_REDUCTION_CONCURRENCY:-4}
+      AGENT_REDUCTION_BATCH: ${AGENT_REDUCTION_BATCH:-5}
+      AGENT_REDUCTION_POLL_SECONDS: ${AGENT_REDUCTION_POLL_SECONDS:-15}
+      AGENT_REDUCTION_MAX_CALLS_PER_DAY: ${AGENT_REDUCTION_MAX_CALLS_PER_DAY:-1000}
+      AGENT_REDUCTION_TIMEOUT_SECONDS: ${AGENT_REDUCTION_TIMEOUT_SECONDS:-45}
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
   campaign-runner:
     # Drives /campaign goals: discovery, then windows of at most 20 groups as
     # ordinary Facebook batches that facebook-runner executes (same quotas and

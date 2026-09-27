@@ -1,11 +1,21 @@
 # Hybrid multi-agent system: Claude + Jev + Grok review loop
 
-Status: **phase 1 implemented** (checklist step 2: migration
-`024_agent_findings.sql` and the SA-3 Recorder in `bot/agents/recorder.py`,
-wired into `CampaignRunner._send_card`). Phase 1 stores the findings of today's
-analysis path, keyed by `finding_id`. The `agent_extractions` and
-`agent_decisions` tables of Task 9.1 arrive with the Reduction agents (phase
-3). Everything else is still **design**. It upgrades
+Status:
+- **Phase 1 implemented.** Migration `024_agent_findings.sql` and the SA-3
+  Recorder (`bot/agents/recorder.py`) store every campaign finding before it
+  is sent.
+- **Phase 3 implemented in shadow mode.** Migration
+  `025_agent_reductions.sql` and the SA-2 Reduction agents (`bot/agents/`:
+  `extraction.py`, `jev.py`, `gate.py`, `reduction.py`), run as the
+  `reduction-worker` service:
+  - Claude and Jev are both called through OpenRouter (`OPENROUTER_API_KEY`,
+    `OPENROUTER_CLAUDE_MODEL`, `OPENROUTER_JEV_MODEL`);
+  - decisions are stored in one table, `agent_reductions`, instead of the
+    `agent_extractions` / `agent_decisions` pair of Task 9.1;
+  - nothing is sent yet.
+- Everything else is still **design**.
+
+It upgrades
 the running bot (`docker-compose.yml`, services `campaign-runner`,
 `analysis-worker`, `facebook-runner`, `browser`, `searxng`, `postgres`) and
 reuses every guard that already works in production: Facebook windows of at
