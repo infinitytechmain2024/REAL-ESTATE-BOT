@@ -89,3 +89,16 @@ def test_only_outbound_clients_join_the_egress_network() -> None:
     assert set(rendered["services"]["browser"]["networks"]) == {"backend", "egress"}
     assert "ports" not in rendered["services"]["telegram"]
     assert "ports" not in rendered["services"]["browser"]
+
+
+def test_migration_script_lists_every_migration_by_its_real_path_in_order() -> None:
+    """Both lists in apply_migrations.sh name every migration file, in order, and each apply entry is a real path."""
+    import re
+
+    text = (ROOT / "scripts/apply_migrations.sh").read_text(encoding="utf-8")
+    on_disk = sorted(p.name for p in (ROOT / "bot/services/db/migrations").glob("[0-9][0-9][0-9]_*.sql"))
+    required = re.search(r"for required in (.*?); do", text, re.DOTALL).group(1).split()
+    applied = re.search(r"for migration_path in (.*?); do", text, re.DOTALL).group(1).replace("\\", " ").split()
+    assert required == on_disk
+    assert applied == [f"bot/services/db/migrations/{name}" for name in on_disk]
+    assert all((ROOT / path).is_file() for path in applied)
