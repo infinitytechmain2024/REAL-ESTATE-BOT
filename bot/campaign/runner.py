@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -49,6 +49,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from bot.agents.recorder import PostgresRecorder, Recorder, record_of
 from bot.analysis_pipeline.cards import CardTask, render_card
 
 from . import offers
@@ -189,16 +190,19 @@ class CampaignRunner:
         owner_ids: Collection[int] = frozenset(),
         web: WebProgress | None = None,
         relevance: RelevanceJudge | None = None,
+        recorder: Recorder | None = None,
     ) -> None:
         """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
         status; everyone else sees only the user-safe labels of ``status_text``. ``web``: the
         website stage's progress, when that stage runs. ``relevance``: the AI check of each
-        finding against the task (None: the deterministic rules alone)."""
+        finding against the task (None: the deterministic rules alone). ``recorder`` (SA-3): stores
+        every finding before it is sent, and held/excluded ones (None: nothing extra is stored)."""
         self.campaigns, self.store, self.messenger, self.discovery = campaigns, store, messenger, discovery
         self.config, self.now = config or RunnerConfig(), now
         self.owner_ids = frozenset(owner_ids)
         self.web = web
         self.relevance = relevance
+        self.recorder = recorder
         # After a failed relevance call the model is left alone for a minute: one slow or broken
         # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
         self._relevance_paused_until: datetime | None = None
@@ -399,12 +403,13 @@ class CampaignRunner:
         for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step):
             match = await self._judge(campaign, request, finding)
             if match.bucket != "exact":
-                await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance)
+                if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance):
+                    await self._record(campaign, finding, match.bucket)
                 continue
             count = await self.store.claim_finding(campaign.id, finding.id)
             if count is None:
                 continue
-            if not await self._send_card(campaign, finding, count, active):
+            if not await self._send_card(campaign, finding, count, active, "exact"):
                 return
         await self._near_matches(campaign, request, active)
 
@@ -462,16 +467,47 @@ class CampaignRunner:
         stored = await self.store.relevance(campaign.id, closest.id)
         return offers.Deviation("other", phrase=stored.deviation if stored is not None else None, land=land)
 
-    async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool) -> bool:
+    async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool, bucket: str) -> bool:
         tail = f"🔎 Найдено: {count} · ищу дальше" if active else f"🔎 Найдено: {count}"
+        card = f"{finding_card(campaign, finding)}\n\n{tail}"
+        if self.recorder is not None:
+            # Stored first (outbox): if the store is down nothing is sent, the finding comes back next tick.
+            try:
+                await self.recorder.to_send(record_of(campaign.id, finding.id, state="to_send", bucket=bucket,
+                                                      payload=finding.payload, text=finding.original or finding.text,
+                                                      card_text=card[:MAX_MESSAGE_CHARS]))
+            except Exception:  # noqa: BLE001
+                log.warning("campaign.finding_record_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
+                await self.store.release_finding(finding.id)
+                return False
         try:
-            message_id = await self.messenger.send(campaign.chat_id, f"{finding_card(campaign, finding)}\n\n{tail}")
+            message_id = await self.messenger.send(campaign.chat_id, card)
         except Exception:  # noqa: BLE001 - Telegram down: give the slot back, retry next tick
             log.warning("campaign.finding_send_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
             await self.store.release_finding(finding.id)
+            await self._recorded(self.recorder.send_failed(campaign.id, finding.id) if self.recorder else None)
             return False
         await self.store.finding_sent(finding.id, message_id)
+        await self._recorded(self.recorder.sent(campaign.id, finding.id, message_id) if self.recorder else None)
         return True
+
+    async def _record(self, campaign: Campaign, finding: StreamFinding, bucket: str) -> None:
+        """Store a held (similar/other) or excluded finding; never blocks the stream."""
+        if self.recorder is None:
+            return
+        record = record_of(campaign.id, finding.id, state="excluded" if bucket == "excluded" else "held",
+                           bucket=bucket, payload=finding.payload, text=finding.original or finding.text)
+        await self._recorded(self.recorder.excluded(record) if bucket == "excluded" else self.recorder.held(record))
+
+    @staticmethod
+    async def _recorded(write: Awaitable[None] | None) -> None:
+        """A bookkeeping write after the fact: logged when it fails, never raised (the card is already out)."""
+        if write is None:
+            return
+        try:
+            await write
+        except Exception:  # noqa: BLE001
+            log.warning("campaign.finding_record_failed")
 
     async def _near_matches(self, campaign: Campaign, request: Request, active: bool) -> None:
         """Held similar/other findings: stream an approved bucket, or ask about it once (see ``offers``)."""
@@ -481,7 +517,7 @@ class CampaignRunner:
             if state == "approved":
                 for finding in await self.store.held_findings(campaign.id, bucket, self.config.max_stream_per_step):
                     count = await self.store.claim_held(campaign.id, finding.id)
-                    if count is not None and not await self._send_card(campaign, finding, count, active):
+                    if count is not None and not await self._send_card(campaign, finding, count, active, bucket):
                         return
                 continue
             if state is not None:  # asked and waiting, or declined: never sent
@@ -645,7 +681,7 @@ async def main() -> None:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     runner = CampaignRunner(campaigns, PostgresRunStore(pool, settings.safety_limits()), messenger, discovery,
                             config=settings.runner_config(), owner_ids=settings.owner_ids(),
-                            web=web[0].store if web else None, relevance=judge)
+                            web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool))
     social, generator = _social_worker(settings, pool, campaigns)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else []})

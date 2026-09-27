@@ -1,6 +1,11 @@
 # Hybrid multi-agent system: Claude + Jev + Grok review loop
 
-Status: **design** (nothing in this document is implemented yet). It upgrades
+Status: **phase 1 implemented** (checklist step 2: migration
+`024_agent_findings.sql` and the SA-3 Recorder in `bot/agents/recorder.py`,
+wired into `CampaignRunner._send_card`). Phase 1 stores the findings of today's
+analysis path, keyed by `finding_id`. The `agent_extractions` and
+`agent_decisions` tables of Task 9.1 arrive with the Reduction agents (phase
+3). Everything else is still **design**. It upgrades
 the running bot (`docker-compose.yml`, services `campaign-runner`,
 `analysis-worker`, `facebook-runner`, `browser`, `searxng`, `postgres`) and
 reuses every guard that already works in production: Facebook windows of at
