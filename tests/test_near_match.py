@@ -67,7 +67,9 @@ def test_unknown_price_currency_deal_and_city() -> None:
     assert classify(listing(None), MADRID_50K) == classify(listing(None), MADRID_50K)
     assert classify(listing(None), MADRID_50K).bucket == "other"  # a budget was asked for
     assert classify(listing(None), Request(deal="sale", location="Madrid")).bucket == "exact"  # no budget
-    assert classify(listing(52_000, currency="USD"), MADRID_50K).bucket == "other"
+    # A Spanish campaign is priced in euros: another currency is another market.
+    assert classify(listing(52_000, currency="USD"), MADRID_50K).bucket == "excluded"
+    assert classify(listing(52_000, currency="USD"), Request(amount=50_000, deal="sale")).bucket == "other"
     assert classify(listing(52_000, currency="€"), MADRID_50K).bucket == "exact"
     assert classify(listing(52_000, currency=None), MADRID_50K).bucket == "exact"  # taken as the requested one
     assert classify(listing(52_000, deal="rent"), MADRID_50K).bucket == "excluded"
@@ -151,7 +153,8 @@ async def test_similar_listing_waits_for_approval_then_streams() -> None:
     await runner.tick()
     assert cards(messenger) == []
     assert [(chat, text) for chat, text, _ in messenger.asks] == [(
-        CHAT, "По точному запросу пусто. Есть похожие варианты (например ~60 000 € при запросе ~50 000 €). Показать?")]
+        CHAT, "По вашим критериям пока ничего не нашёл, но есть варианты чуть дороже "
+              "(например ~60 000 € при запросе ~50 000 €). Показать?")]
     buttons = messenger.asks[0][2]
     assert [label for label, _ in buttons] == ["Одобрить", "Нет"]
     assert [data for _, data in buttons] == [f"near:yes:similar:{cid}", f"near:no:similar:{cid}"]

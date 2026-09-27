@@ -434,6 +434,9 @@ services:
       SOCIAL_SEARCH_POLL_SECONDS: ${SOCIAL_SEARCH_POLL_SECONDS:-15}
       CAMPAIGN_SOCIAL_GRACE_SECONDS: ${CAMPAIGN_SOCIAL_GRACE_SECONDS:-1800}
       OPENROUTER_SOCIAL_MODEL: ${OPENROUTER_SOCIAL_MODEL:-openai/gpt-4o-mini}
+      OPENROUTER_MATCH_MODEL: ${OPENROUTER_MATCH_MODEL:-openai/gpt-4o-mini}
+      OPENROUTER_MATCH_TIMEOUT_SECONDS: ${OPENROUTER_MATCH_TIMEOUT_SECONDS:-15}
+      CAMPAIGN_RELEVANCE_MAX_CALLS: ${CAMPAIGN_RELEVANCE_MAX_CALLS:-200}
     # `backend` reaches PostgreSQL, the browser and SearXNG; `egress` sends
     # Telegram messages, calls OpenRouter and reads public web pages.
     networks: [backend, egress]

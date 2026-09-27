@@ -210,7 +210,7 @@ async def test_a_query_another_campaign_searched_recently_is_not_searched_again(
     await run_until_done(w, first)
     second = await campaign(campaigns)
     await run_until_done(w, second)
-    assert searcher.calls == [("terreno Boadilla Madrid", "es")]
+    assert searcher.calls == [("terreno Boadilla Madrid", "es-ES")]  # a Spanish campaign searches Spain
     assert [q.state for q in store.queries[second]] == ["skipped"]
 
 

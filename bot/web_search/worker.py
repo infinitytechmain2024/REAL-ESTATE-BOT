@@ -27,13 +27,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from bot.campaign import geo
 from bot.campaign.models import TERMINAL_STATES, Campaign
 from bot.campaign.store import CampaignStore
 
 from .extract import listing_links, looks_like_index, parse_html, post_text
 from .fetcher import FetchError, PageFetcher
 from .models import Candidate, PageResult, QueuedUrl
-from .queries import QueryGenerator, QueryTask
+from .queries import QueryGenerator, QueryTask, localise
 from .searxng import Searcher, SearchError
 from .store import BUSY, WebStore
 from .urls import classify_url, fetchable, host_of, url_key
@@ -182,7 +183,9 @@ class WebSearchWorker:
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
-        queries = await self.generator.generate(query_task(campaign), used=used, count=want)
+        task = query_task(campaign)
+        # Whatever generated them, every query names the campaign's place (``localise``).
+        queries = localise(await self.generator.generate(task, used=used, count=want), task)
         round_no = await self.store.next_round(campaign.id)
         added = await self.store.add_queries(campaign.id, round_no, queries[:want], reuse_hours=cfg.query_reuse_hours)
         log.info("web_search.round", extra={"campaign_id": campaign.id, "round": round_no, "generated": len(queries),
@@ -190,10 +193,12 @@ class WebSearchWorker:
         return bool(queries)
 
     async def _search(self, campaign: Campaign, query_count: int, pages: int) -> None:
+        task = query_task(campaign)
         for query in await self.store.pending_queries(campaign.id, self.config.queries_per_tick):
             await self.store.set_progress(campaign.id, None, self._line(query_count, pages, "поиск"))
             try:
-                hits = await self.searcher.search(query.text, language=query.language)
+                # A Spanish campaign searches Spain (es-ES) whatever the query's language.
+                hits = await self.searcher.search(query.text, language=task.search_language or query.language)
             except SearchError as exc:
                 log.warning("web_search.search_failed %s", exc.code, extra={"campaign_id": campaign.id})
                 await self.store.query_done(query.id, ok=False, results=0, new_urls=0, error=exc.code)
@@ -201,6 +206,8 @@ class WebSearchWorker:
             candidates: list[Candidate] = []
             for hit in hits[: self.config.results_per_query]:
                 if not fetchable(hit.url, self.config.blocked_hosts):
+                    continue
+                if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
                     continue
                 candidates.append(Candidate(hit.url, url_key(hit.url), host_of(hit.url), 0, classify_url(hit.url),
                                             query.id))

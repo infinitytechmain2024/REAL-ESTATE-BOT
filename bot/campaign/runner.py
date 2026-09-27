@@ -53,12 +53,23 @@ from bot.analysis_pipeline.cards import CardTask, render_card
 
 from . import offers
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
+from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
 from .status_text import FACEBOOK, campaign_label, user_status
 from .store import CampaignStore
-from .tolerance import HELD_BUCKETS, Request, classify, money, price_of, request_for
+from .tolerance import (
+    HELD_BUCKETS,
+    Match,
+    Request,
+    area_text,
+    classify,
+    money,
+    price_of,
+    request_for,
+)
 
 log = logging.getLogger(__name__)
+RELEVANCE_PAUSE_SECONDS = 60
 
 ACTOR = "campaign:runner"
 SEARCHING = "Сейчас: поиск групп Facebook"
@@ -155,10 +166,13 @@ class RunnerConfig:
     max_stream_per_step: int = 20
     # After the last window, how long the campaign waits for social network searches still to come.
     social_grace_seconds: float = 1800
+    # AI relevance checks per campaign (``relevance``); past the cap the deterministic rules decide alone.
+    max_relevance_calls: int = 200
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
-                or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100):
+                or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100
+                or not 0 <= self.max_relevance_calls <= 10_000):
             raise ValueError("unsafe campaign runner settings")
 
 
@@ -174,14 +188,20 @@ class CampaignRunner:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         owner_ids: Collection[int] = frozenset(),
         web: WebProgress | None = None,
+        relevance: RelevanceJudge | None = None,
     ) -> None:
         """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
         status; everyone else sees only the user-safe labels of ``status_text``. ``web``: the
-        website stage's progress, when that stage runs."""
+        website stage's progress, when that stage runs. ``relevance``: the AI check of each
+        finding against the task (None: the deterministic rules alone)."""
         self.campaigns, self.store, self.messenger, self.discovery = campaigns, store, messenger, discovery
         self.config, self.now = config or RunnerConfig(), now
         self.owner_ids = frozenset(owner_ids)
         self.web = web
+        self.relevance = relevance
+        # After a failed relevance call the model is left alone for a minute: one slow or broken
+        # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
+        self._relevance_paused_until: datetime | None = None
 
     async def tick(self) -> int:
         """Advance every open (or just finished) campaign by one step; returns how many were seen."""
@@ -377,7 +397,7 @@ class CampaignRunner:
         active = campaign.state not in TERMINAL_STATES
         request = campaign_request(campaign)
         for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step):
-            match = classify(finding.payload, request, vertical=finding.vertical)
+            match = await self._judge(campaign, request, finding)
             if match.bucket != "exact":
                 await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance)
                 continue
@@ -387,6 +407,60 @@ class CampaignRunner:
             if not await self._send_card(campaign, finding, count, active):
                 return
         await self._near_matches(campaign, request, active)
+
+    async def _judge(self, campaign: Campaign, request: Request, finding: StreamFinding) -> Match:
+        """The finding's bucket: the deterministic rules, then the AI verdict (stored once) on top.
+
+        reject -> excluded; near -> at least similar; match -> the rules' bucket. Anything the
+        rules exclude is never sent to the model.
+        """
+        match = classify(finding.payload, request, vertical=finding.vertical)
+        if match.bucket == "excluded":
+            log.info("campaign.finding_excluded", extra={"campaign_id": campaign.id, "finding_id": finding.id,
+                                                         "why": match.why})
+            return match
+        verdict = await self._relevance(campaign, finding)
+        if verdict is None or verdict.verdict is None or verdict.verdict == "match":
+            return match
+        if verdict.verdict == "reject":
+            return Match("excluded", float("inf"), "ai")
+        return match if match.bucket != "exact" else Match("similar", match.distance, "ai")
+
+    async def _relevance(self, campaign: Campaign, finding: StreamFinding) -> Relevance | None:
+        """The stored verdict, or one new AI call (within the cap); None: the rules decide alone."""
+        stored = await self.store.relevance(campaign.id, finding.id)
+        if stored is not None or self.relevance is None:
+            return stored
+        if self._relevance_paused_until is not None and self.now() < self._relevance_paused_until:
+            return None
+        if await self.store.relevance_calls(campaign.id) >= self.config.max_relevance_calls:
+            return None
+        try:
+            verdict = await self.relevance.judge(task_data(campaign), finding_data(finding.payload, fallback_text=finding.text))
+        except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules
+            self._relevance_paused_until = self.now() + timedelta(seconds=RELEVANCE_PAUSE_SECONDS)
+            code = getattr(exc, "code", type(exc).__name__)
+            log.warning("campaign.relevance_failed %s", code, extra={"campaign_id": campaign.id, "finding_id": finding.id})
+            verdict = Relevance(None, f"error:{code}"[:300], None, getattr(self.relevance, "model", None))
+        await self.store.save_relevance(campaign.id, finding.id, verdict)
+        # The reason is for owners (logs); users never see it.
+        log.info("campaign.relevance %s: %s", verdict.verdict, verdict.reason,
+                 extra={"campaign_id": campaign.id, "finding_id": finding.id})
+        return verdict
+
+    async def _deviation(self, campaign: Campaign, request: Request, closest: StreamFinding) -> offers.Deviation:
+        """What the closest held listing has outside the criteria: price, area, or the AI's phrase."""
+        match = classify(closest.payload, request, vertical=closest.vertical)
+        land = (closest.payload or {}).get("property_type") == "land"
+        price = price_of(closest.payload)
+        if match.why == "price" and price is not None and request.amount is not None and price > request.amount:
+            return offers.Deviation("price", money(price, request.currency), money(request.amount, request.currency),
+                                    land=land)
+        if match.why == "area" and match.area is not None and request.min_area:
+            requested = f"от {round(request.min_area):,} м²".replace(",", " ")
+            return offers.Deviation("area", area_text(match.area), requested, land=land)
+        stored = await self.store.relevance(campaign.id, closest.id)
+        return offers.Deviation("other", phrase=stored.deviation if stored is not None else None, land=land)
 
     async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool) -> bool:
         tail = f"🔎 Найдено: {count} · ищу дальше" if active else f"🔎 Найдено: {count}"
@@ -430,12 +504,7 @@ class CampaignRunner:
         if not await self.store.open_offer(campaign.id, bucket):
             return
         if bucket == "similar":
-            price = price_of(closest.payload)
-            text = offers.similar_question(
-                money(price, request.currency) if price is not None else None,
-                money(request.amount, request.currency) if request.amount is not None else None,
-                exact_found=exact_found,
-            )
+            text = offers.similar_question(await self._deviation(campaign, request, closest), exact_found=exact_found)
         else:
             text = offers.OTHER_QUESTION
         try:
@@ -520,7 +589,8 @@ class CampaignRunner:
 
 def campaign_request(campaign: Campaign) -> Request:
     """What the campaign asked for, for ``tolerance.classify``."""
-    return request_for(campaign.plan.constraints, location=campaign.plan.location, vertical=campaign.plan.vertical)
+    return request_for(campaign.plan.constraints, location=campaign.plan.location, vertical=campaign.plan.vertical,
+                       text=f"{campaign.source_text} {campaign.plan.goal}")
 
 
 def finding_card(campaign: Campaign, finding: StreamFinding) -> str:
@@ -565,9 +635,17 @@ async def main() -> None:
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
     web = await _web_stage(campaigns, pool)
+    judge = None
+    if settings.openrouter_api_key and settings.relevance_max_calls > 0:
+        from .relevance import OpenRouterRelevanceJudge
+
+        judge = OpenRouterRelevanceJudge(api_key=settings.openrouter_api_key, model=settings.relevance_model,
+                                         timeout_seconds=settings.relevance_timeout_seconds)
+    else:
+        log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     runner = CampaignRunner(campaigns, PostgresRunStore(pool, settings.safety_limits()), messenger, discovery,
                             config=settings.runner_config(), owner_ids=settings.owner_ids(),
-                            web=web[0].store if web else None)
+                            web=web[0].store if web else None, relevance=judge)
     social, generator = _social_worker(settings, pool, campaigns)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else []})
@@ -588,6 +666,8 @@ async def main() -> None:
                 await close()
         if generator is not None:
             await generator.aclose()
+        if judge is not None:
+            await judge.aclose()
         await messenger.aclose()
         await pool.close()
 

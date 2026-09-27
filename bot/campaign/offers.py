@@ -42,12 +42,43 @@ REPLIES: dict[str, str] = {
 }
 
 
-def similar_question(example: str | None, requested: str | None, *, exact_found: bool) -> str:
-    """«По точному запросу пусто. Есть похожие варианты (например ~60 000 € при запросе ~50 000 €). Показать?»"""
-    hint = f" (например {example} при запросе {requested})" if example and requested else ""
+@dataclass(frozen=True, slots=True)
+class Deviation:
+    """What the closest held listing has outside the criteria, for the «Одобрить» question.
+
+    ``kind``: price | area | other. ``example`` / ``requested``: «~60 000 €» / «~50 000 €» (price),
+    «~1 600 м²» / «от 2 000 м²» (area). ``phrase``: a short Russian phrase that completes
+    «есть варианты …» («дальше от метро»), from the relevance check.
+    """
+
+    kind: str = "other"
+    example: str | None = None
+    requested: str | None = None
+    phrase: str | None = None
+    land: bool = False  # «участки» instead of «варианты»
+
+
+def similar_question(deviation: Deviation | None = None, *, exact_found: bool) -> str:
+    """The similar question says what is outside the criteria.
+
+    «По вашим критериям пока ничего не нашёл, но есть варианты чуть дороже (например ~60 000 € при запросе
+    ~50 000 €). Показать?» -- or, once exact results were sent, «Есть ещё похожие варианты (например …). Показать?»
+    """
+    lead, hint = "похожие варианты", None
+    what = "участки" if deviation is not None and deviation.land else "варианты"
+    if deviation is not None and deviation.kind == "price" and deviation.example and deviation.requested:
+        lead, hint = f"{what} чуть дороже", f"например {deviation.example} при запросе {deviation.requested}"
+    elif deviation is not None and deviation.kind == "area" and deviation.example and deviation.requested:
+        lead, hint = f"{what} меньшей площади", f"{deviation.example} при запросе {deviation.requested}"
+    elif deviation is not None and deviation.phrase:
+        lead = f"{what} {deviation.phrase}"
     if exact_found:
-        return f"Есть ещё похожие варианты{hint}. Показать?"
-    return f"По точному запросу пусто. Есть похожие варианты{hint}. Показать?"
+        if deviation is not None and deviation.kind == "area" and hint:
+            hint = f"например {hint}"
+        elif hint is None and deviation is not None and deviation.phrase:
+            hint = deviation.phrase
+        return f"Есть ещё похожие варианты{f' ({hint})' if hint else ''}. Показать?"
+    return f"По вашим критериям пока ничего не нашёл, но есть {lead}{f' ({hint})' if hint else ''}. Показать?"
 
 
 OTHER_QUESTION = "Показать более далёкие варианты?"
