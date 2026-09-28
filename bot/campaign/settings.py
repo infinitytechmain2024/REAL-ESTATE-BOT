@@ -68,7 +68,7 @@ class CampaignRunnerSettings(BaseSettings):
     comment_leads: str = Field(default="all", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
     comment_max_posts: int = Field(default=15, ge=0, le=100, validation_alias="CAMPAIGN_COMMENT_MAX_POSTS")
     # An investor search sends the people stored from comments in its city (at most, seen within days).
-    lead_people_max: int = Field(default=30, ge=0, le=500, validation_alias="CAMPAIGN_LEAD_PEOPLE_MAX")
+    lead_people_max: int = Field(default=60, ge=0, le=500, validation_alias="CAMPAIGN_LEAD_PEOPLE_MAX")
     lead_days: int = Field(default=90, ge=1, le=3650, validation_alias="CAMPAIGN_LEAD_DAYS")
     comment_reads_per_day: int = Field(default=40, ge=0, le=500, validation_alias="SAFETY_MAX_FACEBOOK_COMMENT_READS_PER_DAY")
     comment_reads_per_round: int = Field(default=3, ge=1, le=10, validation_alias="CAMPAIGN_COMMENT_READS_PER_ROUND")
@@ -103,6 +103,20 @@ class CampaignRunnerSettings(BaseSettings):
                             max_relevance_calls=self.relevance_max_calls,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
                             max_people=self.lead_people_max, lead_days=self.lead_days)
+
+    # Investor reach across platforms through the search engines (bot/campaign/reach.py).
+    reach_enabled: bool = Field(default=True, validation_alias="INVESTOR_REACH_ENABLED")
+    reach_queries_per_campaign: int = Field(default=16, ge=1, le=100, validation_alias="INVESTOR_REACH_QUERIES_PER_CAMPAIGN")
+    reach_queries_per_tick: int = Field(default=2, ge=1, le=10, validation_alias="INVESTOR_REACH_QUERIES_PER_TICK")
+    reach_queries_per_day: int = Field(default=80, ge=0, le=2000, validation_alias="INVESTOR_REACH_QUERIES_PER_DAY")
+    reach_poll_seconds: int = Field(default=20, ge=5, le=600, validation_alias="INVESTOR_REACH_POLL_SECONDS")
+    reach_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_REACH_MODEL")
+
+    def reach_config(self):  # -> bot.campaign.reach.ReachConfig
+        from .reach import ReachConfig
+
+        return ReachConfig(queries_per_campaign=self.reach_queries_per_campaign,
+                           queries_per_tick=self.reach_queries_per_tick, queries_per_day=self.reach_queries_per_day)
 
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig

@@ -65,6 +65,14 @@ their profile page is never opened. Comment text goes to OpenRouter for the role
 No retention job covers these tables yet; an investor search only uses rows of the last
 `CAMPAIGN_LEAD_DAYS` (90). §4.1 and §4.3 apply to exactly this data.
 
+### 2.3b Investor reach — built (bot/campaign/reach.py, migration 027)
+
+An investor search asks the search engines for investors, agents, agencies, funds and networks in
+its city on LinkedIn, Reddit, X, Instagram, TikTok, YouTube and the open web. `reach_contacts`
+holds what the engine showed about each result — link, title, snippet — plus the model's kind,
+name and Russian summary and the city. The platforms themselves are never opened. The same
+§4.1 / §4.3 questions apply, and no retention job covers the table yet.
+
 ### 2.4 What the operator's machine holds
 
 The Chrome profile in `./data` contains live Facebook session cookies. `DEPLOYMENT.md` §3

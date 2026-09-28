@@ -60,6 +60,7 @@ from . import offers
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
+from .reach import contact_card
 from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
 from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
@@ -189,8 +190,9 @@ class RunnerConfig:
     # at most ``comment_max_posts`` per campaign. Off unless a comment worker runs beside the runner (``main``).
     comment_leads: str = "off"
     comment_max_posts: int = 15
-    # An investor search sends at most ``max_people`` stored people of its city, seen in the last ``lead_days``.
-    max_people: int = 30
+    # An investor search sends at most ``max_people`` stored people and reach contacts of its city,
+    # seen in the last ``lead_days``.
+    max_people: int = 60
     lead_days: int = 90
 
     def __post_init__(self) -> None:
@@ -404,6 +406,8 @@ class CampaignRunner:
             return ANALYSIS
         if waited < self.config.social_grace_seconds and (await self.store.social_activity(campaign.id)).pending:
             return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
+        if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
+            return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
         await self._stream(campaign)
         await self.campaigns.set_state(campaign.id, "completed", ACTOR, reason=reason)
         return ANALYSIS
@@ -550,17 +554,23 @@ class CampaignRunner:
         if room <= 0:
             return
         limit = min(room, self.config.max_stream_per_step)
-        for person in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit):
-            if not await self.store.claim_person(campaign.id, person.profile_key):
+        # People from comments under objects first (they asked about a concrete object), then the reach.
+        cards: list[tuple[str, str]] = [
+            (p.profile_key, person_card(p, location=location, now=self.now()))
+            for p in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit)]
+        if len(cards) < limit:
+            cards += [(c.delivery_key, contact_card(c)) for c in await self.store.stored_contacts(
+                campaign.id, location, self.config.lead_days, limit - len(cards))]
+        for key, card in cards:
+            if not await self.store.claim_person(campaign.id, key):
                 continue
-            card = person_card(person, location=location, now=self.now())[:MAX_MESSAGE_CHARS]
             try:
-                message_id = await self.messenger.send(campaign.chat_id, card)
+                message_id = await self.messenger.send(campaign.chat_id, card[:MAX_MESSAGE_CHARS])
             except Exception:  # noqa: BLE001 - Telegram down: retry next tick
                 log.warning("campaign.person_send_failed", extra={"campaign_id": campaign.id})
-                await self.store.release_person(campaign.id, person.profile_key)
+                await self.store.release_person(campaign.id, key)
                 return
-            await self.store.person_sent(campaign.id, person.profile_key, message_id)
+            await self.store.person_sent(campaign.id, key, message_id)
             self._below_status.add(campaign.id)
 
     async def _record(self, campaign: Campaign, finding: StreamFinding, bucket: str) -> None:
@@ -775,6 +785,7 @@ async def main() -> None:
     else:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     comments, lead_judge = _comment_worker(settings, pool)
+    reach, reach_closers = _reach_worker(settings, pool)
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
@@ -785,7 +796,8 @@ async def main() -> None:
     social, generator = _social_worker(settings, pool, campaigns)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
-                                             "comment_leads": settings.comment_leads if comments else "off"})
+                                             "comment_leads": settings.comment_leads if comments else "off",
+                                             "investor_reach": reach is not None})
     stop = asyncio.Event()
     try:
         # Each stage is its own loop: a slow site or network never delays Facebook work, and the reverse.
@@ -797,6 +809,8 @@ async def main() -> None:
             tasks.append(social.serve(settings.social_poll_seconds, stop))
         if comments is not None:
             tasks.append(comments.serve(settings.comment_poll_seconds, stop))
+        if reach is not None:
+            tasks.append(reach.serve(settings.reach_poll_seconds, stop))
         await asyncio.gather(*tasks)
     finally:
         stop.set()
@@ -807,6 +821,8 @@ async def main() -> None:
             await generator.aclose()
         if lead_judge is not None:
             await lead_judge.aclose()
+        for close in reach_closers:
+            await close()
         if judge is not None:
             await judge.aclose()
         await messenger.aclose()
@@ -878,6 +894,27 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
     worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config)
     return worker, generator
+
+
+def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
+    """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false."""
+    if not settings.reach_enabled:
+        return None, []
+    from bot.web_search.searxng import SearxngClient
+    from bot.web_search.settings import WebSearchSettings
+
+    from .reach import OpenRouterReachJudge, PostgresReachStore, ReachWorker
+
+    web = WebSearchSettings()
+    searcher = SearxngClient(web.searxng_url, timeout_seconds=web.searxng_timeout_seconds, max_results=10)
+    judge = None
+    if settings.openrouter_api_key:
+        judge = OpenRouterReachJudge(api_key=settings.openrouter_api_key, model=settings.reach_model,
+                                     timeout_seconds=settings.leads_timeout_seconds)
+    else:
+        log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
+    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config())
+    return worker, [searcher.aclose] + ([judge.aclose] if judge else [])
 
 
 def _comment_worker(settings: Any, pool: Any) -> tuple[Any, Any]:

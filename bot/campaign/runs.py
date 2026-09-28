@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from .leads import Person, Sighting
 from .models import WINDOW_SIZE
 from .offers import MemoryOffer, MemoryOfferDesk
+from .reach import KIND_ORDER, Contact
 from .relevance import Relevance
 
 if TYPE_CHECKING:
@@ -137,6 +138,9 @@ class RunStore(Protocol):
     async def claim_person(self, campaign_id: str, profile_key: str) -> bool: ...
     async def person_sent(self, campaign_id: str, profile_key: str, message_id: int) -> None: ...
     async def release_person(self, campaign_id: str, profile_key: str) -> None: ...
+    # investor reach across platforms (migration 027, ``reach``)
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]: ...
+    async def reach_pending(self, campaign_id: str) -> bool: ...
 
 
 def _distance(value: float | None) -> float | None:
@@ -560,6 +564,27 @@ class PostgresRunStore:
             """delete from campaign_lead_deliveries
                 where campaign_id = $1::uuid and profile_key = $2 and state = 'sending'""", campaign_id, profile_key)
 
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]:
+        """Relevant reach results of ``location`` (last ``days``) this campaign has not sent: investors first."""
+        order = " ".join(f"when '{kind}' then {rank}" for kind, rank in KIND_ORDER.items())
+        rows = await self.pool.fetch(
+            f"""select url_key, url, platform, kind, name, coalesce(title, '') as title,
+                       coalesce(snippet, '') as snippet, summary_ru, created_at
+                  from reach_contacts r
+                 where r.relevant and r.location = $2 and r.created_at > now() - make_interval(days => $3)
+                   and not exists (select 1 from campaign_lead_deliveries d
+                                    where d.campaign_id = $1::uuid and d.profile_key = 'reach:' || r.url_key)
+                 order by case r.kind {order} else 9 end, r.confidence desc nulls last, r.created_at, r.url_key
+                 limit {int(limit)}""",
+            campaign_id, location, days)
+        return [Contact(r["url_key"], r["url"], r["platform"], r["kind"], r["name"], r["title"], r["snippet"],
+                        r["summary_ru"], r["created_at"]) for r in rows]
+
+    async def reach_pending(self, campaign_id: str) -> bool:
+        return bool(await self.pool.fetchval(
+            "select exists (select 1 from campaign_reach where campaign_id = $1::uuid and state = 'running')",
+            campaign_id))
+
     async def drop_offer(self, campaign_id: str, bucket: str) -> None:
         """The question could not be sent: free the slot so the next tick asks again."""
         await self.pool.execute(
@@ -662,6 +687,8 @@ class MemoryRunStore:
         self.comment_done: set[str] = set()  # finding ids whose comments were read
         self.people: dict[str, list[Person]] = {}  # city -> stored people, in the order they are offered
         self.deliveries: dict[tuple[str, str], int | None] = {}  # (cid, person) -> message id (None = sending)
+        self.contacts: dict[str, list[Contact]] = {}  # city -> relevant reach results, in the order they are offered
+        self.reaching: set[str] = set()  # campaigns whose reach stage still runs
 
     async def recover_discovery_profile(self) -> int:
         items = getattr(self.campaigns, "campaigns", {})
@@ -891,3 +918,10 @@ class MemoryRunStore:
     async def release_person(self, campaign_id: str, profile_key: str) -> None:
         if self.deliveries.get((campaign_id, profile_key), 0) is None:
             del self.deliveries[(campaign_id, profile_key)]
+
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]:
+        return [c for c in self.contacts.get(location, [])
+                if (campaign_id, c.delivery_key) not in self.deliveries][:limit]
+
+    async def reach_pending(self, campaign_id: str) -> bool:
+        return campaign_id in self.reaching

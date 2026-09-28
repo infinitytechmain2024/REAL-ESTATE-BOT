@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`026_campaign_comment_leads.sql` in order. It records SHA-256 checksums in
+`027_investor_reach.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -33,6 +33,8 @@ traces (Claude extraction, Jev answers, gate), phase 3 in shadow mode.
 `026_campaign_comment_leads.sql` queues the Facebook posts a campaign sent for
 a comment read, stores the investor / buyer leads found in their comments and
 which of them an investor search already sent.
+`027_investor_reach.sql` keeps the investor search's reach across platforms
+(search-engine results about investors, agents, agencies, funds, networks).
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their
