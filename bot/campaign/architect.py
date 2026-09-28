@@ -81,9 +81,19 @@ _RE_WORDS = frozenset({
     "rent", "rental", "rentals", "renting", "flat", "flats", "apartment", "apartments", "room",
     "rooms", "house", "houses", "housing", "property", "properties", "realestate", "bedroom",
     "bedrooms", "studio", "lease", "sale", "home", "homes", "accommodation", "landlord",
+    # land, buildings and commercial property
+    "terreno", "terrenos", "parcela", "parcelas", "solar", "solares", "finca", "fincas", "local", "locales",
+    "nave", "naves", "oficina", "oficinas", "edificio", "edificios", "adosado", "duplex", "villa", "villas",
+    "land", "plot", "plots", "lot", "lots", "acre", "acres", "commercial", "office", "offices", "warehouse",
+    "building", "buildings", "townhouse", "cottage",
+    # «дом» only as a whole word: as a prefix it would match «домашний», «домен»
+    "дом", "дома", "домов", "домик", "домом", "доме", "будинок", "хата",
 })
 _RE_STEMS = ("квартир", "аренд", "снять", "сниму", "съем", "комнат", "жиль", "жилье", "недвижим",
-             "продаж", "студи", "оренд", "житл", "кімнат", "нерухом", "будин", "винайм", "зняти")
+             "продаж", "студи", "оренд", "житл", "кімнат", "нерухом", "будин", "винайм", "зняти",
+             # land, houses and commercial property (RU / UK)
+             "участ", "земл", "сотк", "коттедж", "дач", "таунхаус", "особняк", "вилл", "апартамент",
+             "помещен", "офис", "склад", "здани", "ділянк", "котедж", "приміщен", "офіс")
 _INV_WORDS = frozenset({
     "inversor", "inversores", "inversion", "inversiones", "invertir", "inversionista",
     "inversionistas", "financiacion", "startup", "startups", "emprendedor", "emprendedores",
@@ -221,6 +231,8 @@ def _detect_vertical(words: list[str]) -> Vertical:
         return "real_estate"
     if investors:
         return "investors"
+    if _detect_deal(words) is not None:
+        return "real_estate"  # «купить в Мадриде до 60 000 €»: buying or renting here is always property
     raise InvalidGoal("Не понял, что искать: жильё (аренда/продажа) или инвесторов. Уточните задачу.")
 
 

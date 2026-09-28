@@ -340,7 +340,8 @@ async def challenge_breaker(conn: asyncpg.Connection[asyncpg.Record], limits: Sa
 
     Counts verification jobs and, for Facebook, campaign discoveries that
     stopped at a Facebook challenge (they pause the campaign, see
-    bot/campaign/discovery.py, and create no verification job).
+    bot/campaign/discovery.py, and create no verification job) and comment
+    reads that met one (bot/campaign/leads.py).
     """
     window = limits.breaker_window_hours
     challenges = await conn.fetchval(
@@ -354,6 +355,12 @@ async def challenge_breaker(conn: asyncpg.Connection[asyncpg.Record], limits: Sa
                 where entity_type='campaigns' and old_state='discovering' and new_state='paused_verification'
                   and new_data->>'stop_reason' like 'facebook_challenge:%'
                   and occurred_at > now() - make_interval(hours => $1)""",
+            window,
+        )
+        # Comment reads for investor leads (bot/campaign/leads.py) that met a challenge.
+        challenges += await conn.fetchval(
+            """select count(*) from campaign_comment_reads
+                where error_code like 'facebook_challenge:%' and read_at > now() - make_interval(hours => $1)""",
             window,
         )
     if challenges >= limits.breaker_challenges:

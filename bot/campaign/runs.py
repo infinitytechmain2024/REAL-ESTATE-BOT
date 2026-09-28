@@ -16,8 +16,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .leads import Person, Sighting
 from .models import WINDOW_SIZE
 from .offers import MemoryOffer, MemoryOfferDesk
+from .reach import KIND_ORDER, Contact
 from .relevance import Relevance
 
 if TYPE_CHECKING:
@@ -27,6 +29,8 @@ if TYPE_CHECKING:
 
 TERMINAL_BATCH_STATES = frozenset({"succeeded", "failed", "cancelled"})
 RECENT_SECONDS = 86_400  # finished campaigns still stream late findings for a day
+DEAD_DAYS = 7          # a group whose newest post is this much older than its last read is dead ...
+DEAD_RECHECK_DAYS = 30  # ... until that read is this old: then it is read once more (it may have revived)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,7 @@ class StreamFinding:
     language: str | None = None
     confidence: float | None = None
     vertical: str | None = None
+    url: str | None = None  # the post's own link (a Facebook post's comments are read for leads)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +131,16 @@ class RunStore(Protocol):
     async def relevance(self, campaign_id: str, finding_id: str) -> Relevance | None: ...
     async def save_relevance(self, campaign_id: str, finding_id: str, relevance: Relevance) -> None: ...
     async def relevance_calls(self, campaign_id: str) -> int: ...
+    # investor leads from the comments under sent objects (migration 026, ``leads``)
+    async def queue_comment_read(self, campaign_id: str, finding_id: str, post_url: str, max_posts: int) -> bool: ...
+    async def stored_people(self, campaign_id: str, location: str, days: int, limit: int) -> list[Person]: ...
+    async def people_sent(self, campaign_id: str) -> int: ...
+    async def claim_person(self, campaign_id: str, profile_key: str) -> bool: ...
+    async def person_sent(self, campaign_id: str, profile_key: str, message_id: int) -> None: ...
+    async def release_person(self, campaign_id: str, profile_key: str) -> None: ...
+    # investor reach across platforms (migration 027, ``reach``)
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]: ...
+    async def reach_pending(self, campaign_id: str) -> bool: ...
 
 
 def _distance(value: float | None) -> float | None:
@@ -145,8 +160,11 @@ def _window_size(limit: int) -> int:
 
 
 class PostgresRunStore:
-    def __init__(self, pool: asyncpg.Pool[asyncpg.Record], limits: SafetyLimits) -> None:
-        self.pool, self.limits = pool, limits
+    def __init__(self, pool: asyncpg.Pool[asyncpg.Record], limits: SafetyLimits, *,
+                 dead_days: int = DEAD_DAYS) -> None:
+        if not 1 <= dead_days <= 365:
+            raise ValueError("dead_days must be 1..365")
+        self.pool, self.limits, self.dead_days = pool, limits, dead_days
 
     async def recover_discovery_profile(self) -> int:
         """Free a Facebook profile a crashed discovery left ``in_use``; returns how many were freed.
@@ -262,11 +280,19 @@ class PostgresRunStore:
     async def next_groups(self, campaign_id: str, limit: int) -> list[QueuedGroup]:
         """The next groups to read: the Facebook read quota goes to live groups first.
 
-        A group any campaign read in the last ``EMPTY_READ_DAYS`` days that gave no finding in the last
-        ``FINDINGS_DAYS`` days is skipped (state ``skipped``, the reason stored); groups that gave
+        A dead group is skipped: a read in the last ``DEAD_RECHECK_DAYS`` days found no posts, or its
+        newest post was ``dead_days`` older than that read (FACEBOOK_GROUP_DEAD_DAYS). A group any
+        campaign read in the last ``EMPTY_READ_DAYS`` days that gave no finding in the last
+        ``FINDINGS_DAYS`` days is skipped too (state ``skipped``, the reason stored); groups that gave
         findings recently come first, then the discovery order.
         """
         async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                f"""update campaign_groups g set state = 'skipped',
+                           reject_reason = 'dead: no new posts for ' || $2::int || ' days', updated_at = now()
+                     where g.campaign_id = $1::uuid and g.state = 'queued' and g.batch_id is null
+                       and exists ({_DEAD_GROUP})""",
+                campaign_id, self.dead_days)
             await conn.execute(
                 f"""update campaign_groups g set state = 'skipped', reject_reason = 'no findings in recent reads',
                            updated_at = now()
@@ -298,6 +324,9 @@ class PostgresRunStore:
                              method=AcquisitionMethod.FACEBOOK_CONNECTOR)
         async with self.pool.acquire() as conn, conn.transaction():
             await _set_actor(conn, actor)
+            # The comment reader (bot/campaign/leads.py) claims the profile under the same row lock,
+            # so it either sees this window's batch or holds the profile and the plan is refused.
+            await conn.execute("select 1 from browser_profiles where platform = 'facebook' and deleted_at is null for update")
             window_no = await conn.fetchval(
                 "select count(*) + 1 from campaign_windows where campaign_id = $1::uuid", campaign_id)
             planned = await plan_facebook_batch(conn, self.limits, request, actor=actor, notify_telegram_id=None,
@@ -341,7 +370,8 @@ class PostgresRunStore:
             f"""select f.id::text as id,
                        coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
                        f.structured_payload::text as payload, coalesce(p.body_text, '') as original,
-                       f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical
+                       f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical,
+                       p.canonical_url as url
                   from findings f
                   join collected_posts p on p.id = f.post_id
                  where {_IN_CAMPAIGN} and f.state in ('ready', 'delivery_failed')
@@ -350,7 +380,7 @@ class PostgresRunStore:
             campaign_id,
         )
         return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
-                              r["confidence"], r["vertical"]) for r in rows]
+                              r["confidence"], r["vertical"], r["url"]) for r in rows]
 
     async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None:
         """Take the one send slot for a finding; returns the campaign's finding count, or None if taken."""
@@ -402,7 +432,8 @@ class PostgresRunStore:
             f"""select f.id::text as id,
                        coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
                        f.structured_payload::text as payload, coalesce(p.body_text, '') as original,
-                       f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical
+                       f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical,
+                       p.canonical_url as url
                   from campaign_findings cf
                   join findings f on f.id = cf.finding_id
                   join collected_posts p on p.id = f.post_id
@@ -411,7 +442,7 @@ class PostgresRunStore:
             campaign_id, bucket,
         )
         return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
-                              r["confidence"], r["vertical"]) for r in rows]
+                              r["confidence"], r["vertical"], r["url"]) for r in rows]
 
     async def social_activity(self, campaign_id: str) -> SocialActivity:
         rows = await self.pool.fetch(
@@ -475,6 +506,85 @@ class PostgresRunStore:
         return int(await self.pool.fetchval(
             "select count(*) from campaign_finding_relevance where campaign_id = $1::uuid", campaign_id))
 
+    async def queue_comment_read(self, campaign_id: str, finding_id: str, post_url: str, max_posts: int) -> bool:
+        """Queue a sent Facebook post for one comment read, at most ``max_posts`` per campaign."""
+        return bool(await self.pool.fetchval(
+            """insert into campaign_comment_reads (campaign_id, finding_id, post_url)
+               select $1::uuid, $2::uuid, $3
+                where (select count(*) from campaign_comment_reads where campaign_id = $1::uuid) < $4
+               on conflict do nothing returning 1""",
+            campaign_id, finding_id, post_url[:2000], max_posts,
+        ))
+
+    async def stored_people(self, campaign_id: str, location: str, days: int, limit: int) -> list[Person]:
+        """People stored from comments under objects in ``location`` (last ``days``) this campaign has not sent:
+        investors first, then those with more objects, then the most recent."""
+        rows = await self.pool.fetch(
+            f"""with people as (
+                    select l.profile_key, bool_or(l.role = 'investor') as investor, count(*) as objects,
+                           max(l.created_at) as last_seen
+                      from investor_leads l
+                     where l.location = $2 and l.created_at > now() - make_interval(days => $3)
+                       and not exists (select 1 from campaign_lead_deliveries d
+                                        where d.campaign_id = $1::uuid and d.profile_key = l.profile_key)
+                     group by l.profile_key
+                     order by investor desc, objects desc, last_seen desc, l.profile_key limit {int(limit)})
+                select l.profile_key, l.profile_url, l.author_name, l.post_url, l.comment_text, l.role, l.summary_ru,
+                       l.object_facts::text as facts, l.created_at
+                  from investor_leads l join people p on p.profile_key = l.profile_key
+                 where l.location = $2 and l.created_at > now() - make_interval(days => $3)
+                 order by p.investor desc, p.objects desc, p.last_seen desc, l.profile_key, l.created_at desc""",
+            campaign_id, location, days,
+        )
+        people: dict[str, list[Any]] = {}
+        for r in rows:
+            people.setdefault(r["profile_key"], []).append(r)
+        return [Person(key, group[0]["profile_url"], next((r["author_name"] for r in group if r["author_name"]), None),
+                       tuple(Sighting(r["post_url"], r["comment_text"], r["role"], r["created_at"], r["summary_ru"],
+                                      _payload(r["facts"]) or {}) for r in group))
+                for key, group in people.items()]
+
+    async def people_sent(self, campaign_id: str) -> int:
+        return int(await self.pool.fetchval(
+            "select count(*) from campaign_lead_deliveries where campaign_id = $1::uuid", campaign_id))
+
+    async def claim_person(self, campaign_id: str, profile_key: str) -> bool:
+        return bool(await self.pool.fetchval(
+            """insert into campaign_lead_deliveries (campaign_id, profile_key) values ($1::uuid, $2)
+               on conflict do nothing returning 1""", campaign_id, profile_key))
+
+    async def person_sent(self, campaign_id: str, profile_key: str, message_id: int) -> None:
+        await self.pool.execute(
+            """update campaign_lead_deliveries set state = 'sent', telegram_message_id = $3, sent_at = now()
+                where campaign_id = $1::uuid and profile_key = $2 and state = 'sending'""",
+            campaign_id, profile_key, message_id)
+
+    async def release_person(self, campaign_id: str, profile_key: str) -> None:
+        await self.pool.execute(
+            """delete from campaign_lead_deliveries
+                where campaign_id = $1::uuid and profile_key = $2 and state = 'sending'""", campaign_id, profile_key)
+
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]:
+        """Relevant reach results of ``location`` (last ``days``) this campaign has not sent: investors first."""
+        order = " ".join(f"when '{kind}' then {rank}" for kind, rank in KIND_ORDER.items())
+        rows = await self.pool.fetch(
+            f"""select url_key, url, platform, kind, name, coalesce(title, '') as title,
+                       coalesce(snippet, '') as snippet, summary_ru, created_at
+                  from reach_contacts r
+                 where r.relevant and r.location = $2 and r.created_at > now() - make_interval(days => $3)
+                   and not exists (select 1 from campaign_lead_deliveries d
+                                    where d.campaign_id = $1::uuid and d.profile_key = 'reach:' || r.url_key)
+                 order by case r.kind {order} else 9 end, r.confidence desc nulls last, r.created_at, r.url_key
+                 limit {int(limit)}""",
+            campaign_id, location, days)
+        return [Contact(r["url_key"], r["url"], r["platform"], r["kind"], r["name"], r["title"], r["snippet"],
+                        r["summary_ru"], r["created_at"]) for r in rows]
+
+    async def reach_pending(self, campaign_id: str) -> bool:
+        return bool(await self.pool.fetchval(
+            "select exists (select 1 from campaign_reach where campaign_id = $1::uuid and state = 'running')",
+            campaign_id))
+
     async def drop_offer(self, campaign_id: str, bucket: str) -> None:
         """The question could not be sent: free the slot so the next tick asks again."""
         await self.pool.execute(
@@ -494,6 +604,15 @@ async def _sent_count(conn: asyncpg.Connection[asyncpg.Record], campaign_id: str
 # A post belongs to a campaign through its Facebook batch (acquisition_runs ->
 # batch items -> acquisition_batches.campaign_id) or through the social search
 # that found it (campaign_social_posts, migration 022).
+# $2: dead_days. The last successful read of the group's source, recent enough to trust.
+_DEAD_GROUP = f"""select 1 from monitoring_sources s3
+                   cross join lateral (select max(r3.finished_at) as last_read from acquisition_runs r3
+                                        where r3.source_id = s3.id and r3.state = 'succeeded') lr
+                   where s3.canonical_url = g.canonical_url and s3.platform = 'facebook'
+                     and lr.last_read > now() - interval '{DEAD_RECHECK_DAYS} days'
+                     and (s3.configuration->>'facebook_group_state' = 'INACTIVE'
+                          or (select max(p3.published_at) from collected_posts p3 where p3.source_id = s3.id)
+                             < lr.last_read - make_interval(days => $2::int))"""
 EMPTY_READ_DAYS = 3   # a group read this recently ...
 FINDINGS_DAYS = 14    # ... with no finding for this long is skipped: the quota goes to live groups
 _RECENT_FINDING = f"""select 1 from monitoring_sources s2 join findings f on f.source_id = s2.id
@@ -550,6 +669,7 @@ class MemoryRunStore:
         self.profile = "ready"
         self.breaker: str | None = None
         self.refusal: str | None = None
+        self.dead_groups: set[str] = set()   # canonical URLs with no new posts for days: skipped
         self.empty_groups: set[str] = set()  # canonical URLs read lately with nothing found: skipped
         self.live_groups: set[str] = set()   # canonical URLs with recent findings: read first
         self.unavailable: set[str] = set()
@@ -563,6 +683,12 @@ class MemoryRunStore:
         self.desk = MemoryOfferDesk()  # the control plane's side of campaign_offers
         self.social: dict[str, SocialActivity] = {}  # cid -> social search activity
         self.relevances: dict[tuple[str, str], Relevance] = {}  # (cid, finding) -> stored AI verdict
+        self.comment_reads: dict[str, dict[str, str]] = {}  # cid -> finding -> post URL (queued for a read)
+        self.comment_done: set[str] = set()  # finding ids whose comments were read
+        self.people: dict[str, list[Person]] = {}  # city -> stored people, in the order they are offered
+        self.deliveries: dict[tuple[str, str], int | None] = {}  # (cid, person) -> message id (None = sending)
+        self.contacts: dict[str, list[Contact]] = {}  # city -> relevant reach results, in the order they are offered
+        self.reaching: set[str] = set()  # campaigns whose reach stage still runs
 
     async def recover_discovery_profile(self) -> int:
         items = getattr(self.campaigns, "campaigns", {})
@@ -636,10 +762,10 @@ class MemoryRunStore:
         return len(self.windows.get(campaign_id, []))
 
     async def next_groups(self, campaign_id: str, limit: int) -> list[QueuedGroup]:
-        """Same rules as PostgreSQL: ``empty_groups`` (read lately, nothing found) are skipped,
-        ``live_groups`` (recent findings) come first."""
+        """Same rules as PostgreSQL: ``dead_groups`` (no new posts for days) and ``empty_groups`` (read lately,
+        nothing found) are skipped, ``live_groups`` (recent findings) come first."""
         for g in self.groups.get(campaign_id, []):
-            if g.state == "queued" and g.batch_id is None and g.canonical_url in self.empty_groups:
+            if g.state == "queued" and g.batch_id is None and g.canonical_url in self.dead_groups | self.empty_groups:
                 g.state = "skipped"
         waiting = [g for g in self.groups.get(campaign_id, []) if g.state == "queued" and g.batch_id is None]
         waiting.sort(key=lambda g: (g.canonical_url not in self.live_groups, g.window_no is None, g.window_no or 0,
@@ -765,3 +891,37 @@ class MemoryRunStore:
 
     async def relevance_calls(self, campaign_id: str) -> int:
         return sum(1 for cid, _ in self.relevances if cid == campaign_id)
+
+    async def queue_comment_read(self, campaign_id: str, finding_id: str, post_url: str, max_posts: int) -> bool:
+        reads = self.comment_reads.setdefault(campaign_id, {})
+        if finding_id in reads or len(reads) >= max_posts:
+            return False
+        reads[finding_id] = post_url
+        return True
+
+    async def stored_people(self, campaign_id: str, location: str, days: int, limit: int) -> list[Person]:
+        return [p for p in self.people.get(location, []) if (campaign_id, p.profile_key) not in self.deliveries][:limit]
+
+    async def people_sent(self, campaign_id: str) -> int:
+        return sum(1 for cid, _ in self.deliveries if cid == campaign_id)
+
+    async def claim_person(self, campaign_id: str, profile_key: str) -> bool:
+        if (campaign_id, profile_key) in self.deliveries:
+            return False
+        self.deliveries[(campaign_id, profile_key)] = None
+        return True
+
+    async def person_sent(self, campaign_id: str, profile_key: str, message_id: int) -> None:
+        if (campaign_id, profile_key) in self.deliveries:
+            self.deliveries[(campaign_id, profile_key)] = message_id
+
+    async def release_person(self, campaign_id: str, profile_key: str) -> None:
+        if self.deliveries.get((campaign_id, profile_key), 0) is None:
+            del self.deliveries[(campaign_id, profile_key)]
+
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]:
+        return [c for c in self.contacts.get(location, [])
+                if (campaign_id, c.delivery_key) not in self.deliveries][:limit]
+
+    async def reach_pending(self, campaign_id: str) -> bool:
+        return campaign_id in self.reaching

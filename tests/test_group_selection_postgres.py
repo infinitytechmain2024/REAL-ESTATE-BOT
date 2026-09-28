@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import uuid
 
+import pytest
+
 from bot.campaign import plan_campaign
 from bot.campaign.runs import PostgresRunStore
 from bot.campaign.store import PostgresCampaignStore
@@ -59,3 +61,43 @@ async def test_live_groups_first_empty_recent_reads_skipped(pool) -> None:
     rows = dict(await pool.fetch("select group_key, state || ':' || coalesce(reject_reason, '') from campaign_groups"))
     assert rows["empty"] == "skipped:no findings in recent reads"
     assert rows["alpha"] == "queued:"
+
+
+async def _post(conn, key: str, *, published_days_ago: int) -> None:
+    """A post of the group, published that long ago, from its latest read."""
+    run, source = await conn.fetchrow(
+        """select r.id, r.source_id from acquisition_runs r join monitoring_sources s on s.id = r.source_id
+            where s.canonical_url = $1 order by r.finished_at desc limit 1""",
+        f"https://www.facebook.com/groups/{key}/")
+    await conn.execute(
+        """insert into collected_posts (acquisition_run_id, source_id, platform_post_id, canonical_url, body_text,
+                                        state, content_hash, published_at)
+           values ($1, $2, $3, $4, 'Vendo', 'analysed', $5, now() - make_interval(days => $6))""",
+        run, source, uuid.uuid4().hex, f"https://www.facebook.com/groups/{key}/posts/{uuid.uuid4().int % 10**9}/",
+        uuid.uuid4().hex, published_days_ago)
+
+
+@needs_db
+async def test_dead_groups_are_skipped_until_a_month_after_their_last_read(pool) -> None:
+    campaigns = PostgresCampaignStore(pool)
+    cid = await campaigns.create(plan_campaign(GOAL), chat_id=1, requested_by=USER, source_text=GOAL, actor="t")
+    async with pool.acquire() as conn:
+        for key, score in (("stale", 0.9), ("quiet", 0.8), ("busy", 0.7), ("revived", 0.6), ("new", 0.5)):
+            await _group(conn, cid, key, score)
+        await _read(conn, "stale", days_ago=5, finding=True)     # read 5 days ago, newest post 20 days old: dead
+        await _post(conn, "stale", published_days_ago=20)
+        await _read(conn, "busy", days_ago=5, finding=True)      # newest post 6 days old: alive
+        await _post(conn, "busy", published_days_ago=6)
+        await _read(conn, "quiet", days_ago=10, finding=True)    # the last read found no posts at all: dead
+        await _read(conn, "revived", days_ago=40, finding=True)  # dead once, but a month ago: read again
+        await conn.execute(
+            """update monitoring_sources set configuration = configuration || '{"facebook_group_state": "INACTIVE"}'
+                where canonical_url in ('https://www.facebook.com/groups/quiet/',
+                                        'https://www.facebook.com/groups/revived/')""")
+    store = PostgresRunStore(pool, SafetyLimits(), dead_days=7)
+    keys = [g.group_key for g in await store.next_groups(cid, 20)]
+    assert set(keys) == {"busy", "revived", "new"}
+    rows = dict(await pool.fetch("select group_key, state || ':' || coalesce(reject_reason, '') from campaign_groups"))
+    assert rows["stale"] == rows["quiet"] == "skipped:dead: no new posts for 7 days"
+    with pytest.raises(ValueError):
+        PostgresRunStore(pool, SafetyLimits(), dead_days=0)

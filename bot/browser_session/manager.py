@@ -7,6 +7,7 @@ import fcntl
 import ipaddress
 import logging
 import os
+import re
 import socket
 import time
 import uuid
@@ -317,6 +318,12 @@ class BrowserSessionManager:
             result = await self._extract(page)
             if platform == "website":  # a listing site drawn by JavaScript: its links and JSON-LD (bot/web_search)
                 result.update(await page.evaluate(_WEBSITE_JS))
+            if platform == "facebook" and _FACEBOOK_POST_PATH.search(parsed.path):
+                # A post page: its visible comments (author, profile link, text) for investor leads (bot/campaign/leads).
+                comments = await page.evaluate(_FACEBOOK_COMMENTS_JS)
+                if isinstance(comments, dict):
+                    result["comments"] = comments.get("items") or []
+                    result["post_author_url"] = comments.get("post_author_url")
             if platform in SOCIAL_PLATFORMS:
                 result["items"] = await page.evaluate(_SOCIAL_ITEMS_JS, platform)
                 result["meta"] = await page.evaluate(_SOCIAL_META_JS)
@@ -587,6 +594,46 @@ _SOCIAL_META_JS = """() => {
           description: meta('description'), time: time ? time.dateTime : null};
 }"""
 
+
+# A single Facebook post (group permalink or /posts/): the only pages whose comments are read.
+_FACEBOOK_POST_PATH = re.compile(r"/(?:posts|permalink)/[^/]+")
+
+# Visible comments of a Facebook post page, at most 60: each is a role=article nested in the post or labelled
+# as a comment/reply; author = the first link to a person (or page) with a name, text = its own dir=auto
+# blocks (not a nested reply's). Facebook's markup changes: the caller treats this as candidates only.
+_FACEBOOK_COMMENTS_JS = """() => {
+  const squash = (value, limit) => (value || '').replace(/\\s+/g, ' ').trim().slice(0, limit);
+  const COMMENT = /comment|reply|коммент|ответ|коментар|відповід|comentario|respuesta/i;
+  const PERSON = /^https:\\/\\/(?:www\\.|m\\.|web\\.)?facebook\\.com\\/(?!groups\\/[^/]+\\/?(?:[?#]|$)|groups\\/[^/]+\\/(?:posts|permalink)\\/|hashtag\\/|photo|watch|events\\/|share|reel|story\\.php|permalink\\.php|login|help|policies|privacy)/;
+  const out = [];
+  for (const node of document.querySelectorAll('[role="article"]')) {
+    if (out.length >= 60) break;
+    const label = node.getAttribute('aria-label') || '';
+    const nested = node.parentElement && node.parentElement.closest('[role="article"]');
+    if (!nested && !COMMENT.test(label)) continue;
+    const own = (el) => el.closest('[role="article"]') === node;
+    const anchors = Array.from(node.querySelectorAll('a[href]')).filter(own);
+    const author = anchors.find(a => PERSON.test(a.href) && !/comment_id=/.test(a.href) && squash(a.innerText, 120));
+    if (!author) continue;
+    const name = squash(author.innerText, 120);
+    const texts = Array.from(node.querySelectorAll('div[dir="auto"], span[dir="auto"]')).filter(own)
+      .filter(el => !el.querySelector('div[dir="auto"], span[dir="auto"]'))
+      .map(el => squash(el.innerText, 1500)).filter(text => text && text !== name);
+    const link = anchors.map(a => a.href).find(href => /comment_id=/.test(href)) || null;
+    out.push({author: name, author_url: author.href, text: squash(Array.from(new Set(texts)).join(' '), 1500),
+              comment_url: link, label: squash(label, 200)});
+  }
+  // The post's own author: the first named person link of the top-level article holding the comments.
+  const first = document.querySelector('[role="article"] [role="article"]');
+  const top = first ? first.parentElement.closest('[role="article"]') : null;
+  let root = top;
+  while (root && root.parentElement && root.parentElement.closest('[role="article"]')) {
+    root = root.parentElement.closest('[role="article"]');
+  }
+  const poster = root ? Array.from(root.querySelectorAll('a[href]')).find(a =>
+    a.closest('[role="article"]') === root && PERSON.test(a.href) && squash(a.innerText, 120)) : null;
+  return {items: out, post_author_url: poster ? poster.href : null};
+}"""
 
 # A public website read by bot/web_search: its links and its JSON-LD blocks, bounded.
 _WEBSITE_JS = """() => ({

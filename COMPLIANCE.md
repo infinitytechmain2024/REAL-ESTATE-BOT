@@ -54,6 +54,25 @@ Additionally: the **displayed author name** of a post (`SearchHit.author`), the 
 of posts**, and — once Stage 4.5/4.6 are built — **commenter names, their profile URLs, and
 their comment text**, which is the input to the investor-lead classification.
 
+### 2.3a Comment leads — built (bot/campaign/leads.py, migration 026)
+
+The owner asked for this in September 2026: people who comment under a property a campaign
+found, showing interest as a buyer or investor, are stored and later offered to an investor
+search. What is held, in `investor_leads`: the displayed name, the public profile link, the
+comment text (at most 2 000 characters), a model-written Russian summary of what they want,
+the object's type/price/area/city and the post link. Nothing else about the person is fetched:
+their profile page is never opened. Comment text goes to OpenRouter for the role decision.
+No retention job covers these tables yet; an investor search only uses rows of the last
+`CAMPAIGN_LEAD_DAYS` (90). §4.1 and §4.3 apply to exactly this data.
+
+### 2.3b Investor reach — built (bot/campaign/reach.py, migration 027)
+
+An investor search asks the search engines for investors, agents, agencies, funds and networks in
+its city on LinkedIn, Reddit, X, Instagram, TikTok, YouTube and the open web. `reach_contacts`
+holds what the engine showed about each result — link, title, snippet — plus the model's kind,
+name and Russian summary and the city. The platforms themselves are never opened. The same
+§4.1 / §4.3 questions apply, and no retention job covers the table yet.
+
 ### 2.4 What the operator's machine holds
 
 The Chrome profile in `./data` contains live Facebook session cookies. `DEPLOYMENT.md` §3
