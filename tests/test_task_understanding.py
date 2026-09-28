@@ -508,3 +508,26 @@ async def test_an_unclear_word_is_asked_about_before_the_summary() -> None:
     summary = await say(control, USER, "да, виллы")
     assert summary.text.startswith("Проверьте задачу:") and "управлению виллами" in summary.text
     assert "Убуде" in summary.text and "Киев" not in summary.text and ai.calls[1]["answers"] == ["да, виллы"]
+
+
+@pytest.mark.asyncio
+async def test_an_investor_search_is_never_asked_about_a_budget_or_a_known_place() -> None:
+    from bot.control_plane.intake import wanted_questions
+
+    nosy = TaskUnderstanding(city="Ubud, Bali", place={"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"},
+                             target="русскоязычные агенты по управлению виллами",
+                             questions=["В каком городе искать?", "Какой бюджет?", "Аренда или покупка?"],
+                             summary_ru="Ищем русскоязычных агентов по управлению виллами в Убуде.")
+    control, _, _ = with_ai(FakeAI(nosy))
+    await press(control, USER, "mode:investors")
+    summary = await say(control, USER, "агенты по управлению виллами, Убуд, Бали")
+    assert summary.text.startswith("Проверьте задачу:"), "nothing left to ask"
+    assert "бюджет" not in summary.text.casefold()
+
+    estate = Draft(1, 1, "real_estate", city=None)
+    assert wanted_questions(estate, ["Какой бюджет?", "В каком городе искать?"]) == ["Какой бюджет?",
+                                                                                    "В каком городе искать?"]
+    investors = Draft(1, 1, "investors", city="Madrid")
+    assert wanted_questions(investors, ["Какой бюджет?", "В каком городе искать?", "Уточните: «вілл» — это виллы?",
+                                        "Каких инвесторов искать?"]) == ["Уточните: «вілл» — это виллы?",
+                                                                         "Каких инвесторов искать?"]

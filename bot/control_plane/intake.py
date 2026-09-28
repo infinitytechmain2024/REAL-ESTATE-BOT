@@ -499,7 +499,31 @@ _ASKS_ABOUT = {
     "city": ("город", "где", "район"),
     "deal": ("аренд", "покуп", "купить", "снять", "сделк"),
     "target": ("кого", "кто"),
+    "budget": ("бюджет", "сколько готов", "стоимост", "цен", "сумм"),
 }
+
+
+def wanted_questions(draft: Draft, questions: list[str]) -> list[str]:
+    """The AI's questions minus those that do not belong: budget or deal for investors, a place already known.
+
+    A question that clarifies an unclear word («Уточните: …») always stays.
+    """
+    def about(question: str, slot: str) -> bool:
+        return any(word in question.casefold() for word in _ASKS_ABOUT[slot])
+
+    kept = []
+    for question in questions:
+        if question.casefold().startswith("уточните"):
+            kept.append(question)
+            continue
+        if draft.mode == "investors" and (about(question, "budget") or about(question, "deal")):
+            continue
+        if draft.city is not None and about(question, "city"):
+            continue
+        if draft.budget is not None and about(question, "budget"):
+            continue
+        kept.append(question)
+    return kept
 AI_QUESTION_ROUNDS = 2  # the AI's own (optional) questions stop after two answers
 
 
@@ -733,7 +757,7 @@ class TaskIntake:
         """Ask what is missing (the AI's questions plus the critical ones), else show its summary."""
         ai = self._ai(draft)
         missing = self._ai_missing(draft)
-        own = ai.questions if len(draft.answers) < AI_QUESTION_ROUNDS else []
+        own = wanted_questions(draft, ai.questions) if len(draft.answers) < AI_QUESTION_ROUNDS else []
         # The city question stays first so the cap below never drops it.
         own = sorted(own, key=lambda q: not ("city" in missing and any(w in q.casefold() for w in _ASKS_ABOUT["city"])))
         standard = [slot for slot in missing
