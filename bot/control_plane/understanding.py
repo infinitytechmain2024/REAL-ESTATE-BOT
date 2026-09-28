@@ -118,6 +118,10 @@ primary: 1-5 must-haves (type, deal, city/area, budget, size, purpose). secondar
 (distance to metro, with or without a house, floor, terrace...). Short Russian phrases, numbers normalised
 ("площадь от 1000 м²", "до метро 5 минут на машине", "под застройку").
 questions: only for critical facts that are missing (and the budget once), in Russian, at most 3, short.
+Unclear words: if a word or name is unclear, looks garbled by voice recognition or could mean several things, do
+NOT guess and never put it into summary_ru, primary or secondary: ask about it in questions, offering your best
+reading ("Уточните: «вілл» — это виллы?", "Уточните: «в БУД» — это Убуд на Бали?"). A word in Ukrainian,
+Spanish or English is translated, not transliterated: «вілли» = виллы, «управління» = управление.
 If the answers already cover a fact, do not ask again. If the city and the deal are known, ask nothing else.
 summary_ru: 2-6 short lines in Russian for «Проверьте задачу»: first the main points, then the extra wishes.
 Paraphrase; never quote the person's words, never copy the transcript, never invent facts that were not said.

@@ -432,7 +432,7 @@ def test_schema_and_prompt() -> None:
     assert SCHEMA["properties"]["place"]["required"] == ["es", "ru", "uk", "ru_in", "uk_in", "country"]
     assert "land" in SCHEMA["properties"]["property_type"]["enum"]
     for words in ("ділянка", "terreno", "anywhere in the world", "Ukrainian words do not mean Kyiv", "voice transcript",
-                  "never quote"):
+                  "never quote", "do\nNOT guess", "«вілл» — это виллы?", "translated, not transliterated"):
         assert words in SYSTEM
     with pytest.raises(ValueError):
         OpenRouterUnderstanding(api_key="", model="m", timeout_seconds=1)
@@ -490,3 +490,21 @@ def test_the_bottom_keyboard_is_rendered_set_or_removed() -> None:
     assert isinstance(_markup(Reply("x", keyboard=())), ReplyKeyboardRemove)
     assert _markup(Reply("x")) is None
     assert isinstance(_markup(Reply("x", (Button("Одобрить", callback_data="near:yes"),))), InlineKeyboardMarkup)
+
+
+@pytest.mark.asyncio
+async def test_an_unclear_word_is_asked_about_before_the_summary() -> None:
+    unsure = TaskUnderstanding(city="Ubud, Bali", place={"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"},
+                               target="русскоязычные компании и агенты",
+                               questions=["Уточните: «вілл» — это виллы?"], summary_ru="Ищем русскоязычные компании.")
+    sure = TaskUnderstanding(city="Ubud, Bali", place={"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"},
+                             target="русскоязычные компании и агенты по управлению виллами",
+                             summary_ru="Ищем русскоязычные компании и агентов по управлению виллами в Убуде.")
+    ai = FakeAI(unsure, sure)
+    control, _, _ = with_ai(ai)
+    await press(control, USER, "mode:investors")
+    question = await say(control, USER, "надай контакти російськомовних компаній та агентів з управління вілл, Убуд")
+    assert question.text.startswith("Уточните: «вілл» — это виллы?") and "Проверьте задачу" not in question.text
+    summary = await say(control, USER, "да, виллы")
+    assert summary.text.startswith("Проверьте задачу:") and "управлению виллами" in summary.text
+    assert "Убуде" in summary.text and "Киев" not in summary.text and ai.calls[1]["answers"] == ["да, виллы"]
