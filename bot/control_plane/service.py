@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from bot.campaign import offers as near
@@ -18,10 +19,12 @@ from bot.control_plane.access import LOGIN_BUTTON, SETTINGS_BUTTON, AccessDesk, 
 from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
 from bot.control_plane.intake import (
     CANCEL_WORDS,
+    IDLE_KEYBOARD,
     STOP_CALLBACK,
     IntakeStore,
     MemoryIntakeStore,
     TaskIntake,
+    key_command,
     mode_menu,
 )
 from bot.control_plane.live_view import (
@@ -200,7 +203,7 @@ class ControlPlane:
                 return Reply(STOP_FAILED)
         if (campaign is None or campaign.state in TERMINAL_STATES
                 or (campaign.requested_by != message.user_id and not self._is_owner(message.user_id))):
-            return Reply(NO_ACTIVE_SEARCH)
+            return Reply(NO_ACTIVE_SEARCH, keyboard=IDLE_KEYBOARD)
         try:
             key = _button_key(campaign.id) if button else message.message_id
             await self.command_sink(CommandEnvelope("campaign", f"cancel {campaign.id}", message.chat_id,
@@ -209,7 +212,16 @@ class ControlPlane:
             log.warning("telegram.control.stop_failed", extra={"user_id": message.user_id})
             return Reply(STOP_FAILED)
         log.info("telegram.control.stop_requested", extra={"user_id": message.user_id, "campaign_id": campaign.id})
-        return Reply(SEARCH_STOPPED)
+        return Reply(SEARCH_STOPPED, keyboard=IDLE_KEYBOARD)
+
+    async def _keyboard_action(self, message: IncomingMessage, key: str) -> Reply:
+        """«Запустить» / «Изменить» at the task summary, «Новый поиск»: the mode menu."""
+        assert message.user_id is not None
+        if key == "новый поиск":
+            return mode_menu("Выберите режим нового поиска:")
+        who = label(None, None, message.user_id) if self._is_user(message.user_id) else None
+        return await self.intake.on_button(message.user_id, message.chat_id,
+                                           "launch" if key == "запустить" else "edit", "", who)
 
     async def _wants_stop(self, message: IncomingMessage, text: str) -> bool:
         """«стоп»; or «Отмена» when no task is being written (then it means the draft)."""
@@ -364,10 +376,10 @@ class ControlPlane:
             # The transcript is internal: nobody but the owner ever sees it echoed back.
             # Operators still see which command a short phrase was mapped to.
             heard = f"Understood as: {command}\n\n" if command else ""
-            return Reply(heard + command_reply.text, command_reply.buttons)
+            return replace(command_reply, text=heard + command_reply.text)
         confidence = f", confidence {transcript.confidence:.0%}" if transcript.confidence is not None else ""
         heard = f"\nUnderstood as: {command}" if command else ""
-        return Reply(f"Transcript ({transcript.language or 'unknown'}{confidence}):\n{text}{heard}\n\n{command_reply.text}", command_reply.buttons)
+        return replace(command_reply, text=f"Transcript ({transcript.language or 'unknown'}{confidence}):\n{text}{heard}\n\n{command_reply.text}")
 
     def _duplicate(self, user_id: int | None) -> Reply | None:
         """Telegram re-delivered an update: operators hear about it, everyone else hears nothing."""
@@ -399,11 +411,16 @@ class ControlPlane:
                 return self._operator_refusal(message) or Reply(USER_NOT_AVAILABLE)
             receipt = await self.command_sink(CommandEnvelope(command, arguments, message.chat_id, message.user_id or 0, message.message_id, confirmation_id))
             if not self._can_control(message.user_id):
-                return Reply(SEARCH_STOPPED)
+                return Reply(SEARCH_STOPPED, keyboard=IDLE_KEYBOARD)
             command_id = getattr(receipt, "command_id", None)
             suffix = f" Queue id: {command_id}." if command_id else ""
             return Reply(f"Confirmed: /{command}. Safely queued for bounded orchestration.{suffix}")
         if not text.startswith("/"):
+            if (key := key_command(text)) is not None:
+                # A bottom-keyboard tap arrives as its label: act like the typed command.
+                text = key
+                if key in ("запустить", "изменить", "новый поиск") and self._may_give_tasks(message.user_id):
+                    return await self._keyboard_action(message, key)
             if text and await self._wants_stop(message, text):
                 return await self._stop_search(message)
             if text and await self.auto.applies_to(message.user_id):

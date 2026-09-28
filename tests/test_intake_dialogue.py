@@ -6,6 +6,7 @@ import re
 
 import pytest
 
+from bot.control_plane.intake import SEARCH_KEYBOARD, TASK_KEYBOARD
 from bot.control_plane.models import IncomingMessage, Reply
 from tests.test_user_intake import (
     OPERATOR,
@@ -44,7 +45,7 @@ async def test_a_voice_transcript_is_never_shown_to_a_user_or_an_operator(who: i
     await press(control, who, "mode:real_estate")
     reply = await control.handle_voice(voice_note(who), download)
     assert reply is not None and reply.text.startswith("Проверьте задачу")
-    assert callbacks(reply) == ["task:launch", "task:edit", "task:cancel"]  # voice keeps the buttons
+    assert reply.keyboard == TASK_KEYBOARD and not reply.buttons  # voice keeps the buttons
     launched = await control.handle_callback(who, "task:launch", "Ann", "ann", chat_id=who)
     everything = [reply.text, launched.text, *(r.text for _, r in outbox.sent)]
     for text in everything:
@@ -69,7 +70,7 @@ async def test_the_owner_still_sees_the_transcript() -> None:
     await press(control, OWNER, "mode:real_estate")
     reply = await control.handle_voice(voice_note(OWNER), download)
     assert reply is not None and reply.text.startswith("Transcript (ru") and SECRET in reply.text
-    assert "Проверьте задачу" in reply.text and "task:launch" in callbacks(reply)
+    assert "Проверьте задачу" in reply.text and reply.keyboard == TASK_KEYBOARD
 
 
 @pytest.mark.asyncio
@@ -89,7 +90,7 @@ async def test_a_clear_request_skips_every_question() -> None:
         "Проверьте задачу:", "Режим: 🏡 Участки и объекты", "Город: Мадрид", "Сделка: аренда", "Тип: квартира",
         "Бюджет: до 1200 €",
     ]
-    assert [b.text for b in reply.buttons] == ["Запустить", "Изменить", "Отмена"]
+    assert reply.keyboard == TASK_KEYBOARD and not reply.buttons
     assert "?" not in reply.text.replace("Всё верно?", "")
     assert sink.envelopes == []
 
@@ -100,7 +101,7 @@ async def test_only_the_missing_budget_is_asked() -> None:
     await press(control, USER, "mode:real_estate")
     question = await say(control, USER, "снять квартиру в Мадриде")
     assert question.text == "Какой бюджет? Например, до 1200 €. Или нажмите «Пропустить»."
-    assert callbacks(question) == ["task:budget:skip", "task:cancel"]
+    assert callbacks(question) == ["task:budget:skip"]
     summary = await say(control, USER, "до 900 евро")
     assert "Город: Мадрид" in summary.text and "Сделка: аренда" in summary.text and "Бюджет: до 900 €" in summary.text
 
@@ -150,8 +151,8 @@ async def test_launch_queues_the_campaign_and_the_user_reply_is_plain_russian() 
     assert_clean(summary)
     launched = await press(control, USER, "task:launch")
     assert launched.text == ("Принято. Начинаю поиск. Найденные варианты пришлю сюда.\n"
-                             "Чтобы остановить поиск, нажмите кнопку ниже или напишите «стоп».")
-    assert [(b.text, b.callback_data) for b in launched.buttons] == [("Остановить поиск", "search:stop")]
+                             "Чтобы остановить поиск, нажмите «Остановить поиск» внизу или напишите «стоп».")
+    assert launched.keyboard == SEARCH_KEYBOARD and not launched.buttons
     assert_clean(launched)
     [envelope] = sink.envelopes
     assert envelope.command == "campaign" and envelope.arguments.startswith("mode=real_estate city=Madrid ")

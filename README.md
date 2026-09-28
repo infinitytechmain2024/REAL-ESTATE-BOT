@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`024_agent_findings.sql` in order. It records SHA-256 checksums in
+`025_agent_reductions.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -28,6 +28,8 @@ use `down -v` on a system containing needed data.
 (match / near / reject) of a campaign finding against the campaign's task.
 `024_agent_findings.sql` stores every campaign finding before it is sent (and
 held / excluded ones): phase 1 of the hybrid pipeline (`docs/HYBRID_AGENTS.md`).
+`025_agent_reductions.sql` holds the Reduction agents' claims and decision
+traces (Claude extraction, Jev answers, gate), phase 3 in shadow mode.
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their

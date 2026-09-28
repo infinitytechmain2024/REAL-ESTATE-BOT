@@ -56,7 +56,7 @@ from . import offers
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
-from .status_text import FACEBOOK, campaign_label, user_status
+from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
 from .store import CampaignStore
 from .tolerance import (
     HELD_BUCKETS,
@@ -101,6 +101,7 @@ class Messenger(Protocol):
     async def send_buttons(self, chat_id: int, text: str, buttons: Sequence[tuple[str, str]]) -> int:
         """A message with one row of inline callback buttons: (label, callback data)."""
         ...
+    async def delete(self, chat_id: int, message_id: int) -> None: ...
 
 
 class TelegramMessenger:
@@ -131,6 +132,15 @@ class TelegramMessenger:
             if any(k in detail for k in ("message to edit not found", "message can't be edited", "message_id_invalid")):
                 raise MessageGone(exc.description) from exc
             raise
+
+    async def delete(self, chat_id: int, message_id: int) -> None:
+        """Delete a message; one that is already gone (or too old to delete) is fine."""
+        try:
+            await self._call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        except TelegramError as exc:
+            detail = exc.description.lower()
+            if not any(k in detail for k in ("message to delete not found", "message can't be deleted")):
+                raise
 
     async def _call(self, method: str, body: dict[str, Any]) -> dict[str, Any]:
         response = await self._client.post(f"{self._base}/{method}", json=body)
@@ -206,6 +216,8 @@ class CampaignRunner:
         # After a failed relevance call the model is left alone for a minute: one slow or broken
         # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
         self._relevance_paused_until: datetime | None = None
+        # Campaigns whose chat got a card or a question below the status message: the status moves down.
+        self._below_status: set[str] = set()
 
     async def tick(self) -> int:
         """Advance every open (or just finished) campaign by one step; returns how many were seen."""
@@ -288,6 +300,10 @@ class CampaignRunner:
         if await self.store.busy_elsewhere(campaign.id):
             return QUEUE_BUSY
         if (reason := await self.store.breaker_reason()) is not None:
+            if campaign.state in ("planned", "discovering"):
+                # Nothing to read on Facebook until the breaker closes: the other sources finish the search.
+                await self.campaigns.set_state(campaign.id, "running", ACTOR)  # planned -> completed is not a transition
+                return await self._drain(campaign, await self.store.get_run(campaign.id), "facebook_breaker")
             return f"Пауза: {reason}"
         await self._show(campaign, SEARCHING)  # discovery takes minutes; say so first
         try:
@@ -345,8 +361,12 @@ class CampaignRunner:
         except ValueError as exc:
             # Quota, breaker or profile refusal: nothing was planned; try again later.
             retry = timedelta(seconds=self.config.refusal_retry_seconds)
-            await self.store.save_run(campaign.id, replace(run, next_window_at=now + retry))
+            run = replace(run, next_window_at=now + retry)
+            await self.store.save_run(campaign.id, run)
             log.warning("campaign.window_refused", extra={"campaign_id": campaign.id, "reason": str(exc)})
+            if (limit := facebook_limit(str(exc))) is not None:
+                # Facebook is done for today: finish once the sites, networks and analysis are, never wait a day.
+                return await self._drain(campaign, run, limit)
             return f"Пауза: {exc}"
         if start is None:  # every group's source is paused or blocked; they were skipped
             return ANALYSIS
@@ -488,6 +508,7 @@ class CampaignRunner:
             await self._recorded(self.recorder.send_failed(campaign.id, finding.id) if self.recorder else None)
             return False
         await self.store.finding_sent(finding.id, message_id)
+        self._below_status.add(campaign.id)
         await self._recorded(self.recorder.sent(campaign.id, finding.id, message_id) if self.recorder else None)
         return True
 
@@ -550,18 +571,28 @@ class CampaignRunner:
             await self.store.drop_offer(campaign.id, bucket)
             return
         await self.store.offer_sent(campaign.id, bucket, message_id)
+        self._below_status.add(campaign.id)
         log.info("campaign.offer_asked", extra={"campaign_id": campaign.id, "bucket": bucket})
 
     async def _show(self, campaign: Campaign, line: str) -> None:
-        """Keep one status message per campaign; edit it only when the text changes."""
+        """Keep one status message per campaign, always the last one in the chat: it is edited when its
+        text changes, and moved (sent again below, the old one deleted) after new cards or questions."""
         current = await self.campaigns.get(campaign.id) or campaign
         text = await self._status_text(current, line)
         run = await self.store.get_run(current.id)
-        if current.status_message_id is not None and run.status_text == text:
+        moved = current.id in self._below_status
+        if current.status_message_id is not None and run.status_text == text and not moved:
             return
         try:
             if current.status_message_id is None:
                 await self._new_status(current, text)
+            elif moved:
+                old = current.status_message_id
+                await self._new_status(current, text)  # the new one first: there is never no status
+                try:
+                    await self.messenger.delete(current.chat_id, old)
+                except Exception:  # noqa: BLE001 - a leftover old status is only cosmetic
+                    log.warning("campaign.status_delete_failed", extra={"campaign_id": current.id})
             else:
                 try:
                     await self.messenger.edit(current.chat_id, current.status_message_id, text)
@@ -570,6 +601,7 @@ class CampaignRunner:
         except Exception:  # noqa: BLE001 - status is cosmetic; the next tick retries
             log.warning("campaign.status_update_failed", extra={"campaign_id": current.id})
             return
+        self._below_status.discard(current.id)
         await self.store.save_run(current.id, replace(await self.store.get_run(current.id), status_text=text))
 
     async def _status_text(self, campaign: Campaign, line: str) -> str:
@@ -589,9 +621,11 @@ class CampaignRunner:
                 text += "".join(f"\n{note}" for note in social.notes)
             return text
         if terminal:
-            return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id))
-        if line.startswith("Сейчас: Facebook · ") and line.endswith("ищу дальше"):
-            return FACEBOOK
+            return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id),
+                                  reason=campaign.stop_reason)
+        if line.startswith("Сейчас: Facebook · ") and line.endswith(" · ищу дальше"):
+            # The group being read right now, by its name (like «Ищу на сайте fotocasa.es…» for sites).
+            return group_status(line.removeprefix("Сейчас: Facebook · ").removesuffix(" · ищу дальше"))
         if web_active:
             return user_status("site", site=web.host) if web.host else user_status("web")
         checking = line == ANALYSIS and bool(await self.store.pending_analysis(campaign.id))
@@ -617,10 +651,20 @@ class CampaignRunner:
     @staticmethod
     def _final_line(campaign: Campaign, found: int) -> str:
         if campaign.state == "completed":
-            return f"Кампания завершена · найдено {found}"
+            limit = " · лимит Facebook на сегодня исчерпан" if campaign.stop_reason in LIMIT_REASONS else ""
+            return f"Кампания завершена · найдено {found}{limit}"
         if campaign.state == "failed":
             return f"{STOPPED} · ошибка: {campaign.stop_reason or 'unknown'}"
         return STOPPED if not found else f"{STOPPED} · найдено {found}"
+
+
+def facebook_limit(refusal: str) -> str | None:
+    """The stop reason when a refusal means no more Facebook reads today (daily quota, safety breaker)."""
+    if refusal.startswith("daily quota reached") and "Facebook" in refusal:
+        return "facebook_daily_limit"
+    if refusal.startswith("safety breaker open"):
+        return "facebook_breaker"
+    return None
 
 
 def campaign_request(campaign: Campaign) -> Request:

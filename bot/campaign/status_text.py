@@ -23,10 +23,18 @@ CHECKING = "Нашёл вариант, проверяю…"
 DONE = "Поиск завершён."
 NOTHING = "Пока ничего подходящего не нашёл."
 
+# A search ended early because Facebook's daily limit (or its safety breaker) stopped new group reads.
+LIMIT_NOTE = "Лимит Facebook на сегодня исчерпан, часть групп не проверена. Запустите поиск завтра, чтобы проверить остальные."
+LIMIT_REASONS = frozenset({"facebook_daily_limit", "facebook_breaker"})
+
 FIXED_STATUSES: frozenset[str] = frozenset({ACCEPTED, SEARCHING, FACEBOOK, WEB, TIKTOK, INSTAGRAM, LINKEDIN,
-                                            CHECKING, DONE, NOTHING})
+                                            CHECKING, DONE, NOTHING, f"{DONE}\n{LIMIT_NOTE}",
+                                            f"{NOTHING}\n{LIMIT_NOTE}"})
 _SITE_PREFIX, _SITE_SUFFIX = "Ищу на сайте ", "…"
 _SITE_NAME = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9.\-]{0,39}$")  # a host or brand, no spaces
+_GROUP_PREFIX, _GROUP_SUFFIX = "Ищу в группе Facebook «", "»…"
+MAX_GROUP_CHARS = 60
+_GROUP_UNSAFE = re.compile(r"[«»<>\"`\n\r\t]|https?://|www\.|/", re.IGNORECASE)
 
 Stage = Literal[
     "accepted", "planning", "discovery", "facebook", "web", "site", "social", "checking",
@@ -45,6 +53,16 @@ def site_status(name: str | None) -> str:
         name = name.split("://", 1)[1]
     name = name.split("/", 1)[0].removeprefix("www.")
     return f"{_SITE_PREFIX}{name}{_SITE_SUFFIX}" if name and _SITE_NAME.match(name) else WEB
+
+
+def group_status(name: str | None) -> str:
+    """«Ищу в группе Facebook «<название>»…» for a readable group name; an id, a link or junk is «Ищу в Facebook…»."""
+    name = " ".join((name or "").split())
+    if len(name) > MAX_GROUP_CHARS:
+        name = name[:MAX_GROUP_CHARS - 1].rstrip() + "…"
+    if not name or _GROUP_UNSAFE.search(name) or not re.search(r"[^\W\d_]", name):
+        return FACEBOOK
+    return f"{_GROUP_PREFIX}{name}{_GROUP_SUFFIX}"
 
 
 def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebook_started: bool = False,
@@ -73,11 +91,14 @@ def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebo
     return FACEBOOK if facebook_started else SEARCHING
 
 
-def campaign_label(state: str, *, found: int = 0, checking: bool = False, social: str | None = None) -> str:
+def campaign_label(state: str, *, found: int = 0, checking: bool = False, social: str | None = None,
+                   reason: str | None = None) -> str:
     """The user-safe label for a campaign in ``state`` (``found``: findings already sent;
-    ``social``: the network searched right now while Facebook is idle)."""
+    ``social``: the network searched right now while Facebook is idle; ``reason``: the stop reason,
+    which adds the Facebook-limit note to a finished search)."""
     if state in _TERMINAL_STATES:
-        return user_status("finished", found=found)
+        finished = user_status("finished", found=found)
+        return f"{finished}\n{LIMIT_NOTE}" if reason in LIMIT_REASONS else finished
     if checking:
         return CHECKING
     if social in SOCIAL:
@@ -92,4 +113,6 @@ def is_user_status(text: str) -> bool:
         return True
     if text.startswith(_SITE_PREFIX) and text.endswith(_SITE_SUFFIX):
         return site_status(text[len(_SITE_PREFIX):-len(_SITE_SUFFIX)]) == text
+    if text.startswith(_GROUP_PREFIX) and text.endswith(_GROUP_SUFFIX):
+        return group_status(text[len(_GROUP_PREFIX):-len(_GROUP_SUFFIX)]) == text
     return False

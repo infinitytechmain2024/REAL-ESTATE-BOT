@@ -48,12 +48,16 @@ class FakeMessenger:
         self.edits: list[tuple[int, int, str]] = []
         self.gone = False
         self.fail = 0
+        self.deleted: list[tuple[int, int]] = []
+        self.timeline: list[str] = []  # status texts in the order they were shown (sent or edited)
 
     async def send(self, chat_id: int, text: str) -> int:
         if self.fail:
             self.fail -= 1
             raise httpx.ConnectError("telegram unreachable")
         self.sent.append((chat_id, len(self.sent) + 1, text))
+        if "🔎" not in text:  # send() carries cards and status messages only
+            self.timeline.append(text)
         return len(self.sent)
 
     async def edit(self, chat_id: int, message_id: int, text: str) -> None:
@@ -61,12 +65,16 @@ class FakeMessenger:
             self.gone = False
             raise MessageGone("message to edit not found")
         self.edits.append((chat_id, message_id, text))
+        self.timeline.append(text)
+
+    async def delete(self, chat_id: int, message_id: int) -> None:
+        self.deleted.append((chat_id, message_id))
 
     def findings(self) -> list[str]:
         return [t for _, _, t in self.sent if "🔎" in t]
 
     def statuses(self) -> list[str]:
-        return [t for _, _, t in self.sent if t.startswith("🎯")] + [t for _, _, t in self.edits]
+        return list(self.timeline)
 
 
 class FakeDiscovery:
@@ -277,25 +285,67 @@ async def test_a_discovery_challenge_waits_for_the_profile_then_discovery_resume
     assert (await campaigns.get(cid)).state == "running" and await store.open_window(cid) is not None
 
 
-async def test_breaker_and_quota_refusals_pause_with_the_reason_and_never_bypass() -> None:
-    campaigns, store, messenger, discovery, clock, runner, plan = make()
+async def test_a_breaker_before_discovery_finishes_the_search_without_facebook() -> None:
+    campaigns, store, messenger, discovery, _, runner, plan = make()
     cid = await create(campaigns, plan)
     store.breaker = "safety breaker open: 2 facebook challenges in the last 6 h"
     await runner.tick()
-    assert discovery.calls == [] and (await campaigns.get(cid)).state == "planned"
-    assert messenger.statuses()[-1].endswith("Пауза: safety breaker open: 2 facebook challenges in the last 6 h")
+    campaign = await campaigns.get(cid)
+    assert discovery.calls == [] and store.batches == {}
+    assert (campaign.state, campaign.stop_reason) == ("completed", "facebook_breaker")
+    assert messenger.statuses()[-1].endswith("Кампания завершена · найдено 0 · лимит Facebook на сегодня исчерпан")
 
-    store.breaker = None
+
+async def test_the_daily_quota_finishes_the_search_and_never_bypasses_it() -> None:
+    campaigns, store, messenger, _, _, runner, plan = make()
+    cid = await create(campaigns, plan)
     store.refusal = "daily quota reached: 6 of 6 Facebook batches in 24 h"
     await runner.tick()
-    assert (await campaigns.get(cid)).state == "running" and store.batches == {}
-    assert messenger.statuses()[-1].endswith("Пауза: daily quota reached: 6 of 6 Facebook batches in 24 h")
-    store.refusal = None
+    campaign = await campaigns.get(cid)
+    assert store.batches == {}, "a refused window is never planned"
+    assert (campaign.state, campaign.stop_reason) == ("completed", "facebook_daily_limit")
+    assert messenger.statuses()[-1].endswith("лимит Facebook на сегодня исчерпан")
+
+
+async def test_after_the_daily_quota_the_search_waits_for_the_sites_then_finishes() -> None:
+    from bot.web_search.models import WebStatus
+
+    class Web:
+        status = WebStatus(True, "idealista.com", "сайты: страниц 3/60")
+
+        async def web_status(self, campaign_id: str) -> WebStatus:
+            return self.status
+
+    campaigns, store, _, _, clock, runner, plan = make()
+    web = Web()
+    runner.web = web
+    cid = await create(campaigns, plan)
+    store.refusal = "daily quota reached: 60 of 60 Facebook group reads in 24 h"
     await runner.tick()
-    assert store.batches == {}, "a refused window is retried only after the retry delay"
+    assert (await campaigns.get(cid)).state == "running"  # the sites are still being read
+    web.status = WebStatus(False)
     clock.advance(301)
     await runner.tick()
-    assert len(store.batches) == 1
+    campaign = await campaigns.get(cid)
+    assert (campaign.state, campaign.stop_reason) == ("completed", "facebook_daily_limit")
+    assert store.batches == {}
+
+
+async def test_the_quota_goes_to_live_groups_and_skips_empty_ones() -> None:
+    campaigns, store, _, _, _, runner, plan = make(max_groups=50, groups=30)
+    cid = await create(campaigns, plan)
+    await runner.tick()  # discovery queues 30 groups, window 1 is planned from the first 20
+    first = store.batches[only_batch(store, cid)].urls
+    assert first[0].endswith("/g001/")
+    store.finish_batch(only_batch(store, cid))
+    await runner.tick()
+
+    store.empty_groups = {f"https://www.facebook.com/groups/g{n:03d}/" for n in (21, 22, 23)}  # read lately, nothing
+    store.live_groups = {"https://www.facebook.com/groups/g030/"}                               # recent findings
+    groups = await store.next_groups(cid, 20)
+    assert groups[0].canonical_url.endswith("/g030/")
+    assert not {g.canonical_url for g in groups} & store.empty_groups
+    assert {g.group_key for g in store.groups[cid] if g.state == "skipped"} == {"g021", "g022", "g023"}
 
 
 async def test_cancel_stops_new_windows_and_cancels_the_in_flight_batch() -> None:
@@ -439,3 +489,25 @@ async def test_startup_frees_a_profile_left_in_use_by_a_crashed_discovery_and_re
     assert store.recovered == ["campaign:runner:recovery"]
     await runner.tick()
     assert discovery.calls == [cid] and (await campaigns.get(cid)).state == "running"
+
+
+async def test_the_status_moves_below_each_new_card_and_the_old_one_is_deleted() -> None:
+    campaigns, store, messenger, _, _, runner, plan = make()
+    cid = await create(campaigns, plan)
+    await runner.tick()
+    first_status = (await campaigns.get(cid)).status_message_id
+    await runner.tick()
+    assert messenger.deleted == []  # no card: the status stays and is only edited
+
+    store.add_finding(cid, "f1", "🏠 first")
+    await runner.tick()
+    after_first = (await campaigns.get(cid)).status_message_id
+    kinds = ["card" if "🔎" in t else "status" if t.startswith("🎯") else "other" for _, _, t in messenger.sent]
+    assert kinds[-2:] == ["card", "status"]  # the status is the last message in the chat
+    assert messenger.deleted == [(CHAT, first_status)] and after_first != first_status
+
+    store.add_finding(cid, "f2", "🏠 second")
+    await runner.tick()
+    assert messenger.deleted[-1] == (CHAT, after_first)
+    assert [t for _, _, t in messenger.sent][-1].startswith("🎯")
+    assert (await campaigns.get(cid)).status_message_id == messenger.sent[-1][1]

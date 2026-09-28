@@ -618,7 +618,8 @@ async def test_facebook_reading_wins_the_label_and_no_web_stage_changes_nothing(
     cid = await campaign(campaigns, owner=USER)
     runner = CampaignRunner(campaigns, MemoryRunStore(campaigns), FakeMessenger(), web=FakeWeb(WebStatus(True, "pisos.com")))
     c = await campaigns.get(cid)
-    assert await runner._status_text(c, "Сейчас: Facebook · Pisos Madrid · ищу дальше") == FACEBOOK
+    assert await runner._status_text(c, "Сейчас: Facebook · Pisos Madrid · ищу дальше") == (
+        "Ищу в группе Facebook «Pisos Madrid»…")
     assert await runner._status_text(c, ANALYSIS) == "Ищу на сайте pisos.com…"
     plain = CampaignRunner(campaigns, MemoryRunStore(campaigns), FakeMessenger())
     assert await plain._status_text(c, ANALYSIS) == FACEBOOK

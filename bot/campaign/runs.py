@@ -260,12 +260,29 @@ class PostgresRunStore:
             "select count(*) from campaign_windows where campaign_id = $1::uuid", campaign_id))
 
     async def next_groups(self, campaign_id: str, limit: int) -> list[QueuedGroup]:
-        rows = await self.pool.fetch(
-            """select group_key, canonical_url, name from campaign_groups
-                where campaign_id = $1::uuid and state = 'queued' and batch_id is null
-                order by window_no nulls last, relevance_score desc, group_key limit $2""",
-            campaign_id, _window_size(limit),
-        )
+        """The next groups to read: the Facebook read quota goes to live groups first.
+
+        A group any campaign read in the last ``EMPTY_READ_DAYS`` days that gave no finding in the last
+        ``FINDINGS_DAYS`` days is skipped (state ``skipped``, the reason stored); groups that gave
+        findings recently come first, then the discovery order.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                f"""update campaign_groups g set state = 'skipped', reject_reason = 'no findings in recent reads',
+                           updated_at = now()
+                     where g.campaign_id = $1::uuid and g.state = 'queued' and g.batch_id is null
+                       and exists (select 1 from monitoring_sources s join acquisition_runs r on r.source_id = s.id
+                                    where s.canonical_url = g.canonical_url and r.state = 'succeeded'
+                                      and r.finished_at > now() - interval '{EMPTY_READ_DAYS} days')
+                       and not exists ({_RECENT_FINDING})""",
+                campaign_id)
+            rows = await conn.fetch(
+                f"""select g.group_key, g.canonical_url, g.name from campaign_groups g
+                     where g.campaign_id = $1::uuid and g.state = 'queued' and g.batch_id is null
+                     order by exists ({_RECENT_FINDING}) desc, g.window_no nulls last, g.relevance_score desc,
+                              g.group_key limit $2""",
+                campaign_id, _window_size(limit),
+            )
         return [QueuedGroup(r["group_key"], r["canonical_url"], r["name"]) for r in rows]
 
     async def start_window(self, campaign_id: str, groups: list[QueuedGroup], *, vertical: str,
@@ -477,6 +494,11 @@ async def _sent_count(conn: asyncpg.Connection[asyncpg.Record], campaign_id: str
 # A post belongs to a campaign through its Facebook batch (acquisition_runs ->
 # batch items -> acquisition_batches.campaign_id) or through the social search
 # that found it (campaign_social_posts, migration 022).
+EMPTY_READ_DAYS = 3   # a group read this recently ...
+FINDINGS_DAYS = 14    # ... with no finding for this long is skipped: the quota goes to live groups
+_RECENT_FINDING = f"""select 1 from monitoring_sources s2 join findings f on f.source_id = s2.id
+                      where s2.canonical_url = g.canonical_url
+                        and f.created_at > now() - interval '{FINDINGS_DAYS} days'"""
 _IN_CAMPAIGN = """(exists (select 1 from acquisition_runs r
                       join acquisition_batch_items i on i.id = r.batch_item_id
                       join acquisition_batches b on b.id = i.batch_id
@@ -528,6 +550,8 @@ class MemoryRunStore:
         self.profile = "ready"
         self.breaker: str | None = None
         self.refusal: str | None = None
+        self.empty_groups: set[str] = set()  # canonical URLs read lately with nothing found: skipped
+        self.live_groups: set[str] = set()   # canonical URLs with recent findings: read first
         self.unavailable: set[str] = set()
         self.normalised: dict[str, int] = {}
         self.busy = False
@@ -612,8 +636,14 @@ class MemoryRunStore:
         return len(self.windows.get(campaign_id, []))
 
     async def next_groups(self, campaign_id: str, limit: int) -> list[QueuedGroup]:
+        """Same rules as PostgreSQL: ``empty_groups`` (read lately, nothing found) are skipped,
+        ``live_groups`` (recent findings) come first."""
+        for g in self.groups.get(campaign_id, []):
+            if g.state == "queued" and g.batch_id is None and g.canonical_url in self.empty_groups:
+                g.state = "skipped"
         waiting = [g for g in self.groups.get(campaign_id, []) if g.state == "queued" and g.batch_id is None]
-        waiting.sort(key=lambda g: (g.window_no is None, g.window_no or 0, -g.score, g.group_key))
+        waiting.sort(key=lambda g: (g.canonical_url not in self.live_groups, g.window_no is None, g.window_no or 0,
+                                    -g.score, g.group_key))
         return [QueuedGroup(g.group_key, g.canonical_url, g.name) for g in waiting[:_window_size(limit)]]
 
     async def start_window(self, campaign_id: str, groups: list[QueuedGroup], *, vertical: str,

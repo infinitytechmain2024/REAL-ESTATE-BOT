@@ -79,8 +79,12 @@ class Button:
 
 @dataclass(frozen=True, slots=True)
 class Reply:
+    """``buttons``: inline buttons under the message. ``keyboard``: rows of the reply keyboard shown at the
+    bottom of the chat instead of the letter keyboard (None: leave it as it is; ``()``: remove it)."""
+
     text: str
     buttons: tuple[Button, ...] = ()
+    keyboard: tuple[tuple[str, ...], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

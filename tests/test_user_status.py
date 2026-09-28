@@ -31,6 +31,7 @@ USER, OWNER, CHAT = 7, 99, -100
 ALLOWED = {"Принято. Начинаю поиск.", "Ищу…", "Ищу в Facebook…", "Ищу в интернете…", "Нашёл вариант, проверяю…",
            "Поиск завершён.", "Пока ничего подходящего не нашёл.",
            "Ищу в TikTok…", "Ищу в Instagram…", "Ищу в LinkedIn…"}
+GROUP_4 = "Ищу в группе Facebook «Group 4»…"  # the group being read, by its name
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", re.I)
 FORBIDDEN = ("window", "окно", "20", "batch", "campaign", "Кампания", "кампания", "orchestra", "Orchestra",
              "/campaign", "групп", "Queue", "Пауза", "verification", "🎯")
@@ -38,6 +39,12 @@ LATIN_WORD = re.compile(r"[A-Za-z]{2,}")
 
 
 def assert_user_safe(text: str) -> None:
+    if text.startswith("Ищу в группе Facebook «"):  # the group's own name, checked by group_status
+        assert is_user_status(text), text
+        return
+    from bot.campaign.status_text import LIMIT_NOTE
+
+    text = text.replace(f"\n{LIMIT_NOTE}", "")  # the honest Facebook-limit note is written for users
     assert not UUID.search(text), text
     for word in FORBIDDEN:
         assert word not in text, (word, text)
@@ -64,8 +71,8 @@ def build(*, owners: frozenset[int] = frozenset({OWNER}), groups: int = 20, mess
 
 
 def statuses(messenger: FakeMessenger) -> list[str]:
-    """Every status text sent or edited in (findings excluded)."""
-    return [t for _, _, t in messenger.sent if "🔎" not in t] + [t for _, _, t in messenger.edits]
+    """Every status text sent or edited in (findings excluded), in the order shown."""
+    return list(messenger.timeline)
 
 
 def timeline(messenger: FakeMessenger) -> list[str]:
@@ -137,11 +144,13 @@ async def test_a_normal_user_sees_only_allowed_statuses_through_a_whole_search()
     cid = await full_search(runner, campaigns, store, clock, plan, USER)
     assert (await campaigns.get(cid)).state == "completed"
     shown = statuses(messenger)
-    assert shown and all(text in ALLOWED for text in shown), shown
+    assert shown and all(text in ALLOWED or text == GROUP_4 for text in shown), shown
     for text in shown:
         assert_user_safe(text)
-    assert timeline(messenger) == [SEARCHING, FACEBOOK, CHECKING, DONE]
-    assert len([t for _, _, t in messenger.sent if "🔎" not in t]) == 1, "one status message per search"
+    assert timeline(messenger) == [SEARCHING, FACEBOOK, GROUP_4, FACEBOOK, CHECKING, DONE]
+    sent_statuses = [t for _, _, t in messenger.sent if "🔎" not in t]
+    # One status message at a time: it moved below the card and the old one was deleted.
+    assert len(sent_statuses) - len(messenger.deleted) == 1, (sent_statuses, messenger.deleted)
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
 
 
@@ -159,20 +168,30 @@ async def test_a_search_without_findings_ends_with_nothing_found() -> None:
 
 
 async def test_pauses_refusals_cancel_and_errors_stay_user_safe() -> None:
+    from bot.campaign.status_text import LIMIT_NOTE
+
     campaigns, store, messenger, _clock, runner, plan = build()
-    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
+    breaker = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
     store.breaker = "safety breaker open: 2 facebook challenges in the last 6 h"
     await runner.tick()
-    assert statuses(messenger)[-1] == SEARCHING
+    # Facebook cannot be read today and nothing else runs: the search ends and says why, in plain words.
+    assert statuses(messenger)[-1] == f"{NOTHING}\n{LIMIT_NOTE}"
+    assert (await campaigns.get(breaker)).state == "completed"
     store.breaker = None
+
+    quota = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
     store.profile = "in_use"
     await runner.tick()
     store.profile = "ready"
     store.refusal = "daily quota reached: 6 of 6 Facebook batches in 24 h"
     await runner.tick()
-    assert statuses(messenger)[-1] == FACEBOOK
+    assert statuses(messenger)[-1] == f"{NOTHING}\n{LIMIT_NOTE}"
+    assert (await campaigns.get(quota)).stop_reason == "facebook_daily_limit"
     store.refusal = None
-    await campaigns.cancel(cid, "telegram:7")
+
+    cancelled = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
+    await runner.tick()
+    await campaigns.cancel(cancelled, "telegram:7")
     await runner.tick()
     assert statuses(messenger)[-1] == NOTHING
 
@@ -180,7 +199,7 @@ async def test_pauses_refusals_cancel_and_errors_stay_user_safe() -> None:
     await campaigns.set_state(other, "failed", "test", reason="runner_error:RuntimeError")
     await runner.tick()
     for text in statuses(messenger):
-        assert text in ALLOWED
+        assert is_user_status(text), text
         assert_user_safe(text)
 
 
@@ -199,7 +218,9 @@ async def test_a_failing_status_edit_never_breaks_the_run() -> None:
     cid = await full_search(runner, campaigns, store, clock, plan, USER)
     assert (await campaigns.get(cid)).state == "completed"
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
-    assert [t for _, _, t in messenger.sent if "🔎" not in t] == [SEARCHING]
+    # Edits fail, but the status still moved below the card once (sent anew, the old one deleted).
+    assert [t for _, _, t in messenger.sent if "🔎" not in t] == [SEARCHING, CHECKING]
+    assert len(messenger.deleted) == 1
 
 
 # --- the Orchestra's /campaign notices -----------------------------------------------------
@@ -299,3 +320,15 @@ async def test_a_user_sees_the_network_while_facebook_is_idle_and_owners_see_the
     await owner_runner.tick()
     shown = timeline(owner_messenger)[-1]
     assert "Соцсети: linkedin · «business angel Madrid»" in shown and "/login tiktok" in shown
+
+
+def test_the_group_being_read_is_named_only_when_the_name_is_safe() -> None:
+    from bot.campaign.status_text import group_status
+
+    assert group_status("Pisos en Madrid · alquiler") == "Ищу в группе Facebook «Pisos en Madrid · alquiler»…"
+    assert is_user_status(group_status("Недвижимость Испании"))
+    for junk in (None, "", "123456789012345", "https://www.facebook.com/groups/x", "<b>x</b>", "a/b", "«x»"):
+        assert group_status(junk) == FACEBOOK, junk
+    long = group_status("Квартиры " * 20)
+    assert long.endswith("…»…") and len(long) < 100 and is_user_status(long)
+    assert not is_user_status("Ищу в группе Facebook «https://x»…")
