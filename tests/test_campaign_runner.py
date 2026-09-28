@@ -285,25 +285,67 @@ async def test_a_discovery_challenge_waits_for_the_profile_then_discovery_resume
     assert (await campaigns.get(cid)).state == "running" and await store.open_window(cid) is not None
 
 
-async def test_breaker_and_quota_refusals_pause_with_the_reason_and_never_bypass() -> None:
-    campaigns, store, messenger, discovery, clock, runner, plan = make()
+async def test_a_breaker_before_discovery_finishes_the_search_without_facebook() -> None:
+    campaigns, store, messenger, discovery, _, runner, plan = make()
     cid = await create(campaigns, plan)
     store.breaker = "safety breaker open: 2 facebook challenges in the last 6 h"
     await runner.tick()
-    assert discovery.calls == [] and (await campaigns.get(cid)).state == "planned"
-    assert messenger.statuses()[-1].endswith("Пауза: safety breaker open: 2 facebook challenges in the last 6 h")
+    campaign = await campaigns.get(cid)
+    assert discovery.calls == [] and store.batches == {}
+    assert (campaign.state, campaign.stop_reason) == ("completed", "facebook_breaker")
+    assert messenger.statuses()[-1].endswith("Кампания завершена · найдено 0 · лимит Facebook на сегодня исчерпан")
 
-    store.breaker = None
+
+async def test_the_daily_quota_finishes_the_search_and_never_bypasses_it() -> None:
+    campaigns, store, messenger, _, _, runner, plan = make()
+    cid = await create(campaigns, plan)
     store.refusal = "daily quota reached: 6 of 6 Facebook batches in 24 h"
     await runner.tick()
-    assert (await campaigns.get(cid)).state == "running" and store.batches == {}
-    assert messenger.statuses()[-1].endswith("Пауза: daily quota reached: 6 of 6 Facebook batches in 24 h")
-    store.refusal = None
+    campaign = await campaigns.get(cid)
+    assert store.batches == {}, "a refused window is never planned"
+    assert (campaign.state, campaign.stop_reason) == ("completed", "facebook_daily_limit")
+    assert messenger.statuses()[-1].endswith("лимит Facebook на сегодня исчерпан")
+
+
+async def test_after_the_daily_quota_the_search_waits_for_the_sites_then_finishes() -> None:
+    from bot.web_search.models import WebStatus
+
+    class Web:
+        status = WebStatus(True, "idealista.com", "сайты: страниц 3/60")
+
+        async def web_status(self, campaign_id: str) -> WebStatus:
+            return self.status
+
+    campaigns, store, _, _, clock, runner, plan = make()
+    web = Web()
+    runner.web = web
+    cid = await create(campaigns, plan)
+    store.refusal = "daily quota reached: 60 of 60 Facebook group reads in 24 h"
     await runner.tick()
-    assert store.batches == {}, "a refused window is retried only after the retry delay"
+    assert (await campaigns.get(cid)).state == "running"  # the sites are still being read
+    web.status = WebStatus(False)
     clock.advance(301)
     await runner.tick()
-    assert len(store.batches) == 1
+    campaign = await campaigns.get(cid)
+    assert (campaign.state, campaign.stop_reason) == ("completed", "facebook_daily_limit")
+    assert store.batches == {}
+
+
+async def test_the_quota_goes_to_live_groups_and_skips_empty_ones() -> None:
+    campaigns, store, _, _, _, runner, plan = make(max_groups=50, groups=30)
+    cid = await create(campaigns, plan)
+    await runner.tick()  # discovery queues 30 groups, window 1 is planned from the first 20
+    first = store.batches[only_batch(store, cid)].urls
+    assert first[0].endswith("/g001/")
+    store.finish_batch(only_batch(store, cid))
+    await runner.tick()
+
+    store.empty_groups = {f"https://www.facebook.com/groups/g{n:03d}/" for n in (21, 22, 23)}  # read lately, nothing
+    store.live_groups = {"https://www.facebook.com/groups/g030/"}                               # recent findings
+    groups = await store.next_groups(cid, 20)
+    assert groups[0].canonical_url.endswith("/g030/")
+    assert not {g.canonical_url for g in groups} & store.empty_groups
+    assert {g.group_key for g in store.groups[cid] if g.state == "skipped"} == {"g021", "g022", "g023"}
 
 
 async def test_cancel_stops_new_windows_and_cancels_the_in_flight_batch() -> None:

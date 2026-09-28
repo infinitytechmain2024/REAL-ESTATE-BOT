@@ -42,6 +42,9 @@ def assert_user_safe(text: str) -> None:
     if text.startswith("Ищу в группе Facebook «"):  # the group's own name, checked by group_status
         assert is_user_status(text), text
         return
+    from bot.campaign.status_text import LIMIT_NOTE
+
+    text = text.replace(f"\n{LIMIT_NOTE}", "")  # the honest Facebook-limit note is written for users
     assert not UUID.search(text), text
     for word in FORBIDDEN:
         assert word not in text, (word, text)
@@ -165,20 +168,30 @@ async def test_a_search_without_findings_ends_with_nothing_found() -> None:
 
 
 async def test_pauses_refusals_cancel_and_errors_stay_user_safe() -> None:
+    from bot.campaign.status_text import LIMIT_NOTE
+
     campaigns, store, messenger, _clock, runner, plan = build()
-    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
+    breaker = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
     store.breaker = "safety breaker open: 2 facebook challenges in the last 6 h"
     await runner.tick()
-    assert statuses(messenger)[-1] == SEARCHING
+    # Facebook cannot be read today and nothing else runs: the search ends and says why, in plain words.
+    assert statuses(messenger)[-1] == f"{NOTHING}\n{LIMIT_NOTE}"
+    assert (await campaigns.get(breaker)).state == "completed"
     store.breaker = None
+
+    quota = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
     store.profile = "in_use"
     await runner.tick()
     store.profile = "ready"
     store.refusal = "daily quota reached: 6 of 6 Facebook batches in 24 h"
     await runner.tick()
-    assert statuses(messenger)[-1] == FACEBOOK
+    assert statuses(messenger)[-1] == f"{NOTHING}\n{LIMIT_NOTE}"
+    assert (await campaigns.get(quota)).stop_reason == "facebook_daily_limit"
     store.refusal = None
-    await campaigns.cancel(cid, "telegram:7")
+
+    cancelled = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
+    await runner.tick()
+    await campaigns.cancel(cancelled, "telegram:7")
     await runner.tick()
     assert statuses(messenger)[-1] == NOTHING
 
@@ -186,7 +199,7 @@ async def test_pauses_refusals_cancel_and_errors_stay_user_safe() -> None:
     await campaigns.set_state(other, "failed", "test", reason="runner_error:RuntimeError")
     await runner.tick()
     for text in statuses(messenger):
-        assert text in ALLOWED
+        assert is_user_status(text), text
         assert_user_safe(text)
 
 

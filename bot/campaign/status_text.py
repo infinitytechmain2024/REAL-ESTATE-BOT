@@ -23,8 +23,13 @@ CHECKING = "Нашёл вариант, проверяю…"
 DONE = "Поиск завершён."
 NOTHING = "Пока ничего подходящего не нашёл."
 
+# A search ended early because Facebook's daily limit (or its safety breaker) stopped new group reads.
+LIMIT_NOTE = "Лимит Facebook на сегодня исчерпан, часть групп не проверена. Запустите поиск завтра, чтобы проверить остальные."
+LIMIT_REASONS = frozenset({"facebook_daily_limit", "facebook_breaker"})
+
 FIXED_STATUSES: frozenset[str] = frozenset({ACCEPTED, SEARCHING, FACEBOOK, WEB, TIKTOK, INSTAGRAM, LINKEDIN,
-                                            CHECKING, DONE, NOTHING})
+                                            CHECKING, DONE, NOTHING, f"{DONE}\n{LIMIT_NOTE}",
+                                            f"{NOTHING}\n{LIMIT_NOTE}"})
 _SITE_PREFIX, _SITE_SUFFIX = "Ищу на сайте ", "…"
 _SITE_NAME = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9.\-]{0,39}$")  # a host or brand, no spaces
 _GROUP_PREFIX, _GROUP_SUFFIX = "Ищу в группе Facebook «", "»…"
@@ -86,11 +91,14 @@ def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebo
     return FACEBOOK if facebook_started else SEARCHING
 
 
-def campaign_label(state: str, *, found: int = 0, checking: bool = False, social: str | None = None) -> str:
+def campaign_label(state: str, *, found: int = 0, checking: bool = False, social: str | None = None,
+                   reason: str | None = None) -> str:
     """The user-safe label for a campaign in ``state`` (``found``: findings already sent;
-    ``social``: the network searched right now while Facebook is idle)."""
+    ``social``: the network searched right now while Facebook is idle; ``reason``: the stop reason,
+    which adds the Facebook-limit note to a finished search)."""
     if state in _TERMINAL_STATES:
-        return user_status("finished", found=found)
+        finished = user_status("finished", found=found)
+        return f"{finished}\n{LIMIT_NOTE}" if reason in LIMIT_REASONS else finished
     if checking:
         return CHECKING
     if social in SOCIAL:

@@ -56,7 +56,7 @@ from . import offers
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
-from .status_text import campaign_label, group_status, user_status
+from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
 from .store import CampaignStore
 from .tolerance import (
     HELD_BUCKETS,
@@ -300,6 +300,10 @@ class CampaignRunner:
         if await self.store.busy_elsewhere(campaign.id):
             return QUEUE_BUSY
         if (reason := await self.store.breaker_reason()) is not None:
+            if campaign.state in ("planned", "discovering"):
+                # Nothing to read on Facebook until the breaker closes: the other sources finish the search.
+                await self.campaigns.set_state(campaign.id, "running", ACTOR)  # planned -> completed is not a transition
+                return await self._drain(campaign, await self.store.get_run(campaign.id), "facebook_breaker")
             return f"Пауза: {reason}"
         await self._show(campaign, SEARCHING)  # discovery takes minutes; say so first
         try:
@@ -357,8 +361,12 @@ class CampaignRunner:
         except ValueError as exc:
             # Quota, breaker or profile refusal: nothing was planned; try again later.
             retry = timedelta(seconds=self.config.refusal_retry_seconds)
-            await self.store.save_run(campaign.id, replace(run, next_window_at=now + retry))
+            run = replace(run, next_window_at=now + retry)
+            await self.store.save_run(campaign.id, run)
             log.warning("campaign.window_refused", extra={"campaign_id": campaign.id, "reason": str(exc)})
+            if (limit := facebook_limit(str(exc))) is not None:
+                # Facebook is done for today: finish once the sites, networks and analysis are, never wait a day.
+                return await self._drain(campaign, run, limit)
             return f"Пауза: {exc}"
         if start is None:  # every group's source is paused or blocked; they were skipped
             return ANALYSIS
@@ -613,7 +621,8 @@ class CampaignRunner:
                 text += "".join(f"\n{note}" for note in social.notes)
             return text
         if terminal:
-            return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id))
+            return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id),
+                                  reason=campaign.stop_reason)
         if line.startswith("Сейчас: Facebook · ") and line.endswith(" · ищу дальше"):
             # The group being read right now, by its name (like «Ищу на сайте fotocasa.es…» for sites).
             return group_status(line.removeprefix("Сейчас: Facebook · ").removesuffix(" · ищу дальше"))
@@ -642,10 +651,20 @@ class CampaignRunner:
     @staticmethod
     def _final_line(campaign: Campaign, found: int) -> str:
         if campaign.state == "completed":
-            return f"Кампания завершена · найдено {found}"
+            limit = " · лимит Facebook на сегодня исчерпан" if campaign.stop_reason in LIMIT_REASONS else ""
+            return f"Кампания завершена · найдено {found}{limit}"
         if campaign.state == "failed":
             return f"{STOPPED} · ошибка: {campaign.stop_reason or 'unknown'}"
         return STOPPED if not found else f"{STOPPED} · найдено {found}"
+
+
+def facebook_limit(refusal: str) -> str | None:
+    """The stop reason when a refusal means no more Facebook reads today (daily quota, safety breaker)."""
+    if refusal.startswith("daily quota reached") and "Facebook" in refusal:
+        return "facebook_daily_limit"
+    if refusal.startswith("safety breaker open"):
+        return "facebook_breaker"
+    return None
 
 
 def campaign_request(campaign: Campaign) -> Request:
