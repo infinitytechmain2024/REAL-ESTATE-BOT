@@ -1,7 +1,11 @@
 """Deterministic campaign planning from a free-text (or transcribed voice) goal.
 
-No network, no LLM, no browsing: the text is matched against a small built-in
-gazetteer and multilingual keyword lists, and seeds come from fixed templates.
+No network, no LLM, no browsing: keyword lists and fixed templates. The place
+can be anywhere in the world: the task intake passes it with its names in
+es/en/ru/uk and its country (``place=``), or any name is taken as it is
+(``location=``). The small built-in list of well-known cities is only a
+dictionary of spellings and case endings, so a typed goal («… в Мадриде»)
+is still understood without the model; it never limits where to search.
 Nothing here starts a collector.
 """
 
@@ -9,7 +13,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .models import (
     LANGUAGES,
@@ -41,17 +47,53 @@ class _Place:
     locative: dict[Language, str]  # "в Мадриде" / "в Мадриді"
     words: frozenset[str]  # exact Latin tokens
     stems: tuple[str, ...]  # Cyrillic prefixes that cover case endings
+    country: str | None = None  # ISO-2, when known
+
+
+Place = _Place
 
 
 def _place(canonical: str, es: str, en: str, ru: str, uk: str, ru_loc: str, uk_loc: str,
-           words: tuple[str, ...], stems: tuple[str, ...]) -> _Place:
+           words: tuple[str, ...], stems: tuple[str, ...], country: str = "ES") -> _Place:
     return _Place(
         canonical,
         {"es": es, "en": en, "ru": ru, "uk": uk},
         {"es": es, "en": en, "ru": ru_loc, "uk": uk_loc},
         frozenset(_norm(w) for w in words),
         tuple(_norm(s) for s in stems),
+        country,
     )
+
+
+MAX_PLACE_CHARS = 80
+_COUNTRY_CODE = re.compile(r"^[A-Z]{2}$")
+_PREPOSITION = re.compile(r"^(?:в|во|у|на|in|en)\s+", re.IGNORECASE)
+
+
+def world_place(names: Mapping[str, Any], *, locative: Mapping[str, Any] | None = None,
+                country: object = None) -> _Place:
+    """Any place in the world from its names (``{"en": "Ubud, Bali", "ru": "Убуд, Бали", ...}``).
+
+    A name the known list has (``Madrid``) keeps the list's case endings and
+    country. Missing languages fall back to the English (or any given) name.
+    """
+    given = {lang: " ".join(str(names.get(lang) or "").split())[:MAX_PLACE_CHARS] for lang in LANGUAGES}
+    canonical = given.get("en") or next((n for n in given.values() if n), "")
+    if not canonical:
+        raise InvalidGoal("Не понял, где искать. Напишите город, район или регион.")
+    for place in GAZETTEER:
+        if _norm(canonical) in {_norm(place.canonical), *(_norm(a) for a in place.aliases.values())}:
+            return place
+    aliases = {lang: given.get(lang) or canonical for lang in LANGUAGES}
+    # The locative goes after «в» in the seeds («бизнес в {in}»): «в Убуде» -> «Убуде».
+    loc = {lang: _PREPOSITION.sub("", " ".join(str((locative or {}).get(lang) or "").split()))[:MAX_PLACE_CHARS]
+           or aliases[lang] for lang in LANGUAGES}
+    tokens = {w for name in aliases.values() for w in _WORD.findall(_norm(name)) if len(w) >= 3}
+    words = frozenset(w for w in tokens if w.isascii())
+    # Cyrillic names change their endings (Убуд -> Убуде): match their stems.
+    stems = tuple(sorted({w[:max(3, len(w) - 2)] for w in tokens if not w.isascii()}))
+    code = str(country or "").strip().upper()
+    return _Place(canonical, aliases, loc, words, stems, code if _COUNTRY_CODE.match(code) else None)
 
 
 GAZETTEER: tuple[_Place, ...] = (
@@ -70,7 +112,7 @@ GAZETTEER: tuple[_Place, ...] = (
     _place("Marbella", "Marbella", "Marbella", "Марбелья", "Марбелья", "Марбелье", "Марбельї",
            ("marbella",), ("марбель", "марбел")),
     _place("Kyiv", "Kiev", "Kyiv", "Киев", "Київ", "Киеве", "Києві",
-           ("kyiv", "kiev", "kiew", "kyjiw"), ("киев", "київ", "києв")),
+           ("kyiv", "kiev", "kiew", "kyjiw"), ("киев", "київ", "києв"), country="UA"),
 )
 
 # Latin words match exactly; Cyrillic stems match as word prefixes.
@@ -148,12 +190,15 @@ _TEMPLATES: dict[str, dict[Language, tuple[tuple[str, str], ...]]] = {
 EXPLICIT_VERTICALS = ("real_estate", "investors")
 
 
-def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str | None = None) -> CampaignPlan:
+def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str | None = None,
+                  place: Mapping[str, Any] | None = None) -> CampaignPlan:
     """Turn a user goal in ES/EN/RU/UK into a bounded plan, or raise ``InvalidGoal``.
 
-    ``vertical`` (real_estate|investors) and ``location`` (a gazetteer
-    canonical name) are choices a person already made; they override what
-    the text says, so "no vertical" and "several cities" cannot fire.
+    ``vertical`` (real_estate|investors), ``place`` (names per language,
+    ``ru_in``/``uk_in`` locatives and ``country``, see :func:`world_place`)
+    and ``location`` (any place name) are choices a person already made;
+    they override what the text says, so "no vertical" and "several cities"
+    cannot fire.
     """
     if not isinstance(text, str) or not text.strip():
         raise InvalidGoal("Пустая задача. Напишите, что искать и где, например: «квартиры в аренду в Мадриде».")
@@ -161,7 +206,13 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
         raise InvalidGoal(f"Слишком длинная задача (больше {MAX_TEXT_CHARS} символов). Сократите её.")
     normalized = _norm(text)
     words = _WORD.findall(normalized)
-    place = _place_named(location) if location is not None else _detect_place(words)
+    if place is not None:
+        where = world_place(place, locative={"ru": place.get("ru_in"), "uk": place.get("uk_in")},
+                            country=place.get("country"))
+    elif location is not None:
+        where = world_place({"en": location})
+    else:
+        where = _detect_place(words)
     if vertical is None:
         vertical = _detect_vertical(words)
     elif vertical not in EXPLICIT_VERTICALS:
@@ -176,12 +227,13 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
 
     limits = CampaignLimits(max_groups=max_groups) if max_groups is not None else CampaignLimits()
     return CampaignPlan(
-        goal=_summary(vertical, place.canonical, deal, max_price, rooms),
-        location=place.canonical,
-        location_aliases=dict(place.aliases),
+        goal=_summary(vertical, where.canonical, deal, max_price, rooms),
+        location=where.canonical,
+        location_aliases=dict(where.aliases),
+        country=where.country,
         vertical=vertical,
         languages=list(LANGUAGES),
-        query_seeds={lang: _seeds(place, vertical, deal, lang) for lang in LANGUAGES},
+        query_seeds={lang: _seeds(where, vertical, deal, lang) for lang in LANGUAGES},
         constraints=constraints,
         limits=limits,
     )
@@ -201,19 +253,12 @@ def find_places(text: str) -> list[str]:
     return [p.canonical for p in GAZETTEER if any(_matches(p, w) for w in words)]
 
 
-def _place_named(name: str) -> _Place:
-    for place in GAZETTEER:
-        if place.canonical == name:
-            return place
-    raise InvalidGoal(f"Неизвестный город: {name}.")
-
-
 def _detect_place(words: list[str]) -> _Place:
     found = [p for p in GAZETTEER if any(_matches(p, w) for w in words)]
     if not found:
         raise InvalidGoal(
-            "Не понял город. Укажите его явно: Мадрид, Барселона, Валенсия, Малага, Аликанте, "
-            "Севилья, Марбелья или Киев."
+            "Не понял, где искать. Напишите место в начале задачи, например: city=Ubud,_Bali "
+            "(любой город, район или регион мира; пробелы — через _)."
         )
     if len(found) > 1:
         names = ", ".join(p.canonical for p in found)

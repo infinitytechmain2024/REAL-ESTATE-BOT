@@ -490,6 +490,7 @@ services:
       INVESTOR_REACH_QUERIES_PER_DAY: ${INVESTOR_REACH_QUERIES_PER_DAY:-80}
       INVESTOR_REACH_POLL_SECONDS: ${INVESTOR_REACH_POLL_SECONDS:-20}
       OPENROUTER_REACH_MODEL: ${OPENROUTER_REACH_MODEL:-openai/gpt-4o-mini}
+      INVESTOR_REACH_MODEL_QUERIES: ${INVESTOR_REACH_MODEL_QUERIES:-10}
     # `backend` reaches PostgreSQL, the browser and SearXNG; `egress` sends
     # Telegram messages, calls OpenRouter and reads public web pages.
     networks: [backend, egress]

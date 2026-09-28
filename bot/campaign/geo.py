@@ -111,6 +111,8 @@ def host_of_link(link: object) -> str | None:
 def place_names(location: str, aliases: dict[str, str] | None = None) -> tuple[str, ...]:
     """Every name of a campaign's place a search query may carry: city aliases and regions, folded."""
     names = {_fold(location), *(_fold(a) for a in (aliases or {}).values() if a), *(_fold(r) for r in REGIONS.get(location, ()))}
+    # «Ubud, Bali»: each part names the place too.
+    names |= {part.strip() for name in list(names) if "," in name for part in name.split(",") if len(part.strip()) >= 3}
     for place in GAZETTEER:
         if place.canonical == location:
             names |= set(place.words) | set(place.stems) | {_fold(a) for a in place.aliases.values()}

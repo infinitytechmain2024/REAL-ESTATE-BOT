@@ -892,12 +892,11 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         owner_notices = [r.text for c, r in inbox if c == OWNER and r.text.startswith("Пользователь ")]
         assert len(owner_notices) == 2 and owner_notices[-1].startswith("Пользователь Ann (@ann), ID 777 запустил кампанию: investors")
 
-        # Several cities: the picked one is stored, with the task text as written.
+        # Several cities: the typed one is stored, with the task text as written.
         await control.handle_callback(user, "mode:real_estate", chat_id=user)
         question = await control.handle_text(message("квартиры в аренду в Мадриде или Валенсии до 900 €"))
-        assert "несколько городов" in question.text
-        valencia = next(b.callback_data for b in question.buttons if b.text == "Валенсия")
-        assert "Город: Валенсия" in (await control.handle_callback(user, valencia, chat_id=user)).text
+        assert "несколько городов" in question.text and question.buttons == ()
+        assert "Город: Валенсия" in (await control.handle_text(message("Валенсия"))).text
         await control.handle_callback(user, "task:launch", chat_id=user)
         assert await dispatcher.process_once()
         row = await pool.fetchrow("select source_text, plan->>'vertical', plan->>'location' from campaigns where requested_by=$1 "

@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`027_investor_reach.sql` in order. It records SHA-256 checksums in
+`028_reach_company_kind.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -35,6 +35,7 @@ a comment read, stores the investor / buyer leads found in their comments and
 which of them an investor search already sent.
 `027_investor_reach.sql` keeps the investor search's reach across platforms
 (search-engine results about investors, agents, agencies, funds, networks).
+`028_reach_company_kind.sql` adds the `company` kind (a company of the kind the task asks for).
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their

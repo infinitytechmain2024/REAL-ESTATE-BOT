@@ -42,8 +42,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from bot.campaign import geo
 from bot.campaign.architect import (
-    GAZETTEER,
     MAX_TEXT_CHARS,
     InvalidGoal,
     find_places,
@@ -111,10 +111,13 @@ class Draft:
     pending: list[str] = field(default_factory=list)  # the slots of the question on screen
     ai: dict[str, Any] | None = None  # the AI's TaskUnderstanding; None = deterministic rules
     answers: list[str] = field(default_factory=list)  # typed answers and button choices, for the next AI call
+    # The city's names per language and its country (from the AI, or the typed name): any place in the world.
+    place: dict[str, Any] | None = None
 
     def copy(self, **changes: Any) -> Draft:
         return replace(self, asked=list(self.asked), options=list(self.options), pending=list(self.pending),
-                       ai=dict(self.ai) if self.ai is not None else None, answers=list(self.answers), **changes)
+                       ai=dict(self.ai) if self.ai is not None else None, answers=list(self.answers),
+                       place=dict(self.place) if self.place is not None else None, **changes)
 
     def understanding(self) -> TaskUnderstanding | None:
         return TaskUnderstanding.load(self.ai) if self.ai is not None else None
@@ -160,13 +163,16 @@ class Draft:
 
     def plan(self) -> CampaignPlan:
         """What the Orchestra will plan; raises ``InvalidGoal``."""
-        return plan_campaign(self.goal_text(), vertical=self.mode, location=self.city)  # type: ignore[arg-type]
+        return plan_campaign(self.goal_text(), vertical=self.mode,  # type: ignore[arg-type]
+                             location=None if self.place else self.city, place=self.place)
 
     def command_arguments(self) -> str:
-        """``mode=<vertical> [city=<name>] <goal>``: the choices travel with the queued command."""
+        """``mode=<vertical> [place=<names>|city=<name>] <goal>``: the choices travel with the queued command."""
         tokens = [f"mode={self.mode}"] if self.mode else []
-        if self.city:
-            tokens.append(f"city={self.city}")
+        if self.place:
+            tokens.append(f"place={encode_place(self.place)}")
+        elif self.city:
+            tokens.append(f"city={self.city.replace(' ', '_')}")
         return " ".join([*tokens, self.goal_text()])
 
     def fresh(self) -> Draft:
@@ -176,7 +182,7 @@ class Draft:
     def payload(self) -> dict[str, Any]:
         return {"task": self.task, "message_id": self.message_id, "city": self.city, "deal": self.deal,
                 "budget": self.budget, "asked": self.asked, "options": self.options, "target": self.target,
-                "pending": self.pending, "ai": self.ai, "answers": self.answers}
+                "pending": self.pending, "ai": self.ai, "answers": self.answers, "place": self.place}
 
     @classmethod
     def load(cls, user_id: int, chat_id: int, mode: str | None, step: str, payload: dict[str, Any],
@@ -186,7 +192,8 @@ class Draft:
                    list(payload.get("asked") or []), list(payload.get("options") or []), updated_at,
                    payload.get("target"), list(payload.get("pending") or []),
                    dict(payload["ai"]) if isinstance(payload.get("ai"), dict) else None,
-                   [str(a) for a in payload.get("answers") or []])
+                   [str(a) for a in payload.get("answers") or []],
+                   dict(payload["place"]) if isinstance(payload.get("place"), dict) else None)
 
     def expired(self, now: datetime) -> bool:
         return self.updated_at is not None and now - self.updated_at > DRAFT_TTL
@@ -208,7 +215,7 @@ SLOT_QUESTIONS = {
     "budget": "Какой бюджет? Например, до 1200 €.",
     "target": "Кого ищете? Например: инвесторы в недвижимость, стартапы, бизнес-ангелы.",
 }
-SLOT_HINTS = {"city": " Выберите или напишите.", "budget": " Или нажмите «Пропустить».", "target": ""}
+SLOT_HINTS = {"city": " Напишите город, район или регион в любой стране.", "budget": " Или нажмите «Пропустить».", "target": ""}
 
 
 def targets(text: str) -> list[str]:
@@ -224,9 +231,10 @@ def missing_slots(draft: Draft) -> list[str]:
     skipped stays in ``draft.asked`` and is not asked again.
     """
     city_missing = draft.city is None and len(find_places(draft.task)) != 1
-    # Without a city the planner cannot run; any gazetteer city stands in to read deal and budget.
-    location = draft.city or (GAZETTEER[0].canonical if city_missing else None)
-    plan = plan_campaign(draft.goal_text(), vertical=draft.mode, location=location)  # type: ignore[arg-type]
+    # Without a place the planner cannot run; a stand-in reads deal and budget.
+    location = draft.city or ("Madrid" if city_missing else None)
+    plan = plan_campaign(draft.goal_text(), vertical=draft.mode,  # type: ignore[arg-type]
+                         location=None if draft.place else location, place=draft.place)
     missing = ["city"] if city_missing else []
 
     def may_ask(slot: str) -> bool:
@@ -254,12 +262,8 @@ def deterministic_clarifier(draft: Draft) -> Question | None:
     if first == "city":
         places = find_places(draft.task)
         if len(places) > 1:
-            indexes = [i for i, p in enumerate(GAZETTEER) if p.canonical in places]
-            names = ", ".join(GAZETTEER[i].aliases["ru"] for i in indexes)
+            names = ", ".join(geo_ru(name) for name in places)
             city_text = f"Указано несколько городов ({names}). Одна задача — один город. Какой выбрать?"
-            options = tuple((GAZETTEER[i].aliases["ru"], str(i)) for i in indexes)
-        else:
-            options = tuple((p.aliases["ru"], str(i)) for i, p in enumerate(GAZETTEER))
     elif first == "deal":
         options = (("Аренда", "rent"), ("Покупка", "sale"), ("Не важно", "any"))
     elif first == "budget":
@@ -386,8 +390,36 @@ def parse_budget(text: str) -> int | None:
     return value if 0 < value <= 100_000_000 else None
 
 
-def _city_ru(canonical: str) -> str:
+def geo_ru(canonical: str) -> str:
+    """The Russian name of a well-known city (``Madrid`` -> «Мадрид»), else the name as it is."""
+    from bot.campaign.architect import GAZETTEER
+
     return next((p.aliases["ru"] for p in GAZETTEER if p.canonical == canonical), canonical)
+
+
+def _city_ru(plan: CampaignPlan) -> str:
+    return plan.location_aliases.get("ru") or geo_ru(plan.location)
+
+
+def encode_place(place: dict[str, Any]) -> str:
+    """The place as one token of the queued command (URL-safe base64 of its JSON, no spaces)."""
+    import base64
+    import json
+
+    data = {k: v for k, v in place.items() if isinstance(v, str) and v}
+    return base64.urlsafe_b64encode(json.dumps(data, ensure_ascii=False).encode()).decode().rstrip("=")
+
+
+_VAGUE = re.compile(r"(где-?нибудь|где угодно|любо[йме]|неважно|не важно|не знаю|без разницы|anywhere|"
+                    r"somewhere|де завгодно|будь-де)", re.IGNORECASE)
+
+
+def typed_place(text: str) -> dict[str, Any] | None:
+    """A reply that is only a place («Убуд, Бали», «в Дубае»): its name as typed, for every language."""
+    name = re.sub(r"^(?:в|во|у|на|in|en)\s+", "", " ".join(text.split()).strip(" .!?"), flags=re.IGNORECASE)
+    if not 2 <= len(name) <= 80 or re.search(r"\d", name) or len(name.split()) > 6 or _VAGUE.search(name):
+        return None
+    return {"en": name, "es": name, "ru": name, "uk": name}
 
 
 def summary(draft: Draft, plan: CampaignPlan, technical: bool = False) -> Reply:
@@ -395,7 +427,7 @@ def summary(draft: Draft, plan: CampaignPlan, technical: bool = False) -> Reply:
     lines = [
         "Проверьте задачу:",
         f"Режим: {MODES[draft.mode] if draft.mode in MODES else MODES.get(plan.vertical, plan.vertical)}",
-        f"Город: {_city_ru(plan.location)}",
+        f"Город: {_city_ru(plan)}",
     ]
     if plan.vertical == "investors":
         found = targets(draft.goal_text())
@@ -443,8 +475,8 @@ def ai_summary(draft: Draft, ai: TaskUnderstanding, plan: CampaignPlan, technica
     """«Проверьте задачу» written by the AI; the city the search will use is always visible."""
     body = _ai_body(draft, ai)
     lines = ["Проверьте задачу:"]
-    if find_places(body) != [plan.location]:
-        lines.append(f"Город: {_city_ru(plan.location)}")
+    if not geo.mentions_place(body, geo.place_names(plan.location, dict(plan.location_aliases))):
+        lines.append(f"Город: {_city_ru(plan)}")
     lines.append(body)
     if technical:
         limits = plan.limits
@@ -546,7 +578,10 @@ class TaskIntake:
         filled: set[str] = set()
         places = find_places(text)
         if "city" in pending and len(places) == 1:
-            draft.city = places[0]
+            draft.city, draft.place = places[0], None
+            filled.add("city")
+        elif pending == ["city"] and not skip and (typed := typed_place(text)) is not None:
+            draft.city, draft.place = typed["en"], typed  # any place in the world, as typed
             filled.add("city")
         if "deal" in pending and (deal := parse_deal(text)) is not None:
             draft.deal = deal
@@ -585,11 +620,7 @@ class TaskIntake:
             return Reply("Эта кнопка устарела.")
         if draft.ai is not None:
             return await self._ai_button(draft, action, value)
-        if action == "city":
-            if not value.isdigit() or int(value) >= len(GAZETTEER):
-                return Reply("Эта кнопка устарела.")
-            draft.city = GAZETTEER[int(value)].canonical
-        elif action == "deal":
+        if action == "deal":
             if value not in DEAL_TEXT:
                 return Reply("Эта кнопка устарела.")
             draft.deal = value
@@ -629,7 +660,8 @@ class TaskIntake:
             return False
         draft.ai = ai.payload()
         # A newer answer may correct a field; a field the AI does not know keeps what was chosen.
-        draft.city = ai.city or draft.city
+        if ai.city:
+            draft.city, draft.place = ai.city, ai.place
         draft.deal = (ai.deal or draft.deal) if draft.mode == "real_estate" else None
         draft.budget = ai.budget_max or draft.budget
         if draft.mode == "investors":
@@ -651,7 +683,7 @@ class TaskIntake:
         was_missing_city = draft.city is None
         places = find_places(text)
         if draft.city is None and len(places) == 1:  # a plain city name needs no model to be read
-            draft.city = places[0]
+            draft.city, draft.place = places[0], None
         self._record_answer(draft, text[:MAX_ANSWER_CHARS])
         if not await self._understand(draft):
             return await self._fallback_answer(draft, text)
@@ -670,12 +702,7 @@ class TaskIntake:
         return await self._answer(draft, text)
 
     async def _ai_button(self, draft: Draft, action: str, value: str) -> Reply:
-        if action == "city":
-            if not value.isdigit() or int(value) >= len(GAZETTEER):
-                return Reply("Эта кнопка устарела.")
-            draft.city = GAZETTEER[int(value)].canonical
-            answer = f"Город: {GAZETTEER[int(value)].aliases['ru']}"
-        elif action == "deal":
+        if action == "deal":
             if value not in DEAL_TEXT:
                 return Reply("Эта кнопка устарела.")
             draft.deal = value
@@ -718,7 +745,7 @@ class TaskIntake:
             draft.asked += [slot for slot in missing if slot not in draft.asked]
             await self.store.save(draft)
             if first == "city":
-                options = tuple((p.aliases["ru"], str(i)) for i, p in enumerate(GAZETTEER))
+                options = ()  # any place in the world: typed, never picked from a list
             elif first == "deal":
                 options = (("Аренда", "rent"), ("Покупка", "sale"), ("Не важно", "any"))
             else:

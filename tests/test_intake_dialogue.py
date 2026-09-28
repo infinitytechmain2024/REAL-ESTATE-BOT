@@ -111,7 +111,7 @@ async def test_only_the_missing_city_is_asked() -> None:
     control, _, _ = plane()
     await press(control, USER, "mode:real_estate")
     question = await say(control, USER, "купить квартиру до 300 000 €")
-    assert question.text == "В каком городе искать? Выберите или напишите."
+    assert question.text == "В каком городе искать? Напишите город, район или регион в любой стране."
     assert "Бюджет" not in question.text and "Аренда" not in question.text
 
 

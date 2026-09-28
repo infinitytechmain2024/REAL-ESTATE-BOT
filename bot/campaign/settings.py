@@ -111,12 +111,14 @@ class CampaignRunnerSettings(BaseSettings):
     reach_queries_per_day: int = Field(default=80, ge=0, le=2000, validation_alias="INVESTOR_REACH_QUERIES_PER_DAY")
     reach_poll_seconds: int = Field(default=20, ge=5, le=600, validation_alias="INVESTOR_REACH_POLL_SECONDS")
     reach_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_REACH_MODEL")
+    reach_model_queries: int = Field(default=10, ge=0, le=30, validation_alias="INVESTOR_REACH_MODEL_QUERIES")
 
     def reach_config(self):  # -> bot.campaign.reach.ReachConfig
         from .reach import ReachConfig
 
         return ReachConfig(queries_per_campaign=self.reach_queries_per_campaign,
-                           queries_per_tick=self.reach_queries_per_tick, queries_per_day=self.reach_queries_per_day)
+                           queries_per_tick=self.reach_queries_per_tick, queries_per_day=self.reach_queries_per_day,
+                           model_queries=self.reach_model_queries)
 
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig

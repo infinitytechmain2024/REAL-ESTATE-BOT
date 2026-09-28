@@ -68,6 +68,11 @@ class QueryContext:
     location_aliases: dict[str, str] = field(default_factory=dict)
     constraints: dict[str, Any] = field(default_factory=dict)
     seeds: dict[str, list[str]] = field(default_factory=dict)
+    country: str | None = None  # the plan's ISO-2 country (any place in the world)
+
+    @property
+    def spanish(self) -> bool:
+        return (self.country or geo.country_of(self.location)) == "ES"
 
     @classmethod
     def from_campaign(cls, campaign: Any) -> QueryContext:
@@ -75,7 +80,7 @@ class QueryContext:
         return cls(task=str(campaign.source_text or "")[:MAX_TASK_CHARS], goal=plan.goal, location=plan.location,
                    vertical=plan.vertical, location_aliases=dict(plan.location_aliases),
                    constraints={k: v for k, v in plan.constraints.items() if v is not None},
-                   seeds={k: list(v) for k, v in plan.query_seeds.items()})
+                   seeds={k: list(v) for k, v in plan.query_seeds.items()}, country=plan.country)
 
 
 def _strip_accents(text: str) -> str:
@@ -161,7 +166,7 @@ def fallback_queries(context: QueryContext, platform: str, used: Collection[tupl
     """Queries from the plan's seeds and the task's topic, without a model. Deterministic."""
     words = _topic_words(context)
     candidates: list[SocialQuery | None] = []
-    spanish = geo.country_of(context.location) == "ES"
+    spanish = context.spanish
     alias = {lang: context.location_aliases.get("es" if spanish and lang in ("ru", "uk") else lang, context.location)
              for lang in LANGUAGES}
     building = any(w in context.task.casefold() for w in _BUILD)
@@ -208,7 +213,7 @@ def localise(queries: Iterable[SocialQuery], context: QueryContext) -> list[Soci
     """Queries that name the campaign's place; repaired or dropped (see the module notes)."""
     names = geo.place_names(context.location, context.location_aliases)
     latin = geo.latin_place_names(context.location, context.location_aliases)
-    spanish = geo.country_of(context.location) == "ES"
+    spanish = context.spanish
     out: list[SocialQuery] = []
     for query in queries:
         cyrillic = query.language in ("ru", "uk") or bool(_CYRILLIC.search(query.text))

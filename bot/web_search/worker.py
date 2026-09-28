@@ -90,7 +90,8 @@ def query_task(campaign: Campaign) -> QueryTask:
     plan = campaign.plan
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
-                     constraints=dict(plan.constraints), languages=tuple(plan.languages))
+                     constraints=dict(plan.constraints), languages=tuple(plan.languages),
+                     country_code=plan.country)
 
 
 class WebSearchWorker:

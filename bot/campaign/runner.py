@@ -556,7 +556,8 @@ class CampaignRunner:
         limit = min(room, self.config.max_stream_per_step)
         # People from comments under objects first (they asked about a concrete object), then the reach.
         cards: list[tuple[str, str]] = [
-            (p.profile_key, person_card(p, location=location, now=self.now()))
+            (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
+                                        now=self.now()))
             for p in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit)]
         if len(cards) < limit:
             cards += [(c.delivery_key, contact_card(c)) for c in await self.store.stored_contacts(
@@ -731,7 +732,7 @@ def facebook_limit(refusal: str) -> str | None:
 def campaign_request(campaign: Campaign) -> Request:
     """What the campaign asked for, for ``tolerance.classify``."""
     return request_for(campaign.plan.constraints, location=campaign.plan.location, vertical=campaign.plan.vertical,
-                       text=f"{campaign.source_text} {campaign.plan.goal}")
+                       text=f"{campaign.source_text} {campaign.plan.goal}", country=campaign.plan.country)
 
 
 def finding_card(campaign: Campaign, finding: StreamFinding) -> str:

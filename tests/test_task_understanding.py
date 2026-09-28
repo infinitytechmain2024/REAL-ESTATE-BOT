@@ -111,7 +111,7 @@ async def test_a_ukrainian_voice_land_task_is_a_plot_not_a_room() -> None:
     launched = await press(control, USER, "task:launch")
     assert launched.text.startswith("Принято. Начинаю поиск.")
     [envelope] = sink.envelopes
-    goal, vertical, city = parse_campaign_goal(envelope.arguments)
+    goal, vertical, city, _place = parse_campaign_goal(envelope.arguments)
     assert (vertical, city) == ("real_estate", "Madrid")
     assert goal.startswith("покупка Тип: земельный участок. Задача: шукаємо")
     assert "Главное: земельный участок; покупка; пригород Мадрида; площадь от 1000 м²; под застройку." in goal
@@ -145,8 +145,9 @@ async def test_a_missing_city_is_asked_by_the_ai_and_the_answer_goes_back_to_it(
     control, _, _ = with_ai(ai)
     await press(control, USER, "mode:real_estate")
     question = await say(control, USER, "ищу участок под застройку, покупка")
-    assert question.text == "В каком городе или рядом с каким городом искать участок? Выберите или напишите."
-    assert callbacks(question)[0] == "task:city:0" and "task:cancel" not in callbacks(question)
+    assert question.text == ("В каком городе или рядом с каким городом искать участок? "
+                             "Напишите город, район или регион в любой стране.")
+    assert callbacks(question) == [], "no list of cities to pick from"
     summary = await say(control, USER, "под Мадридом")
     assert summary.text.startswith("Проверьте задачу:\nИщем земельный участок")
     assert_summary_buttons(summary)
@@ -155,29 +156,47 @@ async def test_a_missing_city_is_asked_by_the_ai_and_the_answer_goes_back_to_it(
 
 
 @pytest.mark.asyncio
-async def test_a_city_button_is_an_answer_too() -> None:
+async def test_the_city_question_has_no_list_of_cities_and_an_old_city_button_is_stale() -> None:
     asking = TaskUnderstanding(deal="rent", property_type="apartment", questions=["В каком городе искать?"],
                                summary_ru="Снять квартиру.")
-    done = TaskUnderstanding(city="Valencia", deal="rent", property_type="apartment", primary=["квартира", "аренда"],
-                             summary_ru="Снять квартиру в Валенсии.")
-    ai = FakeAI(asking, done)
+    ai = FakeAI(asking)
     control, _, _ = with_ai(ai)
     await press(control, USER, "mode:real_estate")
-    assert (await say(control, USER, "хочу снять квартиру")).text.startswith("В каком городе искать?")
-    summary = await press(control, USER, "task:city:2")
-    assert summary.text.startswith("Проверьте задачу:\nСнять квартиру в Валенсии.")
-    assert ai.calls[1]["answers"] == ["Город: Валенсия"] and ai.calls[1]["known"]["city"] == "Valencia"
+    question = await say(control, USER, "хочу снять квартиру")
+    assert question.text.startswith("В каком городе искать?") and question.buttons == ()
+    assert (await press(control, USER, "task:city:2")).text == "Эта кнопка устарела."
 
 
 @pytest.mark.asyncio
-async def test_a_city_outside_the_list_is_missing_and_the_code_asks_even_if_the_ai_does_not() -> None:
-    parsed = parse_understanding(json.dumps({"city": "Toledo", "summary_ru": "Квартира в Толедо."}))
-    assert parsed.city is None
-    forgot = TaskUnderstanding(deal="rent", primary=["квартира"], summary_ru="Снять квартиру в Толедо.")
+async def test_any_place_in_the_world_is_taken_with_its_names_and_country() -> None:
+    parsed = parse_understanding(json.dumps({
+        "city": "Ubud, Bali", "summary_ru": "Контакты компаний по управлению виллами в Убуде.",
+        "place": {"es": "Ubud, Bali", "ru": "Убуд, Бали", "uk": "Убуд, Балі", "ru_in": "Убуде", "uk_in": "Убуді",
+                  "country": "id"}}))
+    assert parsed.city == "Ubud, Bali" and parsed.place["country"] == "ID" and parsed.place["ru"] == "Убуд, Бали"
+    assert parse_understanding(json.dumps({"city": "Toledo", "summary_ru": "Квартира в Толедо."})).city == "Toledo"
+    assert parse_understanding(json.dumps({"city": "мадрид", "summary_ru": "Квартира."})).city == "Madrid"
+    bali = TaskUnderstanding(city="Ubud, Bali", place=parsed.place, target="русскоязычные агенты по управлению виллами",
+                             primary=["управление виллами"], summary_ru="Ищем русскоязычные компании и агентов по "
+                                                                        "управлению виллами.")
+    control, sink, _ = with_ai(FakeAI(bali))
+    await press(control, USER, "mode:investors")
+    summary = await say(control, USER, "надай контакти російськомовних компаній та агентів з управління віллами, Убуд")
+    assert "Город: Убуд, Бали" in summary.text and "Киев" not in summary.text
+    await press(control, USER, "task:launch")
+    goal, vertical, city, place = parse_campaign_goal(sink.envelopes[-1].arguments)
+    assert (vertical, city, place["en"], place["country"]) == ("investors", None, "Ubud, Bali", "ID")
+    plan = plan_campaign(goal, vertical=vertical, place=place)
+    assert (plan.location, plan.country, plan.location_aliases["ru"]) == ("Ubud, Bali", "ID", "Убуд, Бали")
+
+
+@pytest.mark.asyncio
+async def test_without_a_place_the_code_asks_even_if_the_ai_does_not() -> None:
+    forgot = TaskUnderstanding(deal="rent", primary=["квартира"], summary_ru="Снять квартиру.")
     control, _, _ = with_ai(FakeAI(forgot))
     await press(control, USER, "mode:real_estate")
-    question = await say(control, USER, "снять квартиру в Толедо")
-    assert question.text == "В каком городе искать? Выберите или напишите."
+    question = await say(control, USER, "снять квартиру")
+    assert question.text == "В каком городе искать? Напишите город, район или регион в любой стране."
     # The same answer again: still no known city, asked again with a hint.
     again = await say(control, USER, "Толедо")
     assert again.text.startswith("Не понял город. В каком городе искать?")
@@ -409,10 +428,11 @@ async def test_client_failures_raise_a_safe_error(response: httpx.Response | Exc
 
 def test_schema_and_prompt() -> None:
     assert set(SCHEMA["required"]) == set(SCHEMA["properties"]) and SCHEMA["additionalProperties"] is False
-    assert SCHEMA["properties"]["city"]["enum"][:-1] == ["Madrid", "Barcelona", "Valencia", "Málaga", "Alicante",
-                                                         "Sevilla", "Marbella", "Kyiv"]
+    assert "enum" not in SCHEMA["properties"]["city"], "any place in the world, not a fixed list"
+    assert SCHEMA["properties"]["place"]["required"] == ["es", "ru", "uk", "ru_in", "uk_in", "country"]
     assert "land" in SCHEMA["properties"]["property_type"]["enum"]
-    for words in ("ділянка", "terreno", "Madrid (Мадрид)", "voice transcript", "never quote"):
+    for words in ("ділянка", "terreno", "anywhere in the world", "Ukrainian words do not mean Kyiv", "voice transcript",
+                  "never quote", "do\nNOT guess", "«вілл» — это виллы?", "translated, not transliterated"):
         assert words in SYSTEM
     with pytest.raises(ValueError):
         OpenRouterUnderstanding(api_key="", model="m", timeout_seconds=1)
@@ -470,3 +490,21 @@ def test_the_bottom_keyboard_is_rendered_set_or_removed() -> None:
     assert isinstance(_markup(Reply("x", keyboard=())), ReplyKeyboardRemove)
     assert _markup(Reply("x")) is None
     assert isinstance(_markup(Reply("x", (Button("Одобрить", callback_data="near:yes"),))), InlineKeyboardMarkup)
+
+
+@pytest.mark.asyncio
+async def test_an_unclear_word_is_asked_about_before_the_summary() -> None:
+    unsure = TaskUnderstanding(city="Ubud, Bali", place={"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"},
+                               target="русскоязычные компании и агенты",
+                               questions=["Уточните: «вілл» — это виллы?"], summary_ru="Ищем русскоязычные компании.")
+    sure = TaskUnderstanding(city="Ubud, Bali", place={"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"},
+                             target="русскоязычные компании и агенты по управлению виллами",
+                             summary_ru="Ищем русскоязычные компании и агентов по управлению виллами в Убуде.")
+    ai = FakeAI(unsure, sure)
+    control, _, _ = with_ai(ai)
+    await press(control, USER, "mode:investors")
+    question = await say(control, USER, "надай контакти російськомовних компаній та агентів з управління вілл, Убуд")
+    assert question.text.startswith("Уточните: «вілл» — это виллы?") and "Проверьте задачу" not in question.text
+    summary = await say(control, USER, "да, виллы")
+    assert summary.text.startswith("Проверьте задачу:") and "управлению виллами" in summary.text
+    assert "Убуде" in summary.text and "Киев" not in summary.text and ai.calls[1]["answers"] == ["да, виллы"]

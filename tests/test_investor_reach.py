@@ -65,12 +65,17 @@ def test_results_worth_judging_are_profiles_posts_and_public_pages(url: str, exp
 
 def test_queries_cover_every_platform_in_the_campaigns_languages_with_its_city() -> None:
     queries = plan_queries(MADRID)
-    assert {q.platform for q in queries} == {"linkedin", "reddit", "x", "instagram", "tiktok", "youtube", "web"}
+    assert {q.platform for q in queries} == {"linkedin", "reddit", "x", "instagram", "tiktok", "youtube", "telegram",
+                                             "web"}
     assert all("Madrid" in q.text or "Мадрид" in q.text for q in queries)
     assert len({q.text for q in queries}) == len(queries)
     assert queries[0].text == 'site:linkedin.com/in "real estate investor" Madrid'
     spanish_only = plan_queries(ReachCampaign("c", "Madrid", {"es": "Madrid"}, ("es",)))
     assert {q.language for q in spanish_only} == {"es", "en"}
+    bali = plan_queries(ReachCampaign("c", "Ubud, Bali", {"ru": "Убуд, Бали", "en": "Ubud, Bali"},
+                                      ("es", "en", "ru", "uk"), country="ID"))
+    assert "es" not in {q.language for q in bali}, "Spanish only for Spain"
+    assert "site:t.me инвестиции недвижимость Убуд, Бали" in {q.text for q in bali}
 
 
 def _cand(title: str, snippet: str = "", url: str = "https://es.linkedin.com/in/x") -> Candidate:
@@ -263,3 +268,65 @@ async def test_postgres_reach_from_the_query_to_the_card(pool) -> None:
 
     await store.finish(cid)
     assert await store.open_campaigns() == [] and not await runs.reach_pending(cid)
+
+
+# --- any place in the world, the task's own queries -------------------------------------------------
+
+
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://t.me/bali_villas_ru", ("telegram", "profile")),
+    ("https://t.me/bali_villas_ru/1234", ("telegram", "post")),
+    ("https://t.me/s/bali_villas_ru", None),
+    ("https://t.me/+AbCdEf", None),
+])
+def test_public_telegram_channels_count(url: str, expected) -> None:
+    assert platform_of(url) == expected
+
+
+def test_the_models_queries_are_cleaned_and_get_their_site() -> None:
+    from bot.campaign.reach import parse_queries
+
+    content = json.dumps({"queries": [
+        {"platform": "telegram", "language": "ru", "text": "управление виллами Убуд"},
+        {"platform": "linkedin", "language": "en", "text": "site:linkedin.com/company villa management Ubud"},
+        {"platform": "web", "language": "ru", "text": "русскоязычная управляющая компания виллы Убуд Бали"},
+        {"platform": "myspace", "language": "en", "text": "villa Ubud"},
+        {"platform": "telegram", "language": "ru", "text": "управление виллами Убуд"},
+        {"platform": "x", "language": "en", "text": "x"},
+    ]})
+    assert [(q.platform, q.text) for q in parse_queries(content, 10)] == [
+        ("telegram", "site:t.me управление виллами Убуд"),
+        ("linkedin", "site:linkedin.com/company villa management Ubud"),
+        ("web", "русскоязычная управляющая компания виллы Убуд Бали")]
+
+
+async def test_the_task_drives_the_queries_before_the_templates() -> None:
+    from bot.campaign.reach import ReachQuery
+
+    bali = ReachCampaign("c9", "Ubud, Bali", {"ru": "Убуд, Бали", "en": "Ubud, Bali"}, ("en", "ru", "uk"),
+                         task="русскоязычные компании по управлению виллами", country="ID")
+
+    class Planner:
+        model = "m"
+        asked = 0
+
+        async def judge(self, campaign, candidates):
+            return [Judged("company", True, 0.9, "Bali Villa Care", "Управление виллами") for _ in candidates]
+
+        async def queries(self, campaign, count):
+            Planner.asked += 1
+            return [ReachQuery("telegram", "ru", "site:t.me управление виллами Убуд")]
+
+    store = MemoryReachStore([bali])
+    searcher = FakeSearcher({"site:t.me управление виллами Убуд": [
+        SearchHit("https://t.me/bali_villa_care", "Bali Villa Care — управление виллами в Убуде", "")]})
+    worker = ReachWorker(store, searcher, Planner(), config=ReachConfig(queries_per_tick=2))
+    await worker.tick()
+    await worker.tick()
+    assert searcher.queries[0] == ("site:t.me управление виллами Убуд", "ru")
+    assert Planner.asked == 1, "the model writes the queries once per campaign"
+    [stored] = store.contacts.values()
+    assert (stored.candidate.platform, stored.judged.kind, stored.location) == ("telegram", "company", "Ubud, Bali")
+    card = contact_card(Contact(stored.candidate.url_key, stored.candidate.url, "telegram", "company",
+                                "Bali Villa Care"))
+    assert card.startswith("🏢 Компания · Telegram\nИмя: Bali Villa Care\nСсылка: https://t.me/bali_villa_care")

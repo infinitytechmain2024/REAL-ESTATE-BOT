@@ -221,24 +221,25 @@ async def test_a_missing_city_is_asked_and_a_typed_or_pressed_answer_is_accepted
     control, _ = await with_mode()
     question = await say(control, USER, "квартиры в аренду до 1000 евро")
     assert question.text.startswith("В каком городе искать?")
-    assert len(question.buttons) == 8 and "task:cancel" not in callbacks(question)
+    assert question.buttons == (), "any place in the world: typed, never picked from a list"
     assert "Не понял город" in (await say(control, USER, "где-нибудь у моря")).text
     summary = await say(control, USER, "Валенсия")
     assert "Город: Валенсия" in summary.text
 
-    control, _ = await with_mode()
-    question = await say(control, USER, "квартиры в аренду до 1000 евро")
-    madrid = next(b.callback_data for b in question.buttons if b.text == "Мадрид")
-    assert "Город: Мадрид" in (await press(control, USER, madrid)).text  # type: ignore[arg-type]
+    control, sink = await with_mode()
+    await say(control, USER, "квартиры в аренду до 1000 евро")
+    summary = await say(control, USER, "в Лиссабон")
+    assert "Город: Лиссабон" in summary.text  # without the AI the name is kept as typed
+    await press(control, USER, "task:launch")
+    assert sink.envelopes[-1].arguments.startswith("mode=real_estate place=")
 
 
 @pytest.mark.asyncio
 async def test_several_cities_ask_to_choose_one() -> None:
     control, sink = await with_mode()
     question = await say(control, USER, "снять квартиру в Мадриде или Барселоне до 900 €")
-    assert "несколько городов" in question.text
-    assert [b.text for b in question.buttons] == ["Мадрид", "Барселона"]
-    summary = await press(control, USER, callbacks(question)[1])
+    assert "несколько городов (Мадрид, Барселона)" in question.text and question.buttons == ()
+    summary = await say(control, USER, "Барселона")
     assert "Город: Барселона" in summary.text
     await press(control, USER, "task:launch")
     arguments = sink.envelopes[0].arguments
@@ -317,7 +318,7 @@ async def test_launch_queues_exactly_one_campaign_for_the_user_and_their_chat() 
     assert "устарела" in (await press(control, USER, "task:launch")).text  # double tap
     [envelope] = sink.envelopes
     assert (envelope.command, envelope.chat_id, envelope.user_id, envelope.message_id, envelope.auto) == ("campaign", USER, USER, task.message_id, False)
-    goal, vertical, city = parse_campaign_goal(envelope.arguments)
+    goal, vertical, city, _place = parse_campaign_goal(envelope.arguments)
     plan = plan_campaign(goal, vertical=vertical, location=city)  # type: ignore[arg-type]
     assert (plan.location, plan.vertical, plan.constraints["deal"], plan.constraints["max_price"]) == ("Madrid", "real_estate", "rent", 1200)
 
@@ -452,24 +453,30 @@ def test_explicit_vertical_and_location_override_detection() -> None:
     assert plan_campaign("инвесторы в Мадриде", vertical="real_estate").vertical == "real_estate"
     assert plan_campaign("что-нибудь в Мадриде", vertical="investors").vertical == "investors"  # no "no vertical" error
     assert plan_campaign("квартиры в Мадриде или Барселоне", location="Barcelona").location == "Barcelona"
-    with pytest.raises(InvalidGoal):
-        plan_campaign("квартиры", location="Atlantis")
+    assert plan_campaign("квартиры", location="Lisbon").location == "Lisbon"  # any place in the world
     with pytest.raises(InvalidGoal):
         plan_campaign("квартиры в Мадриде", vertical="both")  # type: ignore[arg-type]
 
 
 def test_the_campaign_parser_strips_mode_and_city_tokens() -> None:
-    assert parse_campaign_goal("mode=investors city=Málaga квартиры") == ("квартиры", "investors", "Málaga")
-    assert parse_campaign_goal("квартиры в Мадриде") == ("квартиры в Мадриде", None, None)
+    assert parse_campaign_goal("mode=investors city=Málaga квартиры") == ("квартиры", "investors", "Málaga", None)
+    assert parse_campaign_goal("city=Ubud,_Bali виллы") == ("виллы", None, "Ubud, Bali", None)
+    assert parse_campaign_goal("квартиры в Мадриде") == ("квартиры в Мадриде", None, None, None)
+    from bot.control_plane.intake import encode_place
+
+    token = encode_place({"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"})
+    assert " " not in token
+    assert parse_campaign_goal(f"place={token} виллы")[3] == {"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"}
     for bad in ("mode=both квартиры", "mode=investors mode=investors x", "city= x", "mode=investors",
-                "city=Atlantis квартиры", "city=madrid квартиры", "city=Madrid city=Kyiv квартиры"):
+                "city=Madrid city=Kyiv квартиры", "place=%%% x", f"place={token} place={token} x",
+                "city=" + "a" * 81 + " x", "place=" + encode_place({"ru": "без en"}) + " x"):
         with pytest.raises(CommandValidationError):
             parse_campaign_goal(bad)
 
 
 @pytest.mark.asyncio
 async def test_bad_mode_or_city_tokens_are_rejected_without_a_campaign() -> None:
-    for arguments in ("mode=both квартиры в Мадриде", "city=Atlantis квартиры"):
+    for arguments in ("mode=both квартиры в Мадриде", "place=%%% квартиры"):
         _store, campaigns, notices = await dispatch(claimed("campaign", arguments))
         assert campaigns.campaigns == {}
         assert "failed validation" in notices[-1]

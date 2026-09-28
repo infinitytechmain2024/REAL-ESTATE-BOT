@@ -194,8 +194,10 @@ def _location_terms(plan: CampaignPlan) -> tuple[frozenset[str], tuple[str, ...]
         tokens = _WORD.findall(name)
         if len(tokens) > 1:
             phrases.add(" ".join(tokens))
-        elif tokens:
-            token = tokens[0]
+        # «Ubud, Bali»: each part of a name names the place too (short words like «de» do not).
+        for token in tokens:
+            if len(tokens) > 1 and len(token) < 4:
+                continue
             if token.isascii():
                 words.add(token)
             else:  # case endings: Мадрид -> Мадриде, Київ -> Києві
