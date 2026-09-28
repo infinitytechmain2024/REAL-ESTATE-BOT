@@ -165,3 +165,25 @@ async def test_memory_store_transitions() -> None:
     with pytest.raises(ValueError):
         await store.set_state(cid, "bogus", "t")
     assert [a[3] for a in store.audit] == ["planned", "discovering", "paused_verification", "running", "completed"]
+
+
+@pytest.mark.parametrize(("goal", "vertical", "deal"), [
+    ("Купить участок в Мадриде до 60 000 €", "real_estate", "sale"),
+    ("Куплю землю под Малагой", "real_estate", "sale"),
+    ("Купить дом в Валенсии", "real_estate", "sale"),
+    ("Земельна ділянка в Києві", "real_estate", None),
+    ("Comprar terreno en Madrid", "real_estate", "sale"),
+    ("Buy a plot in Marbella", "real_estate", "sale"),
+    ("Коммерческое помещение в аренду в Барселоне", "real_estate", "rent"),
+    ("Купить в Мадриде до 60 000", "real_estate", "sale"),
+    ("Купить участок в Мадриде и найти инвесторов", "both", "sale"),
+])
+def test_land_houses_and_commercial_property_are_real_estate(goal: str, vertical: str, deal: str | None) -> None:
+    plan = plan_campaign(goal)
+    assert (plan.vertical, plan.constraints["deal"]) == (vertical, deal)
+
+
+def test_home_is_a_whole_word_so_pet_groups_stay_off_topic() -> None:
+    from bot.campaign.discovery import score_relevance
+
+    assert score_relevance("Домашние животные Валенсия", "", plan_campaign("Купить дом в Валенсии")).relevant is False
