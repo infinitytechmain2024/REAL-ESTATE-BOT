@@ -104,7 +104,7 @@ class RelevanceJudge(Protocol):
 def task_data(campaign: Campaign) -> dict[str, Any]:
     """What the model is told about the campaign: goal, task text, place and the numbers."""
     plan = campaign.plan
-    country = geo.country_of(plan.location)
+    country = plan.country or geo.country_of(plan.location)
     data: dict[str, Any] = {
         "goal": plan.goal,
         "task": str(campaign.source_text or "")[:MAX_TASK_CHARS],

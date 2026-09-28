@@ -157,7 +157,7 @@ async def test_free_text_from_an_auto_operator_becomes_a_campaign() -> None:
     assert (await say(control, LISTED, GOAL)).startswith("Авто: /campaign")
     assert (sink.envelopes[-1].command, sink.envelopes[-1].arguments, sink.envelopes[-1].auto) == ("campaign", GOAL, True)
     unclear = await say(control, LISTED, "hello there")
-    assert "Не понял город" in unclear and "например «квартиры в аренду в Мадриде»" in unclear
+    assert "Не понял, где искать" in unclear and "например «квартиры в аренду в Мадриде»" in unclear
     assert "/campaign cancel" in await say(control, OWNER, f"cancel {GOAL}")
     assert len(sink.envelopes) == 1
     assert (await say(control, UNLISTED, GOAL)).startswith("Send /help for control-plane commands")

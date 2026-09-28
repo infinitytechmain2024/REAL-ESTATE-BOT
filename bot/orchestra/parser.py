@@ -93,30 +93,54 @@ def parse_campaign(arguments: str) -> tuple[str, str]:
 GOAL_MODES = frozenset({"real_estate", "investors"})
 
 
-def parse_campaign_goal(value: str) -> tuple[str, str | None, str | None]:
-    """Strip leading ``mode=<vertical>`` and ``city=<name>`` tokens -> (goal, vertical, city).
+PLACE_KEYS = frozenset({"en", "es", "ru", "uk", "ru_in", "uk_in", "country"})
+MAX_PLACE_CHARS = 80
 
-    Task intake queues the person's chosen mode and city this way so the
+
+def _decode_place(raw: str) -> dict[str, str]:
+    """``place=``: URL-safe base64 of a JSON object of short strings (the intake's ``encode_place``)."""
+    import base64
+    import binascii
+    import json
+
+    try:
+        data = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode())
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise CommandValidationError("place is not readable") from exc
+    if (not isinstance(data, dict) or not isinstance(data.get("en"), str) or set(data) - PLACE_KEYS
+            or any(not isinstance(v, str) or not 0 < len(v) <= MAX_PLACE_CHARS for v in data.values())):
+        raise CommandValidationError("place must name the place in short strings (en, es, ru, uk, country)")
+    return data
+
+
+def parse_campaign_goal(value: str) -> tuple[str, str | None, str | None, dict[str, str] | None]:
+    """Strip leading ``mode=``, ``city=`` and ``place=`` tokens -> (goal, vertical, city, place).
+
+    Task intake queues the person's chosen mode and place this way so the
     Orchestra plans exactly what they confirmed; a plain goal keeps detection.
-    The city must be a gazetteer canonical name (e.g. ``Madrid``, ``Málaga``).
+    The place can be anywhere in the world: ``city=Ubud,_Bali`` (``_`` for
+    spaces) or ``place=<names>`` with its names per language and country.
     """
-    from bot.campaign.architect import GAZETTEER
-
-    cities = {place.canonical for place in GAZETTEER}
     vertical: str | None = None
     city: str | None = None
+    place: dict[str, str] | None = None
     words = value.split()
-    while words and "=" in words[0] and words[0].split("=", 1)[0] in {"mode", "city"}:
+    while words and "=" in words[0] and words[0].split("=", 1)[0] in {"mode", "city", "place"}:
         key, _, raw = words.pop(0).partition("=")
         if key == "mode":
             if raw not in GOAL_MODES or vertical is not None:
                 raise CommandValidationError("mode must be real_estate or investors")
             vertical = raw
+        elif key == "city":
+            name = " ".join(raw.replace("_", " ").split())
+            if not 0 < len(name) <= MAX_PLACE_CHARS or city is not None or place is not None:
+                raise CommandValidationError(f"city must be one place name of at most {MAX_PLACE_CHARS} characters")
+            city = name
         else:
-            if raw not in cities or city is not None:
-                raise CommandValidationError(f"city must be one of: {', '.join(sorted(cities))}")
-            city = raw
+            if city is not None or place is not None:
+                raise CommandValidationError("one place per campaign")
+            place = _decode_place(raw)
     goal = " ".join(words)
     if not goal:
         raise CommandValidationError("use /campaign <goal>")
-    return goal, vertical, city
+    return goal, vertical, city, place

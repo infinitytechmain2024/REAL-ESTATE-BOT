@@ -130,14 +130,15 @@ class QueryTask:
     vertical: str
     constraints: dict[str, Any] = field(default_factory=dict)
     languages: tuple[str, ...] = QUERY_LANGUAGES
-
-    @property
-    def ukrainian(self) -> bool:
-        return self.location.casefold() in ("kyiv", "kiev", "київ", "киев")
+    country_code: str | None = None  # the plan's country (any place in the world)
 
     @property
     def country(self) -> str | None:
-        return "UA" if self.ukrainian else geo.country_of(self.location)
+        return self.country_code or geo.country_of(self.location)
+
+    @property
+    def ukrainian(self) -> bool:
+        return self.country == "UA"
 
     @property
     def spanish(self) -> bool:
@@ -157,7 +158,9 @@ class QueryTask:
     def portals(self) -> tuple[str, ...]:
         if self.vertical == "investors":
             return ()
-        return UKRAINE_PORTALS if self.ukrainian else SPAIN_PORTALS
+        if self.ukrainian:
+            return UKRAINE_PORTALS
+        return SPAIN_PORTALS if self.spanish else ()  # elsewhere: no known portals, the open web only
 
 
 class QueryGenerator(Protocol):

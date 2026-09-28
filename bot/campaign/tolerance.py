@@ -91,7 +91,7 @@ class Request:
     is_max: bool = True  # «до N»: anything cheaper is exact
     currency: str = DEFAULT_CURRENCY
     deal: str | None = None
-    location: str | None = None  # a gazetteer canonical name
+    location: str | None = None  # the plan's place (any place in the world)
     min_area: float | None = None  # «от 2000 м²» in the task, square metres
     country: str | None = None  # ISO-2; derived from ``location`` when not given
 
@@ -197,10 +197,11 @@ def area_match(area: float, minimum: float) -> Match:
 
 
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
-                text: str | None = None) -> Request:
-    """The bucketing request of a campaign plan (``plan.constraints``, ``plan.location``; ``text``: the task)."""
+                text: str | None = None, country: str | None = None) -> Request:
+    """The bucketing request of a campaign plan (``plan.constraints``, ``plan.location``, ``plan.country``;
+    ``text``: the task)."""
     if vertical == "investors":
-        return Request(location=location)
+        return Request(location=location, country=country)
     amount = constraints.get("max_price")
     deal = constraints.get("deal")
     return Request(
@@ -208,6 +209,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         deal=deal if deal in ("rent", "sale") else None,
         location=location,
         min_area=min_area_of(text),
+        country=country,
     )
 
 

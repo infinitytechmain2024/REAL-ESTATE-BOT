@@ -70,6 +70,8 @@ class CampaignPlan(BaseModel):
     goal: str = Field(min_length=1, max_length=200)
     location: str = Field(min_length=1, max_length=80)
     location_aliases: dict[Language, str]
+    # ISO-2 country of the place, when known (any place in the world; None for plans stored before it).
+    country: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
     vertical: Vertical
     languages: list[Language] = Field(default_factory=lambda: list(LANGUAGES), min_length=1)
     platforms_order: list[str] = Field(default_factory=lambda: ["facebook_groups", "websites"], min_length=1)

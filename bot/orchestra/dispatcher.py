@@ -158,9 +158,9 @@ class OrchestraDispatcher:
             # and the status message turns final, so only a search that had already ended gets a line.
             user_reply = NOT_STOPPABLE if not cancelled else None if own_only else DONE
         else:
-            # Intake queues "mode=<vertical> city=<name> <task>": the person's choices override detection.
-            goal, vertical, city = parse_campaign_goal(value)
-            plan = plan_campaign(goal, vertical=vertical, location=city)  # type: ignore[arg-type]  # InvalidGoal: nothing is stored
+            # Intake queues "mode=<vertical> place=<names> <task>": the person's choices override detection.
+            goal, vertical, city, place = parse_campaign_goal(value)
+            plan = plan_campaign(goal, vertical=vertical, location=city, place=place)  # type: ignore[arg-type]  # InvalidGoal: nothing is stored
             created = await self.campaigns.create(plan, chat_id=item.chat_id, requested_by=item.user_id,
                                                   source_text=goal, actor=actor)
             result = {"status": "planned", "campaign_id": created, "reply": f"Кампания {created} запланирована: {plan.goal}"}
