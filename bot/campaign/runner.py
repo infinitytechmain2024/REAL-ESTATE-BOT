@@ -29,6 +29,10 @@ campaign_findings), so a restart continues where it stopped.
 * The website stage (``bot.web_search``) runs beside all of this in the same
   service; while it is still searching the campaign does not complete, and
   its site shows in the status («Ищу на сайте <host>…» for non-owners).
+* Each sent Facebook post is queued for one read of its comments (``leads``):
+  the people who show interest as an investor or buyer are only stored. An
+  investor search (vertical investors or both) sends each stored person of its
+  city once, with their profile link, a preview and a recommendation.
 * After the last window (and the web stage) the runner waits (bounded) for
   analysis, then completes the campaign. A campaign cancelled from outside has its in-flight
   batch cancelled through the ordinary batch cancel.
@@ -53,6 +57,8 @@ from bot.agents.recorder import PostgresRecorder, Recorder, record_of
 from bot.analysis_pipeline.cards import CardTask, render_card
 
 from . import offers
+from .leads import MODES as COMMENT_MODES
+from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
@@ -179,11 +185,20 @@ class RunnerConfig:
     social_grace_seconds: float = 1800
     # AI relevance checks per campaign (``relevance``); past the cap the deterministic rules decide alone.
     max_relevance_calls: int = 200
+    # Which campaigns queue their sent Facebook posts for a comment read (``leads``): all | investors | off,
+    # at most ``comment_max_posts`` per campaign. Off unless a comment worker runs beside the runner (``main``).
+    comment_leads: str = "off"
+    comment_max_posts: int = 15
+    # An investor search sends at most ``max_people`` stored people of its city, seen in the last ``lead_days``.
+    max_people: int = 30
+    lead_days: int = 90
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
                 or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100
-                or not 0 <= self.max_relevance_calls <= 10_000):
+                or not 0 <= self.max_relevance_calls <= 10_000 or self.comment_leads not in COMMENT_MODES
+                or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500
+                or not 1 <= self.lead_days <= 3650):
             raise ValueError("unsafe campaign runner settings")
 
 
@@ -432,6 +447,7 @@ class CampaignRunner:
             if not await self._send_card(campaign, finding, count, active, "exact"):
                 return
         await self._near_matches(campaign, request, active)
+        await self._people(campaign)
 
     async def _judge(self, campaign: Campaign, request: Request, finding: StreamFinding) -> Match:
         """The finding's bucket: the deterministic rules, then the AI verdict (stored once) on top.
@@ -510,7 +526,42 @@ class CampaignRunner:
         await self.store.finding_sent(finding.id, message_id)
         self._below_status.add(campaign.id)
         await self._recorded(self.recorder.sent(campaign.id, finding.id, message_id) if self.recorder else None)
+        await self._queue_comments(campaign, finding)
         return True
+
+    async def _queue_comments(self, campaign: Campaign, finding: StreamFinding) -> None:
+        """A sent Facebook post: queue one read of its comments for investor leads (never blocks the stream)."""
+        mode = self.config.comment_leads
+        if mode == "off" or (mode == "investors" and campaign.plan.vertical == "real_estate"):
+            return
+        if not self.config.comment_max_posts or not is_facebook_post(finding.url):
+            return
+        try:
+            await self.store.queue_comment_read(campaign.id, finding.id, finding.url or "", self.config.comment_max_posts)
+        except Exception:  # noqa: BLE001 - the card is out; a lost read only costs leads
+            log.warning("campaign.comment_queue_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
+
+    async def _people(self, campaign: Campaign) -> None:
+        """An investor search: send each person stored from comments under objects in its city, once."""
+        location = campaign.plan.location
+        if campaign.plan.vertical not in ("investors", "both") or not location or not self.config.max_people:
+            return
+        room = self.config.max_people - await self.store.people_sent(campaign.id)
+        if room <= 0:
+            return
+        limit = min(room, self.config.max_stream_per_step)
+        for person in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit):
+            if not await self.store.claim_person(campaign.id, person.profile_key):
+                continue
+            card = person_card(person, location=location, now=self.now())[:MAX_MESSAGE_CHARS]
+            try:
+                message_id = await self.messenger.send(campaign.chat_id, card)
+            except Exception:  # noqa: BLE001 - Telegram down: retry next tick
+                log.warning("campaign.person_send_failed", extra={"campaign_id": campaign.id})
+                await self.store.release_person(campaign.id, person.profile_key)
+                return
+            await self.store.person_sent(campaign.id, person.profile_key, message_id)
+            self._below_status.add(campaign.id)
 
     async def _record(self, campaign: Campaign, finding: StreamFinding, bucket: str) -> None:
         """Store a held (similar/other) or excluded finding; never blocks the stream."""
@@ -723,12 +774,18 @@ async def main() -> None:
                                          timeout_seconds=settings.relevance_timeout_seconds)
     else:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
-    runner = CampaignRunner(campaigns, PostgresRunStore(pool, settings.safety_limits()), messenger, discovery,
-                            config=settings.runner_config(), owner_ids=settings.owner_ids(),
+    comments, lead_judge = _comment_worker(settings, pool)
+    config = settings.runner_config()
+    if comments is None:
+        config = replace(config, comment_leads="off")
+    store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
+    runner = CampaignRunner(campaigns, store, messenger, discovery,
+                            config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool))
     social, generator = _social_worker(settings, pool, campaigns)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
-                                             "social_platforms": list(social.config.platforms) if social else []})
+                                             "social_platforms": list(social.config.platforms) if social else [],
+                                             "comment_leads": settings.comment_leads if comments else "off"})
     stop = asyncio.Event()
     try:
         # Each stage is its own loop: a slow site or network never delays Facebook work, and the reverse.
@@ -738,6 +795,8 @@ async def main() -> None:
             tasks.append(worker.serve(poll, stop))
         if social is not None:
             tasks.append(social.serve(settings.social_poll_seconds, stop))
+        if comments is not None:
+            tasks.append(comments.serve(settings.comment_poll_seconds, stop))
         await asyncio.gather(*tasks)
     finally:
         stop.set()
@@ -746,6 +805,8 @@ async def main() -> None:
                 await close()
         if generator is not None:
             await generator.aclose()
+        if lead_judge is not None:
+            await lead_judge.aclose()
         if judge is not None:
             await judge.aclose()
         await messenger.aclose()
@@ -817,6 +878,29 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
     worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config)
     return worker, generator
+
+
+def _comment_worker(settings: Any, pool: Any) -> tuple[Any, Any]:
+    """The comment reader for investor leads, unless CAMPAIGN_COMMENT_LEADS=off (or the browser is unreachable)."""
+    if settings.comment_leads == "off" or not settings.comment_max_posts:
+        return None, None
+    if not settings.browser_token:
+        log.warning("campaign.runner.comment_leads_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
+        return None, None
+    from bot.facebook_collector.browser import BrowserSessionClient
+
+    from .leads import CommentLeadWorker, OpenRouterLeadJudge, PostgresLeadStore
+
+    judge = None
+    if settings.openrouter_api_key:
+        judge = OpenRouterLeadJudge(api_key=settings.openrouter_api_key, model=settings.leads_model,
+                                    timeout_seconds=settings.leads_timeout_seconds)
+    else:
+        log.warning("campaign.runner.comment_leads_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
+    browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
+    worker = CommentLeadWorker(PostgresLeadStore(pool, settings.safety_limits()), browser, judge,
+                               config=settings.comment_config())
+    return worker, judge
 
 
 if __name__ == "__main__":

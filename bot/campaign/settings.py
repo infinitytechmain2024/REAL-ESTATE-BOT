@@ -35,6 +35,8 @@ class CampaignRunnerSettings(BaseSettings):
     runs_per_day: int = Field(default=40, ge=1, le=500, validation_alias="SAFETY_MAX_RUNS_PER_DAY")
     breaker_failures: int = Field(default=3, ge=1, le=20, validation_alias="SAFETY_BREAKER_FAILURES")
     breaker_challenges: int = Field(default=2, ge=1, le=20, validation_alias="SAFETY_BREAKER_CHALLENGES")
+    # A group whose newest post is this many days older than its last read is dead and skipped (re-read after 30 days).
+    facebook_group_dead_days: int = Field(default=7, ge=1, le=365, validation_alias="FACEBOOK_GROUP_DEAD_DAYS")
     breaker_window_hours: int = Field(default=6, ge=1, le=72, validation_alias="SAFETY_BREAKER_WINDOW_HOURS")
 
     # Social network search (bot/social_search): off unless platforms are listed.
@@ -61,6 +63,19 @@ class CampaignRunnerSettings(BaseSettings):
     relevance_timeout_seconds: int = Field(default=15, ge=1, le=120, validation_alias="OPENROUTER_MATCH_TIMEOUT_SECONDS")
     relevance_max_calls: int = Field(default=200, ge=0, le=10_000, validation_alias="CAMPAIGN_RELEVANCE_MAX_CALLS")
 
+    # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
+    # all: every campaign; investors: investor campaigns only; off: never read comments.
+    comment_leads: str = Field(default="all", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
+    comment_max_posts: int = Field(default=15, ge=0, le=100, validation_alias="CAMPAIGN_COMMENT_MAX_POSTS")
+    # An investor search sends the people stored from comments in its city (at most, seen within days).
+    lead_people_max: int = Field(default=30, ge=0, le=500, validation_alias="CAMPAIGN_LEAD_PEOPLE_MAX")
+    lead_days: int = Field(default=90, ge=1, le=3650, validation_alias="CAMPAIGN_LEAD_DAYS")
+    comment_reads_per_day: int = Field(default=40, ge=0, le=500, validation_alias="SAFETY_MAX_FACEBOOK_COMMENT_READS_PER_DAY")
+    comment_reads_per_round: int = Field(default=3, ge=1, le=10, validation_alias="CAMPAIGN_COMMENT_READS_PER_ROUND")
+    comment_poll_seconds: int = Field(default=30, ge=5, le=600, validation_alias="CAMPAIGN_COMMENT_POLL_SECONDS")
+    leads_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_LEADS_MODEL")
+    leads_timeout_seconds: int = Field(default=30, ge=5, le=120, validation_alias="OPENROUTER_LEADS_TIMEOUT_SECONDS")
+
     def social_config(self):  # -> bot.social_search.worker.SocialConfig (imported lazily)
         from bot.social_search.worker import SocialConfig, parse_platforms
 
@@ -85,7 +100,14 @@ class CampaignRunnerSettings(BaseSettings):
                             analysis_grace_seconds=self.analysis_grace_seconds,
                             refusal_retry_seconds=self.refusal_retry_seconds,
                             social_grace_seconds=self.social_grace_seconds,
-                            max_relevance_calls=self.relevance_max_calls)
+                            max_relevance_calls=self.relevance_max_calls,
+                            comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
+                            max_people=self.lead_people_max, lead_days=self.lead_days)
+
+    def comment_config(self):  # -> bot.campaign.leads.CommentConfig
+        from .leads import CommentConfig
+
+        return CommentConfig(reads_per_day=self.comment_reads_per_day, reads_per_round=self.comment_reads_per_round)
 
 
     def owner_ids(self) -> frozenset[int]:
