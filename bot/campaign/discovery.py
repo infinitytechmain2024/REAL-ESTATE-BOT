@@ -48,6 +48,9 @@ log = logging.getLogger(__name__)
 
 ACTOR = "campaign:discovery"
 SEARCH_URL = "https://www.facebook.com/search/groups/?q={query}"
+# After the groups: people and pages (agents, agencies, investors) for the reach's contact cards.
+PEOPLE_URLS = {"people": "https://www.facebook.com/search/people/?q={query}",
+               "pages": "https://www.facebook.com/search/pages/?q={query}"}
 RESUMABLE_STATES = frozenset({"planned", "discovering", "paused_verification"})
 RELEVANCE_THRESHOLD = 0.6
 ACTIVE_DAYS = 14
@@ -631,6 +634,8 @@ class FacebookDiscovery:
         search_timeout_ms: int = 30_000,
         visit_timeout_seconds: float = 90.0,
         max_errors: int = 3,
+        people_searches: int = 4,
+        reach: Any = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -644,6 +649,9 @@ class FacebookDiscovery:
         self.pause_min_seconds, self.pause_max_seconds = pause_min_seconds, pause_max_seconds
         self.time_budget_seconds, self.search_timeout_ms = time_budget_seconds, search_timeout_ms
         self.visit_timeout_seconds, self.max_errors = visit_timeout_seconds, max_errors
+        # ``bot.campaign.reach.ReachWorker``: after every group search, up to ``people_searches`` people/pages
+        # searches whose results are judged and sent as contact cards (investors, agents, agencies ...).
+        self.people_searches, self.reach = max(0, min(people_searches, 8)), reach
         self.sleep, self.clock, self.now = sleep, clock, now
 
     async def run(self, campaign_id: str) -> DiscoveryReport:
@@ -755,6 +763,15 @@ class FacebookDiscovery:
             run.seeds_run += 1
             await save_progress()
 
+        if self.reach is not None and self.people_searches and not progress.get("people_done"):
+            await self._people(campaign, lease, run, started)
+            if run.stopped_state is not None:
+                return
+            progress["people_done"] = True
+            await self.store.save_progress(cid, {
+                "seeds_done": [list(pair) for pair in sorted(seeds_done)], "visited": sorted(visited),
+                "visits": visits_total, "people_done": True}, ACTOR)
+
         pending = sorted(
             (g for g in known.values()
              if g.state == "discovered" and g.activity == "UNKNOWN" and g.group_key not in visited),
@@ -784,6 +801,44 @@ class FacebookDiscovery:
             visits_total += 1
             run.visits += 1
             await save_progress()
+
+    async def _people(self, campaign: Campaign, lease: BrowserLease, run: _Run, started: float) -> None:
+        """People and pages for the first seeds: who is behind the objects (agents, agencies) or invests."""
+        from bot.web_search.searxng import SearchHit
+
+        from .reach import ReachQuery, reach_campaign
+
+        tabs = ("pages", "people") if campaign.plan.vertical == "real_estate" else ("people", "pages")
+        seeds = plan_seeds(campaign.plan, self.max_seeds)[: (self.people_searches + 1) // 2]
+        searches = [(tab, language, seed) for language, seed in seeds for tab in tabs][: self.people_searches]
+        for tab, language, seed in searches:
+            await self._pause(run)
+            if not await self._may_continue(campaign.id, started, run):
+                return
+            url = PEOPLE_URLS[tab].format(query=quote(seed, safe=""))
+            try:
+                snapshot = await self.browser.snapshot(lease, url, self.search_timeout_ms)
+            except Exception as exc:  # noqa: BLE001 - people are a bonus: the groups go on
+                log.warning("campaign.discovery.people_failed", extra={"campaign_id": campaign.id,
+                                                                       "error": type(exc).__name__})
+                continue
+            reason = detect_challenge(snapshot)
+            if reason:
+                raise ChallengeDetected(reason, {})
+            links = snapshot.get("profile_links")
+            hits = [SearchHit(str(link.get("url") or ""), str(link.get("name") or "")[:200],
+                              str(link.get("card") or "")[:500])
+                    for link in (links if isinstance(links, list) else []) if isinstance(link, dict)]
+            try:
+                kept = await self.reach.ingest(reach_campaign(campaign),
+                                               ReachQuery("facebook", language, f"facebook:{tab}:{seed}"[:300]),
+                                               hits, record=False)
+            except Exception as exc:  # noqa: BLE001 - the contacts of this search are lost, nothing else
+                log.warning("campaign.discovery.people_judge_failed", extra={"campaign_id": campaign.id,
+                                                                             "error": type(exc).__name__})
+                continue
+            log.info("campaign.discovery.people", extra={"campaign_id": campaign.id, "tab": tab, "found": len(hits),
+                                                         "relevant": kept})
 
     def _evaluate(self, plan: CampaignPlan, language: str, seed: str, key: str, url: str,
                   name: str, card: str) -> CampaignGroup:

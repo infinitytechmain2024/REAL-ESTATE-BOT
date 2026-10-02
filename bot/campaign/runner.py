@@ -806,6 +806,9 @@ async def main() -> None:
 
     logins = LoginPrompts(messenger, settings.owner_ids())
     reach, reach_closers = _reach_worker(settings, pool, logins)
+    if discovery is not None:
+        # After the groups, Facebook people and pages searches feed the reach's contact cards.
+        discovery.reach = reach
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")

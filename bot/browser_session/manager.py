@@ -481,6 +481,37 @@ class BrowserSessionManager:
                 }
                 return Array.from(found.values());
               };
+              // profile_links: on a people or pages search only, at most 30 distinct people / pages
+              // (facebook.com/<name> or profile.php?id=<n>) with the text of their result card.
+              const PROFILE = /^https:\/\/(?:www\.|m\.)?facebook\.com\/(?:profile\.php\?id=(\d{5,20})|([A-Za-z0-9.]{3,80}))\/?(?:[?#&].*)?$/;
+              const NOT_PROFILE = new Set(['groups', 'search', 'watch', 'marketplace', 'events', 'gaming', 'friends',
+                'notifications', 'messages', 'help', 'policies', 'privacy', 'login', 'settings', 'bookmarks', 'reel',
+                'reels', 'stories', 'photo', 'photos', 'hashtag', 'pages', 'home.php', 'profile.php', 'me', 'saved']);
+              const profileKey = (href) => {
+                const match = PROFILE.exec(href || '');
+                if (!match) return null;
+                if (match[1]) return `profile.php?id=${match[1]}`;
+                const name = match[2].toLowerCase();
+                return NOT_PROFILE.has(name) ? null : name;
+              };
+              const profileLinks = () => {
+                if (!/^\/search\/(people|pages)/.test(location.pathname)) return [];
+                const found = new Map();
+                for (const anchor of document.querySelectorAll('[role="main"] a[href]')) {
+                  const key = profileKey(anchor.href);
+                  if (!key || found.has(key) || found.size >= 30) continue;
+                  let node = anchor, best = anchor;
+                  for (let depth = 0; depth < 8 && node.parentElement; depth++) {
+                    node = node.parentElement;
+                    const keys = new Set(Array.from(node.querySelectorAll('a[href]')).map(a => profileKey(a.href)).filter(Boolean));
+                    if (keys.size > 1) break;
+                    best = node;
+                  }
+                  found.set(key, {url: `https://www.facebook.com/${key}`, name: squash(anchor.innerText, 200),
+                                  card: squash(best.innerText, 400)});
+                }
+                return Array.from(found.values());
+              };
               return ({
               url: location.href,
               title: document.title.slice(0, 500),
@@ -500,6 +531,7 @@ class BrowserSessionManager:
                 return {url: link, text: (node.innerText || '').slice(0, 12000), published_at: time?.dateTime || null};
               }),
               group_links: groupLinks(),
+              profile_links: profileLinks(),
               });
             })()"""
         )

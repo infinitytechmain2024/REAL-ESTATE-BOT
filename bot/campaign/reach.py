@@ -47,7 +47,8 @@ KIND_ORDER = {"investor": 0, "company": 1, "fund": 2, "network": 3, "seeking": 4
               "agent": 7}
 MIN_CONFIDENCE = 0.6
 PLATFORM_NAMES = {"linkedin": "LinkedIn", "reddit": "Reddit", "x": "X (Twitter)", "instagram": "Instagram",
-                  "tiktok": "TikTok", "youtube": "YouTube", "telegram": "Telegram", "web": "сайт"}
+                  "tiktok": "TikTok", "youtube": "YouTube", "telegram": "Telegram", "facebook": "Facebook",
+                  "web": "сайт"}
 PLATFORMS = tuple(PLATFORM_NAMES)
 
 # (platform, language, query); {city} is the campaign's city in that language. Platforms interleave, so a
@@ -104,15 +105,19 @@ _RESERVED = {
           "privacy"},
     "instagram": {"explore", "accounts", "stories", "reels", "about", "legal", "direct", "developer"},
     "telegram": {"s", "joinchat", "share", "addstickers", "proxy", "socks", "iv", "login"},
+    "facebook": {"groups", "search", "watch", "marketplace", "events", "gaming", "friends", "notifications",
+                 "messages", "help", "policies", "privacy", "login", "settings", "bookmarks", "reel", "reels",
+                 "stories", "photo", "photos", "hashtag", "pages", "home.php", "me", "saved", "sharer"},
 }
 
 
-def platform_of(url: str) -> tuple[str, str] | None:
+def platform_of(url: str, *, facebook: bool = False) -> tuple[str, str] | None:
     """``(platform, page)`` of a search result worth judging, or None.
 
     Profiles, company pages and single posts on LinkedIn, Reddit, X, Instagram,
     TikTok, YouTube and public Telegram channels; any other public page (not Facebook, which has its own
-    stage, nor a search engine, encyclopaedia or file) is ``("web", "page")``.
+    stage, nor a search engine, encyclopaedia or file) is ``("web", "page")``. ``facebook``: a person or page
+    from the Facebook people/pages search (``discovery``) counts too.
     """
     from bot.web_search.urls import host_of, is_blocked
 
@@ -154,6 +159,12 @@ def platform_of(url: str) -> tuple[str, str] | None:
     if host in ("t.me", "telegram.me"):  # public channels and chats: their public preview pages
         if seg[:1] and seg[0].lower() not in _RESERVED["telegram"] and not seg[0].startswith("+"):
             return "telegram", "post" if len(seg) >= 2 and seg[1].isdigit() else "profile"
+        return None
+    if facebook and host in ("facebook.com", "fb.com"):  # a person or page of a Facebook people/pages search
+        if seg == ["profile.php"] and re.search(r"(?:^|&)id=\d{5,20}(?:&|$)", parts.query):
+            return "facebook", "profile"
+        if len(seg) == 1 and seg[0].lower() not in _RESERVED["facebook"] and re.fullmatch(r"[A-Za-z0-9.]{3,80}", seg[0]):
+            return "facebook", "profile"
         return None
     if host in ("youtube.com", "youtu.be"):
         if seg[:1] and (seg[0].startswith("@") or seg[0] in ("channel", "c")):
@@ -602,7 +613,7 @@ class ReachWorker:
         """Judge the new results of one query (search engines, X, or a LinkedIn search page) and keep them once.
 
         ``record``: count it as one of the reach's own queries (its caps); a LinkedIn search page is not."""
-        candidates = _candidates(hits)
+        candidates = _candidates(hits, facebook=query.platform == "facebook")
         known = await self.store.known([c.url_key for c in candidates])
         fresh = [c for c in candidates if c.url_key not in known]
         judged, judged_by = await self._judge(campaign, fresh)
@@ -626,11 +637,11 @@ class ReachWorker:
         return [rule_judge(c, campaign) for c in candidates], "rules"
 
 
-def _candidates(hits: Sequence[SearchHit]) -> list[Candidate]:
+def _candidates(hits: Sequence[SearchHit], *, facebook: bool = False) -> list[Candidate]:
     out: list[Candidate] = []
     seen: set[str] = set()
     for hit in hits:
-        where = platform_of(hit.url)
+        where = platform_of(hit.url, facebook=facebook)
         if where is None:
             continue
         candidate = Candidate(hit.url[:2000], where[0], where[1], hit.title[:300], hit.snippet[:600])
