@@ -294,6 +294,26 @@ class PostgresLiveViewStore:
         )
         return [LiveProfile(r["id"], r["profile_name"], r["platform"], r["state"]) for r in rows]
 
+    async def platforms_needing_login(self, cooldown_seconds: int) -> list[str]:
+        """Platforms a running search needed within the last hour (``login_requests``) with no usable profile
+        and no login asked for lately: the watcher sends the operators the login link."""
+        rows = await self._pool().fetch(  # type: ignore[attr-defined]
+            """select r.platform from public.login_requests r
+                where r.last_needed_at > now() - interval '1 hour'
+                  and not exists (select 1 from public.browser_profiles p
+                                   where p.platform = r.platform and p.deleted_at is null
+                                     and p.state in ('ready', 'in_use', 'human_verification_required'))
+                  and not exists (select 1 from public.live_view_sessions s
+                                   join public.browser_profiles p on p.id = s.browser_profile_id
+                                  where p.platform = r.platform
+                                    and (s.state in ('requested', 'open')
+                                         or (s.state in ('cancelled', 'expired')
+                                             and s.closed_at > now() - ($1 * interval '1 second'))))
+                order by r.platform""",
+            cooldown_seconds,
+        )
+        return [r["platform"] for r in rows]
+
     async def expired_live_views(self) -> list[LiveSession]:
         rows = await self._pool().fetch(  # type: ignore[attr-defined]
             _LIVE_SELECT + " where s.state in ('requested', 'open') and s.expires_at <= now()"
@@ -318,6 +338,7 @@ class MemoryLiveViewStore:
         self.created_at: dict[str, datetime] = {}
         self.closed_at: dict[str, datetime] = {}
         self.completed: list[str] = []
+        self.login_requests: dict[str, datetime] = {}  # platform -> when a search last needed it
 
     async def ensure_profile(self, platform: str, name: str, actor: str) -> LiveProfile:
         existing = next((p for p in self.profiles.values() if p.name == name), None)
@@ -365,6 +386,22 @@ class MemoryLiveViewStore:
             or (s.state in {"cancelled", "expired"} and self.closed_at.get(s.id, cutoff) > cutoff)
         }
         return [p for p in self.profiles.values() if p.state == "human_verification_required" and p.id not in busy]
+
+    async def platforms_needing_login(self, cooldown_seconds: int) -> list[str]:
+        cutoff = datetime.now(UTC) - timedelta(seconds=cooldown_seconds)
+        out = []
+        for platform, needed in sorted(self.login_requests.items()):
+            if needed <= datetime.now(UTC) - timedelta(hours=1):
+                continue
+            if any(p.platform == platform and p.state in {"ready", "in_use", "human_verification_required"}
+                   for p in self.profiles.values()):
+                continue
+            if any(s.profile.platform == platform and (s.state in {"requested", "open"} or (
+                    s.state in {"cancelled", "expired"} and self.closed_at.get(s.id, cutoff) > cutoff))
+                   for s in self.sessions.values()):
+                continue
+            out.append(platform)
+        return out
 
     async def expired_live_views(self) -> list[LiveSession]:
         now = datetime.now(UTC)

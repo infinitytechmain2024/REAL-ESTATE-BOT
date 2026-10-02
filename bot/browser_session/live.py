@@ -26,7 +26,7 @@ from typing import Any
 
 from . import interactive
 from .manager import BrowserSessionManager
-from .models import ProfileRequest, SessionHandle
+from .models import Device, ProfileRequest, SessionHandle
 
 log = logging.getLogger(__name__)
 MAX_MINUTES = interactive.MAX_MINUTES
@@ -63,7 +63,7 @@ class LiveViewController:
             wait_viewer = lambda processes: interactive._wait_viewer(processes)  # noqa: E731
         self._wait_viewer = wait_viewer
         # Looked up at call time so tests can replace interactive's helpers.
-        self._start_viewer = start_viewer or (lambda password: interactive._start_viewer(password))
+        self._start_viewer = start_viewer or (lambda password, clip=None: interactive._start_viewer(password, clip))
         self._stop_viewer = stop_viewer or (lambda processes: interactive._stop(processes))
         self.keepalive_seconds = keepalive_seconds
         self._current: _LiveView | None = None
@@ -73,7 +73,9 @@ class LiveViewController:
         view = self._current
         return {"profile_id": view.profile_id, "expires_at": view.expires_at} if view else {}
 
-    async def start(self, request: ProfileRequest, url: str, minutes: int) -> dict[str, Any]:
+    async def start(self, request: ProfileRequest, url: str, minutes: int,
+                    device: Device | None = None) -> dict[str, Any]:
+        """Open ``url`` in the profile's window; laid out for ``device`` (the person's phone) when given."""
         if not 1 <= minutes <= MAX_MINUTES:
             raise ValueError(f"minutes must be between 1 and {MAX_MINUTES}")
         async with self._lock:
@@ -81,7 +83,8 @@ class LiveViewController:
                 raise LiveViewError("a live view is already open")
             if self.manager.active_profiles():
                 raise LiveViewError("another browser session is running; try again when it finishes")
-            handle = await self.manager.acquire(request)
+            handle = await (self.manager.acquire(request) if device is None
+                            else self.manager.acquire(request, device=device))
             viewer: list[Any] = []
             try:
                 try:
@@ -92,7 +95,8 @@ class LiveViewController:
                     if type(exc).__name__ != "TimeoutError":
                         raise
                 password = secrets.token_urlsafe(9)[:8]  # VNC reads at most 8 characters
-                viewer = self._start_viewer(password)
+                # The viewer shows only the window's toolbar and page, so the phone's screen is filled by it.
+                viewer = self._start_viewer(password) if device is None else self._start_viewer(password, device.clip)
                 if self._wait_viewer is not None:
                     try:
                         await self._wait_viewer(viewer)

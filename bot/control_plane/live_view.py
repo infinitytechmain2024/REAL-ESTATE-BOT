@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx
@@ -43,8 +43,10 @@ START_URLS = {
     "instagram": "https://www.instagram.com/",
     "tiktok": "https://www.tiktok.com/",
     "linkedin": "https://www.linkedin.com/login",
+    "x": "https://x.com/i/flow/login",
 }
-PLATFORM_NAMES = {"facebook": "Facebook", "instagram": "Instagram", "tiktok": "TikTok", "linkedin": "LinkedIn"}
+PLATFORM_NAMES = {"facebook": "Facebook", "instagram": "Instagram", "tiktok": "TikTok", "linkedin": "LinkedIn",
+                  "x": "X (Twitter)"}
 NOT_LOGGED_IN = "Вход не найден. Войдите в аккаунт в окне и нажмите «Готово»."
 CHECK_FAILED = ("Не удалось проверить вход: окно браузера не отвечает. Откройте браузер ещё раз, "
                 "войдите и нажмите «Готово», или нажмите «Закрыть» и начните вход заново.")
@@ -59,6 +61,7 @@ class LiveViewStore(Protocol):
     async def close_live_view(self, session_id: str, state: str, actor: str, error_code: str | None = None) -> LiveSession | None: ...
     async def complete_verification(self, profile: LiveProfile, actor: str) -> None: ...
     async def profiles_needing_human(self, cooldown_seconds: int) -> list[LiveProfile]: ...
+    async def platforms_needing_login(self, cooldown_seconds: int) -> list[str]: ...
     async def expired_live_views(self) -> list[LiveSession]: ...
     async def platform_states(self) -> dict[str, str]:
         """platform -> the most usable profile state (ready, else in_use, else any)."""
@@ -66,7 +69,8 @@ class LiveViewStore(Protocol):
 
 
 class LiveBrowser(Protocol):
-    async def start(self, profile: LiveProfile, url: str, minutes: int) -> str: ...
+    async def start(self, profile: LiveProfile, url: str, minutes: int,
+                    screen: dict[str, object] | None = None) -> str: ...
     async def stop(self, profile_id: str) -> None: ...
     async def is_open(self, profile_id: str) -> bool: ...
     async def logged_in(self, profile_id: str) -> bool | None:
@@ -94,8 +98,12 @@ class BrowserLiveClient:
         # Opening a page may take up to a minute of navigation.
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(90))
 
-    async def start(self, profile: LiveProfile, url: str, minutes: int) -> str:
-        body = {"profile_id": profile.id, "profile_name": profile.name, "platform": profile.platform, "url": url, "minutes": minutes}
+    async def start(self, profile: LiveProfile, url: str, minutes: int,
+                    screen: dict[str, object] | None = None) -> str:
+        body: dict[str, object] = {"profile_id": profile.id, "profile_name": profile.name, "platform": profile.platform,
+                                   "url": url, "minutes": minutes}
+        if screen:
+            body["device"] = screen  # the person's screen: the window is laid out for it
         try:
             response = await self._client.post(self._url, json=body, headers=self._headers)
         except httpx.HTTPError as exc:
@@ -214,7 +222,7 @@ class LiveViewCoordinator:
         session, _ = await self.store.request_live_view(profile, "login", f"telegram:{user_id}", self.config.request_minutes * 60)
         return self.request_reply(session, user_id)
 
-    async def open(self, session_id: str, user_id: int) -> str:
+    async def open(self, session_id: str, user_id: int, screen: dict[str, object] | None = None) -> str:
         """Start (or resume) the window for an operator; returns the VNC password."""
         if not self.is_operator(user_id):
             raise PermissionError("not an operator")
@@ -230,7 +238,9 @@ class LiveViewCoordinator:
             if session.state == "open":
                 # The bot or the browser restarted while the window was open: start it afresh.
                 await self.browser.stop(session.profile.id)
-            password = await self.browser.start(session.profile, START_URLS.get(session.profile.platform, START_URLS["facebook"]), self.config.open_minutes)
+            url = START_URLS.get(session.profile.platform, START_URLS["facebook"])
+            password = await (self.browser.start(session.profile, url, self.config.open_minutes) if not screen
+                              else self.browser.start(session.profile, url, self.config.open_minutes, screen))
             opened = await self.store.mark_live_view_open(session_id, user_id, self.config.open_minutes * 60) if session.state == "requested" else session
             if opened is None:
                 await self.browser.stop(session.profile.id)
@@ -339,10 +349,17 @@ class LiveViewCoordinator:
                 await self.store.close_live_view(session.id, "expired", "system")
         if not self.enabled or self.notifier is None:
             return
-        for profile in await self.store.profiles_needing_human(self.config.request_minutes * 60):
-            session, created = await self.store.request_live_view(profile, "checkpoint", "system", self.config.request_minutes * 60)
+        ttl = self.config.request_minutes * 60
+        requests = [(profile, "checkpoint") for profile in await self.store.profiles_needing_human(ttl)]
+        # A search needs a platform nobody is signed in to (bot.campaign.logins): the same message, a login.
+        for platform in await self.store.platforms_needing_login(ttl):
+            if platform in START_URLS:
+                requests.append((await self.store.ensure_profile(platform, f"{platform}-main", "system"), "login"))
+        for profile, reason in requests:
+            session, created = await self.store.request_live_view(profile, reason, "system", ttl)
             if not created:
                 continue
+            log.info("telegram.live_view.requested", extra={"platform": profile.platform, "reason": reason})
             for operator in sorted(self.config.operator_ids):
                 try:
                     await self.notifier(operator, self.request_reply(session, operator))
@@ -377,7 +394,10 @@ if (tg && tg.initData) {{
   // Use the whole screen, and keep swipes inside the remote page from closing the app.
   try {{ if (tg.requestFullscreen) tg.requestFullscreen(); }} catch (e) {{}}
   try {{ if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); }} catch (e) {{}}
-  fetch('{auth}', {{method: 'POST', headers: {{'Content-Type': 'text/plain'}}, body: tg.initData, credentials: 'same-origin'}})
+  // The window is laid out for this screen: a phone gets the sites' mobile pages, full screen.
+  const mobile = /android|ios/.test(tg.platform || '') || /Android|iPhone|iPad|iPod|Mobile/.test(navigator.userAgent);
+  const screenSize = '?w=' + Math.round(screen.width) + '&h=' + Math.round(screen.height) + '&m=' + (mobile ? 1 : 0);
+  fetch('{auth}' + (mobile ? screenSize : ''), {{method: 'POST', headers: {{'Content-Type': 'text/plain'}}, body: tg.initData, credentials: 'same-origin'}})
     .then(r => r.json().then(j => [r.ok, j]))
     .then(([ok, j]) => ok ? location.replace(j.viewer) : say(j.error || 'Not allowed.'))
     .catch(() => say('The server did not answer. Try again in a moment.'));
@@ -398,6 +418,14 @@ this page checks every few seconds.</p></body></html>"""
 _PENDING_COOKIE = "live_view_pending"
 
 _COOKIE = "live_view"
+
+
+def _screen(query: Any) -> dict[str, object] | None:
+    """The person's screen from the page (``?w=390&h=844&m=1``): plain numbers only, else None."""
+    width, height = str(query.get("w", "")), str(query.get("h", ""))
+    if not (width.isdigit() and height.isdigit() and len(width) <= 4 and len(height) <= 4):
+        return None
+    return {"width": int(width), "height": int(height), "mobile": query.get("m") == "1"}
 
 
 def _viewer_path(session_id: str, password: str) -> str:
@@ -480,7 +508,7 @@ def create_gate_app(coordinator: LiveViewCoordinator, bot_token: str, novnc_url:
         if not coordinator.is_operator(user_id):
             return web.json_response({"error": "Only operators can open the browser."}, status=403)
         try:
-            password = await coordinator.open(session_id, user_id)
+            password = await coordinator.open(session_id, user_id, _screen(request.query))
         except LiveViewUnavailable as exc:
             return web.json_response({"error": f"Cannot open the browser: {exc}."}, status=409)
         cookie, viewer, max_age = _admit(session_id, user_id, password)

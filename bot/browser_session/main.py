@@ -9,7 +9,7 @@ from aiohttp import web
 
 from .live import LiveViewController, LiveViewError
 from .manager import BrowserSessionManager, ProfileUnavailableError, SessionBusyError
-from .models import BrowserProfileStatus, ProfileRequest, SessionHandle
+from .models import BrowserProfileStatus, Device, ProfileRequest, SessionHandle
 from .settings import BrowserSessionSettings
 
 
@@ -68,13 +68,27 @@ def create_app(manager: BrowserSessionManager, token: str, live: LiveViewControl
             raise web.HTTPBadRequest(text=str(exc)) from exc
         return web.json_response(result)
 
+    async def x_credentials(request: web.Request) -> web.Response:
+        """auth_token and ct0 of a leased X profile, for twitter-cli in the reach searcher; 404 when not signed in."""
+        body = await request.json()
+        try:
+            found = await manager.x_credentials(handle(body))
+        except PermissionError as exc:
+            raise web.HTTPForbidden(text=str(exc)) from exc
+        if found is None:
+            raise web.HTTPNotFound(text="no X session in this profile")
+        return web.json_response(found, headers={"Cache-Control": "no-store"})
+
     async def live_start(request: web.Request) -> web.Response:
         body = await request.json()
         try:
+            screen = body.get("device") if isinstance(body.get("device"), dict) else {}
+            device = Device.from_screen(screen.get("width"), screen.get("height"), screen.get("mobile")) if screen else None
             result = await live.start(
                 ProfileRequest(body["profile_id"], body.get("profile_name", body["profile_id"]), body["platform"]),
                 body["url"],
                 int(body.get("minutes", 20)),
+                device,
             )
         except (LiveViewError, SessionBusyError) as exc:
             raise web.HTTPConflict(text=str(exc)) from exc
@@ -111,6 +125,7 @@ def create_app(manager: BrowserSessionManager, token: str, live: LiveViewControl
     app.router.add_delete("/v1/sessions", release)
     app.router.add_post("/v1/sessions/screenshot", screenshot)
     app.router.add_post("/v1/sessions/snapshot", snapshot)
+    app.router.add_post("/v1/sessions/x-credentials", x_credentials)
     app.on_shutdown.append(shutdown)
     return app
 

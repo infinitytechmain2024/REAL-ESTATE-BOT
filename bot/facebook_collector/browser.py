@@ -57,6 +57,18 @@ class BrowserSessionClient:
             response.raise_for_status()
             return response.headers.get("X-Screenshot-File", "")
 
+    async def x_credentials(self, lease: BrowserLease) -> dict[str, str] | None:
+        """auth_token and ct0 of a leased X profile (the reach searcher's twitter-cli); None when not signed in."""
+        try:
+            data = await self._request("POST", "/v1/sessions/x-credentials", {
+                "profile_id": lease.profile_id, "session_token": lease.token})
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        token, ct0 = str(data.get("auth_token") or ""), str(data.get("ct0") or "")
+        return {"auth_token": token, "ct0": ct0} if token and ct0 else None
+
     async def release(self, lease: BrowserLease, next_state: str = "READY") -> None:
         await self._request("DELETE", "/v1/sessions", {
             "profile_id": lease.profile_id, "session_token": lease.token, "next_state": next_state,

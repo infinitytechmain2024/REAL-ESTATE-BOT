@@ -16,7 +16,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import BrowserProfileStatus, ProfileRequest, ProfileStatus, SessionHandle
+from .models import (
+    TOOLBAR_HEIGHT,
+    BrowserProfileStatus,
+    Device,
+    ProfileRequest,
+    ProfileStatus,
+    SessionHandle,
+)
 
 log = logging.getLogger(__name__)
 MAX_NAVIGATION_MS = 60_000
@@ -46,6 +53,7 @@ LOGIN_COOKIES: dict[str, tuple[str, frozenset[str]]] = {
     "instagram": ("instagram.com", frozenset({"sessionid"})),
     "tiktok": ("tiktok.com", frozenset({"sessionid", "sid_tt"})),
     "linkedin": ("linkedin.com", frozenset({"li_at"})),
+    "x": ("x.com", frozenset({"auth_token"})),
 }
 
 
@@ -79,6 +87,25 @@ LAUNCH_OPTIONS: dict[str, Any] = {
     "ignore_default_args": ["--enable-automation"],
     "args": ["--disable-blink-features=AutomationControlled"],
 }
+# A phone's browser, for the live window opened from a phone (the sites then serve their mobile pages).
+MOBILE_USER_AGENT = ("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) "
+                     "Chrome/140.0.0.0 Mobile Safari/537.36")
+
+
+def launch_options(device: Device | None = None) -> dict[str, Any]:
+    """The browser for a live window laid out for ``device``; collectors (None) keep the desktop window.
+
+    The window sits in the top-left corner of the virtual screen at the page's size (Chromium keeps a
+    window at least 500 px wide; the viewer shows only ``device.clip``)."""
+    if device is None:
+        return LAUNCH_OPTIONS
+    size = {"width": device.width, "height": device.height}
+    options = {**LAUNCH_OPTIONS, "viewport": size, "screen": size,
+               "args": [*LAUNCH_OPTIONS["args"], "--window-position=0,0",
+                        f"--window-size={max(device.width, 500)},{device.height + TOOLBAR_HEIGHT}"]}
+    if device.mobile:
+        options.update(is_mobile=True, has_touch=True, user_agent=MOBILE_USER_AGENT)
+    return options
 
 class RedisLease(Protocol):
     async def set(self, name: str, value: str, *, nx: bool, ex: int) -> bool | None: ...
@@ -185,7 +212,8 @@ class BrowserSessionManager:
     def _key(profile_id: str) -> str:
         return f"browser-session:profile:{profile_id}"
 
-    async def acquire(self, request: ProfileRequest, *, persisted_state: str = "ready") -> SessionHandle:
+    async def acquire(self, request: ProfileRequest, *, persisted_state: str = "ready",
+                      device: Device | None = None) -> SessionHandle:
         if self._closing:
             raise RuntimeError("browser session manager is shutting down")
         if persisted_state not in {"ready", "in_use"}:
@@ -206,7 +234,8 @@ class BrowserSessionManager:
             os.close(fd)
             raise SessionBusyError("profile Redis lease is held")
         try:
-            browser = await self.launcher(profile_dir)
+            # Only a live window has a device; collectors keep the launcher's desktop window.
+            browser = await (self.launcher(profile_dir) if device is None else self.launcher(profile_dir, device=device))
             handle = SessionHandle(request.profile_id, token, profile_dir, time.time() + self.lease_seconds)
             renewal = asyncio.create_task(self._renew_forever(handle), name=f"browser-lease-{request.profile_id}")
             self._sessions[request.profile_id] = (handle, fd, browser, renewal)
@@ -278,6 +307,7 @@ class BrowserSessionManager:
             "instagram": {"instagram.com", "www.instagram.com"},
             "tiktok": {"tiktok.com", "www.tiktok.com", "m.tiktok.com"},
             "linkedin": {"linkedin.com", "www.linkedin.com"},
+            "x": {"x.com", "www.x.com", "mobile.x.com", "twitter.com", "mobile.twitter.com"},
         }
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("snapshot URL must be HTTPS with a hostname")
@@ -337,6 +367,28 @@ class BrowserSessionManager:
             raise PermissionError("session token does not own this profile")
         self._touch(handle.profile_id)
         return await self._signed_in(owned[2], self._platforms.get(handle.profile_id, ""))
+
+    async def x_credentials(self, handle: SessionHandle) -> dict[str, str] | None:
+        """The two X session cookies ``twitter-cli`` needs (auth_token, ct0) of a leased X profile; None if absent.
+
+        The only cookies this service ever hands out, and only for the ``x`` platform: the reach
+        searcher reads X with the session an owner opened in the live window."""
+        owned = self._sessions.get(handle.profile_id)
+        if not owned or owned[0].token != handle.token:
+            raise PermissionError("session token does not own this profile")
+        if self._platforms.get(handle.profile_id) != "x" or not hasattr(owned[2], "cookies"):
+            return None
+        self._touch(handle.profile_id)
+        moment = time.time()
+        found: dict[str, str] = {}
+        for cookie in await owned[2].cookies():
+            domain = str(cookie.get("domain") or "").lstrip(".").lower()
+            expires = cookie.get("expires")
+            if domain not in ("x.com", "twitter.com") or cookie.get("name") not in ("auth_token", "ct0"):
+                continue
+            if cookie.get("value") and not (isinstance(expires, int | float) and 0 < expires <= moment):
+                found[str(cookie["name"])] = str(cookie["value"])
+        return found if len(found) == 2 else None
 
     @staticmethod
     async def _signed_in(browser: Any, platform: str) -> bool | None:
@@ -429,6 +481,37 @@ class BrowserSessionManager:
                 }
                 return Array.from(found.values());
               };
+              // profile_links: on a people or pages search only, at most 30 distinct people / pages
+              // (facebook.com/<name> or profile.php?id=<n>) with the text of their result card.
+              const PROFILE = /^https:\/\/(?:www\.|m\.)?facebook\.com\/(?:profile\.php\?id=(\d{5,20})|([A-Za-z0-9.]{3,80}))\/?(?:[?#&].*)?$/;
+              const NOT_PROFILE = new Set(['groups', 'search', 'watch', 'marketplace', 'events', 'gaming', 'friends',
+                'notifications', 'messages', 'help', 'policies', 'privacy', 'login', 'settings', 'bookmarks', 'reel',
+                'reels', 'stories', 'photo', 'photos', 'hashtag', 'pages', 'home.php', 'profile.php', 'me', 'saved']);
+              const profileKey = (href) => {
+                const match = PROFILE.exec(href || '');
+                if (!match) return null;
+                if (match[1]) return `profile.php?id=${match[1]}`;
+                const name = match[2].toLowerCase();
+                return NOT_PROFILE.has(name) ? null : name;
+              };
+              const profileLinks = () => {
+                if (!/^\/search\/(people|pages)/.test(location.pathname)) return [];
+                const found = new Map();
+                for (const anchor of document.querySelectorAll('[role="main"] a[href]')) {
+                  const key = profileKey(anchor.href);
+                  if (!key || found.has(key) || found.size >= 30) continue;
+                  let node = anchor, best = anchor;
+                  for (let depth = 0; depth < 8 && node.parentElement; depth++) {
+                    node = node.parentElement;
+                    const keys = new Set(Array.from(node.querySelectorAll('a[href]')).map(a => profileKey(a.href)).filter(Boolean));
+                    if (keys.size > 1) break;
+                    best = node;
+                  }
+                  found.set(key, {url: `https://www.facebook.com/${key}`, name: squash(anchor.innerText, 200),
+                                  card: squash(best.innerText, 400)});
+                }
+                return Array.from(found.values());
+              };
               return ({
               url: location.href,
               title: document.title.slice(0, 500),
@@ -448,6 +531,7 @@ class BrowserSessionManager:
                 return {url: link, text: (node.innerText || '').slice(0, 12000), published_at: time?.dateTime || null};
               }),
               group_links: groupLinks(),
+              profile_links: profileLinks(),
               });
             })()"""
         )
@@ -524,11 +608,11 @@ class BrowserSessionManager:
             await self.state_changed(profile_id, state)
 
     @staticmethod
-    async def _playwright_launcher(profile_dir: Path) -> Any:
+    async def _playwright_launcher(profile_dir: Path, *, device: Device | None = None) -> Any:
         from playwright.async_api import async_playwright
 
         playwright = await async_playwright().start()
-        context = await playwright.chromium.launch_persistent_context(str(profile_dir), **LAUNCH_OPTIONS)
+        context = await playwright.chromium.launch_persistent_context(str(profile_dir), **launch_options(device))
         return _ManagedContext(context, playwright)
 
 

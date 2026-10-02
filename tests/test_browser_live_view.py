@@ -10,7 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from bot.browser_session.live import LiveViewController, LiveViewError
 from bot.browser_session.main import create_app
-from bot.browser_session.models import ProfileRequest
+from bot.browser_session.models import Device, ProfileRequest
 
 REQUEST = ProfileRequest("profile-1", "facebook-main", "facebook")
 
@@ -26,8 +26,8 @@ class FakeManager:
     def active_profiles(self) -> frozenset[str]:
         return frozenset(self.busy | self.owned)
 
-    async def acquire(self, request: ProfileRequest) -> str:
-        self.events.append(("acquire", request.profile_id))
+    async def acquire(self, request: ProfileRequest, device: Any = None) -> str:
+        self.events.append(("acquire", request.profile_id) if device is None else ("acquire", request.profile_id, device.clip))
         self.owned.add(request.profile_id)
         return f"handle:{request.profile_id}"
 
@@ -200,3 +200,33 @@ async def test_the_login_check_reads_only_the_open_window_and_answers_a_boolean(
     finally:
         await live.stop()
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_phone_gets_its_own_window_size_and_the_viewer_shows_only_that_part() -> None:
+    manager, viewers = FakeManager(), []
+    live = LiveViewController(
+        manager,  # type: ignore[arg-type]
+        start_viewer=lambda password, clip=None: viewers.append(f"start:{clip}") or ["viewer"],
+        stop_viewer=lambda processes: None,
+        keepalive_seconds=0.01,
+    )
+    phone = Device.from_screen(390, 844, True)
+    assert phone == Device(390, 757, True) and phone.clip == "390x844+0+0"
+    await live.start(REQUEST, "https://x.com/i/flow/login", 5, phone)
+    assert ("acquire", "profile-1", "390x844+0+0") in manager.events and viewers == ["start:390x844+0+0"]
+    await live.stop("profile-1")
+
+
+def test_the_screen_is_clamped_and_nonsense_is_refused() -> None:
+    from bot.browser_session.manager import LAUNCH_OPTIONS, MOBILE_USER_AGENT, launch_options
+
+    assert Device.from_screen("abc", 800) is None and Device.from_screen(10, 10) is None
+    tablet = Device.from_screen(1024, 1366, "1")
+    assert tablet is not None and tablet.width == 1024 and tablet.height == 1000 - 87 - 8
+    options = launch_options(Device.from_screen(390, 844, True))
+    assert options["viewport"] == {"width": 390, "height": 757} and options["is_mobile"] and options["has_touch"]
+    assert options["user_agent"] == MOBILE_USER_AGENT and "--window-size=500,844" in options["args"]
+    assert launch_options(None) is LAUNCH_OPTIONS, "collectors keep the desktop window"
+    desktop = launch_options(Device(1200, 800, False))
+    assert "is_mobile" not in desktop and desktop["viewport"] == {"width": 1200, "height": 800}

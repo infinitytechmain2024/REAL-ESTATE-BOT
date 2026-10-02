@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -139,7 +140,8 @@ class RunStore(Protocol):
     async def person_sent(self, campaign_id: str, profile_key: str, message_id: int) -> None: ...
     async def release_person(self, campaign_id: str, profile_key: str) -> None: ...
     # investor reach across platforms (migration 027, ``reach``)
-    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]: ...
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int, *,
+                              kinds: Sequence[str] | None = None) -> list[Contact]: ...
     async def reach_pending(self, campaign_id: str) -> bool: ...
 
 
@@ -564,19 +566,23 @@ class PostgresRunStore:
             """delete from campaign_lead_deliveries
                 where campaign_id = $1::uuid and profile_key = $2 and state = 'sending'""", campaign_id, profile_key)
 
-    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]:
-        """Relevant reach results of ``location`` (last ``days``) this campaign has not sent: investors first."""
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int, *,
+                              kinds: Sequence[str] | None = None) -> list[Contact]:
+        """Relevant reach results of ``location`` (last ``days``) this campaign has not sent: investors first.
+
+        ``kinds`` keeps only those kinds (a property search: agents, agencies, developers)."""
         order = " ".join(f"when '{kind}' then {rank}" for kind, rank in KIND_ORDER.items())
         rows = await self.pool.fetch(
             f"""select url_key, url, platform, kind, name, coalesce(title, '') as title,
                        coalesce(snippet, '') as snippet, summary_ru, created_at
                   from reach_contacts r
                  where r.relevant and r.location = $2 and r.created_at > now() - make_interval(days => $3)
+                   and ($4::text[] is null or r.kind = any($4::text[]))
                    and not exists (select 1 from campaign_lead_deliveries d
                                     where d.campaign_id = $1::uuid and d.profile_key = 'reach:' || r.url_key)
                  order by case r.kind {order} else 9 end, r.confidence desc nulls last, r.created_at, r.url_key
                  limit {int(limit)}""",
-            campaign_id, location, days)
+            campaign_id, location, days, list(kinds) if kinds is not None else None)
         return [Contact(r["url_key"], r["url"], r["platform"], r["kind"], r["name"], r["title"], r["snippet"],
                         r["summary_ru"], r["created_at"]) for r in rows]
 
@@ -919,9 +925,11 @@ class MemoryRunStore:
         if self.deliveries.get((campaign_id, profile_key), 0) is None:
             del self.deliveries[(campaign_id, profile_key)]
 
-    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]:
+    async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int, *,
+                              kinds: Sequence[str] | None = None) -> list[Contact]:
         return [c for c in self.contacts.get(location, [])
-                if (campaign_id, c.delivery_key) not in self.deliveries][:limit]
+                if (campaign_id, c.delivery_key) not in self.deliveries
+                and (kinds is None or c.kind in kinds)][:limit]
 
     async def reach_pending(self, campaign_id: str) -> bool:
         return campaign_id in self.reaching

@@ -22,6 +22,7 @@ from aiogram.types import (
 from aiohttp import web
 
 from bot.campaign.offers import PostgresOfferDesk
+from bot.campaign.sites import PostgresSiteStore, SiteDesk
 from bot.campaign.store import PostgresCampaignStore
 from bot.control_plane import menu
 from bot.control_plane.access import AccessDesk, PostgresAccessStore
@@ -162,7 +163,8 @@ async def run() -> None:
                            offers=PostgresOfferDesk(orchestra_store.pool) if orchestra_store.pool else None,
                            # «стоп»: finds the person's running campaign; the Orchestra cancels it.
                            campaigns=PostgresCampaignStore(orchestra_store.pool) if orchestra_store.pool else None,
-                           understander=understander)
+                           understander=understander,
+                           sites=SiteDesk(PostgresSiteStore(orchestra_store.pool)) if orchestra_store.pool else None)
     for user_id in sorted(settings.auto_operator_user_ids):
         if not operators.can_control(user_id):
             # Not refused at startup (approvals change at runtime), but never auto-eligible meanwhile.

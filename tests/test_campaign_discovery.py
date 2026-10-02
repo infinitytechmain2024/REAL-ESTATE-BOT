@@ -450,3 +450,45 @@ async def test_unsafe_limits_are_rejected() -> None:
                 {"pause_min_seconds": 5, "pause_max_seconds": 1}, {"search_timeout_ms": 120_000}):
         with pytest.raises(ValueError):
             FacebookDiscovery(campaigns, store, FakeBrowser(), FakeReader(), **bad)
+
+
+async def test_after_every_group_search_people_and_pages_become_judged_contacts() -> None:
+    from bot.campaign.reach import Contact, Judged, MemoryReachStore, ReachWorker, contact_card
+    from tests.test_investor_reach import FakeSearcher
+
+    class Judge:
+        model = "judge"
+
+        async def judge(self, campaign, candidates):
+            return [Judged("agency" if "Inmobiliaria" in c.title else "agent", True, 0.9, c.title, "Агентство")
+                    for c in candidates]
+
+    class PeopleBrowser(FakeBrowser):
+        async def snapshot(self, lease: BrowserLease, url: str, timeout_ms: int) -> dict[str, Any]:
+            if "/search/people/" in url or "/search/pages/" in url:
+                self.navigations.append(url)
+                return {"url": url, "title": "Facebook", "text": "", "posts": [], "group_links": [], "profile_links": [
+                    {"url": "https://www.facebook.com/inmomadrid", "name": "Inmobiliaria Madrid",
+                     "card": "Inmobiliaria Madrid · Agencia inmobiliaria · Madrid"},
+                    {"url": "https://www.facebook.com/profile.php?id=100012345678", "name": "Ana López",
+                     "card": "Agente inmobiliario en Madrid"},
+                    {"url": "https://www.facebook.com/groups/x/", "name": "a group", "card": ""}]}
+            return await super().snapshot(lease, url, timeout_ms)
+
+    the_plan = plan()
+    seeds = plan_seeds(the_plan, 12)
+    browser = PeopleBrowser({seeds[0][1]: [link("pisosmadrid", "Pisos alquiler Madrid", "Público · 10 posts a day")]})
+    reach_store = MemoryReachStore()
+    h = await setup(the_plan, browser=browser, reach=ReachWorker(reach_store, FakeSearcher(), Judge()),
+                    people_searches=2)
+    await h.discovery.run(h.cid)
+    kinds = ["groups" if "/search/groups/" in u else "people" for u in browser.navigations]
+    assert kinds[-2:] == ["people", "people"] and set(kinds[:-2]) == {"groups"}, "every group search comes first"
+    assert "/search/pages/" in browser.navigations[-2], "a property search asks for pages (agencies) first"
+    urls = {s.candidate.url for s in reach_store.contacts.values()}
+    assert urls == {"https://www.facebook.com/inmomadrid", "https://www.facebook.com/profile.php?id=100012345678"}
+    stored = next(s for s in reach_store.contacts.values() if "inmomadrid" in s.candidate.url)
+    card = contact_card(Contact(stored.candidate.url_key, stored.candidate.url, "facebook", "agency",
+                                stored.judged.name))
+    assert card.startswith("🏢 Агентство недвижимости · Facebook")
+    assert reach_store.used == {}, "people searches are not the reach's own queries"

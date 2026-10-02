@@ -16,6 +16,7 @@ from typing import Any
 from .models import ReachOutcome, ReachPlatform, ReachResult, ReachTask
 
 ACTOR = "agent_reach"
+SUPPORTED_PLATFORMS = [platform.value for platform in ReachPlatform]
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,15 @@ class PostgresReachStore:
         """Claim the oldest queued run whose browser profile is free; None when none can start."""
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('app.actor', $1, true)", ACTOR)
+            # A run for a platform this adapter cannot read (LinkedIn, ...) is cancelled at once with a clear code;
+            # left queued it would be the oldest row forever and hold every run behind it.
+            await conn.execute(
+                """update acquisition_runs r set state = 'cancelled', finished_at = now(),
+                          error_code = 'unsupported_platform', error_detail = s.platform
+                     from monitoring_sources s
+                    where s.id = r.source_id and r.acquisition_method = 'agent_ridge' and r.state = 'queued'
+                      and r.batch_item_id is null and not (s.platform = any($1::text[]))""",
+                SUPPORTED_PLATFORMS)
             row = await conn.fetchrow(
                 """select r.id, r.source_id, r.max_pages, s.canonical_url, s.platform,
                           p.id as profile_id, p.profile_name, p.state as profile_state
@@ -39,10 +49,10 @@ class PostgresReachStore:
                      join monitoring_sources s on s.id = r.source_id
                      join browser_profiles p on p.id = r.browser_profile_id
                     where r.acquisition_method = 'agent_ridge' and r.state = 'queued' and r.batch_item_id is null
-                      and s.state = 'active' and s.deleted_at is null
+                      and s.state = 'active' and s.deleted_at is null and s.platform = any($1::text[])
                       and p.state = 'ready' and p.deleted_at is null
                     order by r.created_at
-                    for update of r, p skip locked limit 1""")
+                    for update of r, p skip locked limit 1""", SUPPORTED_PLATFORMS)
             if row is None:
                 return None
             await conn.execute("update acquisition_runs set state='running', started_at=now() where id=$1 and state='queued'", row["id"])

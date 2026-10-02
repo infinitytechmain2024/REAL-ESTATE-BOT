@@ -123,8 +123,15 @@ class SocialSearchWorker:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random | None = None,
+        logins: Any = None,
+        reach: Any = None,
     ) -> None:
         self.store, self.campaigns, self.browser, self.planner, self.config = store, campaigns, browser, planner, config
+        # ``bot.campaign.logins.LoginPrompts``: owners get a «🔐 Войти» button when a platform has no ready profile.
+        self.logins = logins
+        # ``bot.campaign.reach.ReachWorker``: people and companies a LinkedIn search shows become judged contacts
+        # (investors, agents, agencies ...) with their profile link instead of posts for the listing analysis.
+        self.reach = reach
         self.now, self.sleep, self.rng = now, sleep, rng or random.Random()
         self._turn: dict[str, int] = {}  # round-robin position per platform
 
@@ -178,6 +185,7 @@ class SocialSearchWorker:
         profile = await self.store.ready_profile(platform)
         if profile is None:
             await self._note(campaign_ids, platform, f"{name}: нет готового профиля — войдите через /login {platform}")
+            await self._ask_login(platform, campaign_ids)
             return 0
         start = self._turn.get(platform, 0) % len(campaign_ids)
         for offset in range(len(campaign_ids)):
@@ -197,6 +205,21 @@ class SocialSearchWorker:
             await self._run(campaign, platform, profile, query)
             return 1
         return 0
+
+    async def _ask_login(self, platform: str, campaign_ids: list[str]) -> None:
+        if self.logins is None:
+            return
+        waiting = []
+        for campaign_id in campaign_ids:
+            if (await self.store.campaign_social(campaign_id, platform)).state == "done":
+                continue
+            campaign = await self.campaigns.get(campaign_id)
+            if campaign is not None and campaign.state not in TERMINAL_STATES:
+                waiting.append(campaign)
+        try:
+            await self.logins.need(platform, waiting)
+        except Exception:  # noqa: BLE001 - a lost prompt is asked again later; the search goes on
+            log.warning("social.login_prompt_failed", extra={"platform": platform})
 
     async def _note(self, campaign_ids: list[str], platform: str, note: str) -> None:
         """An owner-only line on each open campaign that still has work on this platform."""
@@ -238,6 +261,11 @@ class SocialSearchWorker:
             self._check(platform, page)
             items = adapter.parse(page, query.kind, limit=self.config.items_per_query)
             found = len(items)
+            if self.reach is not None:
+                people = [i for i in items if i.kind in ("person", "company")]
+                items = [i for i in items if i.kind not in ("person", "company")]
+                if people:
+                    saved += await self._contacts(campaign, platform, query, people)
             known = await self.store.seen(platform, items)
             opened = 0
             for item in (i for i in items if i.key not in known):
@@ -262,6 +290,19 @@ class SocialSearchWorker:
                 await self.store.finish_query(query.id, "failed", found=found, new=saved, error=type(exc).__name__)
         finally:
             await self._finish(campaign, platform, profile, query, lease, blocked, vertical)
+
+    async def _contacts(self, campaign: Any, platform: str, query: PlannedQuery, people: list[SocialItem]) -> int:
+        from bot.campaign.reach import ReachQuery, reach_campaign
+        from bot.web_search.searxng import SearchHit
+
+        hits = [SearchHit(i.url, f"{i.author or ''} · {PLATFORM_NAMES[platform]}".strip(" ·"), i.text) for i in people]
+        try:
+            return int(await self.reach.ingest(reach_campaign(campaign),
+                                               ReachQuery(platform, "en", f"{platform}:{query.kind}:{query.text}"[:300]),
+                                               hits, record=False))
+        except Exception as exc:  # noqa: BLE001 - the contacts are lost for this query, the search goes on
+            log.warning("social.contacts_failed", extra={"platform": platform, "error": type(exc).__name__})
+            return 0
 
     def _check(self, platform: str, snapshot: dict[str, Any]) -> None:
         block = detect_block(platform, snapshot)

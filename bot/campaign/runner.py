@@ -32,7 +32,8 @@ campaign_findings), so a restart continues where it stopped.
 * Each sent Facebook post is queued for one read of its comments (``leads``):
   the people who show interest as an investor or buyer are only stored. An
   investor search (vertical investors or both) sends each stored person of its
-  city once, with their profile link, a preview and a recommendation.
+  city once, with their profile link, a preview and a recommendation. A property
+  search sends the reach's agents, agencies and developers of its city.
 * After the last window (and the web stage) the runner waits (bounded) for
   analysis, then completes the campaign. A campaign cancelled from outside has its in-flight
   batch cancelled through the ordinary batch cancel.
@@ -60,7 +61,7 @@ from . import offers
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
-from .reach import contact_card
+from .reach import REALTY_KINDS, contact_card
 from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
 from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
@@ -194,12 +195,14 @@ class RunnerConfig:
     # seen in the last ``lead_days``.
     max_people: int = 60
     lead_days: int = 90
+    # A property search sends at most ``max_agents`` agents, agencies and developers of its city (the reach).
+    max_agents: int = 15
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
                 or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100
                 or not 0 <= self.max_relevance_calls <= 10_000 or self.comment_leads not in COMMENT_MODES
-                or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500
+                or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500 or not 0 <= self.max_agents <= 200
                 or not 1 <= self.lead_days <= 3650):
             raise ValueError("unsafe campaign runner settings")
 
@@ -218,6 +221,7 @@ class CampaignRunner:
         web: WebProgress | None = None,
         relevance: RelevanceJudge | None = None,
         recorder: Recorder | None = None,
+        logins: Any = None,
     ) -> None:
         """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
         status; everyone else sees only the user-safe labels of ``status_text``. ``web``: the
@@ -230,6 +234,8 @@ class CampaignRunner:
         self.web = web
         self.relevance = relevance
         self.recorder = recorder
+        # ``bot.campaign.logins.LoginPrompts``: no Facebook profile to use -> the operators get the login link.
+        self.logins = logins
         # After a failed relevance call the model is left alone for a minute: one slow or broken
         # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
         self._relevance_paused_until: datetime | None = None
@@ -326,6 +332,10 @@ class CampaignRunner:
         try:
             await self.discovery.run(campaign.id)
         except DiscoveryRefused as exc:
+            if str(exc) == "facebook_profile_not_ready" and self.logins is not None:
+                # No Facebook profile to use: the operators get the login link (bot.campaign.logins).
+                with suppress(Exception):
+                    await self.logins.need("facebook", [campaign])
             return PROFILE_BUSY if "profile" in str(exc) else f"Пауза: {exc}"
         after = await self.campaigns.get(campaign.id)
         if after is not None and after.state == "paused_verification":
@@ -546,14 +556,24 @@ class CampaignRunner:
             log.warning("campaign.comment_queue_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
 
     async def _people(self, campaign: Campaign) -> None:
-        """An investor search: send each person stored from comments under objects in its city, once."""
+        """An investor search: send each person stored from comments under objects in its city, once.
+
+        A property search sends only the reach's agents, agencies and developers of its city
+        (at most ``max_agents``): they hold objects, often ones no portal shows."""
         location = campaign.plan.location
-        if campaign.plan.vertical not in ("investors", "both") or not location or not self.config.max_people:
+        realty = campaign.plan.vertical == "real_estate"
+        cap = self.config.max_agents if realty else self.config.max_people
+        if campaign.plan.vertical not in ("investors", "both", "real_estate") or not location or not cap:
             return
-        room = self.config.max_people - await self.store.people_sent(campaign.id)
+        room = cap - await self.store.people_sent(campaign.id)
         if room <= 0:
             return
         limit = min(room, self.config.max_stream_per_step)
+        if realty:
+            cards = [(c.delivery_key, contact_card(c)) for c in await self.store.stored_contacts(
+                campaign.id, location, self.config.lead_days, limit, kinds=REALTY_KINDS)]
+            await self._send_people(campaign, cards)
+            return
         # People from comments under objects first (they asked about a concrete object), then the reach.
         cards: list[tuple[str, str]] = [
             (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
@@ -562,6 +582,9 @@ class CampaignRunner:
         if len(cards) < limit:
             cards += [(c.delivery_key, contact_card(c)) for c in await self.store.stored_contacts(
                 campaign.id, location, self.config.lead_days, limit - len(cards))]
+        await self._send_people(campaign, cards)
+
+    async def _send_people(self, campaign: Campaign, cards: list[tuple[str, str]]) -> None:
         for key, card in cards:
             if not await self.store.claim_person(campaign.id, key):
                 continue
@@ -776,7 +799,7 @@ async def main() -> None:
         discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, reader)
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
-    web = await _web_stage(campaigns, pool, settings)
+    web = await _web_stage(campaigns, pool, settings, messenger)
     judge = None
     if settings.openrouter_api_key and settings.relevance_max_calls > 0:
         from .relevance import OpenRouterRelevanceJudge
@@ -786,15 +809,21 @@ async def main() -> None:
     else:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     comments, lead_judge = _comment_worker(settings, pool)
-    reach, reach_closers = _reach_worker(settings, pool)
+    from .logins import LoginPrompts, PostgresLoginRequests
+
+    logins = LoginPrompts(messenger, settings.owner_ids(), requests=PostgresLoginRequests(pool))
+    reach, reach_closers = _reach_worker(settings, pool, logins)
+    if discovery is not None:
+        # After the groups, Facebook people and pages searches feed the reach's contact cards.
+        discovery.reach = reach
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
     store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
-    runner = CampaignRunner(campaigns, store, messenger, discovery,
+    runner = CampaignRunner(campaigns, store, messenger, discovery, logins=logins,
                             config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool))
-    social, generator = _social_worker(settings, pool, campaigns)
+    social, generator = _social_worker(settings, pool, campaigns, logins, reach)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
                                              "comment_leads": settings.comment_leads if comments else "off",
@@ -830,7 +859,8 @@ async def main() -> None:
         await pool.close()
 
 
-async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) -> tuple[Any, float, list[Any]] | None:
+async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any,
+                     messenger: Any = None) -> tuple[Any, float, list[Any]] | None:
     """The website search worker (bot.web_search), unless WEB_SEARCH_ENABLED=false.
 
     Pages drawn by JavaScript are read once more in the Browser Session Manager
@@ -866,13 +896,23 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
 
         renderer = BrowserRenderer(BrowserSessionClient(runner_settings.browser_url, runner_settings.browser_token),
                                    timeout_seconds=settings.render_timeout_seconds)
+    gate = None
+    if settings.site_approval and messenger is not None:
+        from .sites import GateConfig, PostgresSiteStore, SiteGate
+
+        gate = SiteGate(PostgresSiteStore(pool), messenger,
+                        config=GateConfig(remind_after_minutes=settings.site_remind_minutes,
+                                          max_batches=settings.site_max_questions))
+    else:
+        log.warning("campaign.web_search_sites_unapproved", extra={"hint": "WEB_SEARCH_SITE_APPROVAL=false"})
     worker = WebSearchWorker(campaigns, PostgresWebStore(pool), searcher, fetcher, FallbackQueryGenerator(model),
-                             renderer=renderer, config=config)
+                             renderer=renderer, gate=gate, config=config)
     closers = [searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
     return worker, settings.poll_seconds, closers
 
 
-def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[Any, Any]:
+def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore, logins: Any = None,
+                   reach: Any = None) -> tuple[Any, Any]:
     """The social search worker when SOCIAL_SEARCH_PLATFORMS lists a platform (and the browser is reachable)."""
     config = settings.social_config()
     if not config.platforms:
@@ -893,12 +933,13 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
         log.warning("campaign.runner.social_queries_without_ai", extra={"hint": "set OPENROUTER_API_KEY"})
     # The browser's API answers after navigation, the bounded wait for results and the scrolls.
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
-    worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config)
+    worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config,
+                                logins=logins, reach=reach)
     return worker, generator
 
 
-def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
-    """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false."""
+def _reach_worker(settings: Any, pool: Any, logins: Any = None) -> tuple[Any, list[Any]]:
+    """The reach across platforms (search engines; X through twitter-cli), unless INVESTOR_REACH_ENABLED=false."""
     if not settings.reach_enabled:
         return None, []
     from bot.web_search.searxng import SearxngClient
@@ -914,7 +955,19 @@ def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
                                      timeout_seconds=settings.leads_timeout_seconds)
     else:
         log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
-    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config())
+    x = None
+    if settings.x_search_enabled:
+        from .xsearch import BrowserSession, EnvSession, FirstSession, TwitterCli
+
+        sessions: list[Any] = [EnvSession()]
+        if settings.browser_token:
+            from bot.facebook_collector.browser import BrowserSessionClient
+
+            sessions.append(BrowserSession(pool, BrowserSessionClient(settings.browser_url, settings.browser_token)))
+        x = TwitterCli(FirstSession(*sessions), binary=settings.x_search_binary,
+                       max_results=settings.x_search_results, proxy_url=settings.x_search_proxy)
+    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), x=x,
+                         logins=logins)
     return worker, [searcher.aclose] + ([judge.aclose] if judge else [])
 
 

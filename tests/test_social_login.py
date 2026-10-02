@@ -82,6 +82,9 @@ async def test_login_command_accepts_linkedin() -> None:
     assert reply and callbacks(reply)[0] == "" and reply.buttons[0].web_app_url
     assert next(iter(store.sessions.values())).profile.name == "linkedin-main"
     assert START_URLS["linkedin"] == "https://www.linkedin.com/login"
+    assert START_URLS["x"] == "https://x.com/i/flow/login"
+    x = await control.handle_text(IncomingMessage(chat_id=OWNER, user_id=OWNER, message_id=2, text="/login x"))
+    assert x and x.text.startswith("Нужен вход в X (Twitter)")
     assert any("LinkedIn" in description for command, description in OWNER_MENU if command == "login")
 
 
@@ -120,8 +123,10 @@ async def test_owner_settings_offer_social_login_with_status_per_network() -> No
     panel = await control.handle_callback(OWNER, "login:list", chat_id=OWNER)
     assert panel.text.startswith("🔐 Вход в соцсети")
     assert [b.text for b in panel.buttons] == [
-        "Facebook — ✅ вошёл", "Instagram — ⚠️ нужен вход", "TikTok — ⚠️ нужен вход", "LinkedIn — ⚠️ нужен вход"]
-    assert callbacks(panel) == ["login:go:facebook", "login:go:instagram", "login:go:tiktok", "login:go:linkedin"]
+        "Facebook — ✅ вошёл", "Instagram — ⚠️ нужен вход", "TikTok — ⚠️ нужен вход", "LinkedIn — ⚠️ нужен вход",
+        "X (Twitter) — ⚠️ нужен вход"]
+    assert callbacks(panel) == ["login:go:facebook", "login:go:instagram", "login:go:tiktok", "login:go:linkedin",
+                                "login:go:x"]
 
     # A tap is the same flow as /login linkedin.
     started = await control.handle_callback(OWNER, "login:go:linkedin", chat_id=OWNER)

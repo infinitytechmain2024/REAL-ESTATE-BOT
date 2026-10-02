@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`028_reach_company_kind.sql` in order. It records SHA-256 checksums in
+`031_login_requests.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -36,6 +36,9 @@ which of them an investor search already sent.
 `027_investor_reach.sql` keeps the investor search's reach across platforms
 (search-engine results about investors, agents, agencies, funds, networks).
 `028_reach_company_kind.sql` adds the `company` kind (a company of the kind the task asks for).
+`029_search_sites.sql` keeps the search sites a person approved or rejected and the per-search site list.
+`030_x_login.sql` lets a browser profile be signed in to X. `031_login_requests.sql` records the platforms a
+search needs a login for, so the control plane sends the operators the login link itself.
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their
@@ -413,6 +416,41 @@ The JSON result is normalized for the later analysis pipeline. A future
 upstream integration must expose a read-only adapter compatible with this
 policy; flipping an environment variable cannot enable it.
 
+A queued run for a platform the adapter cannot read (LinkedIn) is cancelled at
+once with `error_code = unsupported_platform`, so it never holds the runs
+queued behind it.
+
+### X and LinkedIn in the reach (Agent Reach backends)
+
+Every search (investors and property) runs the reach: platform queries for the
+people of its city. Its X queries go to X itself through `twitter-cli` 0.8.5,
+Agent Reach's X backend, installed in its own virtualenv in the campaign-runner
+image (`bot/campaign/xsearch.py`): `twitter search "<query>" -t latest -n 20
+--json`, a fixed argument list, no shell, a timeout and an output cap. The
+session is the X profile an owner signed in with `/login x` (the browser
+service hands out only that profile's `auth_token` and `ct0`, to the runner, over
+its authenticated API) or `TWITTER_AUTH_TOKEN` / `TWITTER_CT0` from `.env`.
+Without a session the search engines answer and owners get a «🔐 Войти в X»
+button. LinkedIn is searched in the bot's own signed-in browser profile
+(`/login linkedin`): the people and companies a LinkedIn search shows are judged
+like every reach result and sent as contact cards (investors, agents, agencies,
+funds; a property search sends agents, agencies and developers only). LinkedIn's
+own MCP server is not used: it would need a second browser and a second login.
+
+### Search sites approved by the person
+
+Before the web stage reads any page, the bot runs every search query of the
+round, then sends the new sites as one numbered list (grouped by the query that
+found them) and asks «Все сайты подтверждены?». The person answers with the
+buttons «✅ Все» / «✏️ Убрать некоторые» or in text: «да», «кроме 3 и 5»,
+«убери olx», «только 1, 2». Pages are read only from approved sites. Decisions
+are stored per person and mode (`search_sites`, migration 029): an approved
+site is read in later searches without asking and is searched first
+(`site:<host>`); a rejected one is never offered again. One reminder after
+`WEB_SEARCH_SITE_REMIND_MINUTES`, at most `WEB_SEARCH_SITE_MAX_QUESTIONS` lists
+per search; `WEB_SEARCH_SITE_APPROVAL=false` reads every site as before.
+Facebook groups have their own stage and are never part of the list.
+
 ### Scrapling website connector
 
 The `scrapling-connector` Compose profile is the lightweight choice for a
@@ -722,6 +760,39 @@ psql "$SUPABASE_DB_URL" -f bot/services/db/migrations/001_init.sql
 некуда записать. При старте об этом пишется предупреждение.
 
 ## Деплой на VPS
+
+### Быстро: установка или полная переустановка одним скриптом
+
+На чистом Ubuntu 22.04/24.04 x86_64 (2+ vCPU, 8+ GB RAM):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/infinitytechmain2024/REAL-ESTATE-BOT/main/scripts/vps_install.sh -o vps_install.sh
+sudo bash vps_install.sh
+```
+
+Скрипт ставит Docker, swap, firewall (только SSH, 80, 443), клонирует код в
+`/opt/real-estate-bot`, пишет `.env` (пароли генерирует сам, спрашивает токен
+бота, ваши Telegram ID и ключ OpenRouter), выдаёт адрес окна входа
+`https://<ip>.sslip.io`, применяет миграции и запускает все сервисы.
+
+Переезд или переустановка с сохранением данных и входов в соцсети:
+
+```sh
+# на старом сервере
+sudo /opt/real-estate-bot/scripts/vps_backup.sh      # база, профили браузера, .env -> /root/bot-backup-*.tar
+# перенести архив на новый сервер (scp), затем на новом
+sudo BACKUP=/root/bot-backup-XXXX.tar bash vps_install.sh
+```
+
+Полная переустановка на том же сервере одной строкой (сама находит текущую установку, делает
+и проверяет копию базы, входов в соцсети и `.env`, удаляет старое, ставит заново и всё восстанавливает;
+IP вводить не нужно):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/infinitytechmain2024/REAL-ESTATE-BOT/main/scripts/vps_reinstall.sh | sudo bash
+```
+
+Обновление на месте: `sudo bash /opt/real-estate-bot/scripts/vps_install.sh`.
 
 Боевой вариант, если нужен Facebook. Браузер с залогиненным профилем должен
 жить постоянно, а к нему в любой момент должен прийти человек с телефона —

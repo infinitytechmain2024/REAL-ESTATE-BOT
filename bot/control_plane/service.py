@@ -13,6 +13,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from bot.campaign import offers as near
+from bot.campaign import sites as site_list
 from bot.campaign.architect import InvalidGoal, plan_campaign
 from bot.campaign.models import TERMINAL_STATES
 from bot.control_plane.access import LOGIN_BUTTON, SETTINGS_BUTTON, AccessDesk, label
@@ -122,11 +123,14 @@ class ControlPlane:
         offers: near.OfferDesk | None = None,
         campaigns: CampaignStore | None = None,
         understander: Understander | None = None,
+        sites: site_list.SiteDesk | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
         # «Одобрить» / «Нет» under the runner's «show similar options?» question (bot/campaign/offers.py).
         self.offers = offers
+        # Answers to «Все сайты подтверждены?» before the web stage reads a site (bot/campaign/sites.py).
+        self.sites = sites
         # Read-only here: finds the person's running campaign for «стоп»; the Orchestra cancels it.
         self.campaigns = campaigns
         # Owners from .env plus operators they approved; shared and live.
@@ -246,6 +250,8 @@ class ControlPlane:
             return await self._stop_search(IncomingMessage(chat_id=chat, user_id=user_id, message_id=0), button=True)
         if kind == near.CALLBACK_KIND:
             return await self._near_match_answer(user_id, action, target)
+        if kind == site_list.CALLBACK_KIND:
+            return await self._sites_button(user_id, action, target)
         if kind in {"mode", "task"}:
             if user_id is None or not self._may_give_tasks(user_id):
                 return self._with_access_button(Reply("Задачи могут давать только одобренные пользователи."), user_id)
@@ -291,6 +297,31 @@ class ControlPlane:
             # Telegram shows Mini App buttons in private chats only.
             return Reply("Откройте вход в личном чате с ботом.")
         return await self.live.login(user_id, platform, f"{platform}-main")
+
+    async def _sites_button(self, user_id: int | None, action: str, target: str) -> Reply:
+        """«✅ Все» / «✏️ Убрать некоторые» under the site list; only the requester (or an owner) answers."""
+        parsed = site_list.parse_callback(action, target)
+        if parsed is None or self.sites is None or user_id is None:
+            return Reply(STALE_BUTTON)
+        try:
+            decision = await self.sites.on_button(user_id, parsed[0], parsed[1], owner=self._is_owner(user_id))
+        except Exception:  # noqa: BLE001 - a database hiccup must not break the bot; the button stays usable
+            log.warning("telegram.control.sites_failed", extra={"user_id": user_id})
+            return Reply("Не получилось сохранить ответ. Попробуйте ещё раз.")
+        return Reply(decision.reply)
+
+    async def _sites_text(self, message: IncomingMessage, text: str) -> Reply | None:
+        """The text answer to an open site list («да», «кроме 3 и 5», «убери olx»); None: not an answer."""
+        if self.sites is None or message.user_id is None or not self._may_give_tasks(message.user_id):
+            return None
+        if await self.intake.drafting(message.user_id):
+            return None  # a task being written takes its own text
+        try:
+            decision = await self.sites.on_text(message.user_id, text)
+        except Exception:  # noqa: BLE001 - fall through to the ordinary handling of the text
+            log.warning("telegram.control.sites_failed", extra={"user_id": message.user_id})
+            return None
+        return Reply(decision.reply) if decision is not None else None
 
     async def _near_match_answer(self, user_id: int | None, action: str, target: str) -> Reply:
         """Only the campaign's requester (or an owner) answers, and only once; the runner acts on it."""
@@ -423,6 +454,8 @@ class ControlPlane:
                     return await self._keyboard_action(message, key)
             if text and await self._wants_stop(message, text):
                 return await self._stop_search(message)
+            if text and (answer := await self._sites_text(message, text)) is not None:
+                return answer
             if text and await self.auto.applies_to(message.user_id):
                 return await self._auto_goal(message, text)
             if text and (self._is_user(message.user_id) or (self._can_control(message.user_id) and await self.intake.mode(message.user_id))):
@@ -456,7 +489,7 @@ class ControlPlane:
                 return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
             text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
                     "/campaign <goal> | status | cancel <id>, "
-                    "/login [facebook|instagram|tiktok|linkedin] [profile-name]. Confirm changes with: confirm <token>.")
+                    "/login [facebook|instagram|tiktok|linkedin|x] [profile-name]. Confirm changes with: confirm <token>.")
             if role == "owner":
                 text += " Owners: /settings (roles with buttons), /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
             if self.auto.eligible(message.user_id):

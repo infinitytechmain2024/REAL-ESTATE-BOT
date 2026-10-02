@@ -69,6 +69,8 @@ class CampaignRunnerSettings(BaseSettings):
     comment_max_posts: int = Field(default=15, ge=0, le=100, validation_alias="CAMPAIGN_COMMENT_MAX_POSTS")
     # An investor search sends the people stored from comments in its city (at most, seen within days).
     lead_people_max: int = Field(default=60, ge=0, le=500, validation_alias="CAMPAIGN_LEAD_PEOPLE_MAX")
+    # A property search sends at most this many agents, agencies and developers of its city (the reach); 0 = none.
+    reach_agents_max: int = Field(default=15, ge=0, le=200, validation_alias="CAMPAIGN_REACH_AGENTS_MAX")
     lead_days: int = Field(default=90, ge=1, le=3650, validation_alias="CAMPAIGN_LEAD_DAYS")
     comment_reads_per_day: int = Field(default=40, ge=0, le=500, validation_alias="SAFETY_MAX_FACEBOOK_COMMENT_READS_PER_DAY")
     comment_reads_per_round: int = Field(default=3, ge=1, le=10, validation_alias="CAMPAIGN_COMMENT_READS_PER_ROUND")
@@ -102,7 +104,8 @@ class CampaignRunnerSettings(BaseSettings):
                             social_grace_seconds=self.social_grace_seconds,
                             max_relevance_calls=self.relevance_max_calls,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
-                            max_people=self.lead_people_max, lead_days=self.lead_days)
+                            max_people=self.lead_people_max, lead_days=self.lead_days,
+                            max_agents=self.reach_agents_max)
 
     # Investor reach across platforms through the search engines (bot/campaign/reach.py).
     reach_enabled: bool = Field(default=True, validation_alias="INVESTOR_REACH_ENABLED")
@@ -112,6 +115,12 @@ class CampaignRunnerSettings(BaseSettings):
     reach_poll_seconds: int = Field(default=20, ge=5, le=600, validation_alias="INVESTOR_REACH_POLL_SECONDS")
     reach_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_REACH_MODEL")
     reach_model_queries: int = Field(default=10, ge=0, le=30, validation_alias="INVESTOR_REACH_MODEL_QUERIES")
+    # X queries of the reach go to X itself through twitter-cli (bot/campaign/xsearch.py) when a session
+    # exists: the X profile signed in with /login x, or TWITTER_AUTH_TOKEN + TWITTER_CT0.
+    x_search_enabled: bool = Field(default=True, validation_alias="X_SEARCH_ENABLED")
+    x_search_results: int = Field(default=20, ge=1, le=50, validation_alias="X_SEARCH_RESULTS")
+    x_search_proxy: str = Field(default="", validation_alias="X_SEARCH_PROXY")
+    x_search_binary: str = Field(default="twitter", validation_alias="X_SEARCH_BINARY")
 
     def reach_config(self):  # -> bot.campaign.reach.ReachConfig
         from .reach import ReachConfig

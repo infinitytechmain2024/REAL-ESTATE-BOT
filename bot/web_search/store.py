@@ -67,7 +67,9 @@ class WebStore(Protocol):
     async def query_done(self, query_id: str, *, ok: bool, results: int, new_urls: int,
                          error: str | None = None) -> None: ...
     async def enqueue(self, campaign_id: str, candidates: list[Candidate]) -> int: ...
-    async def next_urls(self, campaign_id: str, limit: int) -> list[QueuedUrl]: ...
+    async def next_urls(self, campaign_id: str, limit: int, *, hosts: frozenset[str] | None = None) -> list[QueuedUrl]: ...
+    async def queued_hosts(self, campaign_id: str) -> dict[str, tuple[str | None, str | None]]: ...
+    async def skip_hosts(self, campaign_id: str, hosts: frozenset[str], detail: str) -> int: ...
     async def host_attempts(self, campaign_id: str, host: str) -> int: ...
     async def mark_url(self, campaign_id: str, url_key: str, state: str, detail: str | None = None) -> None: ...
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
@@ -256,15 +258,36 @@ class PostgresWebStore:
                 queued += state == "queued"
         return queued
 
-    async def next_urls(self, campaign_id: str, limit: int) -> list[QueuedUrl]:
-        """Queued URLs, one site after another (round-robin), search results before index links."""
+    async def next_urls(self, campaign_id: str, limit: int, *, hosts: frozenset[str] | None = None) -> list[QueuedUrl]:
+        """Queued URLs, one site after another (round-robin), search results before index links.
+
+        ``hosts``: only these sites (the approved ones, ``sites``)."""
         rows = await self.pool.fetch(
             """select url, url_key, host, depth, kind from (
                    select *, row_number() over (partition by host order by depth, created_at, url_key) as turn
-                     from web_campaign_urls where campaign_id = $1::uuid and state = 'queued') q
+                     from web_campaign_urls where campaign_id = $1::uuid and state = 'queued'
+                      and ($3::text[] is null or host = any($3::text[]))) q
                 order by turn, depth, created_at, url_key limit $2""",
-            campaign_id, limit)
+            campaign_id, limit, sorted(hosts) if hosts is not None else None)
         return [QueuedUrl(r["url"], r["url_key"], r["host"], r["depth"], r["kind"]) for r in rows]
+
+    async def queued_hosts(self, campaign_id: str) -> dict[str, tuple[str | None, str | None]]:
+        """Sites with queued search results: host -> (the first query that found it, its language)."""
+        rows = await self.pool.fetch(
+            """select distinct on (u.host) u.host, q.query_text, q.language
+                 from web_campaign_urls u left join web_search_queries q on q.id = u.query_id
+                where u.campaign_id = $1::uuid and u.state = 'queued'
+                order by u.host, u.depth, u.created_at""", campaign_id)
+        return {r["host"]: (r["query_text"], r["language"]) for r in rows}
+
+    async def skip_hosts(self, campaign_id: str, hosts: frozenset[str], detail: str) -> int:
+        if not hosts:
+            return 0
+        rows = await self.pool.fetch(
+            """update web_campaign_urls set state = 'skipped', detail = $3, finished_at = now()
+                where campaign_id = $1::uuid and state = 'queued' and host = any($2::text[]) returning 1""",
+            campaign_id, sorted(hosts), detail[:80])
+        return len(rows)
 
     async def host_attempts(self, campaign_id: str, host: str) -> int:
         return int(await self.pool.fetchval(
@@ -639,8 +662,9 @@ class MemoryWebStore:
             queued += state == "queued"
         return queued
 
-    async def next_urls(self, campaign_id: str, limit: int) -> list[QueuedUrl]:
-        queued = sorted((u for u in self.urls.get(campaign_id, {}).values() if u.state == "queued"),
+    async def next_urls(self, campaign_id: str, limit: int, *, hosts: frozenset[str] | None = None) -> list[QueuedUrl]:
+        queued = sorted((u for u in self.urls.get(campaign_id, {}).values()
+                         if u.state == "queued" and (hosts is None or u.host in hosts)),
                         key=lambda u: (u.depth, u.order))
         turns: dict[str, int] = {}
         ranked = []
@@ -649,6 +673,22 @@ class MemoryWebStore:
             ranked.append((turns[u.host], u.depth, u.order, u))
         ranked.sort(key=lambda t: t[:3])
         return [QueuedUrl(u.url, u.url_key, u.host, u.depth, u.kind) for *_, u in ranked[:limit]]  # type: ignore[arg-type]
+
+    async def queued_hosts(self, campaign_id: str) -> dict[str, tuple[str | None, str | None]]:
+        texts = {q.id: (q.text, q.language) for q in self.queries.get(campaign_id, [])}
+        out: dict[str, tuple[str | None, str | None]] = {}
+        for u in sorted(self.urls.get(campaign_id, {}).values(), key=lambda u: (u.depth, u.order)):
+            if u.state == "queued" and u.host not in out:
+                out[u.host] = texts.get(u.query_id or "", (None, None))
+        return out
+
+    async def skip_hosts(self, campaign_id: str, hosts: frozenset[str], detail: str) -> int:
+        skipped = 0
+        for u in self.urls.get(campaign_id, {}).values():
+            if u.state == "queued" and u.host in hosts:
+                u.state, u.detail = "skipped", detail
+                skipped += 1
+        return skipped
 
     async def host_attempts(self, campaign_id: str, host: str) -> int:
         return sum(1 for u in self.urls.get(campaign_id, {}).values()
