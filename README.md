@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`028_reach_company_kind.sql` in order. It records SHA-256 checksums in
+`031_login_requests.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -36,6 +36,9 @@ which of them an investor search already sent.
 `027_investor_reach.sql` keeps the investor search's reach across platforms
 (search-engine results about investors, agents, agencies, funds, networks).
 `028_reach_company_kind.sql` adds the `company` kind (a company of the kind the task asks for).
+`029_search_sites.sql` keeps the search sites a person approved or rejected and the per-search site list.
+`030_x_login.sql` lets a browser profile be signed in to X. `031_login_requests.sql` records the platforms a
+search needs a login for, so the control plane sends the operators the login link itself.
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their
@@ -757,6 +760,31 @@ psql "$SUPABASE_DB_URL" -f bot/services/db/migrations/001_init.sql
 некуда записать. При старте об этом пишется предупреждение.
 
 ## Деплой на VPS
+
+### Быстро: установка или полная переустановка одним скриптом
+
+На чистом Ubuntu 22.04/24.04 x86_64 (2+ vCPU, 8+ GB RAM):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/infinitytechmain2024/REAL-ESTATE-BOT/main/scripts/vps_install.sh -o vps_install.sh
+sudo bash vps_install.sh
+```
+
+Скрипт ставит Docker, swap, firewall (только SSH, 80, 443), клонирует код в
+`/opt/real-estate-bot`, пишет `.env` (пароли генерирует сам, спрашивает токен
+бота, ваши Telegram ID и ключ OpenRouter), выдаёт адрес окна входа
+`https://<ip>.sslip.io`, применяет миграции и запускает все сервисы.
+
+Переезд или переустановка с сохранением данных и входов в соцсети:
+
+```sh
+# на старом сервере
+sudo /opt/real-estate-bot/scripts/vps_backup.sh      # база, профили браузера, .env -> /root/bot-backup-*.tar
+# перенести архив на новый сервер (scp), затем на новом
+sudo BACKUP=/root/bot-backup-XXXX.tar bash vps_install.sh
+```
+
+Обновление на месте: `sudo bash /opt/real-estate-bot/scripts/vps_install.sh`.
 
 Боевой вариант, если нужен Facebook. Браузер с залогиненным профилем должен
 жить постоянно, а к нему в любой момент должен прийти человек с телефона —
