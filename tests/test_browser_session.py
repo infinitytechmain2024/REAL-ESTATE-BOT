@@ -421,6 +421,30 @@ async def test_social_snapshots_scroll_a_bounded_number_of_times_and_report_card
     await manager.release(linkedin)
 
 
+async def test_only_an_x_profile_hands_out_its_two_session_cookies(tmp_path: Path) -> None:
+    browsers: list[FakeBrowser] = []
+
+    async def launch(_: Path) -> FakeBrowser:
+        browsers.append(FakeBrowser())
+        return browsers[-1]
+
+    manager = BrowserSessionManager(FakeRedis(), profile_root=tmp_path / "p", screenshot_root=tmp_path / "s",
+                                    lease_seconds=30, renew_seconds=5, launcher=launch)  # type: ignore[arg-type]
+    x = await manager.acquire(ProfileRequest("profile_x", "x-main", "x"))
+    assert await manager.x_credentials(x) is None, "not signed in yet"
+    browsers[0].jar.extend([{"name": "auth_token", "value": "tok", "domain": ".x.com", "expires": -1},
+                            {"name": "ct0", "value": "csrf", "domain": ".x.com", "expires": -1},
+                            {"name": "guest_id", "value": "g", "domain": ".x.com", "expires": -1}])
+    assert await manager.x_credentials(x) == {"auth_token": "tok", "ct0": "csrf"}
+    linkedin = await manager.acquire(ProfileRequest("profile_li2", "li", "linkedin"))
+    browsers[1].jar.append({"name": "auth_token", "value": "tok", "domain": ".x.com", "expires": -1})
+    assert await manager.x_credentials(linkedin) is None, "no other platform ever hands out a cookie"
+    with pytest.raises(PermissionError):
+        await manager.x_credentials(type(x)(x.profile_id, "forged", x.profile_dir, x.expires_at))
+    await manager.release(x)
+    await manager.release(linkedin)
+
+
 def test_login_cookie_rules_per_platform() -> None:
     from bot.browser_session.manager import signed_in
 

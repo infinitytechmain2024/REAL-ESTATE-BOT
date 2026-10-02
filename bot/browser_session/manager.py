@@ -368,6 +368,28 @@ class BrowserSessionManager:
         self._touch(handle.profile_id)
         return await self._signed_in(owned[2], self._platforms.get(handle.profile_id, ""))
 
+    async def x_credentials(self, handle: SessionHandle) -> dict[str, str] | None:
+        """The two X session cookies ``twitter-cli`` needs (auth_token, ct0) of a leased X profile; None if absent.
+
+        The only cookies this service ever hands out, and only for the ``x`` platform: the reach
+        searcher reads X with the session an owner opened in the live window."""
+        owned = self._sessions.get(handle.profile_id)
+        if not owned or owned[0].token != handle.token:
+            raise PermissionError("session token does not own this profile")
+        if self._platforms.get(handle.profile_id) != "x" or not hasattr(owned[2], "cookies"):
+            return None
+        self._touch(handle.profile_id)
+        moment = time.time()
+        found: dict[str, str] = {}
+        for cookie in await owned[2].cookies():
+            domain = str(cookie.get("domain") or "").lstrip(".").lower()
+            expires = cookie.get("expires")
+            if domain not in ("x.com", "twitter.com") or cookie.get("name") not in ("auth_token", "ct0"):
+                continue
+            if cookie.get("value") and not (isinstance(expires, int | float) and 0 < expires <= moment):
+                found[str(cookie["name"])] = str(cookie["value"])
+        return found if len(found) == 2 else None
+
     @staticmethod
     async def _signed_in(browser: Any, platform: str) -> bool | None:
         if platform not in LOGIN_COOKIES or not hasattr(browser, "cookies"):

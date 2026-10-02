@@ -802,7 +802,10 @@ async def main() -> None:
     else:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     comments, lead_judge = _comment_worker(settings, pool)
-    reach, reach_closers = _reach_worker(settings, pool)
+    from .logins import LoginPrompts
+
+    logins = LoginPrompts(messenger, settings.owner_ids())
+    reach, reach_closers = _reach_worker(settings, pool, logins)
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
@@ -810,10 +813,7 @@ async def main() -> None:
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool))
-    from .logins import LoginPrompts
-
-    logins = LoginPrompts(messenger, settings.owner_ids())
-    social, generator = _social_worker(settings, pool, campaigns, logins)
+    social, generator = _social_worker(settings, pool, campaigns, logins, reach)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
                                              "comment_leads": settings.comment_leads if comments else "off",
@@ -901,7 +901,8 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any,
     return worker, settings.poll_seconds, closers
 
 
-def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore, logins: Any = None) -> tuple[Any, Any]:
+def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore, logins: Any = None,
+                   reach: Any = None) -> tuple[Any, Any]:
     """The social search worker when SOCIAL_SEARCH_PLATFORMS lists a platform (and the browser is reachable)."""
     config = settings.social_config()
     if not config.platforms:
@@ -923,12 +924,12 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore, logins: A
     # The browser's API answers after navigation, the bounded wait for results and the scrolls.
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
     worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config,
-                                logins=logins)
+                                logins=logins, reach=reach)
     return worker, generator
 
 
-def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
-    """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false."""
+def _reach_worker(settings: Any, pool: Any, logins: Any = None) -> tuple[Any, list[Any]]:
+    """The reach across platforms (search engines; X through twitter-cli), unless INVESTOR_REACH_ENABLED=false."""
     if not settings.reach_enabled:
         return None, []
     from bot.web_search.searxng import SearxngClient
@@ -944,7 +945,19 @@ def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
                                      timeout_seconds=settings.leads_timeout_seconds)
     else:
         log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
-    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config())
+    x = None
+    if settings.x_search_enabled:
+        from .xsearch import BrowserSession, EnvSession, FirstSession, TwitterCli
+
+        sessions: list[Any] = [EnvSession()]
+        if settings.browser_token:
+            from bot.facebook_collector.browser import BrowserSessionClient
+
+            sessions.append(BrowserSession(pool, BrowserSessionClient(settings.browser_url, settings.browser_token)))
+        x = TwitterCli(FirstSession(*sessions), binary=settings.x_search_binary,
+                       max_results=settings.x_search_results, proxy_url=settings.x_search_proxy)
+    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), x=x,
+                         logins=logins)
     return worker, [searcher.aclose] + ([judge.aclose] if judge else [])
 
 

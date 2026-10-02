@@ -68,6 +68,17 @@ def create_app(manager: BrowserSessionManager, token: str, live: LiveViewControl
             raise web.HTTPBadRequest(text=str(exc)) from exc
         return web.json_response(result)
 
+    async def x_credentials(request: web.Request) -> web.Response:
+        """auth_token and ct0 of a leased X profile, for twitter-cli in the reach searcher; 404 when not signed in."""
+        body = await request.json()
+        try:
+            found = await manager.x_credentials(handle(body))
+        except PermissionError as exc:
+            raise web.HTTPForbidden(text=str(exc)) from exc
+        if found is None:
+            raise web.HTTPNotFound(text="no X session in this profile")
+        return web.json_response(found, headers={"Cache-Control": "no-store"})
+
     async def live_start(request: web.Request) -> web.Response:
         body = await request.json()
         try:
@@ -114,6 +125,7 @@ def create_app(manager: BrowserSessionManager, token: str, live: LiveViewControl
     app.router.add_delete("/v1/sessions", release)
     app.router.add_post("/v1/sessions/screenshot", screenshot)
     app.router.add_post("/v1/sessions/snapshot", snapshot)
+    app.router.add_post("/v1/sessions/x-credentials", x_credentials)
     app.on_shutdown.append(shutdown)
     return app
 

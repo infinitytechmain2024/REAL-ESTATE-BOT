@@ -417,6 +417,23 @@ A queued run for a platform the adapter cannot read (LinkedIn) is cancelled at
 once with `error_code = unsupported_platform`, so it never holds the runs
 queued behind it.
 
+### X and LinkedIn in the reach (Agent Reach backends)
+
+Every search (investors and property) runs the reach: platform queries for the
+people of its city. Its X queries go to X itself through `twitter-cli` 0.8.5,
+Agent Reach's X backend, installed in its own virtualenv in the campaign-runner
+image (`bot/campaign/xsearch.py`): `twitter search "<query>" -t latest -n 20
+--json`, a fixed argument list, no shell, a timeout and an output cap. The
+session is the X profile an owner signed in with `/login x` (the browser
+service hands out only that profile's `auth_token` and `ct0`, to the runner, over
+its authenticated API) or `TWITTER_AUTH_TOKEN` / `TWITTER_CT0` from `.env`.
+Without a session the search engines answer and owners get a «🔐 Войти в X»
+button. LinkedIn is searched in the bot's own signed-in browser profile
+(`/login linkedin`): the people and companies a LinkedIn search shows are judged
+like every reach result and sent as contact cards (investors, agents, agencies,
+funds; a property search sends agents, agencies and developers only). LinkedIn's
+own MCP server is not used: it would need a second browser and a second login.
+
 ### Search sites approved by the person
 
 Before the web stage reads any page, the bot runs every search query of the

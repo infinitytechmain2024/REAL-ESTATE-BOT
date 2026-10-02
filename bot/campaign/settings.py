@@ -115,6 +115,12 @@ class CampaignRunnerSettings(BaseSettings):
     reach_poll_seconds: int = Field(default=20, ge=5, le=600, validation_alias="INVESTOR_REACH_POLL_SECONDS")
     reach_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_REACH_MODEL")
     reach_model_queries: int = Field(default=10, ge=0, le=30, validation_alias="INVESTOR_REACH_MODEL_QUERIES")
+    # X queries of the reach go to X itself through twitter-cli (bot/campaign/xsearch.py) when a session
+    # exists: the X profile signed in with /login x, or TWITTER_AUTH_TOKEN + TWITTER_CT0.
+    x_search_enabled: bool = Field(default=True, validation_alias="X_SEARCH_ENABLED")
+    x_search_results: int = Field(default=20, ge=1, le=50, validation_alias="X_SEARCH_RESULTS")
+    x_search_proxy: str = Field(default="", validation_alias="X_SEARCH_PROXY")
+    x_search_binary: str = Field(default="twitter", validation_alias="X_SEARCH_BINARY")
 
     def reach_config(self):  # -> bot.campaign.reach.ReachConfig
         from .reach import ReachConfig

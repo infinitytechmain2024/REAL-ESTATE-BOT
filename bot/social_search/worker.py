@@ -124,10 +124,14 @@ class SocialSearchWorker:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random | None = None,
         logins: Any = None,
+        reach: Any = None,
     ) -> None:
         self.store, self.campaigns, self.browser, self.planner, self.config = store, campaigns, browser, planner, config
         # ``bot.campaign.logins.LoginPrompts``: owners get a «🔐 Войти» button when a platform has no ready profile.
         self.logins = logins
+        # ``bot.campaign.reach.ReachWorker``: people and companies a LinkedIn search shows become judged contacts
+        # (investors, agents, agencies ...) with their profile link instead of posts for the listing analysis.
+        self.reach = reach
         self.now, self.sleep, self.rng = now, sleep, rng or random.Random()
         self._turn: dict[str, int] = {}  # round-robin position per platform
 
@@ -257,6 +261,11 @@ class SocialSearchWorker:
             self._check(platform, page)
             items = adapter.parse(page, query.kind, limit=self.config.items_per_query)
             found = len(items)
+            if self.reach is not None:
+                people = [i for i in items if i.kind in ("person", "company")]
+                items = [i for i in items if i.kind not in ("person", "company")]
+                if people:
+                    saved += await self._contacts(campaign, platform, query, people)
             known = await self.store.seen(platform, items)
             opened = 0
             for item in (i for i in items if i.key not in known):
@@ -281,6 +290,19 @@ class SocialSearchWorker:
                 await self.store.finish_query(query.id, "failed", found=found, new=saved, error=type(exc).__name__)
         finally:
             await self._finish(campaign, platform, profile, query, lease, blocked, vertical)
+
+    async def _contacts(self, campaign: Any, platform: str, query: PlannedQuery, people: list[SocialItem]) -> int:
+        from bot.campaign.reach import ReachQuery, reach_campaign
+        from bot.web_search.searxng import SearchHit
+
+        hits = [SearchHit(i.url, f"{i.author or ''} · {PLATFORM_NAMES[platform]}".strip(" ·"), i.text) for i in people]
+        try:
+            return int(await self.reach.ingest(reach_campaign(campaign),
+                                               ReachQuery(platform, "en", f"{platform}:{query.kind}:{query.text}"[:300]),
+                                               hits, record=False))
+        except Exception as exc:  # noqa: BLE001 - the contacts are lost for this query, the search goes on
+            log.warning("social.contacts_failed", extra={"platform": platform, "error": type(exc).__name__})
+            return 0
 
     def _check(self, platform: str, snapshot: dict[str, Any]) -> None:
         block = detect_block(platform, snapshot)

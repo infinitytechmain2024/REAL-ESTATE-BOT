@@ -176,6 +176,8 @@ class ReachCampaign:
     task: str = ""  # what the person asked, as queued (who to look for, the task text)
     country: str | None = None  # ISO-2 of the place (any place in the world)
     vertical: str = "investors"  # investors | both | real_estate (who the reach looks for)
+    chat_id: int = 0  # where the search's cards go (a login notice for X too)
+    requested_by: int = 0
 
     @property
     def wanted(self) -> str:
@@ -184,6 +186,13 @@ class ReachCampaign:
             return ("real-estate agents, agencies, developers and companies in PLACE that can offer the property "
                     "TASK asks for (sellers and landlords' representatives); never investors, funds or buyers")
         return "the people or companies TASK describes (by default real-estate investors and partners)"
+
+
+def reach_campaign(campaign: Any) -> ReachCampaign:
+    """The reach's view of a campaign (``bot.campaign.models.Campaign``)."""
+    plan = campaign.plan
+    return ReachCampaign(campaign.id, plan.location, dict(plan.location_aliases), tuple(plan.languages), plan.goal,
+                         campaign.source_text, plan.country, plan.vertical, campaign.chat_id, campaign.requested_by)
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,9 +520,12 @@ class ReachStore(Protocol):
 
 class ReachWorker:
     def __init__(self, store: ReachStore, searcher: Searcher, judge: ReachJudge | None = None, *,
-                 config: ReachConfig | None = None) -> None:
+                 config: ReachConfig | None = None, x: Searcher | None = None, logins: Any = None) -> None:
         self.store, self.searcher, self.judge = store, searcher, judge
         self.config = config or ReachConfig()
+        # X queries go to X itself (``xsearch.TwitterCli``, Agent Reach's backend) when a session exists;
+        # without one they go to the search engines and ``logins`` asks the owners to sign in to X.
+        self.x, self.logins = x, logins
         self._planned: dict[str, list[ReachQuery]] = {}  # campaign -> the model's queries (asked once per process)
 
     async def serve(self, poll_seconds: float, stop: asyncio.Event) -> None:
@@ -560,11 +572,36 @@ class ReachWorker:
 
         await self.store.set_current(campaign.id, query.text)
         try:
-            hits = await self.searcher.search(query.text, language=query.language)
+            hits = await self._search(campaign, query)
         except SearchError as exc:
             log.warning("campaign.reach.search_failed %s", exc.code, extra={"campaign_id": campaign.id})
             await self.store.record_query(campaign.id, query, hits=0, kept=0, error=exc.code[:200])
             return
+        await self.ingest(campaign, query, hits)
+
+    async def _search(self, campaign: ReachCampaign, query: ReachQuery) -> list[SearchHit]:
+        if query.platform == "x" and self.x is not None:
+            from .xsearch import XUnavailable
+
+            try:
+                hits = await self.x.search(query.text, language=query.language)
+                log.info("campaign.reach.x_searched", extra={"campaign_id": campaign.id, "hits": len(hits)})
+                return hits
+            except XUnavailable as exc:
+                log.warning("campaign.reach.x_needs_login %s", exc.code, extra={"campaign_id": campaign.id})
+                if self.logins is not None:
+                    with suppress(Exception):
+                        await self.logins.need("x", [campaign])
+            except Exception as exc:  # noqa: BLE001 - X failed: the search engines still answer
+                log.warning("campaign.reach.x_failed %s", getattr(exc, "code", type(exc).__name__),
+                            extra={"campaign_id": campaign.id})
+        return await self.searcher.search(query.text, language=query.language)
+
+    async def ingest(self, campaign: ReachCampaign, query: ReachQuery, hits: Sequence[SearchHit], *,
+                     record: bool = True) -> int:
+        """Judge the new results of one query (search engines, X, or a LinkedIn search page) and keep them once.
+
+        ``record``: count it as one of the reach's own queries (its caps); a LinkedIn search page is not."""
         candidates = _candidates(hits)
         known = await self.store.known([c.url_key for c in candidates])
         fresh = [c for c in candidates if c.url_key not in known]
@@ -572,9 +609,11 @@ class ReachWorker:
         stored = [Stored(c, j, campaign.location, campaign.id, judged_by) for c, j in zip(fresh, judged, strict=True)]
         kept = await self.store.save(stored) if stored else 0
         relevant = sum(1 for s in stored if s.judged.keep)
-        await self.store.record_query(campaign.id, query, hits=len(hits), kept=relevant)
+        if record:
+            await self.store.record_query(campaign.id, query, hits=len(hits), kept=relevant)
         log.info("campaign.reach.query", extra={"campaign_id": campaign.id, "platform": query.platform,
                                                 "hits": len(hits), "new": kept, "relevant": relevant})
+        return relevant
 
     async def _judge(self, campaign: ReachCampaign, candidates: list[Candidate]) -> tuple[list[Judged], str]:
         if not candidates:
@@ -617,8 +656,8 @@ class PostgresReachStore:
                       and c.plan->>'vertical' in ('investors', 'both', 'real_estate')
                       and coalesce(c.plan->>'location', '') <> ''),
                created as (insert into campaign_reach (campaign_id) select id from open on conflict do nothing)
-               select o.id::text, o.plan::text, (select source_text from campaigns c where c.id = o.id) as task
-                 from open o
+               select o.id::text, o.plan::text, c.source_text as task, c.telegram_chat_id, c.requested_by
+                 from open o join campaigns c on c.id = o.id
                 where not exists (select 1 from campaign_reach r where r.campaign_id = o.id and r.state = 'done')
                 order by o.id""")
         campaigns = []
@@ -627,7 +666,8 @@ class PostgresReachStore:
             campaigns.append(ReachCampaign(row["id"], plan["location"], dict(plan.get("location_aliases") or {}),
                                            tuple(plan.get("languages") or ("es", "en", "ru", "uk")),
                                            str(plan.get("goal") or ""), str(row["task"] or ""), plan.get("country"),
-                                           str(plan.get("vertical") or "investors")))
+                                           str(plan.get("vertical") or "investors"), row["telegram_chat_id"],
+                                           row["requested_by"]))
         return campaigns
 
     async def used_queries(self, campaign_id: str) -> set[str]:
