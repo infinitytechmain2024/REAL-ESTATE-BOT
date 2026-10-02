@@ -32,7 +32,8 @@ campaign_findings), so a restart continues where it stopped.
 * Each sent Facebook post is queued for one read of its comments (``leads``):
   the people who show interest as an investor or buyer are only stored. An
   investor search (vertical investors or both) sends each stored person of its
-  city once, with their profile link, a preview and a recommendation.
+  city once, with their profile link, a preview and a recommendation. A property
+  search sends the reach's agents, agencies and developers of its city.
 * After the last window (and the web stage) the runner waits (bounded) for
   analysis, then completes the campaign. A campaign cancelled from outside has its in-flight
   batch cancelled through the ordinary batch cancel.
@@ -60,7 +61,7 @@ from . import offers
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
-from .reach import contact_card
+from .reach import REALTY_KINDS, contact_card
 from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
 from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
@@ -194,12 +195,14 @@ class RunnerConfig:
     # seen in the last ``lead_days``.
     max_people: int = 60
     lead_days: int = 90
+    # A property search sends at most ``max_agents`` agents, agencies and developers of its city (the reach).
+    max_agents: int = 15
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
                 or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100
                 or not 0 <= self.max_relevance_calls <= 10_000 or self.comment_leads not in COMMENT_MODES
-                or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500
+                or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500 or not 0 <= self.max_agents <= 200
                 or not 1 <= self.lead_days <= 3650):
             raise ValueError("unsafe campaign runner settings")
 
@@ -546,14 +549,24 @@ class CampaignRunner:
             log.warning("campaign.comment_queue_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
 
     async def _people(self, campaign: Campaign) -> None:
-        """An investor search: send each person stored from comments under objects in its city, once."""
+        """An investor search: send each person stored from comments under objects in its city, once.
+
+        A property search sends only the reach's agents, agencies and developers of its city
+        (at most ``max_agents``): they hold objects, often ones no portal shows."""
         location = campaign.plan.location
-        if campaign.plan.vertical not in ("investors", "both") or not location or not self.config.max_people:
+        realty = campaign.plan.vertical == "real_estate"
+        cap = self.config.max_agents if realty else self.config.max_people
+        if campaign.plan.vertical not in ("investors", "both", "real_estate") or not location or not cap:
             return
-        room = self.config.max_people - await self.store.people_sent(campaign.id)
+        room = cap - await self.store.people_sent(campaign.id)
         if room <= 0:
             return
         limit = min(room, self.config.max_stream_per_step)
+        if realty:
+            cards = [(c.delivery_key, contact_card(c)) for c in await self.store.stored_contacts(
+                campaign.id, location, self.config.lead_days, limit, kinds=REALTY_KINDS)]
+            await self._send_people(campaign, cards)
+            return
         # People from comments under objects first (they asked about a concrete object), then the reach.
         cards: list[tuple[str, str]] = [
             (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
@@ -562,6 +575,9 @@ class CampaignRunner:
         if len(cards) < limit:
             cards += [(c.delivery_key, contact_card(c)) for c in await self.store.stored_contacts(
                 campaign.id, location, self.config.lead_days, limit - len(cards))]
+        await self._send_people(campaign, cards)
+
+    async def _send_people(self, campaign: Campaign, cards: list[tuple[str, str]]) -> None:
         for key, card in cards:
             if not await self.store.claim_person(campaign.id, key):
                 continue

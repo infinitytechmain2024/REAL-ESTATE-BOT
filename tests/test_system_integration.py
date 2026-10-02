@@ -919,3 +919,47 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
     finally:
         await orchestra.close()
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_reach_cancels_a_platform_it_cannot_read_instead_of_blocking_the_queue(pool) -> None:
+    await pool.execute(
+        "insert into browser_profiles(profile_name, platform, storage_locator, state) values"
+        " ('linkedin-main','linkedin','volume:li','ready'), ('tiktok-main','tiktok','volume:tt','ready')")
+    linkedin = await pool.fetchval(
+        """insert into monitoring_sources(platform, source_kind, vertical, canonical_url, acquisition_method, state)
+           values ('linkedin', 'account', 'investors', 'https://www.linkedin.com/in/ana', 'agent_ridge', 'active')
+           returning id""")
+    tiktok = await pool.fetchval(
+        """insert into monitoring_sources(platform, source_kind, vertical, canonical_url, acquisition_method, state)
+           values ('tiktok', 'account', 'real_estate', 'https://www.tiktok.com/@pisos.madrid', 'agent_ridge', 'active')
+           returning id""")
+    for source, platform in ((linkedin, "linkedin"), (tiktok, "tiktok")):
+        await pool.execute(
+            """insert into acquisition_runs(source_id, browser_profile_id, acquisition_method)
+               select $1, id, 'agent_ridge' from browser_profiles where platform = $2""", source, platform)
+
+    class TikTok:
+        def __init__(self) -> None:
+            self.visited: list[str] = []
+
+        async def acquire(self, profile_id, name, state, *, platform="facebook"):
+            return BrowserLease(profile_id, "lease")
+
+        async def snapshot(self, lease, url, timeout_ms):
+            self.visited.append(url)
+            return {"url": url, "title": "pisos.madrid", "text": "Piso en alquiler en Madrid, Retiro, 1100 EUR al mes."}
+
+        async def release(self, lease, next_state="READY"):
+            return None
+
+        async def health(self):
+            return True
+
+    reach, browser = PostgresReachStore(pool), TikTok()
+    assert await reach_step(reach, ControlledAgentReach(browser)) is True
+    assert browser.visited == ["https://www.tiktok.com/@pisos.madrid"], "the LinkedIn run no longer holds the queue"
+    rows = dict(await pool.fetch(
+        """select s.platform, r.state || ':' || coalesce(r.error_code, '') from acquisition_runs r
+             join monitoring_sources s on s.id = r.source_id"""))
+    assert rows == {"linkedin": "cancelled:unsupported_platform", "tiktok": "succeeded:"}

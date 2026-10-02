@@ -212,6 +212,35 @@ def _contact(n: int, kind: str = "investor") -> Contact:
     return Contact(f"{n:064d}", f"https://es.linkedin.com/in/p{n}", "linkedin", kind, f"P{n}")
 
 
+async def test_a_property_search_sends_only_agents_agencies_and_developers_up_to_its_cap() -> None:
+    campaigns = MemoryCampaignStore()
+    store = MemoryRunStore(campaigns)
+    messenger = FakeMessenger()
+    runner = CampaignRunner(campaigns, store, messenger, None, now=Clock(), config=RunnerConfig(max_agents=2))
+    goal = "Найди квартиры в аренду в Мадриде"
+    cid = await campaigns.create(plan_campaign(goal), chat_id=CHAT, requested_by=8, source_text=goal, actor="t")
+    await campaigns.set_state(cid, "running", "campaign:test")
+    assert (await campaigns.get(cid)).plan.vertical == "real_estate"
+    store.contacts["Madrid"] = [_contact(1), _contact(2, "agency"), _contact(3, "fund"), _contact(4, "agent"),
+                                _contact(5, "developer")]
+    store.reaching.add(cid)
+    for _ in range(3):
+        await runner.step(cid)
+    cards = [t.splitlines()[0] for _, _, t in messenger.sent if "· LinkedIn" in t]
+    assert cards == ["🏢 Агентство недвижимости · LinkedIn", "🧑‍💼 Агент недвижимости · LinkedIn"], (
+        "never investors or funds, at most max_agents")
+
+
+def test_a_property_search_looks_for_agents_agencies_and_developers() -> None:
+    realty = ReachCampaign("c", "Madrid", {"es": "Madrid", "en": "Madrid", "ru": "Мадрид"}, ("es", "en", "ru"),
+                           vertical="real_estate")
+    queries = plan_queries(realty)
+    assert {"linkedin", "x", "instagram", "web"} <= {q.platform for q in queries}
+    assert all("Madrid" in q.text or "Мадрид" in q.text for q in queries)
+    assert not any("invers" in q.text or "investor" in q.text or "инвест" in q.text for q in queries)
+    assert "never investors" in realty.wanted and "investors" in MADRID.wanted
+
+
 async def test_an_investor_search_sends_reach_contacts_once_and_waits_for_the_reach() -> None:
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
@@ -244,9 +273,11 @@ async def test_postgres_reach_from_the_query_to_the_card(pool) -> None:
     property_search = await campaigns.create(plan_campaign("Найди квартиры в аренду в Мадриде"), chat_id=CHAT,
                                              requested_by=USER, source_text="x", actor="t")
     store = PostgresReachStore(pool)
-    opened = await store.open_campaigns()
-    assert [c.id for c in opened] == [cid], "only investor searches reach out"
-    assert opened[0].location == "Madrid" and opened[0].aliases["ru"] == "Мадрид"
+    opened = {c.id: c for c in await store.open_campaigns()}
+    assert set(opened) == {cid, property_search}, "investor and property searches both reach out"
+    assert opened[cid].location == "Madrid" and opened[cid].aliases["ru"] == "Мадрид"
+    assert (opened[cid].vertical, opened[property_search].vertical) == ("investors", "real_estate")
+    await store.finish(property_search)
 
     worker = ReachWorker(store, FakeSearcher({LINKEDIN_Q: HITS}), config=ReachConfig(queries_per_tick=2))
     assert await worker.tick() == 2
@@ -257,6 +288,7 @@ async def test_postgres_reach_from_the_query_to_the_card(pool) -> None:
         ("https://es.linkedin.com/in/juan-perez", "investor", True, "Madrid")]
     runs = PostgresRunStore(pool, SafetyLimits())
     assert await runs.reach_pending(cid) and not await runs.reach_pending(property_search)
+    assert await runs.stored_contacts(cid, "Madrid", 90, 10, kinds=("agent", "agency")) == []
 
     messenger = ButtonMessenger()
     runner = CampaignRunner(campaigns, runs, messenger, None)
