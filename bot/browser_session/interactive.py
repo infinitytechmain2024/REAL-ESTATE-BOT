@@ -36,8 +36,10 @@ MAX_MINUTES = 60
 VIEWER_LOGS = ("/tmp/x11vnc.log", "/tmp/websockify.log")
 
 
-def _start_viewer(password: str) -> list[subprocess.Popen[bytes]]:
-    """Start x11vnc (container-local) and noVNC for the current display only."""
+def _start_viewer(password: str, clip: str | None = None) -> list[subprocess.Popen[bytes]]:
+    """Start x11vnc (container-local) and noVNC for the current display only.
+
+    ``clip`` (``WxH+X+Y``): only that part of the display is shown -- the live window laid out for a phone."""
     display = os.environ.get("DISPLAY", ":99")
     fd, path = tempfile.mkstemp(prefix="vncpass-")
     with os.fdopen(fd, "w") as handle:
@@ -49,7 +51,8 @@ def _start_viewer(password: str) -> list[subprocess.Popen[bytes]]:
         vnc = subprocess.Popen(
             # `rm:` makes x11vnc delete the password file as soon as it has read it.
             ["x11vnc", "-display", display, "-localhost", "-rfbport", str(VNC_PORT),
-             "-passwdfile", f"rm:{path}", "-forever", "-shared", "-quiet", "-noxdamage"],
+             "-passwdfile", f"rm:{path}", "-forever", "-shared", "-quiet", "-noxdamage",
+             *(["-clip", clip] if clip else [])],
             stdout=subprocess.DEVNULL, stderr=vnc_log,
         )
         novnc = subprocess.Popen(

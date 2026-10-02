@@ -46,10 +46,12 @@ class FakeBrowser:
         self.stopped: list[str] = []
         self.fail = fail
         self.window: str | None = None  # the profile whose window the browser service shows
+        self.screens: list[dict[str, object] | None] = []
 
-    async def start(self, profile: LiveProfile, url: str, minutes: int) -> str:
+    async def start(self, profile: LiveProfile, url: str, minutes: int, screen: dict[str, object] | None = None) -> str:
         if self.fail:
             raise LiveViewUnavailable("the browser is busy")
+        self.screens.append(screen)
         self.started.append(f"{profile.name}@{url}")
         self.window = profile.id
         return f"pw{len(self.started)}"
@@ -341,6 +343,16 @@ async def test_gate_admits_only_a_signed_operator_and_proxies_novnc() -> None:
             reply = await ws.receive()
             assert reply.data == b"echo:frame"
 
+        # A phone sends its screen: the window is laid out for it (bot.browser_session.models.Device).
+        assert browser.screens == [None], "no screen given: the desktop window"
+        await live.finish(session_id, OPERATOR, done=False)
+        await live.login(OPERATOR, "x", "x-main")
+        phone_session = next(s.id for s in store.sessions.values() if s.profile.name == "x-main")
+        phone = await client.post(f"/live/{phone_session}/auth?w=390&h=844&m=1", data=init_data(OPERATOR))
+        assert phone.status == 200 and browser.screens[-1] == {"width": 390, "height": 844, "mobile": True}
+        page_js = await (await client.get(f"/live/{session_id}/")).text()
+        assert "screen.width" in page_js and "m=" in page_js
+
         # The cookie belongs to this session only.
         other, _ = await store.request_live_view(await store.ensure_profile("facebook", "facebook-b", "t"), "login", "t", 600)
         assert (await client.get(f"/live/{other.id}/vnc.html", headers=admitted)).status == 403
@@ -443,3 +455,24 @@ async def test_a_window_closed_by_a_browser_restart_is_opened_again() -> None:
     assert await live.open(session_id, OPERATOR) == "pw1" and len(browser.started) == 1  # still open: reused
     browser.window = None  # the browser container was restarted
     assert await live.open(session_id, OPERATOR) == "pw2" and len(browser.started) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_browser_client_sends_the_phone_screen_only_when_there_is_one() -> None:
+    import json as _json
+
+    import httpx
+
+    from bot.control_plane.live_view import BrowserLiveClient
+
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(_json.loads(request.content))
+        return httpx.Response(200, json={"password": "pw"})
+
+    client = BrowserLiveClient("http://browser:8090", "tok", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    profile = LiveProfile("p1", "x-main", "x", "ready")
+    await client.start(profile, "https://x.com/i/flow/login", 10)
+    await client.start(profile, "https://x.com/i/flow/login", 10, {"width": 390, "height": 844, "mobile": True})
+    assert "device" not in bodies[0] and bodies[1]["device"] == {"width": 390, "height": 844, "mobile": True}

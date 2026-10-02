@@ -9,7 +9,7 @@ from aiohttp import web
 
 from .live import LiveViewController, LiveViewError
 from .manager import BrowserSessionManager, ProfileUnavailableError, SessionBusyError
-from .models import BrowserProfileStatus, ProfileRequest, SessionHandle
+from .models import BrowserProfileStatus, Device, ProfileRequest, SessionHandle
 from .settings import BrowserSessionSettings
 
 
@@ -71,10 +71,13 @@ def create_app(manager: BrowserSessionManager, token: str, live: LiveViewControl
     async def live_start(request: web.Request) -> web.Response:
         body = await request.json()
         try:
+            screen = body.get("device") if isinstance(body.get("device"), dict) else {}
+            device = Device.from_screen(screen.get("width"), screen.get("height"), screen.get("mobile")) if screen else None
             result = await live.start(
                 ProfileRequest(body["profile_id"], body.get("profile_name", body["profile_id"]), body["platform"]),
                 body["url"],
                 int(body.get("minutes", 20)),
+                device,
             )
         except (LiveViewError, SessionBusyError) as exc:
             raise web.HTTPConflict(text=str(exc)) from exc

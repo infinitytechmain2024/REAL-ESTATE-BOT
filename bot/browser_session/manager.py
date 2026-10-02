@@ -16,7 +16,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import BrowserProfileStatus, ProfileRequest, ProfileStatus, SessionHandle
+from .models import (
+    TOOLBAR_HEIGHT,
+    BrowserProfileStatus,
+    Device,
+    ProfileRequest,
+    ProfileStatus,
+    SessionHandle,
+)
 
 log = logging.getLogger(__name__)
 MAX_NAVIGATION_MS = 60_000
@@ -80,6 +87,25 @@ LAUNCH_OPTIONS: dict[str, Any] = {
     "ignore_default_args": ["--enable-automation"],
     "args": ["--disable-blink-features=AutomationControlled"],
 }
+# A phone's browser, for the live window opened from a phone (the sites then serve their mobile pages).
+MOBILE_USER_AGENT = ("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) "
+                     "Chrome/140.0.0.0 Mobile Safari/537.36")
+
+
+def launch_options(device: Device | None = None) -> dict[str, Any]:
+    """The browser for a live window laid out for ``device``; collectors (None) keep the desktop window.
+
+    The window sits in the top-left corner of the virtual screen at the page's size (Chromium keeps a
+    window at least 500 px wide; the viewer shows only ``device.clip``)."""
+    if device is None:
+        return LAUNCH_OPTIONS
+    size = {"width": device.width, "height": device.height}
+    options = {**LAUNCH_OPTIONS, "viewport": size, "screen": size,
+               "args": [*LAUNCH_OPTIONS["args"], "--window-position=0,0",
+                        f"--window-size={max(device.width, 500)},{device.height + TOOLBAR_HEIGHT}"]}
+    if device.mobile:
+        options.update(is_mobile=True, has_touch=True, user_agent=MOBILE_USER_AGENT)
+    return options
 
 class RedisLease(Protocol):
     async def set(self, name: str, value: str, *, nx: bool, ex: int) -> bool | None: ...
@@ -186,7 +212,8 @@ class BrowserSessionManager:
     def _key(profile_id: str) -> str:
         return f"browser-session:profile:{profile_id}"
 
-    async def acquire(self, request: ProfileRequest, *, persisted_state: str = "ready") -> SessionHandle:
+    async def acquire(self, request: ProfileRequest, *, persisted_state: str = "ready",
+                      device: Device | None = None) -> SessionHandle:
         if self._closing:
             raise RuntimeError("browser session manager is shutting down")
         if persisted_state not in {"ready", "in_use"}:
@@ -207,7 +234,8 @@ class BrowserSessionManager:
             os.close(fd)
             raise SessionBusyError("profile Redis lease is held")
         try:
-            browser = await self.launcher(profile_dir)
+            # Only a live window has a device; collectors keep the launcher's desktop window.
+            browser = await (self.launcher(profile_dir) if device is None else self.launcher(profile_dir, device=device))
             handle = SessionHandle(request.profile_id, token, profile_dir, time.time() + self.lease_seconds)
             renewal = asyncio.create_task(self._renew_forever(handle), name=f"browser-lease-{request.profile_id}")
             self._sessions[request.profile_id] = (handle, fd, browser, renewal)
@@ -526,11 +554,11 @@ class BrowserSessionManager:
             await self.state_changed(profile_id, state)
 
     @staticmethod
-    async def _playwright_launcher(profile_dir: Path) -> Any:
+    async def _playwright_launcher(profile_dir: Path, *, device: Device | None = None) -> Any:
         from playwright.async_api import async_playwright
 
         playwright = await async_playwright().start()
-        context = await playwright.chromium.launch_persistent_context(str(profile_dir), **LAUNCH_OPTIONS)
+        context = await playwright.chromium.launch_persistent_context(str(profile_dir), **launch_options(device))
         return _ManagedContext(context, playwright)
 
 
