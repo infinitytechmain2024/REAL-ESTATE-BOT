@@ -43,8 +43,10 @@ START_URLS = {
     "instagram": "https://www.instagram.com/",
     "tiktok": "https://www.tiktok.com/",
     "linkedin": "https://www.linkedin.com/login",
+    "x": "https://x.com/i/flow/login",
 }
-PLATFORM_NAMES = {"facebook": "Facebook", "instagram": "Instagram", "tiktok": "TikTok", "linkedin": "LinkedIn"}
+PLATFORM_NAMES = {"facebook": "Facebook", "instagram": "Instagram", "tiktok": "TikTok", "linkedin": "LinkedIn",
+                  "x": "X (Twitter)"}
 NOT_LOGGED_IN = "Вход не найден. Войдите в аккаунт в окне и нажмите «Готово»."
 CHECK_FAILED = ("Не удалось проверить вход: окно браузера не отвечает. Откройте браузер ещё раз, "
                 "войдите и нажмите «Готово», или нажмите «Закрыть» и начните вход заново.")

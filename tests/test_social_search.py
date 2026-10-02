@@ -491,6 +491,27 @@ async def test_no_ready_profile_skips_the_platform_with_an_owner_note_only() -> 
     assert note["state"] == "waiting" and note["note"] == "Instagram: нет готового профиля — войдите через /login instagram"
 
 
+async def test_no_ready_profile_asks_the_owners_for_a_login_and_tells_the_requester_once() -> None:
+    from bot.campaign.logins import LoginPrompts
+    from tests.test_near_match import ButtonMessenger
+
+    clock, campaigns, store, _browser, _, worker = world(RESULTS, platforms=("linkedin",))
+    messenger = ButtonMessenger()
+    worker.logins = LoginPrompts(messenger, {1}, every_hours=12, now=clock)
+    cid = await campaign(campaigns, store)
+    for _ in range(3):
+        await worker.tick()
+    [(owner, text, keys)] = messenger.asks
+    assert owner == 1 and text.startswith("Нужен вход в LinkedIn") and keys == (("🔐 Войти в LinkedIn", "login:go:linkedin"),)
+    told = [(chat, t) for chat, _, t in messenger.sent if chat == -1]
+    assert told == [(-1, "LinkedIn пока недоступен: администратор получил запрос на вход в аккаунт. "
+                         "Остальные источники продолжают поиск, LinkedIn подключится после входа.")]
+    clock.advance(13 * 3600)
+    await worker.tick()
+    assert len(messenger.asks) == 2, "the owners are asked again after every_hours"
+    assert store.social[(cid, "linkedin")]["state"] == "waiting"
+
+
 async def test_a_busy_browser_gives_the_query_back() -> None:
     _clock, campaigns, store, browser, _, worker = world(RESULTS)
     await campaign(campaigns, store)

@@ -46,6 +46,7 @@ LOGIN_COOKIES: dict[str, tuple[str, frozenset[str]]] = {
     "instagram": ("instagram.com", frozenset({"sessionid"})),
     "tiktok": ("tiktok.com", frozenset({"sessionid", "sid_tt"})),
     "linkedin": ("linkedin.com", frozenset({"li_at"})),
+    "x": ("x.com", frozenset({"auth_token"})),
 }
 
 
@@ -278,6 +279,7 @@ class BrowserSessionManager:
             "instagram": {"instagram.com", "www.instagram.com"},
             "tiktok": {"tiktok.com", "www.tiktok.com", "m.tiktok.com"},
             "linkedin": {"linkedin.com", "www.linkedin.com"},
+            "x": {"x.com", "www.x.com", "mobile.x.com", "twitter.com", "mobile.twitter.com"},
         }
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("snapshot URL must be HTTPS with a hostname")

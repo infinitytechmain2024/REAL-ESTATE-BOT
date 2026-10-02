@@ -810,7 +810,10 @@ async def main() -> None:
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool))
-    social, generator = _social_worker(settings, pool, campaigns)
+    from .logins import LoginPrompts
+
+    logins = LoginPrompts(messenger, settings.owner_ids())
+    social, generator = _social_worker(settings, pool, campaigns, logins)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
                                              "comment_leads": settings.comment_leads if comments else "off",
@@ -898,7 +901,7 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any,
     return worker, settings.poll_seconds, closers
 
 
-def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[Any, Any]:
+def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore, logins: Any = None) -> tuple[Any, Any]:
     """The social search worker when SOCIAL_SEARCH_PLATFORMS lists a platform (and the browser is reachable)."""
     config = settings.social_config()
     if not config.platforms:
@@ -919,7 +922,8 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
         log.warning("campaign.runner.social_queries_without_ai", extra={"hint": "set OPENROUTER_API_KEY"})
     # The browser's API answers after navigation, the bounded wait for results and the scrolls.
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
-    worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config)
+    worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config,
+                                logins=logins)
     return worker, generator
 
 

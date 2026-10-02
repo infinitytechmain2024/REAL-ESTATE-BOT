@@ -429,6 +429,8 @@ def test_login_cookie_rules_per_platform() -> None:
     assert signed_in([{"name": "c_user", "domain": ".facebook.com", **live}], "facebook", now=now) is True
     assert signed_in([{"name": "sessionid", "domain": ".instagram.com", **live}], "instagram", now=now) is True
     assert signed_in([{"name": "sid_tt", "domain": ".tiktok.com", **live}], "tiktok", now=now) is True
+    assert signed_in([{"name": "auth_token", "domain": ".x.com", **live}], "x", now=now) is True
+    assert signed_in([{"name": "ct0", "domain": ".x.com", **live}], "x", now=now) is False
     assert signed_in([{"name": "li_at", "domain": ".linkedin.com", **live}], "linkedin", now=now) is True
     # Wrong site, expired, empty, or a cookie that exists logged out too.
     assert signed_in([{"name": "sessionid", "domain": ".tiktok.com.evil.io", **live}], "tiktok", now=now) is False

@@ -17,7 +17,7 @@ OWNER: tuple[tuple[str, str], ...] = (
     ("pause", "Приостановить сбор"),
     ("resume", "Продолжить сбор"),
     ("cancel", "Отменить сбор"),
-    ("login", "Вход в Facebook / Instagram / TikTok / LinkedIn"),
+    ("login", "Вход в Facebook / Instagram / TikTok / LinkedIn / X"),
     ("auto", "Авто-режим: on | off | status"),
     ("operators", "Список одобренных аккаунтов"),
     ("help", "Все команды"),

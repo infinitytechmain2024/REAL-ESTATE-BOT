@@ -145,7 +145,7 @@ async def run(profile_id: str, platform: str, url: str, minutes: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--profile-id", required=True)
-    parser.add_argument("--platform", default="facebook", choices=["facebook", "instagram", "tiktok", "linkedin", "website"])
+    parser.add_argument("--platform", default="facebook", choices=["facebook", "instagram", "tiktok", "linkedin", "x", "website"])
     parser.add_argument("--url", default="https://www.facebook.com/")
     parser.add_argument("--minutes", type=int, default=20)
     args = parser.parse_args()

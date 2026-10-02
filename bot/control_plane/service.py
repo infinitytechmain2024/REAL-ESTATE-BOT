@@ -489,7 +489,7 @@ class ControlPlane:
                 return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
             text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
                     "/campaign <goal> | status | cancel <id>, "
-                    "/login [facebook|instagram|tiktok|linkedin] [profile-name]. Confirm changes with: confirm <token>.")
+                    "/login [facebook|instagram|tiktok|linkedin|x] [profile-name]. Confirm changes with: confirm <token>.")
             if role == "owner":
                 text += " Owners: /settings (roles with buttons), /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
             if self.auto.eligible(message.user_id):
