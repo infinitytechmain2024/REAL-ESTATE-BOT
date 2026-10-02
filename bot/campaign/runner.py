@@ -221,6 +221,7 @@ class CampaignRunner:
         web: WebProgress | None = None,
         relevance: RelevanceJudge | None = None,
         recorder: Recorder | None = None,
+        logins: Any = None,
     ) -> None:
         """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
         status; everyone else sees only the user-safe labels of ``status_text``. ``web``: the
@@ -233,6 +234,8 @@ class CampaignRunner:
         self.web = web
         self.relevance = relevance
         self.recorder = recorder
+        # ``bot.campaign.logins.LoginPrompts``: no Facebook profile to use -> the operators get the login link.
+        self.logins = logins
         # After a failed relevance call the model is left alone for a minute: one slow or broken
         # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
         self._relevance_paused_until: datetime | None = None
@@ -329,6 +332,10 @@ class CampaignRunner:
         try:
             await self.discovery.run(campaign.id)
         except DiscoveryRefused as exc:
+            if str(exc) == "facebook_profile_not_ready" and self.logins is not None:
+                # No Facebook profile to use: the operators get the login link (bot.campaign.logins).
+                with suppress(Exception):
+                    await self.logins.need("facebook", [campaign])
             return PROFILE_BUSY if "profile" in str(exc) else f"Пауза: {exc}"
         after = await self.campaigns.get(campaign.id)
         if after is not None and after.state == "paused_verification":
@@ -802,9 +809,9 @@ async def main() -> None:
     else:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     comments, lead_judge = _comment_worker(settings, pool)
-    from .logins import LoginPrompts
+    from .logins import LoginPrompts, PostgresLoginRequests
 
-    logins = LoginPrompts(messenger, settings.owner_ids())
+    logins = LoginPrompts(messenger, settings.owner_ids(), requests=PostgresLoginRequests(pool))
     reach, reach_closers = _reach_worker(settings, pool, logins)
     if discovery is not None:
         # After the groups, Facebook people and pages searches feed the reach's contact cards.
@@ -813,7 +820,7 @@ async def main() -> None:
     if comments is None:
         config = replace(config, comment_leads="off")
     store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
-    runner = CampaignRunner(campaigns, store, messenger, discovery,
+    runner = CampaignRunner(campaigns, store, messenger, discovery, logins=logins,
                             config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool))
     social, generator = _social_worker(settings, pool, campaigns, logins, reach)

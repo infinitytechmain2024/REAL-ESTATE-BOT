@@ -198,3 +198,50 @@ async def test_people_and_companies_of_a_linkedin_search_become_judged_contacts(
     assert urls == {"https://www.linkedin.com/in/juan-perez-inversor/", "https://www.linkedin.com/company/fondo-madrid/"}
     assert all(s.campaign_id == cid for s in reach_store.contacts.values())
     assert reach_store.used.get(cid) is None, "a LinkedIn page is not one of the reach's own queries"
+
+
+async def test_with_the_store_the_need_is_recorded_and_the_owners_get_no_button_from_the_runner() -> None:
+    from bot.campaign.logins import LoginPrompts
+
+    class Requests:
+        def __init__(self) -> None:
+            self.needed: list[tuple[str, int]] = []
+
+        async def need(self, platform: str, searches: int) -> None:
+            self.needed.append((platform, searches))
+
+    requests, messenger = Requests(), ButtonMessenger()
+    prompts = LoginPrompts(messenger, {1}, requests=requests)
+    await prompts.need("linkedin", [MADRID])
+    assert requests.needed == [("linkedin", 1)] and messenger.asks == [], "the control plane sends the link"
+    assert [chat for chat, _, _ in messenger.sent] == [42], "the requester is still told once"
+
+
+async def test_no_facebook_profile_records_a_facebook_login_need() -> None:
+    from bot.campaign import MemoryCampaignStore, plan_campaign
+    from bot.campaign.discovery import DiscoveryRefused
+    from bot.campaign.logins import LoginPrompts
+    from bot.campaign.runner import CampaignRunner
+    from bot.campaign.runs import MemoryRunStore
+
+    class Refusing:
+        async def run(self, campaign_id: str) -> None:
+            raise DiscoveryRefused("facebook_profile_not_ready")
+
+    class Requests:
+        needed: list[str]
+
+        def __init__(self) -> None:
+            self.needed = []
+
+        async def need(self, platform: str, searches: int) -> None:
+            self.needed.append(platform)
+
+    campaigns = MemoryCampaignStore()
+    requests = Requests()
+    runner = CampaignRunner(campaigns, MemoryRunStore(campaigns), ButtonMessenger(), Refusing(),  # type: ignore[arg-type]
+                            logins=LoginPrompts(ButtonMessenger(), {7}, requests=requests))
+    cid = await campaigns.create(plan_campaign("квартиры в аренду в Мадриде"), chat_id=7, requested_by=7,
+                                 source_text="x", actor="t")
+    await runner.step(cid)
+    assert requests.needed == ["facebook"]

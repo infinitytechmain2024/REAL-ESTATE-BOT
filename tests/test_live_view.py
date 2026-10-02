@@ -21,10 +21,12 @@ from bot.control_plane.live_view import (
     create_gate_app,
     verify_init_data,
 )
-from bot.control_plane.models import IncomingMessage, LiveProfile
+from bot.control_plane.models import IncomingMessage, LiveProfile, Reply
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import MemoryControlPlaneStore, MemoryLiveViewStore
+from tests.test_near_match import needs_db
+from tests.test_near_match import pool as pool
 
 TOKEN = "123456:bot-token"
 OPERATOR, STRANGER = 11, 999
@@ -476,3 +478,51 @@ async def test_the_browser_client_sends_the_phone_screen_only_when_there_is_one(
     await client.start(profile, "https://x.com/i/flow/login", 10)
     await client.start(profile, "https://x.com/i/flow/login", 10, {"width": 390, "height": 844, "mobile": True})
     assert "device" not in bodies[0] and bodies[1]["device"] == {"width": 390, "height": 844, "mobile": True}
+
+
+@pytest.mark.asyncio
+async def test_a_platform_a_search_needs_gets_its_login_link_sent_by_itself_like_a_checkpoint() -> None:
+    store = MemoryLiveViewStore()
+    sent: list[tuple[int, Reply]] = []
+
+    async def notify(chat_id: int, reply: Reply) -> None:
+        sent.append((chat_id, reply))
+
+    live = LiveViewCoordinator(store, FakeBrowser(), LiveViewConfig("https://x.sslip.io", frozenset({OPERATOR})), notify)
+    store.login_requests["x"] = datetime.now(UTC)
+    store.login_requests["linkedin"] = datetime.now(UTC) - timedelta(hours=2)  # needed long ago: not asked
+    await live.tick()
+    await live.tick()
+    [(chat, reply)] = sent
+    assert chat == OPERATOR and reply.text.startswith("Нужен вход в X (Twitter): профиль x-main.")
+    assert reply.buttons[0].text == "Открыть браузер" and reply.buttons[0].web_app_url.startswith("https://x.sslip.io/live/")
+    session = next(iter(store.sessions.values()))
+    assert (session.profile.name, session.reason) == ("x-main", "login")
+
+    # Closed without logging in: not asked again at once; a signed-in profile is never asked about.
+    await live.finish(session.id, OPERATOR, done=False)
+    await live.tick()
+    assert len(sent) == 1
+    store.profiles[session.profile.id] = replace(session.profile, state="ready")
+    store.closed_at.clear()
+    await live.tick()
+    assert len(sent) == 1
+
+
+@needs_db
+async def test_postgres_login_need_reaches_the_watcher(pool) -> None:
+    from bot.campaign.logins import PostgresLoginRequests
+    from bot.control_plane.store import PostgresLiveViewStore
+
+    await PostgresLoginRequests(pool).need("x", 2)
+    await PostgresLoginRequests(pool).need("x", 3)
+    assert await pool.fetchval("select searches from login_requests where platform = 'x'") == 3
+    class Owner:
+        def _pool(self):
+            return pool
+
+    store = PostgresLiveViewStore(Owner())  # type: ignore[arg-type]
+    assert await store.platforms_needing_login(3600) == ["x"]
+    await pool.execute("insert into browser_profiles(profile_name, platform, storage_locator, state)"
+                       " values ('x-main', 'x', 'volume:x', 'ready')")
+    assert await store.platforms_needing_login(3600) == []

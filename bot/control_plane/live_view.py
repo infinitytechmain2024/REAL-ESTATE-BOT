@@ -61,6 +61,7 @@ class LiveViewStore(Protocol):
     async def close_live_view(self, session_id: str, state: str, actor: str, error_code: str | None = None) -> LiveSession | None: ...
     async def complete_verification(self, profile: LiveProfile, actor: str) -> None: ...
     async def profiles_needing_human(self, cooldown_seconds: int) -> list[LiveProfile]: ...
+    async def platforms_needing_login(self, cooldown_seconds: int) -> list[str]: ...
     async def expired_live_views(self) -> list[LiveSession]: ...
     async def platform_states(self) -> dict[str, str]:
         """platform -> the most usable profile state (ready, else in_use, else any)."""
@@ -348,10 +349,17 @@ class LiveViewCoordinator:
                 await self.store.close_live_view(session.id, "expired", "system")
         if not self.enabled or self.notifier is None:
             return
-        for profile in await self.store.profiles_needing_human(self.config.request_minutes * 60):
-            session, created = await self.store.request_live_view(profile, "checkpoint", "system", self.config.request_minutes * 60)
+        ttl = self.config.request_minutes * 60
+        requests = [(profile, "checkpoint") for profile in await self.store.profiles_needing_human(ttl)]
+        # A search needs a platform nobody is signed in to (bot.campaign.logins): the same message, a login.
+        for platform in await self.store.platforms_needing_login(ttl):
+            if platform in START_URLS:
+                requests.append((await self.store.ensure_profile(platform, f"{platform}-main", "system"), "login"))
+        for profile, reason in requests:
+            session, created = await self.store.request_live_view(profile, reason, "system", ttl)
             if not created:
                 continue
+            log.info("telegram.live_view.requested", extra={"platform": profile.platform, "reason": reason})
             for operator in sorted(self.config.operator_ids):
                 try:
                     await self.notifier(operator, self.request_reply(session, operator))
