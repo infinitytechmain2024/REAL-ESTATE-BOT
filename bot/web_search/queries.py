@@ -131,6 +131,7 @@ class QueryTask:
     constraints: dict[str, Any] = field(default_factory=dict)
     languages: tuple[str, ...] = QUERY_LANGUAGES
     country_code: str | None = None  # the plan's country (any place in the world)
+    sites: tuple[str, ...] = ()  # sites the person approved before (``sites``): searched first
 
     @property
     def country(self) -> str | None:
@@ -156,11 +157,12 @@ class QueryTask:
         return self.location_aliases.get(language or "es") or self.location
 
     def portals(self) -> tuple[str, ...]:
-        if self.vertical == "investors":
-            return ()
-        if self.ukrainian:
-            return UKRAINE_PORTALS
-        return SPAIN_PORTALS if self.spanish else ()  # elsewhere: no known portals, the open web only
+        """The person's approved sites first, then the country's known portals (none for investors)."""
+        known: tuple[str, ...] = ()
+        if self.vertical != "investors":
+            # elsewhere: no known portals, the open web only
+            known = UKRAINE_PORTALS if self.ukrainian else SPAIN_PORTALS if self.spanish else ()
+        return tuple(dict.fromkeys((*self.sites, *known)))
 
 
 class QueryGenerator(Protocol):

@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 
 from bot.campaign import geo
 from bot.campaign.models import TERMINAL_STATES, Campaign
+from bot.campaign.sites import Owner, SiteGate
 from bot.campaign.store import CampaignStore
 
 from .extract import (
@@ -86,12 +87,17 @@ class WebSearchConfig:
             raise ValueError("unsafe web search limits")
 
 
-def query_task(campaign: Campaign) -> QueryTask:
+def query_task(campaign: Campaign, sites: tuple[str, ...] = ()) -> QueryTask:
     plan = campaign.plan
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
                      constraints=dict(plan.constraints), languages=tuple(plan.languages),
-                     country_code=plan.country)
+                     country_code=plan.country, sites=sites)
+
+
+def site_owner(campaign: Campaign) -> Owner:
+    plan = campaign.plan
+    return Owner(campaign.id, campaign.requested_by, campaign.chat_id, plan.vertical, plan.location, plan.country)
 
 
 class WebSearchWorker:
@@ -104,6 +110,7 @@ class WebSearchWorker:
         generator: QueryGenerator,
         *,
         renderer: Renderer | None = None,
+        gate: SiteGate | None = None,
         config: WebSearchConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -111,6 +118,8 @@ class WebSearchWorker:
             campaigns, store, searcher, fetcher, generator)
         self.config, self.now = config or WebSearchConfig(), now
         self.renderer = renderer
+        # The person approves the sites before any of their pages is read (``sites``); None: every site is read.
+        self.gate = gate
         self.renders: dict[str, int] = {}   # browser reads per campaign (this process)
         self.token = str(uuid.uuid4())
 
@@ -167,6 +176,24 @@ class WebSearchWorker:
             return
         counts = await self.store.counts(cid)
         usage = await self.store.usage()
+        allowed: frozenset[str] | None = None
+        if self.gate is not None:
+            # Every query of the round first: the person sees all its sites in one list.
+            if counts.pending_queries and usage.queries < cfg.max_queries_per_day:
+                await self._search(campaign, counts.queries, counts.pages)
+                return
+            if counts.queued_urls:
+                queued = await self.store.queued_hosts(cid)
+                verdict = await self.gate.check(site_owner(campaign), queued)
+                skipped = await self.store.skip_hosts(cid, verdict.rejected & frozenset(queued), "site_rejected")
+                if skipped:
+                    log.info("web_search.sites_skipped", extra={"campaign_id": cid, "urls": skipped})
+                allowed = verdict.allowed
+                counts = await self.store.counts(cid)
+                if counts.queued_urls and verdict.waiting and not allowed & frozenset(queued):
+                    await self.store.set_progress(cid, None, self._line(counts.queries, counts.pages,
+                                                                        "жду подтверждения сайтов"))
+                    return
         if counts.queued_urls:
             if counts.pages >= cfg.max_pages_per_campaign:
                 await self._done(campaign, "page_cap")
@@ -174,7 +201,7 @@ class WebSearchWorker:
             if usage.pages >= cfg.max_pages_per_day:
                 await self._done(campaign, "daily_page_cap")
                 return
-            await self._read_pages(campaign, counts.pages, usage.pages)
+            await self._read_pages(campaign, counts.pages, usage.pages, allowed)
             return
         if counts.pending_queries:
             if usage.queries >= cfg.max_queries_per_day:
@@ -199,7 +226,10 @@ class WebSearchWorker:
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
-        task = query_task(campaign)
+        sites: tuple[str, ...] = ()
+        if self.gate is not None:
+            sites = await self.gate.preferred(campaign.requested_by, campaign.plan.vertical, campaign.plan.country)
+        task = query_task(campaign, sites)
         # Whatever generated them, every query names the campaign's place (``localise``).
         queries = localise(await self.generator.generate(task, used=used, count=want), task)
         round_no = await self.store.next_round(campaign.id)
@@ -232,10 +262,11 @@ class WebSearchWorker:
 
     # -- pages --
 
-    async def _read_pages(self, campaign: Campaign, pages: int, pages_today: int) -> None:
+    async def _read_pages(self, campaign: Campaign, pages: int, pages_today: int,
+                          hosts: frozenset[str] | None = None) -> None:
         cfg = self.config
         budget = min(cfg.pages_per_tick, cfg.max_pages_per_campaign - pages, cfg.max_pages_per_day - pages_today)
-        for url in await self.store.next_urls(campaign.id, cfg.pages_per_tick * 3):
+        for url in await self.store.next_urls(campaign.id, cfg.pages_per_tick * 3, hosts=hosts):
             if budget <= 0:
                 break
             if await self.store.host_attempts(campaign.id, url.host) >= cfg.max_pages_per_host:

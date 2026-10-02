@@ -44,6 +44,10 @@ class WebSearchSettings(BaseSettings):
     max_renders_per_campaign: int = Field(default=15, ge=0, le=200, validation_alias="WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN")
     # Optional outbound proxy/VPN for page fetches (http://, https://, socks5://). Never logged.
     proxy_url: str = Field(default="", validation_alias="WEB_SEARCH_PROXY_URL")
+    # The person approves the sites before their pages are read (bot/campaign/sites.py).
+    site_approval: bool = Field(default=True, validation_alias="WEB_SEARCH_SITE_APPROVAL")
+    site_remind_minutes: int = Field(default=30, ge=1, le=1440, validation_alias="WEB_SEARCH_SITE_REMIND_MINUTES")
+    site_max_questions: int = Field(default=3, ge=1, le=20, validation_alias="WEB_SEARCH_SITE_MAX_QUESTIONS")
 
     def blocked_hosts(self) -> frozenset[str]:
         return frozenset(h.strip().lower().removeprefix("www.") for h in self.blocked_hosts_raw.replace(",", " ").split()

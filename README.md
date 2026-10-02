@@ -413,6 +413,24 @@ The JSON result is normalized for the later analysis pipeline. A future
 upstream integration must expose a read-only adapter compatible with this
 policy; flipping an environment variable cannot enable it.
 
+A queued run for a platform the adapter cannot read (LinkedIn) is cancelled at
+once with `error_code = unsupported_platform`, so it never holds the runs
+queued behind it.
+
+### Search sites approved by the person
+
+Before the web stage reads any page, the bot runs every search query of the
+round, then sends the new sites as one numbered list (grouped by the query that
+found them) and asks «Все сайты подтверждены?». The person answers with the
+buttons «✅ Все» / «✏️ Убрать некоторые» or in text: «да», «кроме 3 и 5»,
+«убери olx», «только 1, 2». Pages are read only from approved sites. Decisions
+are stored per person and mode (`search_sites`, migration 029): an approved
+site is read in later searches without asking and is searched first
+(`site:<host>`); a rejected one is never offered again. One reminder after
+`WEB_SEARCH_SITE_REMIND_MINUTES`, at most `WEB_SEARCH_SITE_MAX_QUESTIONS` lists
+per search; `WEB_SEARCH_SITE_APPROVAL=false` reads every site as before.
+Facebook groups have their own stage and are never part of the list.
+
 ### Scrapling website connector
 
 The `scrapling-connector` Compose profile is the lightweight choice for a

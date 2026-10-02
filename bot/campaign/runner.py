@@ -792,7 +792,7 @@ async def main() -> None:
         discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, reader)
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
-    web = await _web_stage(campaigns, pool, settings)
+    web = await _web_stage(campaigns, pool, settings, messenger)
     judge = None
     if settings.openrouter_api_key and settings.relevance_max_calls > 0:
         from .relevance import OpenRouterRelevanceJudge
@@ -846,7 +846,8 @@ async def main() -> None:
         await pool.close()
 
 
-async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) -> tuple[Any, float, list[Any]] | None:
+async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any,
+                     messenger: Any = None) -> tuple[Any, float, list[Any]] | None:
     """The website search worker (bot.web_search), unless WEB_SEARCH_ENABLED=false.
 
     Pages drawn by JavaScript are read once more in the Browser Session Manager
@@ -882,8 +883,17 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
 
         renderer = BrowserRenderer(BrowserSessionClient(runner_settings.browser_url, runner_settings.browser_token),
                                    timeout_seconds=settings.render_timeout_seconds)
+    gate = None
+    if settings.site_approval and messenger is not None:
+        from .sites import GateConfig, PostgresSiteStore, SiteGate
+
+        gate = SiteGate(PostgresSiteStore(pool), messenger,
+                        config=GateConfig(remind_after_minutes=settings.site_remind_minutes,
+                                          max_batches=settings.site_max_questions))
+    else:
+        log.warning("campaign.web_search_sites_unapproved", extra={"hint": "WEB_SEARCH_SITE_APPROVAL=false"})
     worker = WebSearchWorker(campaigns, PostgresWebStore(pool), searcher, fetcher, FallbackQueryGenerator(model),
-                             renderer=renderer, config=config)
+                             renderer=renderer, gate=gate, config=config)
     closers = [searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
     return worker, settings.poll_seconds, closers
 
