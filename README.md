@@ -784,6 +784,14 @@ sudo /opt/real-estate-bot/scripts/vps_backup.sh      # база, профили 
 sudo BACKUP=/root/bot-backup-XXXX.tar bash vps_install.sh
 ```
 
+Полная переустановка на том же сервере одной строкой (сама находит текущую установку, делает
+и проверяет копию базы, входов в соцсети и `.env`, удаляет старое, ставит заново и всё восстанавливает;
+IP вводить не нужно):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/infinitytechmain2024/REAL-ESTATE-BOT/main/scripts/vps_reinstall.sh | sudo bash
+```
+
 Обновление на месте: `sudo bash /opt/real-estate-bot/scripts/vps_install.sh`.
 
 Боевой вариант, если нужен Facebook. Браузер с залогиненным профилем должен

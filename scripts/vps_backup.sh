@@ -8,7 +8,12 @@
 # The archive holds live logins and keys: keep it private, delete it when the new server runs.
 set -euo pipefail
 
-project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The project is the current directory when it holds the stack, else the directory above this script.
+if [[ -f docker-compose.yml && -f .env ]]; then
+  project_dir="$(pwd)"
+else
+  project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 cd "$project_dir"
 out="${1:-/root/bot-backup-$(date +%Y%m%d-%H%M).tar}"
 work="$(mktemp -d)"
