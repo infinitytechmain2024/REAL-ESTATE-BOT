@@ -70,8 +70,9 @@ changes.
 On the machine that will host it:
 
 ```bash
-git clone <this repo> ~/REAL-ESTATE-BOT
-cd ~/REAL-ESTATE-BOT
+sudo git clone <this repo> /opt/real-estate-bot
+sudo chown -R $USER: /opt/real-estate-bot
+cd /opt/real-estate-bot
 make setup          # interactive .env builder; keys never leave the machine
 ```
 

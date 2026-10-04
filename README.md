@@ -728,8 +728,11 @@ psql "$SUPABASE_DB_URL" -f bot/services/db/migrations/001_init.sql
 ### Обновление бота на VPS — одна команда
 
 ```sh
-cd ~/REAL-ESTATE-BOT && ./scripts/update.sh
+cd /opt/real-estate-bot && ./scripts/update.sh
 ```
+
+Если не помните, где лежит проект: `docker compose ls` — путь в колонке
+`CONFIG FILES`.
 
 Скрипт берёт свежий код с GitHub (только fast-forward: если на сервере
 правили файлы руками, он остановится и покажет какие), скачивает свежие
@@ -794,8 +797,9 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ### 2. Код и `.env`
 
 ```sh
-git clone https://github.com/infinitytechmain2024/REAL-ESTATE-BOT.git
-cd REAL-ESTATE-BOT
+sudo git clone https://github.com/infinitytechmain2024/REAL-ESTATE-BOT.git /opt/real-estate-bot
+sudo chown -R $USER: /opt/real-estate-bot
+cd /opt/real-estate-bot
 python3 scripts/setup_env.py        # спросит ключи, запишет .env с правами 0600
 ```
 
