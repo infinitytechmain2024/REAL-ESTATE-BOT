@@ -24,7 +24,7 @@ from bot.campaign.status_text import (
 )
 from bot.operators import OperatorSet
 from bot.orchestra.dispatcher import OrchestraDispatcher
-from tests.test_campaign_runner import GOAL, SUMMARY, Clock, FakeDiscovery, FakeMessenger
+from tests.test_campaign_runner import GOAL, Clock, FakeDiscovery, FakeMessenger
 from tests.test_orchestra_dispatcher import FakeStore, claimed
 
 USER, OWNER, CHAT = 7, 99, -100
@@ -148,7 +148,7 @@ async def test_a_normal_user_sees_only_allowed_statuses_through_a_whole_search()
     for text in shown:
         assert_user_safe(text)
     assert timeline(messenger) == [SEARCHING, FACEBOOK, GROUP_4, FACEBOOK, CHECKING, DONE]
-    sent_statuses = [t for _, _, t in messenger.sent if "🔎" not in t and not t.startswith(SUMMARY)]
+    sent_statuses = [t for _, _, t in messenger.sent if "🔎" not in t]
     # One status message at a time: it moved below the card and the old one was deleted.
     assert len(sent_statuses) - len(messenger.deleted) == 1, (sent_statuses, messenger.deleted)
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
@@ -218,11 +218,10 @@ async def test_a_failing_status_edit_never_breaks_the_run() -> None:
     cid = await full_search(runner, campaigns, store, clock, plan, USER)
     assert (await campaigns.get(cid)).state == "completed"
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
-    # Edits fail, but the status still moved below the card and the summary (sent anew, the old one deleted).
-    assert [t for _, _, t in messenger.sent if "🔎" not in t and not t.startswith(SUMMARY)] == [
-        SEARCHING, CHECKING, DONE]
-    assert len(messenger.deleted) == 2
-    assert len(messenger.summaries()) == 1
+    # Edits fail, but the status still moved below the card once (sent anew, the old one deleted).
+    assert [t for _, _, t in messenger.sent if "🔎" not in t] == [SEARCHING, CHECKING]
+    assert len(messenger.deleted) == 1
+    assert messenger.summaries() == []  # «Итог поиска» is for owners only
 
 
 # --- the Orchestra's /campaign notices -----------------------------------------------------

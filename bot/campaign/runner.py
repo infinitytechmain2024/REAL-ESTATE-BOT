@@ -642,12 +642,13 @@ class CampaignRunner:
         log.info("campaign.offer_asked", extra={"campaign_id": campaign.id, "bucket": bucket})
 
     async def _summary(self, campaign: Campaign) -> None:
-        """«Итог поиска»: what each source gave, sent once when a campaign completes or is cancelled.
+        """«Итог поиска»: what each source gave, sent once to an owner's campaign when it completes or is cancelled.
 
         Only for a campaign that ended within ``SUMMARY_WINDOW``: campaigns that ended before this
         feature existed (still stepped for a day) get none.
         """
-        if campaign.state not in SUMMARY_STATES or campaign.finished_at is None:
+        if (campaign.state not in SUMMARY_STATES or campaign.finished_at is None
+                or campaign.requested_by not in self.owner_ids):  # owners only: it is a technical report
             return
         if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_summary(campaign.id):
             return

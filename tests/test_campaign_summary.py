@@ -15,6 +15,7 @@ from bot.web_search.urls import SPAIN_PORTALS
 from tests.test_campaign_runner import SUMMARY, Clock, FakeDiscovery, FakeMessenger
 
 PORTALS = SPAIN_PORTALS
+OWNER, USER = 1, 2
 
 
 def test_plural() -> None:
@@ -93,12 +94,13 @@ def build(messenger: FakeMessenger | None = None):
     messenger = messenger or FakeMessenger()
     clock = Clock()
     runner = CampaignRunner(campaigns, store, messenger, FakeDiscovery(campaigns, store, 3), now=clock,
-                            config=RunnerConfig())
+                            config=RunnerConfig(), owner_ids={OWNER})
     return campaigns, store, messenger, clock, runner
 
 
-async def finished(campaigns, store, state: str = "completed") -> str:
-    cid = await campaigns.create(plan_campaign("квартира в Мадриде до 1200 евро"), chat_id=-100, requested_by=2,
+async def finished(campaigns, store, state: str = "completed", requested_by: int = 1) -> str:
+    cid = await campaigns.create(plan_campaign("квартира в Мадриде до 1200 евро"), chat_id=-100,
+                                 requested_by=requested_by,
                                  source_text="квартира в Мадриде до 1200 евро", actor="test")
     store.findings[cid] = [StreamFinding("f1", "card", None, url="https://www.facebook.com/groups/1/posts/2")]
     store.posts_read[cid] = {("facebook", "facebook"): (4, 120)}
@@ -126,6 +128,9 @@ async def test_old_failed_or_unsent_summaries() -> None:
     await runner.step(old)
     failed = await finished(campaigns, store, state="failed")
     await runner.step(failed)
+    user = await finished(campaigns, store, requested_by=USER)  # a normal user: no technical report
+    clock.at = (await campaigns.get(user)).finished_at
+    await runner.step(user)
     assert messenger.summaries() == []
 
     campaigns, store, messenger, clock, runner = build()
