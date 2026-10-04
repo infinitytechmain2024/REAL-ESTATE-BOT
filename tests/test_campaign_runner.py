@@ -42,6 +42,9 @@ class Clock:
         self.at += timedelta(seconds=seconds)
 
 
+SUMMARY = "📊 Итог поиска"
+
+
 class FakeMessenger:
     def __init__(self) -> None:
         self.sent: list[tuple[int, int, str]] = []  # (chat, message id, text)
@@ -56,7 +59,7 @@ class FakeMessenger:
             self.fail -= 1
             raise httpx.ConnectError("telegram unreachable")
         self.sent.append((chat_id, len(self.sent) + 1, text))
-        if "🔎" not in text:  # send() carries cards and status messages only
+        if "🔎" not in text and not text.startswith(SUMMARY):  # cards, the summary and status messages
             self.timeline.append(text)
         return len(self.sent)
 
@@ -72,6 +75,9 @@ class FakeMessenger:
 
     def findings(self) -> list[str]:
         return [t for _, _, t in self.sent if "🔎" in t]
+
+    def summaries(self) -> list[str]:
+        return [t for _, _, t in self.sent if t.startswith(SUMMARY)]
 
     def statuses(self) -> list[str]:
         return list(self.timeline)

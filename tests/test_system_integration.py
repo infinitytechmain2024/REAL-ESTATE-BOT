@@ -689,8 +689,10 @@ async def test_campaign_from_command_to_streamed_finding_and_completion(pool) ->
     assert await pool.fetchval("select state from findings") == "delivered"
     assert dict(await pool.fetch("select group_key, state from campaign_groups")) == {"pisosmadrid": "collected", "rentmadrid": "collected"}
     assert tuple(await pool.fetchrow("select state, outcome from campaign_windows")) == ("finished", "succeeded")
-    assert messenger.edits[-1][2].endswith("Кампания завершена · найдено 1")
-    assert messenger.edits[-1][1] == await pool.fetchval("select status_message_id from campaigns")
+    assert messenger.statuses()[-1].endswith("Кампания завершена · найдено 1")  # moved below the summary
+    # The status is the last message, below the summary: its id is the campaign's status message.
+    assert messenger.sent[-1][1] == await pool.fetchval("select status_message_id from campaigns")
+    assert len(messenger.summaries()) == 1
 
     # Restarts and later cycles never send anything twice.
     edits, sent = len(messenger.edits), len(messenger.sent)
@@ -737,7 +739,7 @@ async def test_campaign_window_challenge_pauses_until_verification_resumes_it(po
     await runner.tick()
     assert await pool.fetchval("select state from campaigns") == "completed"
     assert len(messenger.findings()) == 1
-    assert messenger.edits[-1][2].endswith("Кампания завершена · найдено 1")
+    assert messenger.statuses()[-1].endswith("Кампания завершена · найдено 1")  # moved below the summary
 
 
 @pytest.mark.asyncio
@@ -756,7 +758,8 @@ async def test_campaign_cancel_command_cancels_the_in_flight_window(pool) -> Non
     await runner.tick()
     assert await pool.fetchval("select state from acquisition_batches") == "cancelled"
     assert await pool.fetchval("select state from campaign_windows") == "finished"
-    assert messenger.edits[-1][2].endswith("Кампания остановлена")
+    assert messenger.statuses()[-1].endswith("Кампания остановлена")  # moved below the summary
+    assert len(messenger.summaries()) == 1
     # facebook-runner skips the cancelled batch; the campaign never issues another window.
     assert await facebook_runner(pool, CampaignFacebook({})).step() is True
     assert await pool.fetchval("select state from collector_launch_requests") == "skipped"

@@ -8,6 +8,8 @@ from typing import Literal
 UrlKind = Literal["listing", "index", "unknown"]
 RunState = Literal["searching", "done", "stopped"]
 QUERY_LANGUAGES = ("es", "en", "ru", "uk")
+# The last line of a post built from a search result (``worker.search_result``); the relevance check reads it.
+SEARCH_RESULT_NOTE = "(Страница сайта не прочитана: это заголовок и описание объявления из результатов поиска.)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +24,24 @@ class WebStatus:
     active: bool
     host: str | None = None
     line: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SiteReport:
+    """One site's search funnel in a campaign (the end-of-campaign summary).
+
+    ``queries``/``results``: ``site:`` queries for it and what the search engine returned;
+    ``links``: its URLs the campaign met; ``read``: pages read; ``from_search``: listings kept from the
+    search result (the site refused); ``refused``: links it would not serve (403/429, robots.txt, a block).
+    """
+
+    host: str
+    queries: int = 0
+    results: int = 0
+    links: int = 0
+    read: int = 0
+    from_search: int = 0
+    refused: int = 0
 
 
 @dataclass(frozen=True, slots=True)

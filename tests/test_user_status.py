@@ -221,6 +221,7 @@ async def test_a_failing_status_edit_never_breaks_the_run() -> None:
     # Edits fail, but the status still moved below the card once (sent anew, the old one deleted).
     assert [t for _, _, t in messenger.sent if "🔎" not in t] == [SEARCHING, CHECKING]
     assert len(messenger.deleted) == 1
+    assert messenger.summaries() == []  # «Итог поиска» is for owners only
 
 
 # --- the Orchestra's /campaign notices -----------------------------------------------------

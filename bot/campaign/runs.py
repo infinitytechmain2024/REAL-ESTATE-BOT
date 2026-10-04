@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
 from .leads import Person, Sighting
 from .models import WINDOW_SIZE
@@ -38,6 +39,20 @@ class RunState:
     status_text: str | None = None
     next_window_at: datetime | None = None
     drain_started_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCount:
+    """What one source gave a campaign (``summary``): ``platform`` facebook / website / tiktok / instagram /
+    linkedin; ``name`` the site's host for a website, else the platform; ``sources`` groups (or pages) read."""
+
+    platform: str
+    name: str
+    sources: int = 0
+    posts: int = 0       # posts / pages read
+    relevant: int = 0    # the analysis kept them (findings)
+    sent: int = 0        # cards sent
+    held: int = 0        # similar / other, waiting for «Одобрить»
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +156,10 @@ class RunStore(Protocol):
     # investor reach across platforms (migration 027, ``reach``)
     async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]: ...
     async def reach_pending(self, campaign_id: str) -> bool: ...
+    # the end-of-campaign summary (migration 030, ``summary``)
+    async def source_counts(self, campaign_id: str) -> list[SourceCount]: ...
+    async def claim_summary(self, campaign_id: str) -> bool: ...
+    async def release_summary(self, campaign_id: str) -> None: ...
 
 
 def _distance(value: float | None) -> float | None:
@@ -418,6 +437,40 @@ class PostgresRunStore:
         return int(await self.pool.fetchval(
             "select count(*) from campaign_findings where campaign_id = $1::uuid and state = 'sent'", campaign_id))
 
+    async def source_counts(self, campaign_id: str) -> list[SourceCount]:
+        """Per source: posts read, findings, cards sent and held (similar/other); a site by its host."""
+        rows = await self.pool.fetch(
+            f"""select s.platform,
+                       case when s.platform = 'website' then coalesce(s.display_name, s.canonical_url)
+                            else s.platform end as name,
+                       count(distinct s.id) as sources, count(distinct p.id) as posts,
+                       count(distinct f.id) as relevant,
+                       count(distinct cf.finding_id) filter (where cf.state = 'sent') as sent,
+                       count(distinct cf.finding_id) filter (where cf.state = 'held'
+                                                              and cf.bucket in ('similar', 'other')) as held
+                  from collected_posts p
+                  join monitoring_sources s on s.id = p.source_id
+                  left join findings f on f.post_id = p.id
+                  left join campaign_findings cf on cf.finding_id = f.id and cf.campaign_id = $1::uuid
+                 where {_IN_CAMPAIGN}
+                 group by 1, 2""",
+            campaign_id,
+        )
+        return [SourceCount(r["platform"], r["name"], r["sources"], r["posts"], r["relevant"], r["sent"], r["held"])
+                for r in rows]
+
+    async def claim_summary(self, campaign_id: str) -> bool:
+        """Take the one chance to send the summary; False when it was sent (or is being sent) already."""
+        return bool(await self.pool.fetchval(
+            """insert into campaign_runs (campaign_id, summary_sent_at) values ($1::uuid, now())
+               on conflict (campaign_id) do update set summary_sent_at = now(), updated_at = now()
+                 where campaign_runs.summary_sent_at is null
+               returning 1""", campaign_id))
+
+    async def release_summary(self, campaign_id: str) -> None:
+        await self.pool.execute("update campaign_runs set summary_sent_at = null where campaign_id = $1::uuid",
+                                campaign_id)
+
     async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None) -> bool:
         """File a similar/other finding without sending it; False if it already has a bucket."""
         return bool(await self.pool.fetchval(
@@ -689,6 +742,8 @@ class MemoryRunStore:
         self.deliveries: dict[tuple[str, str], int | None] = {}  # (cid, person) -> message id (None = sending)
         self.contacts: dict[str, list[Contact]] = {}  # city -> relevant reach results, in the order they are offered
         self.reaching: set[str] = set()  # campaigns whose reach stage still runs
+        self.summaries: set[str] = set()  # campaigns whose summary was claimed
+        self.posts_read: dict[str, dict[tuple[str, str], tuple[int, int]]] = {}  # cid -> source -> (sources, posts)
 
     async def recover_discovery_profile(self) -> int:
         items = getattr(self.campaigns, "campaigns", {})
@@ -836,6 +891,30 @@ class MemoryRunStore:
 
     async def streamed_count(self, campaign_id: str) -> int:
         return sum(1 for m in self.streamed.get(campaign_id, {}).values() if m is not None)
+
+    async def source_counts(self, campaign_id: str) -> list[SourceCount]:
+        """Findings by their link's site (facebook.com: Facebook); posts read come from ``posts_read``."""
+        counts: dict[tuple[str, str], list[int]] = {
+            key: [sources, posts, 0, 0, 0] for key, (sources, posts) in self.posts_read.get(campaign_id, {}).items()}
+        done = self.streamed.get(campaign_id, {})
+        held = self.held.get(campaign_id, {})
+        for finding in self.findings.get(campaign_id, []):
+            host = (urlsplit(finding.url or "").hostname or "").removeprefix("www.").removeprefix("m.")
+            key = ("website", host) if host and not host.endswith("facebook.com") else ("facebook", "facebook")
+            row = counts.setdefault(key, [1, 1, 0, 0, 0])
+            row[2] += 1
+            row[3] += done.get(finding.id) is not None
+            row[4] += finding.id in held and self.buckets[finding.id][0] in ("similar", "other")
+        return [SourceCount(platform, name, *row) for (platform, name), row in counts.items()]
+
+    async def claim_summary(self, campaign_id: str) -> bool:
+        if campaign_id in self.summaries:
+            return False
+        self.summaries.add(campaign_id)
+        return True
+
+    async def release_summary(self, campaign_id: str) -> None:
+        self.summaries.discard(campaign_id)
 
     async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None) -> bool:
         if finding_id in self.buckets or finding_id in self.streamed.get(campaign_id, {}):
