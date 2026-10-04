@@ -132,7 +132,7 @@ def test_confidence_words() -> None:
 
 
 def test_parse_result_accepts_the_new_schema_and_drifted_variants() -> None:
-    assert PROMPT_VERSION == "analysis-v4"
+    assert PROMPT_VERSION == "analysis-v5"
     assert set(RESULT_SCHEMA["required"]) == set(RESULT_SCHEMA["properties"])
     assert {"summary_ru", "source_language", "price_amount", "price_currency"} <= set(RESULT_SCHEMA["required"])
     assert {"listing_kind", "country", "area_m2"} <= set(RESULT_SCHEMA["required"])

@@ -28,16 +28,19 @@ from typing import Any, Literal, Protocol
 
 import httpx
 
+from bot.web_search.models import SEARCH_RESULT_NOTE
+
 from . import geo
 from .models import Campaign
 from .tolerance import min_area_of
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-PROMPT_VERSION = "relevance-v1"
+PROMPT_VERSION = "relevance-v2"
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 MAX_TASK_CHARS = 1500
 MAX_SUMMARY_CHARS = 900
+MAX_EXCERPT_CHARS = 700
 
 Verdict = Literal["match", "near", "reject"]
 VERDICTS: tuple[Verdict, ...] = ("match", "near", "reject")
@@ -69,6 +72,11 @@ Answer:
 - "reject": another city, region or country; another deal (rent vs sale) or property type; not one concrete offer
   (a catalog or search-results page, a list of many ads, price statistics, someone who is looking for a property,
   news, an advert for a service); a main requirement clearly not met.
+
+Read "excerpt" (the start of the original listing) as well as "summary": the summary may miss or garble details.
+A finding taken from a search result ("from_search": true) has only a title and a short snippet: judge what it
+states and treat missing details as unknown, not as a reason to reject. A price far above the budget (more than
+about 30 % over) or an area far below the minimum is "reject", not "near".
 
 reason: one short Russian sentence. deviation_ru: empty unless verdict is "near".
 Example: task "земельный участок от 2000 м² под застройку в пригороде Мадрида", finding "Москва, 43 объявления о
@@ -120,12 +128,15 @@ def task_data(campaign: Campaign) -> dict[str, Any]:
     return data
 
 
-def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "") -> dict[str, Any]:
-    """A bounded summary of a finding's payload; never the whole post."""
+def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", original: str = "") -> dict[str, Any]:
+    """A bounded summary of a finding's payload plus the start of the original post; never the whole post."""
     payload = payload or {}
     summary = payload.get("summary_ru") or payload.get("summary") or fallback_text
+    excerpt = " ".join(str(original or "").split())
     return {
         "summary": str(summary or "")[:MAX_SUMMARY_CHARS],
+        "excerpt": excerpt[:MAX_EXCERPT_CHARS],
+        "from_search": SEARCH_RESULT_NOTE in str(original or ""),  # the note ends the post: check it whole
         "location": payload.get("location"),
         "country": payload.get("country"),
         "price": payload.get("price_amount"),

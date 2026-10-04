@@ -24,6 +24,23 @@ RELEVANCE = {
         "estudio",
         "venta",
         "vendo",
+        "se vende",
+        # land, houses, commercial (es / en)
+        "terreno",
+        "parcela",
+        "solar",
+        "finca",
+        "casa",
+        "chalet",
+        "villa",
+        "adosado",
+        "nave",
+        "local comercial",
+        "inmueble",
+        "land",
+        "plot",
+        "m2",
+        "m²",
         # ru / uk (stems: сдаю, сдаётся, сниму, продаю, продаётся, комната, квартира ...)
         "аренд",
         "квартир",
@@ -39,6 +56,24 @@ RELEVANCE = {
         "оренд",
         "кімнат",
         "житл",
+        # land, houses, commercial (ru / uk)
+        "участ",
+        "земл",
+        "сотк",
+        "соток",
+        "дом",
+        "вилл",
+        "таунхаус",
+        "коттедж",
+        "офис",
+        "склад",
+        "помещени",
+        "ділянк",
+        "будин",
+        "приміщен",
+        "м²",
+        "кв.м",
+        "кв м",
     ),
     "investors": (
         "invest",
@@ -53,25 +88,6 @@ RELEVANCE = {
     ),
 }
 SPAM = ("guaranteed profit", "click here", "free crypto", "http://bit.ly")
-LOCATIONS = (
-    "madrid",
-    "barcelona",
-    "valencia",
-    "españa",
-    "espana",
-    "spain",
-    "kyiv",
-    "kiev",
-    "мадрид",
-    "барселон",
-    "валенси",
-    "испани",
-    "іспані",
-    "киев",
-    "київ",
-    "украин",
-    "україн",
-)
 
 
 def detect_language(text: str) -> str:
@@ -101,8 +117,7 @@ def filter_evidence(
         return FilterDecision(accepted=False, reason="spam_signal", language=language)
     if not any(keyword in low for keyword in RELEVANCE[vertical]):
         return FilterDecision(accepted=False, reason="irrelevant_keywords", language=language)
-    # A post in a city's group rarely repeats the city; the group title (Evidence.title) counts.
-    place_text = f"{low} {evidence.title.lower()}"
-    if vertical == "real_estate" and not any(place in place_text for place in LOCATIONS):
-        return FilterDecision(accepted=False, reason="missing_location_signal", language=language)
+    # No place gate here: campaigns search any place in the world, and the campaign stage checks the
+    # place against the task (``bot.campaign.tolerance`` and the AI relevance check). A fixed list of
+    # cities dropped every listing that named only its town («Boadilla del Monte», «Usera»).
     return FilterDecision(accepted=True, reason="accepted", language=language)

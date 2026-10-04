@@ -43,7 +43,7 @@ from .extract import (
     post_text,
 )
 from .fetcher import FetchError, PageFetcher
-from .models import Candidate, PageResult, QueuedUrl
+from .models import SEARCH_RESULT_NOTE, Candidate, PageResult, QueuedUrl
 from .queries import (
     QueryGenerator,
     QueryTask,
@@ -381,6 +381,5 @@ def search_result(url: QueuedUrl, error: str | None) -> PageResult | None:
     title, snippet = " ".join(url.title.split()), " ".join(url.snippet.split())
     if url.depth != 0 or classify_url(url.url) != "listing" or not snippet or len(title) + len(snippet) < MIN_SNIPPET_CHARS:
         return None
-    text = (f"{title}\n{snippet}\n\nСсылка: {url.url}\n"
-            "(Страница сайта не прочитана: это заголовок и описание объявления из результатов поиска.)")
+    text = f"{title}\n{snippet}\n\nСсылка: {url.url}\n{SEARCH_RESULT_NOTE}"
     return PageResult(True, "listing", url.url, title, text, error=error, via="search")

@@ -43,15 +43,6 @@ def test_deterministic_filters_prevent_llm_calls():
         ).reason
         == "stale"
     )
-    assert (
-        filter_evidence(
-            evidence(
-                text="Apartment for rent at 20 EUR with a modern kitchen and bright rooms for long stays"
-            ),
-            "real_estate",
-        ).reason
-        == "missing_location_signal"
-    )
 
 
 class DummyAnalyzer:
@@ -150,8 +141,20 @@ def test_the_group_title_is_the_location_but_not_the_topic():
     # A Madrid group's title names the city, but an off-topic post stays out.
     off_topic = evidence(text="Всем привет, кто знает хорошего стоматолога в районе? Посоветуйте пожалуйста", title="МАДРИД АРЕНДА")
     assert filter_evidence(off_topic, "real_estate").reason == "irrelevant_keywords"
-    no_place = evidence(text="Сдаю комнату в районе Usera, 400 евро, для одной девушки, без животных", title="")
-    assert filter_evidence(no_place, "real_estate").reason == "missing_location_signal"
+
+
+
+@pytest.mark.parametrize("text", [
+    "Сдаю комнату в районе Usera, 400 евро, для одной девушки, без животных",  # only the district
+    "Terreno urbanizable de 1.200 m² en Boadilla del Monte. 480.000 €. Todos los servicios.",  # only the town
+    "Участок 10 соток под застройку, 50 000 €, документы готовы, звоните",  # no «продаю», no city
+    "Parcela rústica con pozo en Torrelodones, acceso asfaltado",
+    "Building plot with sea views in Altea, licence ready",
+    "Земельна ділянка 12 соток біля траси, всі комунікації",
+])
+def test_land_and_listings_that_name_only_their_town_reach_the_model(text):
+    # The campaign stage checks the place against the task; the prefilter has no city list.
+    assert filter_evidence(evidence(text=text, title=""), "real_estate").accepted
 
 
 def test_model_output_drift_is_normalised_but_the_schema_still_holds():
