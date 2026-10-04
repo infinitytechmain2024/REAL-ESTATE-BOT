@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from .models import (
     PageResult,
     PendingQuery,
     QueuedUrl,
+    SiteReport,
     Usage,
     WebRun,
     WebStatus,
@@ -74,6 +76,38 @@ class WebStore(Protocol):
                           max_runtime_seconds: int, contact_site: bool = True) -> FetchTicket | str: ...
     async def finish_fetch(self, ticket: FetchTicket, result: PageResult) -> str | None: ...
     async def web_status(self, campaign_id: str) -> WebStatus | None: ...
+    async def site_report(self, campaign_id: str) -> list[SiteReport]: ...
+
+
+_SITE = re.compile(r"site:(?:www\.)?([a-z0-9.-]+)", re.IGNORECASE)
+
+
+def _site_queries(rows: list[tuple[str, int]]) -> dict[str, tuple[int, int]]:
+    """``site:`` host -> (queries, results) over (query text, result count) rows."""
+    out: dict[str, tuple[int, int]] = {}
+    for text, results in rows:
+        found = _SITE.search(text or "")
+        if found:
+            host = found.group(1).lower()
+            queries, total = out.get(host, (0, 0))
+            out[host] = (queries + 1, total + (results or 0))
+    return out
+
+
+def _reports(queries: dict[str, tuple[int, int]], urls: dict[str, list[int]]) -> list[SiteReport]:
+    hosts = sorted(set(queries) | set(urls))
+    return [SiteReport(h, *queries.get(h, (0, 0)), *urls.get(h, [0, 0, 0, 0])) for h in hosts]
+
+
+def _url_bucket(state: str, detail: str | None) -> int | None:
+    """Index into [links, read, from_search, refused] beyond ``links``: 1 read, 2 from search, 3 refused."""
+    if detail == "search_snippet":
+        return 2
+    if state == "fetched":
+        return 1
+    if state in ("failed", "robots") or (state == "skipped" and detail == HOST_BLOCKED):
+        return 3
+    return None
 
 
 def content_hash(text: str) -> str:
@@ -365,6 +399,23 @@ class PostgresWebStore:
                 f"update monitoring_sources set {'last_success_at' if fetched else 'last_failure_at'} = now() where id = $1::uuid",
                 ticket.source_id)
         return post_id
+
+    async def site_report(self, campaign_id: str) -> list[SiteReport]:
+        """Per site: its ``site:`` queries and results, links met, pages read, kept from search, refused."""
+        queries = await self.pool.fetch(
+            """select query_text, coalesce(result_count, 0) as results from web_search_queries
+                where campaign_id = $1::uuid and query_text ilike '%site:%' and state = 'searched'""", campaign_id)
+        urls = await self.pool.fetch(
+            """select host, state, detail, count(*) as n from web_campaign_urls
+                where campaign_id = $1::uuid group by host, state, detail""", campaign_id)
+        counts: dict[str, list[int]] = {}
+        for r in urls:
+            row = counts.setdefault(r["host"], [0, 0, 0, 0])
+            row[0] += r["n"]
+            bucket = _url_bucket(r["state"], r["detail"])
+            if bucket is not None:
+                row[bucket] += r["n"]
+        return _reports(_site_queries([(r["query_text"], r["results"]) for r in queries]), counts)
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         row = await self.pool.fetchrow(
@@ -722,6 +773,17 @@ class MemoryWebStore:
         if refused and host["refusals"] >= REFUSALS_TO_BLOCK:  # type: ignore[operator]
             host["blocked_until"] = self.now() + timedelta(hours=BLOCK_HOURS)
         return post_id
+
+    async def site_report(self, campaign_id: str) -> list[SiteReport]:
+        queries = [(q.text, q.results) for q in self.queries.get(campaign_id, []) if q.state == "searched"]
+        counts: dict[str, list[int]] = {}
+        for u in self.urls.get(campaign_id, {}).values():
+            row = counts.setdefault(u.host, [0, 0, 0, 0])
+            row[0] += 1
+            bucket = _url_bucket(u.state, u.detail)
+            if bucket is not None:
+                row[bucket] += 1
+        return _reports(_site_queries(queries), counts)
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         state = self._campaign_state(campaign_id)

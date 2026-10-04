@@ -65,6 +65,7 @@ from .relevance import Relevance, RelevanceJudge, finding_data, task_data
 from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
 from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
 from .store import CampaignStore
+from .summary import summary_text
 from .tolerance import (
     HELD_BUCKETS,
     Match,
@@ -87,6 +88,8 @@ PROFILE_BUSY = "Ожидание: профиль Facebook занят"
 QUEUE_BUSY = "Ожидание: Facebook занят другой кампанией"
 STOPPED = "Кампания остановлена"
 MAX_MESSAGE_CHARS = 3900
+SUMMARY_STATES = frozenset({"completed", "cancelled"})
+SUMMARY_WINDOW = timedelta(hours=2)
 
 
 # --- Telegram -------------------------------------------------------------------------
@@ -292,6 +295,7 @@ class CampaignRunner:
         if campaign.state in TERMINAL_STATES:
             await self._close(campaign)
             await self._stream(campaign)
+            await self._summary(campaign)
             line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
         await self._show(campaign, line)
 
@@ -481,7 +485,8 @@ class CampaignRunner:
         if await self.store.relevance_calls(campaign.id) >= self.config.max_relevance_calls:
             return None
         try:
-            verdict = await self.relevance.judge(task_data(campaign), finding_data(finding.payload, fallback_text=finding.text))
+            verdict = await self.relevance.judge(task_data(campaign), finding_data(finding.payload, fallback_text=finding.text,
+                                                                                 original=finding.original))
         except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules
             self._relevance_paused_until = self.now() + timedelta(seconds=RELEVANCE_PAUSE_SECONDS)
             code = getattr(exc, "code", type(exc).__name__)
@@ -636,6 +641,31 @@ class CampaignRunner:
         self._below_status.add(campaign.id)
         log.info("campaign.offer_asked", extra={"campaign_id": campaign.id, "bucket": bucket})
 
+    async def _summary(self, campaign: Campaign) -> None:
+        """«Итог поиска»: what each source gave, sent once when a campaign completes or is cancelled.
+
+        Only for a campaign that ended within ``SUMMARY_WINDOW``: campaigns that ended before this
+        feature existed (still stepped for a day) get none.
+        """
+        if campaign.state not in SUMMARY_STATES or campaign.finished_at is None:
+            return
+        if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_summary(campaign.id):
+            return
+        try:
+            sources = await self.store.source_counts(campaign.id)
+            site_report = getattr(self.web, "site_report", None)
+            reports = await site_report(campaign.id) if site_report is not None else []
+            # The known portals only when the web stage ran (it reports every site it met or searched).
+            portals = campaign_portals(campaign) if reports else ()
+            text = summary_text(campaign.plan.goal, sources, reports, portals=portals)
+            await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
+        except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
+            log.warning("campaign.summary_failed", extra={"campaign_id": campaign.id})
+            await self.store.release_summary(campaign.id)
+            return
+        self._below_status.add(campaign.id)  # the status message moves below the summary
+        log.info("campaign.summary_sent", extra={"campaign_id": campaign.id})
+
     async def _show(self, campaign: Campaign, line: str) -> None:
         """Keep one status message per campaign, always the last one in the chat: it is edited when its
         text changes, and moved (sent again below, the old one deleted) after new cards or questions."""
@@ -727,6 +757,13 @@ def facebook_limit(refusal: str) -> str | None:
     if refusal.startswith("safety breaker open"):
         return "facebook_breaker"
     return None
+
+
+def campaign_portals(campaign: Campaign) -> tuple[str, ...]:
+    """The known portals the web stage searched for this campaign (Idealista, Fotocasa first)."""
+    from bot.web_search.worker import query_task
+
+    return query_task(campaign).portals()
 
 
 def campaign_request(campaign: Campaign) -> Request:

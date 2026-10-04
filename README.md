@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`029_web_search_snippets.sql` in order. It records SHA-256 checksums in
+`030_campaign_summary.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -38,6 +38,7 @@ which of them an investor search already sent.
 `028_reach_company_kind.sql` adds the `company` kind (a company of the kind the task asks for).
 `029_web_search_snippets.sql` keeps the search engine's title and snippet of each queued URL, so a
 listing on a site that refuses bots (Idealista) still becomes a card built from the search result.
+`030_campaign_summary.sql` marks the end-of-campaign summary (what each source gave) as sent, once.
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their
