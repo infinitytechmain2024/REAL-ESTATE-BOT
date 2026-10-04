@@ -40,7 +40,7 @@ import httpx
 from bot.campaign import geo
 
 from .models import QUERY_LANGUAGES, GeneratedQuery
-from .urls import SPAIN_PORTALS, UKRAINE_PORTALS
+from .urls import SPAIN_LAND_FIRST, SPAIN_PORTALS, UKRAINE_PORTALS
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -166,7 +166,12 @@ class QueryTask:
             return ()
         if self.ukrainian:
             return UKRAINE_PORTALS
-        return SPAIN_PORTALS if self.spanish else ()  # elsewhere: no known portals, the open web only
+        if not self.spanish:
+            return ()  # elsewhere: no known portals, the open web only
+        if task_kind(self) == "land":  # land: the land portal and Sareb's land stock right after the two leaders
+            return (*SPAIN_PORTALS[:2], *SPAIN_LAND_FIRST,
+                    *(p for p in SPAIN_PORTALS[2:] if p not in SPAIN_LAND_FIRST))
+        return SPAIN_PORTALS
 
 
 class QueryGenerator(Protocol):

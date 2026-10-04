@@ -231,6 +231,15 @@ def test_idealista_and_fotocasa_come_first_among_the_spanish_portals() -> None:
     assert missing_portals(madrid_task(), [])[:2] == ("idealista.com", "fotocasa.es")
 
 
+def test_for_land_terrenos_and_sareb_come_right_after_fotocasa() -> None:
+    portals = madrid_task().portals()  # «участок»: land
+    assert portals[:4] == ("idealista.com", "fotocasa.es", "terrenos.es", "sareb.es")
+    assert sorted(portals) == sorted(SPAIN_PORTALS)
+    flat = QueryTask(goal="квартира", task_text="квартира 2 комнаты, аренда", location="Madrid",
+                     location_aliases={"es": "Madrid"}, vertical="real_estate")
+    assert flat.portals() == SPAIN_PORTALS
+
+
 def test_a_portal_the_model_already_searched_counts_as_searched() -> None:
     used = ["site:www.idealista.com parcela Madrid", "terreno fotocasa Madrid"]  # a name in the words is not a site:
     assert missing_portals(madrid_task(), used)[0] == "fotocasa.es"
@@ -264,7 +273,8 @@ async def test_every_spanish_portal_is_searched_even_when_the_model_names_none()
                max_queries_per_campaign=40, queries_per_tick=10)
     await run_until_done(w, cid)
     texts = [q.text for q in store.queries[cid]]
-    assert texts[0].startswith("site:idealista.com ") and texts[1].startswith("site:fotocasa.es ")
+    assert [t.split()[0] for t in texts[:4]] == ["site:idealista.com", "site:fotocasa.es", "site:terrenos.es",
+                                                 "site:sareb.es"]
     assert all(any(t.startswith(f"site:{p} ") for t in texts) for p in SPAIN_PORTALS)
     assert sum(t.startswith("terreno ") for t in texts[:12]) == 6  # the model keeps half of every round
 

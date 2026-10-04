@@ -132,6 +132,7 @@ SPAIN_PORTALS = ("idealista.com", "fotocasa.es", "yaencontre.com", "pisos.com", 
                  "milanuncios.com", "indomio.es", "tucasa.com", "kyero.com", "thinkspain.com", "terrenos.es",
                  "solvia.es", "alisedainmobiliaria.com", "servihabitat.com", "sareb.es", "altamirainmuebles.com",
                  "haya.es", "hogaria.net", "spainhouses.net", "green-acres.es")
+SPAIN_LAND_FIRST = ("terrenos.es", "sareb.es")  # for land, searched right after Idealista and Fotocasa
 UKRAINE_PORTALS = ("dom.ria.com", "lun.ua", "olx.ua", "rieltor.ua")
 _GENERIC_LISTING = re.compile(r"(?:^|[/_-])(?:id)?\d{6,}(?:[/_.-]|$)|/(?:inmueble|anuncio|ficha|property|listing|detalle|obyavlenie)[/-][^/]*\d{4,}",
                               re.IGNORECASE)
