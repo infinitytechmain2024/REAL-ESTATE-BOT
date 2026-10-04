@@ -4,7 +4,9 @@ A step, under a per-campaign lease (so two workers never drive one campaign):
 
 1. queued URLs  -> read up to ``pages_per_tick`` of them (site after site):
    robots.txt, the global "seen" claim, fetch, then either store the listing
-   as a post or, for a portal's search/list page, queue its listing links;
+   as a post or, for a portal's search/list page, queue its listing links.
+   A listing on a site that cannot be read (it refuses bots, robots.txt, a
+   blocked site) becomes a post from the search engine's title and snippet;
 2. else pending queries -> search up to ``queries_per_tick`` in SearXNG and
    queue the new URLs (a URL any campaign already met is never queued);
 3. else, below the per-campaign query cap -> generate the next round of
@@ -52,12 +54,13 @@ from .queries import (
 )
 from .render import Renderer, RenderError
 from .searxng import Searcher, SearchError
-from .store import BUSY, WebStore
+from .store import BUSY, HOST_BLOCKED, WebStore
 from .structured import Structured, facts_block, from_jsonld, structured
 from .urls import classify_url, fetchable, host_of, url_key
 
 log = logging.getLogger(__name__)
 MIN_POST_CHARS = 120
+MIN_SNIPPET_CHARS = 60  # title + snippet: less than this says nothing about the listing
 
 
 @dataclass(frozen=True)
@@ -239,7 +242,7 @@ class WebSearchWorker:
                 if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
                     continue
                 candidates.append(Candidate(hit.url, url_key(hit.url), host_of(hit.url), 0, classify_url(hit.url),
-                                            query.id))
+                                            query.id, hit.title, hit.snippet))
             new = await self.store.enqueue(campaign.id, candidates)
             await self.store.query_done(query.id, ok=True, results=len(hits), new_urls=new)
 
@@ -255,22 +258,42 @@ class WebSearchWorker:
                 await self.store.mark_url(campaign.id, url.url_key, "capped", "host_cap")
                 continue
             if not await self.fetcher.allowed(url.url):
-                await self.store.mark_url(campaign.id, url.url_key, "robots", "robots_txt")
+                if not await self._keep_search_result(campaign, url, None):
+                    await self.store.mark_url(campaign.id, url.url_key, "robots", "robots_txt")
                 continue
             ticket = await self.store.begin_fetch(campaign.id, url, vertical=campaign.plan.vertical,
                                                   lease_seconds=cfg.lease_seconds,
                                                   max_runtime_seconds=cfg.page_runtime_seconds)
             if isinstance(ticket, str):
-                if ticket != BUSY:
+                if ticket == HOST_BLOCKED:  # the site kept refusing us: its search result is all we keep
+                    await self._keep_search_result(campaign, url, None)
+                elif ticket != BUSY:
                     log.info("web_search.url_skipped %s", ticket, extra={"campaign_id": campaign.id})
                 continue
             budget -= 1
             pages += 1
             await self.store.set_progress(campaign.id, url.host, self._line(None, pages, f"сайт {url.host}"))
             result, children = await self._read(campaign.id, url)
+            if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
+                result = search_result(url, result.error) or result
             await self.store.finish_fetch(ticket, result)
             if children:
                 await self.store.enqueue(campaign.id, children)
+
+    async def _keep_search_result(self, campaign: Campaign, url: QueuedUrl, error: str | None) -> bool:
+        """Store ``url``'s search result as its post without asking the site; False when there is none."""
+        result = search_result(url, error)
+        if result is None:
+            return False
+        ticket = await self.store.begin_fetch(campaign.id, url, vertical=campaign.plan.vertical,
+                                              lease_seconds=self.config.lease_seconds,
+                                              max_runtime_seconds=self.config.page_runtime_seconds,
+                                              contact_site=False)
+        if isinstance(ticket, str):  # already read (duplicate), a paused site, or busy: retried later
+            return True
+        await self.store.finish_fetch(ticket, result)
+        log.info("web_search.search_result_kept", extra={"campaign_id": campaign.id, "host": url.host})
+        return True
 
     async def _read(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
         """Plain HTTP first; Scrapling reads the site's JSON-LD; the browser only when HTTP showed nothing."""
@@ -346,3 +369,18 @@ class WebSearchWorker:
             parts.append(f"страниц {pages}/{self.config.max_pages_per_campaign} ·")
         parts.append(doing)
         return " ".join(parts)
+
+
+def search_result(url: QueuedUrl, error: str | None) -> PageResult | None:
+    """A listing post from what the search engine showed (title, snippet, link) when the site cannot be read.
+
+    Only a search result (not a link found on an index page) that looks like one concrete listing,
+    and only when the title and snippet say something. ``error``: why the site's page was not read
+    (None: the site was never asked).
+    """
+    title, snippet = " ".join(url.title.split()), " ".join(url.snippet.split())
+    if url.depth != 0 or classify_url(url.url) != "listing" or not snippet or len(title) + len(snippet) < MIN_SNIPPET_CHARS:
+        return None
+    text = (f"{title}\n{snippet}\n\nСсылка: {url.url}\n"
+            "(Страница сайта не прочитана: это заголовок и описание объявления из результатов поиска.)")
+    return PageResult(True, "listing", url.url, title, text, error=error, via="search")

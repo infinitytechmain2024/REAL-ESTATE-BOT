@@ -64,8 +64,9 @@ def listing_page(title: str) -> str:
 
 
 class FakeSearcher:
-    def __init__(self, results: dict[str, list[str]] | None = None, default: list[str] | None = None) -> None:
-        self.results, self.default = results or {}, default or []
+    def __init__(self, results: dict[str, list[str]] | None = None, default: list[str] | None = None,
+                 texts: dict[str, tuple[str, str]] | None = None) -> None:
+        self.results, self.default, self.texts = results or {}, default or [], texts or {}
         self.calls: list[tuple[str, str | None]] = []
         self.fail: set[str] = set()
 
@@ -73,7 +74,7 @@ class FakeSearcher:
         self.calls.append((query, language))
         if query in self.fail:
             raise SearchError("http_502")
-        return [SearchHit(u) for u in self.results.get(query, self.default)]
+        return [SearchHit(u, *self.texts.get(u, ("", ""))) for u in self.results.get(query, self.default)]
 
 
 class FakeFetcher:
@@ -494,6 +495,44 @@ async def test_robots_disallowed_pages_and_refusing_sites_are_left_alone() -> No
     assert fetcher.fetched == refusing[:3]  # three refusals block the site for a while
     assert [store.urls[cid][url_key(u)].detail for u in refusing[3:]] == ["host_blocked", "host_blocked"]
     assert store.posts == []
+
+
+IDEALISTA_HIT = ("Terreno en venta en Boadilla del Monte - idealista",
+                 "Terreno urbanizable de 1.200 m² en Boadilla del Monte, Madrid. 480.000 €. Todos los servicios.")
+
+
+async def test_a_site_that_refuses_bots_still_gives_a_post_from_its_search_result() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    private = "https://www.habitaclia.com/comprar-terreno-boadilla-i500000000001.htm"
+    refusing = [f"https://www.idealista.com/inmueble/{60000000 + n}/" for n in range(5)]
+    index = "https://www.idealista.com/venta-terrenos/madrid/"
+    texts = {u: IDEALISTA_HIT for u in [private, *refusing, index]}
+    fetcher = FakeFetcher(disallow={private}, errors={u: "http_403" for u in [*refusing, index]})
+    w = worker(campaigns, store, FakeSearcher(default=[private, *refusing, index], texts=texts), fetcher,
+               ListGenerator(["terreno Boadilla Madrid"]), pages_per_tick=1, cover_portals=False)
+    await run_until_done(w, cid)
+    assert private not in fetcher.fetched  # robots.txt: the site is never asked, its search result is kept
+    assert fetcher.fetched == refusing[:3]  # three refusals still block Idealista for a while
+    posts = {p["url"]: p for p in store.posts}
+    assert set(posts) == {private, *refusing}  # every listing, the blocked ones too; not the index page
+    post = posts[refusing[0]]
+    assert post["via"] == "search" and "480.000 €" in post["text"] and refusing[0] in post["text"]
+    assert all(store.urls[cid][url_key(u)].detail == "search_snippet" for u in [private, *refusing])
+    assert store.hosts["idealista.com"]["blocked_until"] is not None
+
+
+async def test_a_search_result_without_a_snippet_is_not_a_post() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    url = "https://www.idealista.com/inmueble/60000001/"
+    fetcher = FakeFetcher(errors={url: "http_403"})
+    w = worker(campaigns, store, FakeSearcher(default=[url], texts={url: ("idealista", "")}), fetcher,
+               ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
+    await run_until_done(w, cid)
+    assert store.posts == [] and store.urls[cid][url_key(url)].detail == "http_403"
 
 
 async def test_a_paused_site_source_is_not_read() -> None:

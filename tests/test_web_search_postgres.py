@@ -80,7 +80,7 @@ async def new_campaign(pool) -> str:
 def web_worker(pool, fetcher: FakeFetcher, queries: list[str]) -> WebSearchWorker:
     searcher = FakeSearcher(default=[LISTING, LISTING + "?utm_source=bing", INDEX_URL])
     return WebSearchWorker(PostgresCampaignStore(pool), PostgresWebStore(pool), searcher, fetcher, ListGenerator(queries),
-                           config=WebSearchConfig(max_links_per_index=2, query_reuse_hours=1))
+                           config=WebSearchConfig(max_links_per_index=2, query_reuse_hours=1, cover_portals=False))
 
 
 async def until_done(worker: WebSearchWorker, campaign_id: str) -> None:
@@ -219,3 +219,24 @@ async def test_a_full_web_batch_is_closed_and_the_next_site_opens_a_new_one(pool
     assert [r[0] for r in await pool.fetch("select state from acquisition_batches order by created_at")] == [
         "succeeded", "cancelled"]
     assert await pool.fetchval("select count(*) from collected_posts") == 21
+
+
+async def test_a_site_that_refuses_bots_gives_posts_from_its_search_results(pool) -> None:
+    cid = await new_campaign(pool)
+    refusing = [f"https://www.idealista.com/inmueble/{70000000 + n}/" for n in range(5)]
+    title, snippet = ("Terreno en venta en Boadilla del Monte - idealista",
+                      "Terreno urbanizable de 1.200 m² en Boadilla del Monte, Madrid. 480.000 €. Todos los servicios.")
+    searcher = FakeSearcher(default=refusing, texts={u: (title, snippet) for u in refusing})
+    fetcher = FakeFetcher(errors={u: "http_403" for u in refusing})
+    worker = WebSearchWorker(PostgresCampaignStore(pool), PostgresWebStore(pool), searcher, fetcher,
+                             ListGenerator(["terreno Boadilla Madrid"]),
+                             config=WebSearchConfig(pages_per_tick=1, cover_portals=False))
+    await until_done(worker, cid)
+    assert fetcher.fetched == refusing[:3]  # three refusals block the site; the rest are never asked
+    rows = await pool.fetch("select canonical_url, body_text, raw_payload->>'via' as via from collected_posts")
+    assert sorted(r["canonical_url"] for r in rows) == sorted(refusing)
+    assert all(r["via"] == "search" and "480.000 €" in r["body_text"] for r in rows)
+    assert dict(await pool.fetch("select detail, count(*) from web_campaign_urls group by detail")) == {
+        "search_snippet": 5}
+    assert await pool.fetchval("select blocked_until > now() from web_hosts where host = 'idealista.com'")
+    assert await pool.fetchval("select search_title from web_campaign_urls limit 1") == title
