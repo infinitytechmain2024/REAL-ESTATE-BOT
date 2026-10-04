@@ -24,7 +24,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from bot.campaign import geo
@@ -42,7 +42,14 @@ from .extract import (
 )
 from .fetcher import FetchError, PageFetcher
 from .models import Candidate, PageResult, QueuedUrl
-from .queries import QueryGenerator, QueryTask, localise
+from .queries import (
+    QueryGenerator,
+    QueryTask,
+    cover_portals,
+    localise,
+    missing_portals,
+    portal_quota,
+)
 from .render import Renderer, RenderError
 from .searxng import Searcher, SearchError
 from .store import BUSY, WebStore
@@ -73,6 +80,7 @@ class WebSearchConfig:
     page_runtime_seconds: int = 60
     max_renders_per_campaign: int = 15
     blocked_hosts: frozenset[str] = frozenset()
+    cover_portals: bool = True  # every known portal of the country gets its own site: query
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -200,8 +208,13 @@ class WebSearchWorker:
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
         task = query_task(campaign)
+        # The known portals (Idealista, Fotocasa first) are always searched: the ones not yet
+        # searched take up to half of this round, written by the model or, if it skips one, from the task.
+        if cfg.cover_portals:
+            task = replace(task, required_portals=missing_portals(task, used)[:portal_quota(want)])
         # Whatever generated them, every query names the campaign's place (``localise``).
         queries = localise(await self.generator.generate(task, used=used, count=want), task)
+        queries = cover_portals(queries, task, used, want)
         round_no = await self.store.next_round(campaign.id)
         added = await self.store.add_queries(campaign.id, round_no, queries[:want], reuse_hours=cfg.query_reuse_hours)
         log.info("web_search.round", extra={"campaign_id": campaign.id, "round": round_no, "generated": len(queries),

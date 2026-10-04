@@ -31,6 +31,8 @@ class WebSearchSettings(BaseSettings):
     max_queries_per_day: int = Field(default=300, ge=1, le=5_000, validation_alias="WEB_SEARCH_MAX_QUERIES_PER_DAY")
     max_minutes_per_campaign: int = Field(default=240, ge=5, le=10_080, validation_alias="WEB_SEARCH_MAX_MINUTES_PER_CAMPAIGN")
     blocked_hosts_raw: str = Field(default="", validation_alias="WEB_SEARCH_BLOCKED_HOSTS")
+    # Search every known portal of the country (Idealista, Fotocasa first), not only those the model picks.
+    cover_portals: bool = Field(default=True, validation_alias="WEB_SEARCH_COVER_PORTALS")
 
     # Fetching public pages.
     user_agent: str = Field(default="RealEstateResearchBot/0.2 (+https://github.com/infinitytechmain2024/REAL-ESTATE-BOT)",
@@ -58,4 +60,5 @@ class WebSearchSettings(BaseSettings):
             max_minutes_per_campaign=self.max_minutes_per_campaign, blocked_hosts=self.blocked_hosts(),
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
+            cover_portals=self.cover_portals,
         )

@@ -125,8 +125,13 @@ PORTALS: dict[str, Portal] = {
     "olx.ua": Portal(_p(r"/obyavlenie/.+-ID[a-zA-Z0-9]+\.html$"), _p(r"^/(?:uk/)?nedvizhimost/")),
     "rieltor.ua": Portal(_p(r"/(?:flats|houses|land)-sale/view/\d+"), _p(r"^/(?:flats|houses|land)-sale/")),
 }
-SPAIN_PORTALS = ("idealista.com", "fotocasa.es", "pisos.com", "milanuncios.com", "habitaclia.com",
-                 "yaencontre.com", "kyero.com", "thinkspain.com", "solvia.es", "servihabitat.com")
+# Every Spanish campaign searches each of these (``queries.cover_portals``), in this order:
+# Idealista and Fotocasa first, then the big national portals, classifieds, foreign-buyer
+# portals, land, and the bank/Sareb portfolios (land and unusual objects not on the leaders).
+SPAIN_PORTALS = ("idealista.com", "fotocasa.es", "yaencontre.com", "pisos.com", "habitaclia.com",
+                 "milanuncios.com", "indomio.es", "tucasa.com", "kyero.com", "thinkspain.com", "terrenos.es",
+                 "solvia.es", "alisedainmobiliaria.com", "servihabitat.com", "sareb.es", "altamirainmuebles.com",
+                 "haya.es", "hogaria.net", "spainhouses.net", "green-acres.es")
 UKRAINE_PORTALS = ("dom.ria.com", "lun.ua", "olx.ua", "rieltor.ua")
 _GENERIC_LISTING = re.compile(r"(?:^|[/_-])(?:id)?\d{6,}(?:[/_.-]|$)|/(?:inmueble|anuncio|ficha|property|listing|detalle|obyavlenie)[/-][^/]*\d{4,}",
                               re.IGNORECASE)

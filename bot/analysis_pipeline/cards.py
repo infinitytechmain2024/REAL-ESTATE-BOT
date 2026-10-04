@@ -46,6 +46,23 @@ SOURCES = {
     "idealista.com": "Idealista",
     "fotocasa.es": "Fotocasa",
     "milanuncios.com": "Milanuncios",
+    "yaencontre.com": "Yaencontre",
+    "pisos.com": "Pisos.com",
+    "habitaclia.com": "Habitaclia",
+    "indomio.es": "Indomio",
+    "tucasa.com": "Tucasa",
+    "kyero.com": "Kyero",
+    "thinkspain.com": "ThinkSpain",
+    "terrenos.es": "Terrenos.es",
+    "solvia.es": "Solvia",
+    "alisedainmobiliaria.com": "Aliseda",
+    "servihabitat.com": "Servihabitat",
+    "sareb.es": "Sareb",
+    "altamirainmuebles.com": "Altamira",
+    "haya.es": "Haya",
+    "hogaria.net": "Hogaria",
+    "spainhouses.net": "SpainHouses",
+    "green-acres.es": "Green-Acres",
 }
 
 

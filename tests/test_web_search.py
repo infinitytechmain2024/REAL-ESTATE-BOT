@@ -22,13 +22,16 @@ from bot.web_search.queries import (
     QueryGenerationError,
     QueryTask,
     TemplateQueryGenerator,
+    cover_portals,
     dedupe,
+    missing_portals,
     parse_queries,
+    portal_quota,
     query_key,
 )
 from bot.web_search.searxng import SearchError, SearchHit, SearxngClient
 from bot.web_search.store import MemoryWebStore
-from bot.web_search.urls import classify_url, fetchable, host_of, url_key
+from bot.web_search.urls import SPAIN_PORTALS, classify_url, fetchable, host_of, url_key
 from bot.web_search.worker import WebSearchConfig, WebSearchWorker, query_task
 from tests.test_campaign_runner import FakeMessenger
 
@@ -180,7 +183,7 @@ async def test_worker_generates_rounds_passing_used_queries_up_to_the_cap() -> N
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher()
     w = worker(campaigns, store, searcher, FakeFetcher(), generator, queries_per_round=12, max_queries_per_campaign=40,
-               queries_per_tick=10)
+               queries_per_tick=10, cover_portals=False)
     await run_until_done(w, cid)
     assert [count for _, count in generator.calls] == [12, 12, 12, 4]
     assert [len(used) for used, _ in generator.calls] == [0, 12, 24, 36]
@@ -195,7 +198,7 @@ async def test_a_round_without_new_queries_ends_the_stage() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     generator = ListGenerator(["terreno Boadilla Madrid", "terrenos boadilla madrid"])
-    w = worker(campaigns, store, FakeSearcher(), FakeFetcher(), generator)
+    w = worker(campaigns, store, FakeSearcher(), FakeFetcher(), generator, cover_portals=False)
     await run_until_done(w, cid)
     assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Madrid"]
     assert store.runs[cid].stop_reason == "queries_exhausted"
@@ -206,12 +209,64 @@ async def test_a_query_another_campaign_searched_recently_is_not_searched_again(
     first = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher()
-    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]))
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]),
+               cover_portals=False)
     await run_until_done(w, first)
     second = await campaign(campaigns)
     await run_until_done(w, second)
     assert searcher.calls == [("terreno Boadilla Madrid", "es-ES")]  # a Spanish campaign searches Spain
     assert [q.state for q in store.queries[second]] == ["skipped"]
+
+
+def madrid_task(**extra) -> QueryTask:
+    return QueryTask(goal="участок под застройку", task_text="участок от 1000 м² под застройку, покупка",
+                     location="Madrid", location_aliases={"es": "Madrid"}, vertical="real_estate",
+                     constraints={"deal": "sale"}, **extra)
+
+
+def test_idealista_and_fotocasa_come_first_among_the_spanish_portals() -> None:
+    assert SPAIN_PORTALS[:2] == ("idealista.com", "fotocasa.es")
+    assert {"yaencontre.com", "pisos.com", "habitaclia.com", "milanuncios.com", "terrenos.es", "sareb.es",
+            "green-acres.es"} <= set(SPAIN_PORTALS)
+    assert missing_portals(madrid_task(), [])[:2] == ("idealista.com", "fotocasa.es")
+
+
+def test_a_portal_the_model_already_searched_counts_as_searched() -> None:
+    used = ["site:www.idealista.com parcela Madrid", "terreno fotocasa Madrid"]  # a name in the words is not a site:
+    assert missing_portals(madrid_task(), used)[0] == "fotocasa.es"
+
+
+def test_cover_portals_keeps_the_models_portal_query_and_builds_the_skipped_one() -> None:
+    task = madrid_task(required_portals=("idealista.com", "fotocasa.es"))
+    model = [GeneratedQuery("parcela en venta cerca metro Madrid", "es"),
+             GeneratedQuery("site:idealista.com solar urbanizable Comunidad de Madrid", "es"),
+             GeneratedQuery("building plot for sale near Madrid", "en")]
+    out = cover_portals(model, task, [], 4)
+    assert out[0] == GeneratedQuery("site:idealista.com solar urbanizable Comunidad de Madrid", "es")
+    assert out[1].text == "site:fotocasa.es terreno en venta 1000 m2 Madrid"  # what the task asks, on that site
+    assert [q.text for q in out[2:]] == ["parcela en venta cerca metro Madrid", "building plot for sale near Madrid"]
+
+
+def test_portal_quota_is_half_a_round_but_never_less_than_two() -> None:
+    assert [portal_quota(n) for n in (1, 2, 3, 4, 12)] == [1, 2, 2, 2, 6]
+
+
+async def test_every_spanish_portal_is_searched_even_when_the_model_names_none() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    queries = [f"terreno {town} Madrid" for town in (
+        "Boadilla", "Pozuelo", "Majadahonda", "Rozas", "Torrelodones", "Galapagar", "Villanueva", "Brunete",
+        "Navalcarnero", "Arganda", "Rivas", "Alcobendas", "Tres Cantos", "Colmenar", "Algete", "Getafe",
+        "Leganes", "Fuenlabrada", "Mostoles", "Alcorcon", "Parla", "Pinto", "Valdemoro", "Aranjuez")]
+    searcher = FakeSearcher()
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(queries), queries_per_round=12,
+               max_queries_per_campaign=40, queries_per_tick=10)
+    await run_until_done(w, cid)
+    texts = [q.text for q in store.queries[cid]]
+    assert texts[0].startswith("site:idealista.com ") and texts[1].startswith("site:fotocasa.es ")
+    assert all(any(t.startswith(f"site:{p} ") for t in texts) for p in SPAIN_PORTALS)
+    assert sum(t.startswith("terreno ") for t in texts[:12]) == 6  # the model keeps half of every round
 
 
 def test_parse_queries_accepts_drift() -> None:
@@ -449,7 +504,8 @@ async def test_a_failed_search_is_recorded_and_the_stage_goes_on() -> None:
     searcher.fail.add("terreno Boadilla Madrid")
     fetcher = FakeFetcher()
     await run_until_done(worker(campaigns, store, searcher, fetcher,
-                                ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"])), cid)
+                                ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]),
+                                cover_portals=False), cid)
     assert [q.state for q in store.queries[cid]] == ["failed", "searched"]
     assert len(fetcher.fetched) == 1
 
