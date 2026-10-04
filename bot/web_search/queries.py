@@ -16,6 +16,11 @@ not fit), and for a Spanish target lets a Russian or Ukrainian query through
 only with the Spanish place name in Latin letters («купить участок Madrid»),
 at most a quarter of a round: the rest is Spanish and English.
 
+``cover_portals`` makes every known portal of the country (``urls.SPAIN_PORTALS``:
+Idealista and Fotocasa first) get its own ``site:`` query: a portal the model
+already searched counts as covered; one it skipped is still searched, with a
+query built from the task, the first missing ones taking up to half a round.
+
 ``dedupe`` drops a query whose meaning is already
 covered: same words after case/accents/stop-words/word-endings are folded
 (``query_key``), or a token overlap of ``SIMILARITY`` or more with a used one.
@@ -35,11 +40,11 @@ import httpx
 from bot.campaign import geo
 
 from .models import QUERY_LANGUAGES, GeneratedQuery
-from .urls import SPAIN_PORTALS, UKRAINE_PORTALS
+from .urls import SPAIN_LAND_FIRST, SPAIN_PORTALS, UKRAINE_PORTALS
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-PROMPT_VERSION = "web-queries-v2"
+PROMPT_VERSION = "web-queries-v3"
 MAX_QUERY_CHARS = 120
 MAX_USED_IN_PROMPT = 120
 SIMILARITY = 0.75
@@ -131,6 +136,7 @@ class QueryTask:
     constraints: dict[str, Any] = field(default_factory=dict)
     languages: tuple[str, ...] = QUERY_LANGUAGES
     country_code: str | None = None  # the plan's country (any place in the world)
+    required_portals: tuple[str, ...] = ()  # this round must search each of these (``cover_portals``)
 
     @property
     def country(self) -> str | None:
@@ -160,7 +166,12 @@ class QueryTask:
             return ()
         if self.ukrainian:
             return UKRAINE_PORTALS
-        return SPAIN_PORTALS if self.spanish else ()  # elsewhere: no known portals, the open web only
+        if not self.spanish:
+            return ()  # elsewhere: no known portals, the open web only
+        if task_kind(self) == "land":  # land: the land portal and Sareb's land stock right after the two leaders
+            return (*SPAIN_PORTALS[:2], *SPAIN_LAND_FIRST,
+                    *(p for p in SPAIN_PORTALS[2:] if p not in SPAIN_LAND_FIRST))
+        return SPAIN_PORTALS
 
 
 class QueryGenerator(Protocol):
@@ -209,7 +220,9 @@ Rules:
   plot, land...), the deal words (venta, comprar, se vende...), towns and districts around the city, sizes and
   purposes from the task, and portals.
 - About a third are portal-focused: "site:<portal>" plus a short query, or the portal name in the words.
-  Use the portals given.
+  Use the portals given. For EVERY portal in "required_portals" write exactly one "site:<portal>" query
+  that describes what the task is looking for (property type, deal, place, size) the way that portal's
+  listings are worded.
 - Keep each query short (3-9 words, at most 100 characters), the way people type into a search engine.
   No quotes, no OR/AND operators, no explanations.
 - Never invent requirements the task does not state.
@@ -299,6 +312,68 @@ def local_round(candidates: list[GeneratedQuery], task: QueryTask, used: list[st
     return fresh[:count]
 
 
+# --- the known portals: every one is searched --------------------------------------------------
+
+
+def portal_quota(count: int) -> int:
+    """How many slots of a ``count``-query round the not-yet-searched portals may take: half, at least 2."""
+    return min(count, max(2, -(-count // 2)))
+
+
+def _sites(text: str) -> set[str]:
+    return {t[5:] for t in query_tokens(text) if t.startswith("site:")}
+
+
+def _on_portal(site: str, portal: str) -> bool:
+    return site == portal or site.endswith("." + portal)
+
+
+def searched_portals(task: QueryTask, queries: list[str]) -> set[str]:
+    """The task's portals that one of ``queries`` already searches with ``site:``."""
+    sites = set().union(*(_sites(q) for q in queries)) if queries else set()
+    return {p for p in task.portals() if any(_on_portal(site, p) for site in sites)}
+
+
+def missing_portals(task: QueryTask, used: list[str]) -> tuple[str, ...]:
+    """The task's portals no used query has searched yet, in priority order (Idealista, Fotocasa, ...)."""
+    done = searched_portals(task, used)
+    return tuple(p for p in task.portals() if p not in done)
+
+
+def portal_query(task: QueryTask, portal: str) -> GeneratedQuery:
+    """A ``site:`` query for ``portal`` built from the task: property type, deal, size, place."""
+    language = "uk" if task.ukrainian else "es"
+    kind = task_kind(task)
+    term = _KIND_TERMS[kind].get(language, ("",))[0]
+    deal_word = _DEAL_TERMS.get(task.constraints.get("deal"), _DEAL_TERMS[None]).get(language, ("",))[0]
+    size = _size(task.task_text)
+    words = [f"site:{portal}", term, deal_word, f"{size} m2" if size else "", task.place_alias(language)]
+    return GeneratedQuery(" ".join(w for w in words if w), language)
+
+
+def cover_portals(queries: list[GeneratedQuery], task: QueryTask, used: list[str],
+                  count: int) -> list[GeneratedQuery]:
+    """At most ``count`` queries where each portal of ``task.required_portals`` has its own ``site:`` query.
+
+    The model's query for a required portal is kept as it is; a required portal it skipped
+    gets ``portal_query``. Portal queries go first (in the required order), then the rest.
+    """
+    if not task.required_portals:
+        return queries[:count]
+    first: list[GeneratedQuery] = []
+    for portal in task.required_portals:
+        own = next((q for q in queries if any(_on_portal(s, portal) for s in _sites(q.text))), None)
+        if own is None:
+            built = localise([portal_query(task, portal)], task)
+            own = built[0] if built else None
+        if own is not None and own not in first:
+            first.append(own)
+    rest = [q for q in queries if q not in first]
+    taken = [q.text for q in first]
+    fresh_rest = dedupe(rest, [*used, *taken], limit=max(count - len(first), 0))
+    return [*first, *fresh_rest][:count]
+
+
 class OpenRouterQueryGenerator:
     """One chat completion per round; a 400 retries once without the schema; no other retries."""
 
@@ -324,6 +399,7 @@ class OpenRouterQueryGenerator:
             "constraints": {k: v for k, v in task.constraints.items() if v is not None},
             "languages": list(task.languages),
             "portals": list(task.portals()),
+            "required_portals": list(task.required_portals),
             "count": count,
             "used": used[-MAX_USED_IN_PROMPT:],
         }

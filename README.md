@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`028_reach_company_kind.sql` in order. It records SHA-256 checksums in
+`029_web_search_snippets.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -36,6 +36,8 @@ which of them an investor search already sent.
 `027_investor_reach.sql` keeps the investor search's reach across platforms
 (search-engine results about investors, agents, agencies, funds, networks).
 `028_reach_company_kind.sql` adds the `company` kind (a company of the kind the task asks for).
+`029_web_search_snippets.sql` keeps the search engine's title and snippet of each queued URL, so a
+listing on a site that refuses bots (Idealista) still becomes a card built from the search result.
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their
@@ -723,6 +725,23 @@ psql "$SUPABASE_DB_URL" -f bot/services/db/migrations/001_init.sql
 
 ## Деплой на VPS
 
+### Обновление бота на VPS — одна команда
+
+```sh
+cd /opt/real-estate-bot && ./scripts/update.sh
+```
+
+Если не помните, где лежит проект: `docker compose ls` — путь в колонке
+`CONFIG FILES`.
+
+Скрипт берёт свежий код с GitHub (только fast-forward: если на сервере
+правили файлы руками, он остановится и покажет какие), скачивает свежие
+образы postgres/redis/caddy/searxng, пересобирает образы бота, накатывает
+миграции базы (`scripts/apply_migrations.sh`), пересоздаёт и перезапускает
+все контейнеры, удаляет старые образы и показывает `docker compose ps`.
+Данные (база, профиль Facebook, сертификаты) живут в томах и не трогаются.
+Другая ветка: `BRANCH=main ./scripts/update.sh`. То же самое: `make update`.
+
 Боевой вариант, если нужен Facebook. Браузер с залогиненным профилем должен
 жить постоянно, а к нему в любой момент должен прийти человек с телефона —
 когда Facebook попросит подтверждение. Render так не умеет: там имеет смысл
@@ -778,8 +797,9 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ### 2. Код и `.env`
 
 ```sh
-git clone https://github.com/infinitytechmain2024/REAL-ESTATE-BOT.git
-cd REAL-ESTATE-BOT
+sudo git clone https://github.com/infinitytechmain2024/REAL-ESTATE-BOT.git /opt/real-estate-bot
+sudo chown -R $USER: /opt/real-estate-bot
+cd /opt/real-estate-bot
 python3 scripts/setup_env.py        # спросит ключи, запишет .env с правами 0600
 ```
 

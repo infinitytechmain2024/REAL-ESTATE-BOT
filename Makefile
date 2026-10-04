@@ -9,7 +9,7 @@ export PYTHONPATH := $(CURDIR):$(CURDIR)/searxng
 
 .DEFAULT_GOAL := help
 .PHONY: help setup install browsers run searxng check lint probe-gate check-imports \
-        check-config check-sql check-api check-vendor probe-pipeline docker-up docker-down clean
+        check-config check-sql check-api check-vendor probe-pipeline docker-up docker-down update clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -93,6 +93,9 @@ docker-up: ## Build and run the single-container setup, as on Render
 
 docker-down: ## Stop it
 	docker compose down
+
+update: ## On the VPS: pull the code, refresh images, migrate, restart everything
+	./scripts/update.sh
 
 clean: ## Remove caches and build artefacts
 	find . -path ./searxng -prune -o -name '__pycache__' -type d -print0 | xargs -0 rm -rf

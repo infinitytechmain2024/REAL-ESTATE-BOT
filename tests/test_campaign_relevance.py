@@ -415,7 +415,8 @@ async def test_web_worker_searches_spain_and_drops_foreign_sites() -> None:
     store = MemoryWebStore(campaigns)
     searcher = RecordingSearcher(["https://dom.mirkvartir.ru/Москва/Участки-у-метро/", "https://www.olx.ua/a/1",
                                   "https://www.idealista.com/inmueble/12345/", "https://www.fotocasa.es/es/x/1/d"])
-    worker = WebSearchWorker(campaigns, store, searcher, None, OneRound(), config=WebSearchConfig())  # type: ignore[arg-type]
+    worker = WebSearchWorker(campaigns, store, searcher, None, OneRound(),  # type: ignore[arg-type]
+                             config=WebSearchConfig(cover_portals=False))
     await worker.tick()  # the round
     await worker.tick()  # the search
     assert searcher.calls == [("купить участок у метро Madrid", "es-ES")]

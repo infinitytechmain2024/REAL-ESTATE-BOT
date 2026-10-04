@@ -9,6 +9,7 @@ identity behind every listing fetch.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -174,3 +175,13 @@ def test_the_local_model_server_sets_the_two_things_ollama_does_not() -> None:
 
     assert "--ctx-size" in body
     assert "--cache-type-k" in body
+
+
+def test_vps_update_script_migrates_restarts_and_never_drops_data() -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts/update.sh"
+    text = script.read_text(encoding="utf-8")
+    assert os.access(script, os.X_OK)
+    assert "git merge --ff-only" in text and "./scripts/apply_migrations.sh" in text
+    assert "pull --ignore-buildable" in text and "build --pull" in text and "up -d --force-recreate" in text
+    assert text.index("apply_migrations") < text.index("up -d --force-recreate")  # schema first, then new code
+    assert "down -v" not in text and "volume rm" not in text and "prune -a" not in text
