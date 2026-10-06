@@ -15,34 +15,34 @@
 
 ## Этап 0 — Быстрые фиксы (1–2 дня)
 
-- [ ] **0.1 Миграция `031_task_draft_steps.sql`**: расширить CHECK `user_task_drafts.step`
+- [x] **0.1 Миграция `031_task_draft_steps.sql`**: расширить CHECK `user_task_drafts.step`
   значениями `ask`, `target`.
   Файлы: `bot/services/db/migrations/031_*.sql`, README (список миграций).
   Проверка: `tests/test_campaign_postgres.py` — новый тест сохраняет черновик со `step='ask'`.
-- [ ] **0.2 `task_kind`**: проверять `land → house → commercial → apartment → room`;
+- [x] **0.2 `task_kind`**: проверять `land → house → commercial → apartment → room`;
   `room` только как отдельное слово без числа перед ним («2 rooms» ≠ «room»).
   Файл: `bot/web_search/queries.py:468`.
   Проверка: тест «apartment Valencia 2+ rooms» → `apartment`; «комната в Мадриде» → `room`.
-- [ ] **0.3 Бюджет и комнаты в запросах**: `portal_query` и `TemplateQueryGenerator`
+- [x] **0.3 Бюджет и комнаты в запросах**: `portal_query` и `TemplateQueryGenerator`
   добавляют `hasta <max_price>` / `<rooms> habitaciones` (es), `under <max_price>` (en) и т. д.
   Файл: `bot/web_search/queries.py:343, 478`.
-- [ ] **0.4 Город ≠ регион**: в `QueryTask` поле `place_level` (city|province|region);
+- [x] **0.4 Город ≠ регион**: в `QueryTask` поле `place_level` (city|province|region);
   для `city` аллиасы из `geo.REGIONS` не считаются «на месте»; к запросу добавляется страна
   («Valencia España» / «Valencia Spain»); результаты с маркерами другой страны
   (Carabobo, Venezuela, «, CA», USD для ES) отбрасываются до очереди.
   Файлы: `bot/campaign/geo.py`, `bot/web_search/queries.py:277`, `bot/web_search/worker.py:239`.
-- [ ] **0.5 Порталы по типу задачи**: `portals()` возвращает список под `task_kind`:
+- [x] **0.5 Порталы по типу задачи**: `portals()` возвращает список под `task_kind`:
   квартиры/дома → idealista, fotocasa, habitaclia, pisos, yaencontre, kyero, thinkspain, milanuncios;
   земля → terrenos, sareb, idealista, fotocasa; банковские — только при словах «банк/embargo/cheap».
   Квота принудительных `site:` в раунде ≤ 1/3. Файл: `bot/web_search/queries.py:164, 318`.
-- [ ] **0.6 Fail-closed**: без AI-вердикта (лимит, пауза после ошибки, нет ключа) находка идёт
+- [x] **0.6 Fail-closed**: без AI-вердикта (лимит, пауза после ошибки, нет ключа) находка идёт
   в `similar`, не `exact`; при заданном бюджете и неизвестной цене → `other`.
   Файлы: `bot/campaign/runner.py:483-499`, `bot/campaign/tolerance.py:230`.
-- [ ] **0.7 SearXNG глубже**: `pageno` 1..3 (настройка `WEB_SEARCH_PAGES_PER_QUERY`),
+- [x] **0.7 SearXNG глубже**: `pageno` 1..3 (настройка `WEB_SEARCH_PAGES_PER_QUERY`),
   `WEB_SEARCH_RESULTS_PER_QUERY=30`; убрать 72-часовой запрет повторного запроса для другой
   кампании; TTL 7 дней для `web_seen_urls` страниц вида `index`.
   Файлы: `bot/web_search/searxng.py:50`, `bot/web_search/store.py:236, 270`.
-- [ ] **0.8 `.env.example`**: `CAMPAIGN_RELEVANCE_MAX_CALLS=2000`, `WEB_SEARCH_MAX_PAGES_PER_HOST=100`,
+- [x] **0.8 `.env.example`**: `CAMPAIGN_RELEVANCE_MAX_CALLS=2000`, `WEB_SEARCH_MAX_PAGES_PER_HOST=100`,
   `WEB_SEARCH_MAX_LINKS_PER_INDEX=40`, `WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN=80`,
   `WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN=400`. Лимит рендеров хранить в БД, не в памяти.
 - [ ] **0.9 Золотой тест**: `tests/golden/` — 10 задач с ожидаемыми `task_kind`, порталами и
