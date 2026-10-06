@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`035_campaign_specs.sql` in order. It records SHA-256 checksums in
+`036_campaign_finding_clusters.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -45,6 +45,7 @@ and keeps the web stage's browser-render count in the database.
 `033_campaign_finding_hold_reason.sql` stores why a finding was held unverified (the AI check could not run), for owners.
 `034_web_fetch_layers.sql` tracks a site's refusals and blocks per fetch layer (HTTP, browser) and counts scrape-API reads.
 `035_campaign_specs.sql` adds the structured task (`TaskSpec`, JSON) to campaigns and to the task draft, so the interviewer keeps it across answers.
+`036_campaign_finding_clusters.sql` groups the same property seen on several sites into one card (`cluster_id`, `cluster_links`, `duplicate_of`; state `duplicate`).
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their

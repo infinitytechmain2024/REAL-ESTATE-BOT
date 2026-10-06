@@ -54,15 +54,24 @@ from typing import Any, Protocol
 import httpx
 
 from bot.agents.recorder import PostgresRecorder, Recorder, record_of
-from bot.analysis_pipeline.cards import CardTask, render_card
+from bot.analysis_pipeline.cards import CardTask, also_on, render_card
 
 from . import offers
+from .dedup import listing_of, same_object, site_of
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .reach import contact_card
 from .relevance import Relevance, RelevanceJudge, finding_data, task_data
-from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
+from .runs import (
+    TERMINAL_BATCH_STATES,
+    ClusterHead,
+    RunState,
+    RunStore,
+    SentFinding,
+    StreamFinding,
+    Window,
+)
 from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
 from .store import CampaignStore
 from .summary import summary_text
@@ -478,6 +487,8 @@ class CampaignRunner:
                                  extra={"campaign_id": campaign.id, "finding_id": finding.id})
                     await self._record(campaign, finding, match.bucket)
                 continue
+            if await self._deduplicate(campaign, finding, active):
+                continue
             count = await self.store.claim_finding(campaign.id, finding.id)
             if count is None:
                 continue
@@ -486,6 +497,51 @@ class CampaignRunner:
         await self._near_matches(campaign, request, active)
         await self._people(campaign)
         return deferred
+
+    async def _deduplicate(self, campaign: Campaign, finding: StreamFinding, active: bool) -> bool:
+        """The same object as an exact card already sent: store the finding as its duplicate and add its link.
+
+        No second card is sent; the head card is edited to show «Также на: ...». Conservative (``dedup.same_object``):
+        when in doubt the finding is sent as its own card. A finding without a link is never merged.
+        Returns True when the finding was attached (nothing is left to send).
+        """
+        if not finding.url:
+            return False
+        mine = listing_of(finding.payload, url=finding.url, text=finding.text)
+        if mine.price is None and mine.area is None:
+            return False
+        try:
+            heads = await self.store.recent_sent_findings(campaign.id)
+            for head in heads:
+                if head.finding.id == finding.id or not same_object(
+                        mine, listing_of(head.finding.payload, url=head.finding.url, text=head.finding.text)):
+                    continue
+                link = {"url": finding.url, "site": site_of(finding.url)}
+                if finding.url == head.finding.url:
+                    link = {}  # the same post again: nothing to add
+                attached = await self.store.attach_to_cluster(finding.id, head.finding.id, link)
+                if attached is None:
+                    continue
+                log.info("campaign.finding_deduplicated", extra={
+                    "campaign_id": campaign.id, "finding_id": finding.id, "head_finding_id": head.finding.id})
+                if len(attached.links) > len(head.links):
+                    await self._edit_head(campaign, head, attached, active)
+                return True
+        except Exception:  # noqa: BLE001 - dedup is an optimisation: on any failure send the card as usual
+            log.warning("campaign.dedup_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
+        return False
+
+    async def _edit_head(self, campaign: Campaign, head: SentFinding, attached: ClusterHead, active: bool) -> None:
+        """Re-render the head card with «Также на: ...» and edit its Telegram message (best effort)."""
+        if attached.message_id is None:
+            return
+        tail = f"🔎 Найдено: {head.number}" + (" · ищу дальше" if active else "")
+        card = f"{finding_card(campaign, head.finding, cluster_links=attached.links)}\n\n{tail}"
+        try:
+            await self.messenger.edit(campaign.chat_id, attached.message_id, card[:MAX_MESSAGE_CHARS])
+        except Exception:  # noqa: BLE001 - the link is stored; a lost edit only hides it from the card
+            log.warning("campaign.cluster_edit_failed",
+                        extra={"campaign_id": campaign.id, "finding_id": head.finding.id})
 
     async def _judge(self, campaign: Campaign, request: Request, finding: StreamFinding, *,
                      final: bool = False) -> Match | None:
@@ -837,10 +893,12 @@ def campaign_request(campaign: Campaign) -> Request:
                        text=f"{campaign.source_text} {campaign.plan.goal}", country=campaign.plan.country)
 
 
-def finding_card(campaign: Campaign, finding: StreamFinding) -> str:
+def finding_card(campaign: Campaign, finding: StreamFinding, *,
+                 cluster_links: Sequence[dict[str, str]] = ()) -> str:
     """The Russian card for one finding, its fields ordered by the campaign's task."""
     if finding.payload is None:
-        return finding.text[:MAX_MESSAGE_CHARS]
+        extra = also_on(cluster_links)
+        return (f"{finding.text}\n\n{extra}" if extra else finding.text)[:MAX_MESSAGE_CHARS]
     constraints = campaign.plan.constraints
     deal, max_price, rooms = constraints.get("deal"), constraints.get("max_price"), constraints.get("rooms")
     task = CardTask(
@@ -850,7 +908,8 @@ def finding_card(campaign: Campaign, finding: StreamFinding) -> str:
         rooms=rooms if isinstance(rooms, int) else None,
     )
     return render_card(finding.payload, original=finding.original, task=task, vertical=finding.vertical,
-                       language=finding.language, confidence=finding.confidence, limit=MAX_MESSAGE_CHARS)
+                       language=finding.language, confidence=finding.confidence, limit=MAX_MESSAGE_CHARS,
+                       cluster_links=cluster_links)
 
 
 # --- service ------------------------------------------------------------------------------
