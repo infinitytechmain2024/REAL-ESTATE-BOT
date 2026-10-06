@@ -13,7 +13,7 @@ campaign in exactly one bucket (``campaign_findings.bucket``, migration 019):
 Budget
 ------
 The plan's ``max_price`` is the requested amount (intake and the architect
-turn «до 1200 €» and a bare «1200 €» into it; the currency is always EUR).
+turn «до 1200 €» and a bare «1200 €» into it; the currency is the plan's ``currency``, else the country's, else EUR).
 
 * ``BUDGET_TOLERANCE`` (10 %): the exact band is the amount ± 10 %. A budget
   given as a maximum («до 50 000») has no lower edge: anything cheaper than the
@@ -133,9 +133,10 @@ def worse(a: Match, b: Match) -> Match:
 
 
 _AREA = re.compile(
-    r"(?<!\w)(?:от|від|не менее|не менше|минимум|мінімум|min(?:imum)?|from|at least|desde|m[aá]s de|>=|≥|>)\s*"
+    r"(?<!\w)(?:от|від|не менее|не менше|минимум|мінімум|min(?:imum)?|from|at least|desde|a partir de|"
+    r"al menos|m[ií]nimo(?:\s+de)?|m[aá]s de|>=|≥|>)\s*"
     r"(\d{1,3}(?:[ .,]\d{3})+|\d+(?:[.,]\d+)?)\s*(тыс\w*\.?|тис\w*\.?|k)?\s*"
-    r"(м²|м2|кв\.?\s*м\w*|m²|m2|sq\.?\s*m|metros?(?:\s+cuadrados)?|квадрат\w*|сот\w*|га\b|ha\b|hect\w*|гект\w*)",
+    r"(м²|м2|кв\.?\s*м\w*|m²|m2|sq\.?\s*m|sqm\b|metros?(?:\s+cuadrados)?|квадрат\w*|сот\w*|га\b|ha\b|hect\w*|гект\w*)",
     re.IGNORECASE,
 )
 
@@ -192,7 +193,7 @@ def foreign(payload: dict[str, Any], request: Request) -> Match | None:
             return Match("excluded", math.inf, "foreign")
     if geo.foreign_tld(geo.host_of_link(payload.get("original_post_link") or payload.get("url")), country):
         return Match("excluded", math.inf, "foreign")
-    expected = geo.CURRENCY.get(country)
+    expected = request.currency
     currency = currency_code(payload.get("price_currency"))
     if expected and currency and currency != expected:
         return Match("excluded", math.inf, "currency")
@@ -229,8 +230,11 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
     amount = constraints.get("max_price")
     deal = constraints.get("deal")
     rooms = constraints.get("rooms")
+    stated = currency_code(constraints.get("currency"))
+    code = country or geo.country_of(location)
     return Request(
         amount=amount if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0 else None,
+        currency=stated or geo.CURRENCY.get(code or "") or DEFAULT_CURRENCY,
         deal=deal if deal in ("rent", "sale") else None,
         location=location,
         min_area=_positive(constraints.get("min_area")) or min_area_of(text),

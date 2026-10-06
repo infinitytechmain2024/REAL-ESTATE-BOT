@@ -28,7 +28,7 @@ from .architect import GAZETTEER, find_places
 
 COUNTRY: dict[str, str] = {place.canonical: ("UA" if place.canonical == "Kyiv" else "ES") for place in GAZETTEER}
 # The only currency a listing in that country is priced in (a Spanish listing in roubles is not in Spain).
-CURRENCY: dict[str, str] = {"ES": "EUR"}
+CURRENCY: dict[str, str] = {"ES": "EUR", "UA": "UAH"}
 
 REGIONS: dict[str, tuple[str, ...]] = {
     "Madrid": ("comunidad de madrid", "madrid region", "region de madrid", "мадридская область", "мадридська область"),

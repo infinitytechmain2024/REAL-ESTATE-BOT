@@ -20,12 +20,8 @@ from bot.web_search.queries import QueryTask, place_level_of, portal_query, task
 
 CASES: list[dict[str, Any]] = json.loads(Path(__file__).with_name("cases.json").read_text(encoding="utf-8"))
 
-# (case id, assertion) -> the bug it documents.
-KNOWN_BUGS: dict[tuple[str, str], str] = {
-    ("kyiv_flat_rent_20000uah", "tolerance:0"): (
-        "tolerance.Request.currency is always EUR (request_for never sets it), so a UAH budget «до 20000 грн» "
-        "is compared with UAH listings as a foreign currency and a 18000 UAH flat is filed as 'other', not 'exact'."),
-}
+# (case id, assertion) -> the bug it documents; strict xfail. Empty: all known bugs are fixed.
+KNOWN_BUGS: dict[tuple[str, str], str] = {}
 
 
 def _spec(case: dict[str, Any], plan_location: str) -> TaskSpec:
@@ -107,6 +103,5 @@ def test_tolerance(case: dict[str, Any], request: pytest.FixtureRequest) -> None
     assert classify(sample["listing"], request_of(case, plan), vertical=plan.vertical).bucket == sample["bucket"]
 
 
-@pytest.mark.xfail(strict=True, reason="min_area_of knows «от/from/at least/desde/más de» but not Spanish «al menos» / «mínimo»")
 def test_spanish_minimum_area() -> None:
     assert min_area_of("Terreno en Madrid de al menos 2000 m²") == 2000

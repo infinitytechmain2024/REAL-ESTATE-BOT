@@ -16,7 +16,7 @@ MAX_WINDOWS = 10
 MAX_SEEDS_PER_LANGUAGE = 6
 MAX_SEED_CHARS = 80
 CONSTRAINT_KEYS = frozenset({"deal", "max_price", "rooms", "min_price", "min_area", "max_area", "property_type",
-                             "districts"})
+                             "districts", "currency"})
 PROPERTY_TYPES = frozenset({"apartment", "house", "land", "room", "commercial", "other"})
 
 Language = Literal["es", "en", "ru", "uk"]
@@ -123,6 +123,8 @@ class CampaignPlan(BaseModel):
                 raise ValueError(f"{key} must be a positive integer")
         if value.get("property_type") not in (None, *PROPERTY_TYPES):
             raise ValueError("property_type must be one of " + ", ".join(sorted(PROPERTY_TYPES)))
+        if value.get("currency") is not None and not (isinstance(value["currency"], str) and value["currency"].strip()):
+            raise ValueError("currency must be a non-empty string")
         if value.get("districts") is not None and not isinstance(value["districts"], str):
             raise ValueError("districts must be a comma-separated string")
         return value

@@ -18,6 +18,7 @@ from bot.campaign.tolerance import (
     Request,
     budget_match,
     classify,
+    min_area_of,
     money,
     request_for,
 )
@@ -507,3 +508,33 @@ def test_max_area_min_price_and_type_mismatch() -> None:
     assert classify({k: v for k, v in base.items() if k != "property_type"}, request).bucket == "exact"
     land = Request(location="Madrid", property_type="land")
     assert classify({**listing(None), "property_type": "commercial"}, land).bucket == "excluded"
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("Terreno en Madrid de al menos 2000 m²", 2000),
+    ("piso mínimo 80 m2", 80),
+    ("casa desde 150 m²", 150),
+    ("local a partir de 60 m²", 60),
+    ("apartment at least 70 sqm", 70),
+    ("flat min 45 m2", 45),
+    ("квартира від 50 м²", 50),
+    ("квартира від 50 кв.м", 50),
+    ("участок не менее 300 м²", 300),
+    ("квартира минимум 40 м²", 40),
+])
+def test_min_area_phrases(text: str, expected: float) -> None:
+    assert min_area_of(text) == expected
+
+
+def test_ukrainian_budget_currency() -> None:
+    for text in ("квартира в Києві до 20000 грн", "квартира в Києві до 20 000 ₴", "квартира в Києві до 20000 UAH"):
+        plan = plan_campaign(text)
+        assert plan.constraints["max_price"] == 20000 and plan.constraints["currency"] == "UAH", text
+        request = request_for(plan.constraints, location=plan.location, country=plan.country)
+        assert request.currency == "UAH"
+        assert classify({"price_amount": 18000, "price_currency": "UAH"}, request).bucket == "exact"
+        assert classify({"price_amount": 18000, "price_currency": "EUR"}, request).bucket in ("other", "excluded")
+    assert "currency" not in plan_campaign("piso en Madrid hasta 1200 €").constraints
+    assert request_for({}, country="UA").currency == "UAH"
+    assert request_for({"currency": "USD"}, country="UA").currency == "USD"
+    assert request_for({}).currency == "EUR"

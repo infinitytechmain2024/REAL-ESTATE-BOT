@@ -157,7 +157,10 @@ _SALE_STEMS = ("продаж", "продам", "купить", "купл", "по
 
 _WORD = re.compile(r"\w+")
 _NUM = r"(\d{1,3}(?:[ .,]\d{3})+|\d+(?:[.,]\d+)?)"
-_CUR = r"(?:€|eur\b|euros?\b|евро\b|євро\b)"
+_CUR = r"(?:€|₴|\$|eur\b|euros?\b|евро\b|євро\b|грн\b|гривн\w*|uah\b|usd\b|долл\w*|дол\b)"
+_CUR_SYMBOLS = r"[€₴$]"
+_CUR_CODES = (("UAH", ("₴", "грн", "гривн", "uah")), ("USD", ("$", "usd", "долл", "дол")),
+              ("EUR", ("€", "eur", "евро", "євро")))
 _GROUPS = re.compile(r"(\d{1,4})\s*(?:групп\w*|груп\w*|groups?\b|grupos?\b)")
 _ROOMS = re.compile(
     r"(\d{1,2})\s*-?\s*(?:х\s*)?(?:комнат\w*|комн\b|кімнат\w*|спал\w*|habitacion\w*|hab\b|"
@@ -165,9 +168,9 @@ _ROOMS = re.compile(
 )
 _PRICE_KEYWORD = re.compile(
     r"(?<!\w)(?:до|не дороже|не дорожче|максимум|under|below|up to|max(?:imum)?|less than|hasta|"
-    r"maximo|menos de|no mas de|<=|≤|<)\s*€?\s*" + _NUM + r"\s*(k|к|тыс\w*|тис\w*)?\s*(" + _CUR + r")?"
+    r"maximo|menos de|no mas de|<=|≤|<)\s*" + _CUR_SYMBOLS + r"?\s*" + _NUM + r"\s*(k|к|тыс\w*|тис\w*)?\s*(" + _CUR + r")?"
 )
-_PRICE_BARE = re.compile(r"(?:€\s*" + _NUM + r"|" + _NUM + r"\s*(k|к|тыс\w*|тис\w*)?\s*" + _CUR + r")")
+_PRICE_BARE = re.compile(r"(?:" + _CUR_SYMBOLS + r"\s*" + _NUM + r"|" + _NUM + r"\s*(k|к|тыс\w*|тис\w*)?\s*" + _CUR + r")")
 
 _TEMPLATES: dict[str, dict[Language, tuple[tuple[str, str], ...]]] = {
     "real_estate": {
@@ -233,9 +236,11 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
     rest = normalized
     max_groups, rest = _extract_groups(rest)
     rooms, rest = _extract_rooms(rest)
-    max_price = _extract_price(rest)
+    max_price, currency = _extract_price_currency(rest)
     deal = _detect_deal(words) if vertical != "investors" else None
     constraints: dict[str, str | int | None] = {"deal": deal, "max_price": max_price, "rooms": rooms}
+    if max_price and currency and currency != "EUR":
+        constraints["currency"] = currency
     if spec is not None:
         constraints = _spec_constraints(spec, vertical)
         deal, max_price, rooms = constraints.get("deal"), constraints.get("max_price"), constraints.get("rooms")  # type: ignore[assignment]
@@ -291,6 +296,8 @@ def _spec_constraints(spec: TaskSpec, vertical: str) -> dict[str, str | int | No
         return constraints
     constraints["deal"] = spec.deal if spec.deal in ("rent", "sale") else None
     constraints["max_price"] = _whole(spec.budget.max)
+    if spec.budget.currency:
+        constraints["currency"] = spec.budget.currency
     constraints["rooms"] = _whole(spec.rooms.min)  # «up to 3 rooms» is no minimum: rooms stays None
     if (low := _whole(spec.budget.min)) is not None:
         constraints["min_price"] = low
@@ -382,17 +389,27 @@ def _to_number(raw: str, thousands: str | None) -> int | None:
     return number if 0 < number <= 100_000_000 else None
 
 
-def _extract_price(text: str) -> int | None:
+def _currency_of(fragment: str) -> str | None:
+    lowered = fragment.casefold()
+    return next((code for code, marks in _CUR_CODES if any(mark in lowered for mark in marks)), None)
+
+
+def _extract_price_currency(text: str) -> tuple[int | None, str | None]:
+    """The budget and its currency code (None when the text names no currency)."""
     for match in _PRICE_KEYWORD.finditer(text):
         number = _to_number(match.group(1), match.group(2))
         # "до 3" without a currency is not a price; real budgets are >= 100.
         if number is not None and (match.group(3) or number >= 100):
-            return number
+            return number, _currency_of(match.group(0))
     match = _PRICE_BARE.search(text)
     if match:
         raw = match.group(1) or match.group(2)
-        return _to_number(raw, match.group(3))
-    return None
+        return _to_number(raw, match.group(3)), _currency_of(match.group(0))
+    return None, None
+
+
+def _extract_price(text: str) -> int | None:
+    return _extract_price_currency(text)[0]
 
 
 def _seeds(place: _Place, vertical: Vertical, deal: str | None, lang: Language) -> list[str]:
