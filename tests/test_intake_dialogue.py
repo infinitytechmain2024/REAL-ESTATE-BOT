@@ -187,8 +187,8 @@ async def test_edit_changes_one_field_and_cancel_still_works() -> None:
     await enough(control, USER)
     edit = await press(control, USER, "task:edit")
     assert edit.text == "Что изменить?"
-    assert [b.text for b in edit.buttons] == ["Место", "Сделка", "Тип", "Бюджет", "Комнаты", "Площадь", "Районы", "Пожелания",
-                                              "Источники", "Назад"]
+    assert [b.text for b in edit.buttons] == ["Место", "Сделка", "Тип", "Бюджет", "Комнаты", "Площадь", "Районы", "Обязательно",
+                                              "Пожелания", "Исключить", "Источники", "Назад"]
     prompt = await press(control, USER, "task:field:budget")
     assert prompt.text.startswith("Бюджет: напишите новое значение.") and callbacks(prompt) == ["task:back"]
     card = await say(control, USER, "до 800 евро")  # one field changes, the rest of the task stays

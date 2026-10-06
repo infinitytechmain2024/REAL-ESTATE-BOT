@@ -33,12 +33,15 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from pydantic import ValidationError
+
 from bot.campaign.architect import MAX_TEXT_CHARS, InvalidGoal, find_places, plan_campaign
 from bot.campaign.models import CampaignPlan
 from bot.campaign.spec import DEAL_RU, INVESTOR_WHO_RU, MODE_TITLES, PROPERTY_RU, TaskSpec
 from bot.control_plane.interviewer import Interviewer, InterviewTurn
 from bot.control_plane.models import Button, CommandEnvelope, IncomingMessage, Reply
 from bot.control_plane.rules import (
+    AI_SKIP_WORDS,
     SKIP_WORDS,
     RuleInterviewer,
     gazetteer_place,
@@ -71,13 +74,14 @@ FIELDS: dict[str, dict[str, tuple[str, str]]] = {
     "real_estate": {
         "place": ("Место", "place"), "deal": ("Сделка", "deal"), "type": ("Тип", "property_type"),
         "budget": ("Бюджет", "budget.max"), "rooms": ("Комнаты", "rooms.min"), "area": ("Площадь", "area_m2.min"),
-        "districts": ("Районы", "place.districts"), "wishes": ("Пожелания", "wishes"),
-        "sources": ("Источники", "sources.required"),
+        "districts": ("Районы", "place.districts"), "must_have": ("Обязательно", "must_have"),
+        "wishes": ("Пожелания", "wishes"), "exclude": ("Исключить", "exclude"), "sources": ("Источники", "sources.required"),
     },
     "investors": {
         "who": ("Кого ищем", "investor.who"), "ticket": ("Тикет", "investor.ticket"),
         "role": ("Роль", "investor.user_role"), "geo": ("География", "investor.geography"),
-        "place": ("Место", "place"), "wishes": ("Пожелания", "wishes"),
+        "place": ("Место", "place"), "must_have": ("Обязательно", "must_have"),
+        "wishes": ("Пожелания", "wishes"), "exclude": ("Исключить", "exclude"),
     },
 }
 _WORD = re.compile(r"\w+")
@@ -177,8 +181,13 @@ class Draft:
              updated_at: datetime | None = None, spec: dict[str, Any] | None = None) -> Draft:
         dialogue = [{"role": str(t.get("role")), "text": str(t.get("text"))}
                     for t in payload.get("dialogue") or [] if isinstance(t, dict)]
+        try:
+            loaded = TaskSpec.model_validate(spec) if isinstance(spec, dict) else None
+        except ValidationError:
+            log.warning("telegram.intake.draft_spec_corrupt", extra={"user_id": user_id})
+            return cls(user_id, chat_id, mode)  # a fresh draft: the person describes the task again
         return cls(user_id, chat_id, mode, step, str(payload.get("task") or ""), int(payload.get("message_id") or 0),
-                   updated_at, TaskSpec.model_validate(spec) if isinstance(spec, dict) else None, dialogue,
+                   updated_at, loaded, dialogue,
                    int(payload.get("rounds") or 0), payload.get("asking"), payload.get("editing"),
                    bool(payload.get("forced")))
 
@@ -374,7 +383,7 @@ class TaskIntake:
                 return await self._edit_value(draft, text)
             if word in ENOUGH_WORDS:
                 return await self._enough(draft)
-            if word in SKIP_WORDS and draft.asking and draft.asking != "place":
+            if word in self._skip_words() and draft.asking and draft.asking != "place":
                 return await self._skip(draft)
             return await self._interview(draft, text)
         if draft.spec is not None and draft.step == "summary":
@@ -440,10 +449,14 @@ class TaskIntake:
         path = draft.editing or ""
         title = next((t for t, p in FIELDS[draft.mode or "real_estate"].values() if p == path), path)
         spec = draft.spec or TaskSpec(mode=draft.mode)  # type: ignore[arg-type]
-        if _norm(text) in SKIP_WORDS and path != "place":
+        if _norm(text) in self._skip_words() and path != "place":
             draft.spec = _cleared(spec, path).mark_unspecified(path)
             text = "не важно"
         return await self._interview(draft, f"{title.lower()}: {text}", editing=True)
+
+    def _skip_words(self) -> frozenset[str]:
+        """What counts as «doesn't matter»: the explicit words with the AI interviewer, the wider set for the rules."""
+        return AI_SKIP_WORDS if self.interviewer is not None else SKIP_WORDS
 
     async def _skip(self, draft: Draft) -> Reply:
         """«Не важно»: the asked field stays open on purpose; the interviewer asks the next one."""
@@ -610,6 +623,10 @@ def _cleared(spec: TaskSpec, path: str) -> TaskSpec:
             spec.area_m2 = spec.area_m2.model_copy(update={"min": None, "max": None})
         case "place.districts":
             spec.place = spec.place.model_copy(update={"districts": []})
+        case "must_have":
+            spec.must_have = []
+        case "exclude":
+            spec.exclude = []
         case "wishes":
             spec.wishes = []
         case "sources.required":

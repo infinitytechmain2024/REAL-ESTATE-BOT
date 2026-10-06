@@ -18,6 +18,9 @@ from bot.control_plane.interviewer import InterviewTurn
 
 SKIP_WORDS = frozenset({"пропустить", "пропуск", "нет", "не важно", "неважно", "не имеет значения", "skip", "no", "-",
                         "без разницы", "любой", "любая", "любое"})
+# With the AI interviewer only an explicit «doesn't matter» is a skip: «нет», «no», «-», «любой» may be the answer to a
+# question («Есть ли парковка?» - «нет») and go to the model.
+AI_SKIP_WORDS = frozenset({"не важно", "неважно", "без разницы", "всё равно", "все равно", "any"})
 SOFT_ORDER = ("place.districts", "must_have")  # real estate: optional, asked once after the hard fields
 
 SLOT_QUESTIONS = {
@@ -33,6 +36,7 @@ SLOT_QUESTIONS = {
     "investor.user_role": "Вы ищете деньги для своего проекта или сами хотите вкладывать?",
     # fields offered only from «Изменить»
     "area_m2.min": "Какая площадь, м²? Например: от 50, 60–80.",
+    "exclude": "Что исключить? Например: «первый этаж», «агентства», «без лифта».",
     "wishes": "Какие пожелания? Например: «рядом с метро», «новый дом».",
     "sources.required": "Какие сайты или группы обязательно проверить?",
     "investor.geography": "В каких странах или городах искать? Например: Испания, Португалия.",
@@ -299,7 +303,8 @@ class RuleInterviewer:
     @staticmethod
     def _read_asked_lists(spec: TaskSpec, text: str, asking: str | None, editing: bool) -> None:
         """A bare answer to a list field («центр, Руссафа»): its items; an edit replaces, an answer adds."""
-        if asking not in ("place.districts", "must_have", "wishes", "sources.required", "investor.geography"):
+        if asking not in ("place.districts", "must_have", "exclude", "wishes", "sources.required",
+                          "investor.geography"):
             return
         items = [] if _norm(text) in SKIP_WORDS else _split(text)
         if not items:
@@ -309,6 +314,8 @@ class RuleInterviewer:
             spec.place = spec.place.model_copy(update={"districts": [*current, *items][:12]})
         elif asking == "must_have":
             spec.must_have = [*([] if editing else spec.must_have), *items][:12]
+        elif asking == "exclude":
+            spec.exclude = [*([] if editing else spec.exclude), *items][:12]
         elif asking == "wishes":
             keep = [] if editing else [{"text": w.text, "weight": w.weight} for w in spec.wishes]
             spec.wishes = spec.__class__.model_validate({"wishes": [*keep, *items]}).wishes

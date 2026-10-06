@@ -269,7 +269,7 @@ def _spec_constraints(spec: TaskSpec, vertical: str) -> dict[str, str | int | No
         return constraints
     constraints["deal"] = spec.deal if spec.deal in ("rent", "sale") else None
     constraints["max_price"] = _whole(spec.budget.max)
-    constraints["rooms"] = _whole(spec.rooms.min if spec.rooms.min is not None else spec.rooms.max)
+    constraints["rooms"] = _whole(spec.rooms.min)  # «up to 3 rooms» is no minimum: rooms stays None
     if (low := _whole(spec.budget.min)) is not None:
         constraints["min_price"] = low
     if (low := _whole(spec.area_m2.min)) is not None:

@@ -15,7 +15,7 @@ import pytest
 
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.models import CampaignPlan
-from bot.campaign.spec import TaskSpec
+from bot.campaign.spec import Rooms, TaskSpec, parse_number
 from bot.control_plane.intake import (
     DRAFT_KEYBOARD,
     TASK_KEYBOARD,
@@ -287,7 +287,7 @@ async def test_the_edit_button_changes_one_field_and_returns_to_the_card() -> No
     menu = await press(control, USER, "task:edit")
     assert menu.text == "Что изменить?" and callbacks(menu) == [
         "task:field:place", "task:field:deal", "task:field:type", "task:field:budget", "task:field:rooms",
-        "task:field:area", "task:field:districts", "task:field:wishes", "task:field:sources", "task:back"]
+        "task:field:area", "task:field:districts", "task:field:must_have", "task:field:wishes", "task:field:exclude", "task:field:sources", "task:back"]
     prompt = await press(control, USER, "task:field:budget")
     assert prompt.text.startswith("Бюджет: напишите новое значение.") and callbacks(prompt) == ["task:back"]
     card = await say(control, USER, "до 1500")
@@ -566,7 +566,7 @@ def test_settings_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
     settings = ControlPlaneSettings.from_env()
     assert (settings.interview_model, settings.interview_timeout_seconds, settings.interview_max_rounds) == (
-        "anthropic/claude-sonnet-4.5", 60.0, 10)
+        "anthropic/claude-sonnet-4.5", 30.0, 10)
     monkeypatch.setenv("OPENROUTER_INTERVIEW_MODEL", "anthropic/claude-opus-4.5")
     monkeypatch.setenv("INTERVIEW_MAX_ROUNDS", "6")
     settings = ControlPlaneSettings.from_env()
@@ -588,3 +588,72 @@ async def test_the_rule_interviewer_reads_ranges_and_never_wipes_known_fields() 
     edited = await rules.interview(mode="real_estate", spec=turn.spec, dialogue=[], message="бюджет: до 1500", asking="budget.max",
                                    editing=True)
     assert edited.spec.budget.max == 1500 and edited.spec.budget.min == 500
+
+
+@pytest.mark.asyncio
+async def test_no_to_a_confirmation_question_reaches_the_ai_interviewer_and_is_not_a_skip() -> None:
+    fake = FakeInterviewer(
+        ask("Правильно ли я понял: Мадрид, аренда? Например: да, нет.", "deal",
+            {"place": MADRID, "deal": "rent", "property_type": "apartment"}),
+        ask("Тогда покупка? Например: покупка.", "deal", {}),
+    )
+    control, _ = await _mode(fake)
+    await say(control, USER, "квартиру в Мадриде")
+    await say(control, USER, "нет")
+    assert [c["message"] for c in fake.calls] == ["квартиру в Мадриде", "нет"]
+    assert fake.calls[1]["spec"].unspecified == [] and fake.calls[1]["asking"] == "deal"
+    await say(control, USER, "-")
+    assert fake.calls[2]["message"] == "-" and fake.calls[2]["spec"].unspecified == []
+    # An explicit skip word still skips the asked field.
+    await say(control, USER, "без разницы")
+    assert fake.calls[3]["message"] == "Не важно" and fake.calls[3]["spec"].unspecified == ["deal"]
+
+
+def test_merge_never_wipes_a_set_field_with_junk() -> None:
+    base = TaskSpec(mode="real_estate").merged({"place": MADRID, "deal": "rent", "property_type": "apartment",
+                                                "budget": {"max": 900, "currency": "EUR"}, "rooms": {"min": 2}})
+    junk = base.merged({"deal": "whatever", "budget": {"max": "abc"}, "rooms": {"min": -3}, "property_type": "",
+                        "place": {"name": None, "country": "zzz"}})
+    assert (junk.deal, junk.property_type, junk.budget.max, junk.rooms.min) == ("rent", "apartment", 900, 2)
+    assert junk.place.name == "Madrid"
+    assert base.merged({"budget": {"max": -5}}).budget.max == 900
+    assert base.merged({"budget": {"max": 700}}).budget.max == 700  # a real value still overrides
+
+
+@pytest.mark.parametrize(("text", "number"), [
+    ("1,200", 1200), ("1.200", 1200), ("1,200,000", 1_200_000), ("1.200.000", 1_200_000), ("1,5 млн", 1_500_000),
+    ("200k", 200_000), ("200 тыс", 200_000), ("200 тыс.", 200_000), ("1.5", 1.5), ("1,5", 1.5), ("1 200", 1200),
+    ("до 1200 €", 1200), ("1.5m", 1_500_000), ("2 комнаты", 2), ("1,234.5", 1234.5), ("abc", None)])
+def test_number_parsing(text: str, number: float | None) -> None:
+    assert parse_number(text) == number
+    assert TaskSpec().merged({"budget": {"max": text}}).budget.max == number
+
+
+def test_inverted_ranges_drop_or_swap() -> None:
+    spec = TaskSpec().merged({"budget": {"min": 900, "max": 500}, "area_m2": {"min": 90, "max": 50}})
+    assert (spec.budget.min, spec.budget.max) == (None, 500) and (spec.area_m2.min, spec.area_m2.max) == (None, 50)
+    rooms = TaskSpec().merged({"rooms": {"min": 3, "max": 2}}).rooms
+    assert isinstance(rooms, Rooms) and (rooms.min, rooms.max) == (2, 3)
+    assert TaskSpec().merged({"budget": {"min": 100, "max": 500}}).budget.min == 100
+
+
+def test_unspecified_and_asking_are_whitelisted_to_leaf_field_paths() -> None:
+    spec = TaskSpec(mode="investors").merged({"unspecified": ["investor", "budget", "place", "bogus", "investor.who"]})
+    assert spec.unspecified == ["investor.who"]
+    assert "place" in spec.missing_hard() and "investor.ticket" in spec.missing_hard()
+    spec = TaskSpec(mode="investors").merged({"unspecified": ["investor"]})
+    assert spec.missing_hard() == ["place", "investor.who", "investor.ticket", "investor.user_role"]
+    assert TaskSpec(unspecified=["rooms", "rooms.min"]).unspecified == ["rooms.min"]
+    turn = parse_turn(json.dumps(ask("Какой бюджет?", "everything", {})), TaskSpec())
+    assert turn.asking is None
+    assert parse_turn(json.dumps(ask("Какой бюджет?", "budget.max", {})), TaskSpec()).asking == "budget.max"
+    assert parse_turn(json.dumps(ask("Где искать?", "place", {})), TaskSpec()).asking == "place"
+
+
+@pytest.mark.asyncio
+async def test_a_corrupted_spec_row_loads_as_a_fresh_draft(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        draft = Draft.load(USER, 1, "real_estate", "ask", {"task": "x", "rounds": 3},
+                           spec={"place": {"radius_km": "very far", "name": "Madrid"}, "budget": {"max": [1]}, "wishes": [{"weight": {}}], "must_have": 5, "deal": "rent", "rooms": 3, "sources": "x"})
+    assert draft.step == "idle" and draft.spec is None and draft.task == "" and draft.mode == "real_estate"
+    assert "draft_spec_corrupt" in caplog.text

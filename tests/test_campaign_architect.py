@@ -187,3 +187,12 @@ def test_home_is_a_whole_word_so_pet_groups_stay_off_topic() -> None:
     from bot.campaign.discovery import score_relevance
 
     assert score_relevance("Домашние животные Валенсия", "", plan_campaign("Купить дом в Валенсии")).relevant is False
+
+
+def test_only_a_maximum_of_rooms_is_not_a_minimum() -> None:
+    from bot.campaign.spec import TaskSpec
+
+    spec = TaskSpec(mode="real_estate").merged({"place": {"name": "Madrid"}, "rooms": {"max": 3}})
+    assert plan_campaign("x", vertical="real_estate", spec=spec).constraints["rooms"] is None
+    spec = spec.merged({"rooms": {"min": 2}})
+    assert plan_campaign("x", vertical="real_estate", spec=spec).constraints["rooms"] == 2

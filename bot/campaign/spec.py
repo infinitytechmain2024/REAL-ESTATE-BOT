@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 Mode = Literal["real_estate", "investors"]
 Deal = Literal["rent", "sale", "any"]
@@ -64,6 +64,21 @@ MAX_NOTES = 1000
 REAL_ESTATE_ORDER = ("place", "deal", "property_type", "budget.max", "rooms.min")
 INVESTORS_ORDER = ("place", "investor.who", "investor.ticket", "investor.user_role")
 ROOMS_TYPES = ("apartment", "house")
+# Field paths a person can waive or a question can be about: leaves only (never a group such as «investor» or
+# «budget», which would waive several hard fields at once, and never «place»).
+UNSPECIFIABLE_PATHS = frozenset({
+    *(p for p in (*REAL_ESTATE_ORDER, *INVESTORS_ORDER) if p != "place"),
+    "budget.min", "budget.max", "rooms.min", "rooms.max", "area_m2.min", "area_m2.max", "place.districts",
+    "must_have", "exclude", "wishes", "sources.required", "sources.extra", "sources.blocked",
+    "investor.who", "investor.ticket", "investor.ticket.min", "investor.ticket.max", "investor.user_role",
+    "investor.geography", "investor.asset_class", "investor.languages", "investor.yield_min",
+})
+ASKABLE_PATHS = UNSPECIFIABLE_PATHS | {"place"}
+
+
+def known_paths(paths: list[str], *, allowed: frozenset[str] = UNSPECIFIABLE_PATHS) -> list[str]:
+    """``paths`` without the unknown and group-level ones."""
+    return [p for p in paths if p in allowed]
 PLACE_NAME_KEYS = ("es", "ru", "uk", "ru_in", "uk_in")
 
 
@@ -139,6 +154,38 @@ class Place(_Model):
         return {k: v for k, v in names.items() if v}
 
 
+_MULTIPLIER = re.compile(r"\s*(млн|миллион\w*|million\w*|mm?(?![a-zа-яё])|тыс|тысяч\w*|k(?![a-zа-яё])|к(?![a-zа-яё]))\.?",
+                         re.IGNORECASE)
+
+
+def parse_number(text: str) -> float | None:
+    """A number out of free text: «1,200» and «1.200» are 1200 (a comma or dot with exactly three digits after it is a
+    thousands separator), «1,5 млн» is 1500000, «200k» and «200 тыс» are 200000, «1.5» is 1.5; ``None`` if none."""
+    found = re.search(r"\d[\d\s\u00a0.,]*", text)
+    if found is None:
+        return None
+    raw = re.sub(r"[\s\u00a0]", "", found.group()).rstrip(".,")
+    suffix = _MULTIPLIER.match(text[found.end():])
+    factor = 1.0
+    if suffix:
+        word = suffix.group(1).casefold()
+        factor = 1_000_000.0 if word.startswith(("м", "m")) else 1000.0
+    dots, commas = raw.count("."), raw.count(",")
+    if dots and commas:  # the last separator is the decimal one
+        decimal = "." if raw.rfind(".") > raw.rfind(",") else ","
+        raw = raw.replace("," if decimal == "." else ".", "").replace(decimal, ".")
+    elif dots + commas > 1:  # «1.200.000», «1,200,000»
+        raw = re.sub(r"[.,]", "", raw)
+    elif dots + commas == 1:
+        head, tail = re.split(r"[.,]", raw)
+        thousands = len(tail) == 3 and head not in ("", "0") and not suffix
+        raw = head + tail if thousands else f"{head or '0'}.{tail}"
+    try:
+        return float(raw) * factor
+    except ValueError:
+        return None
+
+
 class Range(_Model):
     min: float | None = None
     max: float | None = None
@@ -149,17 +196,30 @@ class Range(_Model):
         if isinstance(value, bool) or value is None:
             return None
         if isinstance(value, str):
-            digits = re.sub(r"[^\d.,]", "", value).replace(",", ".")
-            try:
-                value = float(digits) if digits else None
-            except ValueError:
-                return None
+            value = parse_number(value)
         if isinstance(value, int | float) and not 0 <= value <= 1_000_000_000:
             return None
         return value
 
+    @model_validator(mode="after")
+    def _ordered(self) -> Range:
+        """An inverted pair (min > max) keeps only the maximum, the person's ceiling."""
+        if self.min is not None and self.max is not None and self.min > self.max:
+            self.min = None
+        return self
+
     def is_set(self) -> bool:
         return self.min is not None or self.max is not None
+
+
+class Rooms(Range):
+    """Rooms: an inverted pair is swapped («3-2» means 2 to 3)."""
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Rooms:
+        if self.min is not None and self.max is not None and self.min > self.max:
+            self.min, self.max = self.max, self.min
+        return self
 
 
 class Money(Range):
@@ -256,7 +316,7 @@ class TaskSpec(_Model):
     deal: Deal | None = None
     property_type: PropertyType | None = None
     budget: Money = Field(default_factory=Money)
-    rooms: Range = Field(default_factory=Range)
+    rooms: Rooms = Field(default_factory=Rooms)
     area_m2: Range = Field(default_factory=Range)
     must_have: list[str] = Field(default_factory=list)
     # soft
@@ -316,7 +376,7 @@ class TaskSpec(_Model):
     @field_validator("unspecified", mode="before")
     @classmethod
     def _unspecified(cls, value: Any) -> list[str]:
-        return _clean_list(value, 40, 30)
+        return known_paths(_clean_list(value, 40, 30))
 
     # --- what is known -------------------------------------------------------------------
 
@@ -398,15 +458,16 @@ class TaskSpec(_Model):
                     continue
                 trial = {**base, key: _overlay(base[key], value)}
                 try:
-                    TaskSpec.model_validate(trial)
+                    checked = TaskSpec.model_validate(trial).model_dump()[key]
                 except ValidationError:
                     continue
-                base = trial
+                # A value that validates to nothing (junk, a negative number) never wipes a field that is set.
+                base = {**base, key: _keep_set(base[key], checked)}
         spec = TaskSpec.model_validate(base)
         extra = partial.get("unspecified") if isinstance(partial, dict) else None
-        unspecified = [*self.unspecified, *_clean_list(extra, 40, 30)]
+        unspecified = known_paths([*self.unspecified, *_clean_list(extra, 40, 30)])
         spec.unspecified = [p for i, p in enumerate(unspecified)
-                            if p not in unspecified[:i] and not (spec.filled(p) and p != "place")]
+                            if p not in unspecified[:i] and not spec.filled(p)]
         return spec
 
     def mark_unspecified(self, path: str) -> TaskSpec:
@@ -491,6 +552,15 @@ def _overlay(current: Any, new: Any) -> Any:
         return current
     if isinstance(current, dict) and isinstance(new, dict):
         return {**current, **{k: _overlay(current.get(k), v) for k, v in new.items()}}
+    return new
+
+
+def _keep_set(old: Any, new: Any) -> Any:
+    """``new`` (validated), except that an empty leaf never replaces a leaf that is set in ``old``."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        return {k: _keep_set(old.get(k), v) for k, v in new.items()}
+    if (new is None or new == "" or new == [] or new == {}) and not (old is None or old == "" or old == [] or old == {}):
+        return old
     return new
 
 

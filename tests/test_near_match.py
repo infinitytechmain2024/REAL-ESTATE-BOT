@@ -481,3 +481,29 @@ def test_rooms_lower_than_requested_is_other_unknown_or_more_is_unchanged() -> N
     assert classify({**listing(None), "rooms": 3}, request).bucket == "exact"
     assert classify({**listing(None), "rooms": 4}, request).bucket == "exact"
     assert classify({**listing(None), "rooms": None}, request).bucket == "exact"
+
+
+def test_request_honours_plan_min_area_max_area_min_price_and_type() -> None:
+    constraints = {"deal": "sale", "max_price": 100_000, "min_area": 500, "max_area": 1000, "min_price": 50_000,
+                   "property_type": "land"}
+    request = request_for(constraints, location="Madrid", text="купить участок от 2000 м²")
+    assert request.min_area == 500 and request.max_area == 1000 and request.min_price == 50_000
+    assert request.property_type == "land"
+    assert request_for({}, text="участок от 2000 м²").min_area == 2000
+
+
+def test_max_area_min_price_and_type_mismatch() -> None:
+    request = Request(amount=100_000, deal="sale", location="Madrid", max_area=1000, min_price=50_000,
+                      property_type="apartment")
+    base = {**listing(80_000), "area_m2": 1000}
+    assert classify(base, request).bucket == "exact"
+    assert classify({**base, "area_m2": 1100}, request).bucket == "exact"  # within +10 %
+    assert classify({**base, "area_m2": 1200}, request).bucket == "other"
+    assert classify({**base, "price_amount": 46_000}, request).bucket == "exact"  # within -10 %
+    assert classify({**base, "price_amount": 40_000}, request).bucket == "other"
+    assert classify({**base, "property_type": "house"}, request).bucket == "excluded"
+    assert classify({**base, "property_type": "studio"}, request).bucket == "exact"
+    assert classify({**base, "property_type": "room"}, request).bucket == "exact"  # lenient
+    assert classify({k: v for k, v in base.items() if k != "property_type"}, request).bucket == "exact"
+    land = Request(location="Madrid", property_type="land")
+    assert classify({**listing(None), "property_type": "commercial"}, land).bucket == "excluded"

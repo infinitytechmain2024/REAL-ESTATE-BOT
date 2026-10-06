@@ -21,7 +21,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from bot.campaign.spec import TaskSpec
+from bot.campaign.spec import ASKABLE_PATHS, TaskSpec
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -157,6 +157,8 @@ def parse_turn(content: str, current: TaskSpec) -> InterviewTurn:
     if understood and not _CYRILLIC.search(understood):
         understood = ""
     asking = _text(data.get("asking"), 40)
+    if asking not in ASKABLE_PATHS:  # an invented or group-level path would point the next answer at nothing
+        asking = None
     return InterviewTurn(spec, question, done or question is None, understood, asking if question else None)
 
 
