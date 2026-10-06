@@ -90,7 +90,7 @@ async def run_once(store=None, pipeline: AnalysisPipeline | None = None, send: S
     s = settings or AnalysisSettings()
     own_store = store is None
     if own_store:
-        store = PostgresAnalysisStore(s.database_url)
+        store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms)
         await store.connect()
     try:
         p = pipeline or AnalysisPipeline(
@@ -119,7 +119,7 @@ async def serve() -> None:
         log.warning("analysis.disabled", extra={"hint": "set OPENROUTER_API_KEY"})
         while True:
             await asyncio.sleep(3600)
-    store = PostgresAnalysisStore(s.database_url)
+    store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms)
     await store.connect()
     pipeline = AnalysisPipeline(OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds))
     log.info("analysis.started", extra={"poll_seconds": s.poll_seconds, "digests": bool(s.telegram_chat_id)})

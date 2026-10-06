@@ -1,4 +1,4 @@
-"""Environment of the ``reduction-worker`` service (SA-2 Reduction agents, shadow mode)."""
+"""Environment of the ``reduction-worker`` service (SA-2 Reduction agents: shadow, or live for the chosen sources)."""
 
 from __future__ import annotations
 
@@ -23,6 +23,10 @@ class ReductionSettings(BaseSettings):
     concurrency: int = Field(default=4, ge=1, le=16, validation_alias="AGENT_REDUCTION_CONCURRENCY")
     lease_seconds: int = Field(default=300, ge=60, le=3600, validation_alias="AGENT_REDUCTION_LEASE_SECONDS")
     max_calls_per_day: int = Field(default=1000, ge=0, le=100_000, validation_alias="AGENT_REDUCTION_MAX_CALLS_PER_DAY")
+    # shadow: decisions are only stored. live: the posts of ``sources`` become findings the campaign runner streams
+    # (and the analysis worker must leave those platforms alone: ANALYSIS_EXCLUDE_PLATFORMS).
+    mode: str = Field(default="shadow", validation_alias="AGENT_REDUCTION_MODE")
+    sources: str = Field(default="website", validation_alias="AGENT_REDUCTION_SOURCES")
 
     def missing(self) -> list[str]:
         """Why the service must stay idle: switched off, or a required setting is empty."""
@@ -34,4 +38,5 @@ class ReductionSettings(BaseSettings):
 
     def config(self) -> ReductionConfig:
         return ReductionConfig(batch=self.batch, concurrency=self.concurrency, lease_seconds=self.lease_seconds,
-                               max_calls_per_day=self.max_calls_per_day)
+                               max_calls_per_day=self.max_calls_per_day, mode=self.mode.strip().lower(),
+                               sources=tuple(s.strip().lower() for s in self.sources.split(",") if s.strip()))

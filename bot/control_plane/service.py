@@ -457,7 +457,7 @@ class ControlPlane:
             if role is None:
                 return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
             text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
-                    "/campaign <goal> | status | cancel <id>, "
+                    "/campaign <goal> | status | report [<id>] | cancel <id>, "
                     "/login [facebook|instagram|tiktok|linkedin] [profile-name]. Confirm changes with: confirm <token>.")
             if role == "owner":
                 text += " Owners: /settings (roles with buttons), /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
@@ -510,11 +510,15 @@ class ControlPlane:
             return refusal
         if command == "campaign":
             if not arguments.strip():
-                return Reply("Use /campaign <what and where to search>, /campaign status, or /campaign cancel <id>.")
+                return Reply("Use /campaign <what and where to search>, /campaign status, /campaign report [<id>], or /campaign cancel <id>.")
             if arguments.strip().lower() == "status":
                 # Read-only: no confirmation; the Orchestra answers in this chat.
                 await self.command_sink(CommandEnvelope(command, "status", message.chat_id, message.user_id, message.message_id))
                 return Reply("Campaign status requested.")
+            if (report := _report_arguments(arguments)) is not None:
+                # Read-only too: the campaign's metrics (PLAN 4.4); owners may name any campaign.
+                await self.command_sink(CommandEnvelope(command, report, message.chat_id, message.user_id, message.message_id))
+                return Reply("Собираю отчёт по поиску.")
         cancelling = command == "campaign" and arguments.split(maxsplit=1)[0].lower() == "cancel"
         if command in AUTO_COMMANDS and not cancelling and await self.auto.applies_to(message.user_id):
             return await self._auto_queue(message, command, arguments)
@@ -532,6 +536,10 @@ class ControlPlane:
         if goal.lower() == "status":
             await self.command_sink(CommandEnvelope(command, "status", message.chat_id, message.user_id, message.message_id))
             return Reply("Проверяю, как идёт поиск.")
+        if (report := _report_arguments(goal)) is not None:
+            # Their own campaign only (the Orchestra checks the owner): the latest of this chat, or the one named.
+            await self.command_sink(CommandEnvelope(command, report, message.chat_id, message.user_id, message.message_id))
+            return Reply("Собираю отчёт по поиску.")
         if _is_cancel(goal):
             # Users never see campaign ids: «cancel» (with or without one) stops their running search.
             return await self._stop_search(message)
@@ -578,6 +586,15 @@ class ControlPlane:
 def _button_key(campaign_id: str) -> int:
     """A negative message id (Telegram's are positive) unique to the campaign: the Orchestra's idempotency key."""
     return -int(hashlib.sha256(f"stop:{campaign_id}".encode()).hexdigest()[:15], 16) - 1
+
+
+def _report_arguments(arguments: str) -> str | None:
+    """``report`` or ``report <id>`` -> the normalised arguments; None when this is not a report request
+    (three or more words after «report» are a goal)."""
+    parts = arguments.split()
+    if not parts or parts[0].lower() != "report" or len(parts) > 2:
+        return None
+    return " ".join(["report", *parts[1:]])
 
 
 def _is_cancel(arguments: str) -> bool:

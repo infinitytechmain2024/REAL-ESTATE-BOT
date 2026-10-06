@@ -9,6 +9,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from bot.campaign.architect import InvalidGoal, plan_campaign
+from bot.campaign.metrics import campaign_title, report_text
 from bot.campaign.models import TERMINAL_STATES, Campaign
 from bot.campaign.spec import TaskSpec
 from bot.campaign.status_text import DONE, NOTHING, campaign_label
@@ -158,6 +159,22 @@ class OrchestraDispatcher:
                 campaign = None
             result = {"status": "finished", "campaign_id": campaign.id if campaign else None, "reply": campaign_status(campaign)}
             user_reply = user_campaign_status(campaign)
+        elif action == "report":
+            # The campaign's numbers (``campaign_metrics``): the given id, else the chat's latest. A user sees only a
+            # campaign they requested, and without the technical lines (queries, pages per fetch layer).
+            campaign = await self.campaigns.get(value) if value else await self.campaigns.latest_for_chat(item.chat_id)
+            if own_only and campaign is not None and campaign.requested_by != item.user_id:
+                campaign = None
+            if campaign is None:
+                reply = "Кампания не найдена. Отчёт доступен только по своим кампаниям." if own_only else (
+                    f"Кампания {value} не найдена." if value else "В этом чате ещё нет кампаний.")
+                result = {"status": "unchanged", "campaign_id": value or None, "reply": reply}
+                user_reply = reply
+            else:
+                metrics = await self.campaigns.refresh_metrics(campaign.id)
+                reply = report_text(metrics, campaign_title(campaign), technical=self._is_owner(item.user_id))
+                result = {"status": "finished", "campaign_id": campaign.id, "reply": reply}
+                user_reply = reply
         elif action == "cancel" and own_only and not await self._owns(value, item.user_id):
             log.warning("orchestra.campaign_cancel_refused", extra={"command_id": item.id, "user_id": item.user_id})
             result = {"status": "refused", "campaign_id": value, "reply": f"Можно остановить только свою кампанию; {value} не ваша или не найдена."}

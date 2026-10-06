@@ -170,6 +170,7 @@ class RunStore(Protocol):
     async def release_finding(self, finding_id: str) -> None: ...
     async def streamed_count(self, campaign_id: str) -> int: ...
     async def recent_sent_findings(self, campaign_id: str, limit: int = 200) -> list[SentFinding]: ...
+    async def stream_finding(self, finding_id: str) -> StreamFinding | None: ...
     async def attach_to_cluster(self, finding_id: str, cluster_id: str, link: dict[str, str]) -> ClusterHead | None: ...
     # exact / similar / other (migration 019, ``tolerance`` and ``offers``)
     async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None,
@@ -466,7 +467,7 @@ class PostgresRunStore:
             )
             if not claimed:
                 return None
-            return await _sent_count(conn, campaign_id)
+            return await _number_card(conn, campaign_id, finding_id)
 
     async def finding_sent(self, finding_id: str, message_id: int) -> None:
         async with self.pool.acquire() as conn, conn.transaction():
@@ -546,15 +547,20 @@ class PostgresRunStore:
                                 campaign_id)
 
     async def recent_sent_findings(self, campaign_id: str, limit: int = 200) -> list[SentFinding]:
-        """The campaign's newest sent exact cards (cluster heads), with their listing fields and links."""
+        """The campaign's newest sent exact cards (cluster heads), with their listing fields and links.
+
+        The post's own text is not fetched (it can be large and the comparison does not read it): ``original`` is
+        empty here, ``stream_finding`` loads a whole finding. ``number`` is the number stored when the card was
+        claimed; rows from before it was stored count the sent exact cards instead.
+        """
         rows = await self.pool.fetch(
             f"""select f.id::text as id,
                        coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
-                       f.structured_payload::text as payload, coalesce(p.body_text, '') as original,
+                       f.structured_payload::text as payload,
                        f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical,
                        p.canonical_url as url, cf.telegram_message_id, cf.cluster_id::text as cluster_id,
-                       cf.cluster_links::text as links, cf.number
-                  from (select cf2.*, row_number() over (order by cf2.sent_at, cf2.finding_id) as number
+                       cf.cluster_links::text as links, coalesce(cf.card_number, cf.counted)::int as number
+                  from (select cf2.*, row_number() over (order by cf2.sent_at, cf2.finding_id) as counted
                           from campaign_findings cf2
                          where cf2.campaign_id = $1::uuid and cf2.state = 'sent' and cf2.bucket = 'exact') cf
                   join findings f on f.id = cf.finding_id
@@ -564,35 +570,62 @@ class PostgresRunStore:
             campaign_id,
         )
         return [SentFinding(
-            StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"], r["confidence"],
+            StreamFinding(r["id"], r["text"], _payload(r["payload"]), "", r["language"], r["confidence"],
                           r["vertical"], r["url"]),
             r["telegram_message_id"], int(r["number"]), r["cluster_id"], _links(r["links"])) for r in rows]
+
+    async def stream_finding(self, finding_id: str) -> StreamFinding | None:
+        """One finding with the post's own text (what the card is rendered from), or None."""
+        row = await self.pool.fetchrow(
+            """select f.id::text as id,
+                      coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
+                      f.structured_payload::text as payload, coalesce(p.body_text, '') as original,
+                      f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical,
+                      p.canonical_url as url
+                 from findings f join collected_posts p on p.id = f.post_id
+                where f.id = $1::uuid""", finding_id)
+        if row is None:
+            return None
+        return StreamFinding(row["id"], row["text"], _payload(row["payload"]), row["original"], row["language"],
+                             row["confidence"], row["vertical"], row["url"])
 
     async def attach_to_cluster(self, finding_id: str, cluster_id: str, link: dict[str, str]) -> ClusterHead | None:
         """Record ``finding_id`` as a duplicate of the head ``cluster_id`` (never sent) and add ``link`` to the head.
 
         Returns the head's message id and all its links, or None when the head is not a sent card of the same
-        campaign (nothing is written then). Attaching twice adds the link once.
+        campaign, or when the finding itself is already sent or held (nothing is written then: the transaction is
+        rolled back). Attaching twice adds the link once. The finding is delivered like a sent one: its ``findings``
+        row leaves ``ready`` (nothing else must pick it up).
         """
-        async with self.pool.acquire() as conn, conn.transaction():
-            head = await conn.fetchrow(
-                """select campaign_id, telegram_message_id, cluster_links::text as links from campaign_findings
-                    where finding_id = $1::uuid and state = 'sent' and duplicate_of is null for update""", cluster_id)
-            if head is None:
-                return None
-            links = list(_links(head["links"]))
-            if link.get("url") and all(x.get("url") != link["url"] for x in links):
-                links.append({"url": str(link["url"]), "site": str(link.get("site") or "")})
-            await conn.execute(
-                "update campaign_findings set cluster_id = $1::uuid, cluster_links = $2::jsonb where finding_id = $1::uuid",
-                cluster_id, json.dumps(links))
-            await conn.execute(
-                """insert into campaign_findings (finding_id, campaign_id, state, duplicate_of, cluster_id)
-                   values ($1::uuid, $2::uuid, 'duplicate', $3::uuid, $3::uuid)
-                   on conflict (finding_id) do update set state = 'duplicate', duplicate_of = excluded.duplicate_of,
-                       cluster_id = excluded.cluster_id where campaign_findings.state in ('sending', 'duplicate')""",
-                finding_id, head["campaign_id"], cluster_id)
-            return ClusterHead(head["telegram_message_id"], tuple(links))
+        try:
+            async with self.pool.acquire() as conn, conn.transaction():
+                await _set_actor(conn, "campaign:runner")
+                head = await conn.fetchrow(
+                    """select campaign_id, telegram_message_id, cluster_links::text as links from campaign_findings
+                        where finding_id = $1::uuid and state = 'sent' and duplicate_of is null for update""", cluster_id)
+                if head is None:
+                    return None
+                stored = await conn.fetchval(
+                    """insert into campaign_findings (finding_id, campaign_id, state, duplicate_of, cluster_id)
+                       values ($1::uuid, $2::uuid, 'duplicate', $3::uuid, $3::uuid)
+                       on conflict (finding_id) do update set state = 'duplicate', duplicate_of = excluded.duplicate_of,
+                           cluster_id = excluded.cluster_id
+                         where campaign_findings.state in ('sending', 'duplicate')
+                       returning 1""",
+                    finding_id, head["campaign_id"], cluster_id)
+                if not stored:  # the finding was sent or held meanwhile: it is no duplicate
+                    raise _NotAttached
+                links = list(_links(head["links"]))
+                if link.get("url") and all(x.get("url") != link["url"] for x in links):
+                    links.append({"url": str(link["url"]), "site": str(link.get("site") or "")})
+                await conn.execute(
+                    "update campaign_findings set cluster_id = $1::uuid, cluster_links = $2::jsonb where finding_id = $1::uuid",
+                    cluster_id, json.dumps(links))
+                await conn.execute("update findings set state = 'delivered' where id = $1::uuid and state = 'ready'",
+                                   finding_id)
+                return ClusterHead(head["telegram_message_id"], tuple(links))
+        except _NotAttached:
+            return None
 
     async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None,
                            reason: str | None = None, why: str | None = None) -> bool:
@@ -644,7 +677,7 @@ class PostgresRunStore:
                     where finding_id = $1::uuid and campaign_id = $2::uuid and state = 'held' returning 1""",
                 finding_id, campaign_id,
             )
-            return await _sent_count(conn, campaign_id) if claimed else None
+            return await _number_card(conn, campaign_id, finding_id) if claimed else None
 
     async def exact_count(self, campaign_id: str) -> int:
         return int(await self.pool.fetchval(
@@ -783,6 +816,15 @@ async def _sent_count(conn: asyncpg.Connection[asyncpg.Record], campaign_id: str
         campaign_id))
 
 
+async def _number_card(conn: asyncpg.Connection[asyncpg.Record], campaign_id: str, finding_id: str) -> int:
+    """The finding's card number (the count of cards sent or being sent, itself included), stored on its row so an
+    edit of the card later shows the same «Найдено: N»."""
+    number = await _sent_count(conn, campaign_id)
+    await conn.execute("update campaign_findings set card_number = $2 where finding_id = $1::uuid",
+                       finding_id, number)
+    return number
+
+
 # A post belongs to a campaign through its Facebook batch (acquisition_runs ->
 # batch items -> acquisition_batches.campaign_id) or through the social search
 # that found it (campaign_social_posts, migration 022).
@@ -811,6 +853,10 @@ _CAMPAIGN_POSTS = f"""from collected_posts p
 
 async def _set_actor(conn: asyncpg.Connection[asyncpg.Record], actor: str) -> None:
     await conn.execute("select set_config('app.actor', $1, true)", actor)
+
+
+class _NotAttached(Exception):
+    """Raised inside ``attach_to_cluster``'s transaction to roll it back: the finding is not a duplicate any more."""
 
 
 # --- in-process twin ------------------------------------------------------------------
@@ -877,6 +923,8 @@ class MemoryRunStore:
         self.summaries: set[str] = set()  # campaigns whose summary was claimed
         self.cluster_links: dict[str, list[dict[str, str]]] = {}  # head finding -> other sightings
         self.duplicates: dict[str, str] = {}  # duplicate finding -> head finding (stored, never sent)
+        self.finding_reads: list[str] = []  # ids ``stream_finding`` loaded (dedup edits only)
+        self.card_numbers: dict[str, int] = {}  # finding -> the number its card was sent with
         self.posts_read: dict[str, dict[tuple[str, str], tuple[int, int]]] = {}  # cid -> source -> (sources, posts)
 
     async def recover_discovery_profile(self) -> int:
@@ -1008,6 +1056,7 @@ class MemoryRunStore:
             return None
         done[finding_id] = None
         self.buckets[finding_id] = ("exact", 0.0)
+        self.card_numbers[finding_id] = len(done)
         return len(done)
 
     async def finding_sent(self, finding_id: str, message_id: int) -> None:
@@ -1082,19 +1131,28 @@ class MemoryRunStore:
         by_id = {f.id: f for f in self.findings.get(campaign_id, [])}
         sent = [fid for fid, m in self.streamed.get(campaign_id, {}).items()
                 if m is not None and self.buckets.get(fid, ("", None))[0] == "exact" and fid in by_id]
-        return [SentFinding(by_id[fid], self.streamed[campaign_id][fid], sent.index(fid) + 1,
+        return [SentFinding(replace(by_id[fid], original=""), self.streamed[campaign_id][fid],
+                            self.card_numbers.get(fid) or sent.index(fid) + 1,
                             fid if fid in self.cluster_links else None, tuple(self.cluster_links.get(fid, ())))
                 for fid in reversed(sent)][:limit]
+
+    async def stream_finding(self, finding_id: str) -> StreamFinding | None:
+        self.finding_reads.append(finding_id)
+        return next((f for items in self.findings.values() for f in items if f.id == finding_id), None)
 
     async def attach_to_cluster(self, finding_id: str, cluster_id: str, link: dict[str, str]) -> ClusterHead | None:
         message_id = next((done[cluster_id] for done in self.streamed.values() if done.get(cluster_id) is not None), None)
         if message_id is None or cluster_id in self.duplicates:
             return None
+        if finding_id not in self.duplicates and (any(finding_id in done for done in self.streamed.values())
+                                                  or any(finding_id in held for held in self.held.values())):
+            return None  # sent or held meanwhile: no duplicate
         links = self.cluster_links.setdefault(cluster_id, [])
         if link.get("url") and all(x.get("url") != link["url"] for x in links):
             links.append({"url": str(link["url"]), "site": str(link.get("site") or "")})
         self.duplicates[finding_id] = cluster_id
         self.buckets[finding_id] = ("exact", 0.0)
+        self.findings_state[finding_id] = "delivered"
         return ClusterHead(message_id, tuple(links))
 
     async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None,
@@ -1121,6 +1179,7 @@ class MemoryRunStore:
         del held[finding_id]
         done = self.streamed.setdefault(campaign_id, {})
         done[finding_id] = None
+        self.card_numbers[finding_id] = len(done)
         return len(done)
 
     async def exact_count(self, campaign_id: str) -> int:

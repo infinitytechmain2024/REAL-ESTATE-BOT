@@ -168,6 +168,79 @@ async def test_a_failed_edit_keeps_the_attachment_and_sends_nothing() -> None:
     assert len(messenger.findings()) == 1 and store.duplicates == {"f2": "f1"} and not messenger.edits
 
 
+async def test_the_head_keeps_its_card_number_when_a_held_card_was_sent_before_it() -> None:
+    store, messenger, runner, cid = await setup()
+    add(store, cid, "f1", IDEALISTA, price=199_000, area=85)
+    await runner.step(cid)  # card 1
+    await store.hold_finding(cid, "fs", "similar", 0.1)
+    assert await store.claim_held(cid, "fs") == 2  # an approved similar card is card 2
+    await store.finding_sent("fs", 99)
+    other = "https://www.pisos.com/9"
+    add(store, cid, "f2", other, price=150_000, area=60, location="Benimaclet, Valencia")
+    await runner.step(cid)  # card 3: the exact cards alone would number it 2
+    add(store, cid, "f3", FOTOCASA, price=151_000, area=60, location="Benimaclet, Valencia")
+    await runner.step(cid)
+    assert store.duplicates == {"f3": "f2"}
+    assert messenger.edits[-1][2].rstrip().endswith("🔎 Найдено: 3 · ищу дальше")
+
+
+async def test_a_duplicate_is_recorded_as_excluded_and_delivered() -> None:
+    from bot.agents.recorder import MemoryRecorder
+
+    store, messenger, _, cid = await setup()
+    recorder = MemoryRecorder()
+    runner = CampaignRunner(store.campaigns, store, messenger, None, owner_ids={7}, recorder=recorder,  # type: ignore[arg-type]
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0))
+    add(store, cid, "f1", IDEALISTA, price=199_000, area=85)
+    add(store, cid, "f2", FOTOCASA, price=200_000, area=86)
+    await runner.step(cid)
+    dup = recorder.rows[(cid, "f2")]
+    assert (dup.state, dup.bucket, dup.reason) == ("excluded", "excluded", "duplicate_of:f1")
+    assert recorder.rows[(cid, "f1")].state == "sent" and store.findings_state["f2"] == "delivered"
+
+
+async def test_the_heads_are_fetched_once_per_step_and_the_head_text_only_for_an_edit() -> None:
+    store, _, runner, cid = await setup()
+    calls: list[str] = []
+    original = store.recent_sent_findings
+
+    async def counting(campaign_id: str, limit: int = 200):
+        calls.append(campaign_id)
+        return await original(campaign_id, limit)
+
+    store.recent_sent_findings = counting  # type: ignore[method-assign]
+    add(store, cid, "f1", IDEALISTA, price=199_000, area=85)
+    await runner.step(cid)
+    assert len(calls) == 1 and store.finding_reads == []  # nothing to merge: no head text loaded
+    for n in range(4):  # four sightings of other objects and one more of the first, in one step
+        add(store, cid, f"o{n}", f"https://www.pisos.com/{n}", price=100_000 + n * 50_000, area=50 + n * 20,
+            location=f"Barrio{n} Valencia", rooms=n + 1)
+    add(store, cid, "f2", FOTOCASA, price=200_000, area=86)
+    calls.clear()
+    await runner.step(cid)
+    assert len(calls) == 1 and store.duplicates == {"f2": "f1"} and store.finding_reads == ["f1"]
+
+
+async def test_a_card_sent_in_this_step_is_a_head_for_the_next_findings() -> None:
+    store, messenger, runner, cid = await setup()
+    add(store, cid, "f1", IDEALISTA, price=199_000, area=85)
+    await runner.step(cid)  # loads the index (empty), sends f1 ... in a later step f2 and f3 arrive together
+    add(store, cid, "f2", "https://www.pisos.com/2", price=150_000, area=60, location="Benimaclet, Valencia")
+    add(store, cid, "f3", FOTOCASA, price=151_000, area=60, location="Benimaclet, Valencia")
+    await runner.step(cid)
+    assert store.duplicates == {"f3": "f2"} and len(messenger.findings()) == 2
+
+
+async def test_a_finding_that_is_already_sent_or_held_is_never_attached() -> None:
+    store, _, runner, cid = await setup()
+    add(store, cid, "f1", IDEALISTA, price=199_000, area=85)
+    await runner.step(cid)
+    await store.hold_finding(cid, "h", "similar", 0.1)
+    assert await store.attach_to_cluster("h", "f1", {"url": FOTOCASA, "site": "fotocasa.es"}) is None
+    assert "f1" not in store.cluster_links or store.cluster_links["f1"] == []
+    assert store.duplicates == {}
+
+
 # --- PostgreSQL (migration 036) -----------------------------------------------------------------
 
 URL = os.environ.get("SYSTEM_TEST_DATABASE_URL", "")
@@ -264,3 +337,50 @@ async def test_postgres_clusters_duplicates_and_streams_one_card(pool) -> None:
     assert again is not None and len(again.links) == 1  # the same link is added once
     assert await store.attach_to_cluster(dup, other, {}) is not None
     assert await store.attach_to_cluster(dup, dup, {"url": "x"}) is None  # a duplicate is not a head
+
+
+@needs_db
+async def test_postgres_stores_the_card_number_and_attach_rolls_back_for_a_sent_finding(pool) -> None:
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+
+    campaigns = PostgresCampaignStore(pool)
+    store = PostgresRunStore(pool, SafetyLimits())
+    cid = await campaigns.create(plan_campaign(GOAL), chat_id=-100, requested_by=42, source_text=GOAL, actor="telegram:42")
+    await campaigns.set_state(cid, "running", "campaign:test")
+    head, similar, dup, other, late = await _seed(pool, cid, [
+        (IDEALISTA, payload(199_000, 85)), ("https://www.pisos.com/s", payload(150_000, 60, rooms=2)),
+        (FOTOCASA, payload(200_000, 86, link=FOTOCASA)), ("https://www.pisos.com/o", payload(310_000, 120, rooms=4)),
+        ("https://www.habitaclia.com/l", payload(400_000, 160, rooms=5))])
+
+    assert await store.claim_finding(cid, head) == 1
+    await store.finding_sent(head, 11)
+    assert await store.hold_finding(cid, similar, "similar", 0.1)
+    assert await store.claim_held(cid, similar) == 2  # the approved similar card is card 2 ...
+    await store.finding_sent(similar, 12)
+    assert await store.claim_finding(cid, other) == 3  # ... so the next exact card is 3, not 2
+    await store.finding_sent(other, 13)
+    numbers = {r["finding_id"]: r["card_number"] for r in await pool.fetch(
+        "select finding_id::text, card_number from campaign_findings where state = 'sent'")}
+    assert numbers == {head: 1, similar: 2, other: 3}
+    sent = {s.finding.id: s for s in await store.recent_sent_findings(cid)}
+    assert sent[other].number == 3 and sent[head].number == 1 and sent[other].finding.original == ""
+    await pool.execute("update campaign_findings set card_number = null where finding_id = $1::uuid", other)
+    assert {s.finding.id: s.number for s in await store.recent_sent_findings(cid)}[other] == 2  # the old computation
+    assert (await store.stream_finding(other)).original == "piso"  # the lazily fetched head has the post text
+    assert await store.stream_finding(str(uuid.uuid4())) is None
+
+    # A duplicate leaves ``ready`` like a sent finding does.
+    assert await pool.fetchval("select state from findings where id = $1::uuid", dup) == "ready"
+    attached = await store.attach_to_cluster(dup, head, {"url": FOTOCASA, "site": "fotocasa.es"})
+    assert attached is not None and attached.message_id == 11
+    assert await pool.fetchval("select state from findings where id = $1::uuid", dup) == "delivered"
+    # A finding that was sent meanwhile is no duplicate: nothing is written, the head's links stay.
+    assert await store.claim_finding(cid, late) == 4
+    await store.finding_sent(late, 14)
+    assert await store.attach_to_cluster(late, head, {"url": "https://x.es/late", "site": "x.es"}) is None
+    row = await pool.fetchrow("select state, duplicate_of from campaign_findings where finding_id = $1::uuid", late)
+    assert (row["state"], row["duplicate_of"]) == ("sent", None)
+    links = json.loads(await pool.fetchval("select cluster_links::text from campaign_findings where finding_id = $1::uuid", head))
+    assert links == [{"url": FOTOCASA, "site": "fotocasa.es"}]

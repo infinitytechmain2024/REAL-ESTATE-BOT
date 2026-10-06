@@ -47,7 +47,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -57,7 +57,7 @@ from bot.agents.recorder import PostgresRecorder, Recorder, record_of
 from bot.analysis_pipeline.cards import CardTask, also_on, render_card
 
 from . import offers, people
-from .dedup import listing_of, same_object, site_of
+from .dedup import Listing, listing_of, same_object, site_of
 from .final_report import FinalReporter, task_title
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
@@ -236,14 +236,33 @@ class RunnerConfig:
     # seen in the last ``lead_days``.
     max_people: int = 60
     lead_days: int = 90
+    # The campaign's metrics row (``campaign_metrics``) is recomputed at most this often while it runs.
+    metrics_seconds: float = 30
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
                 or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100
                 or not 0 <= self.max_relevance_calls <= 10_000 or not 1 <= self.relevance_retry_limit <= 100 or self.comment_leads not in COMMENT_MODES
                 or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500
-                or not 1 <= self.lead_days <= 3650):
+                or not 1 <= self.lead_days <= 3650 or self.metrics_seconds < 0):
             raise ValueError("unsafe campaign runner settings")
+
+
+@dataclass(slots=True)
+class _Head:
+    """A sent exact card as a dedup candidate: its fields and its precomputed ``Listing``."""
+
+    sent: SentFinding
+    listing: Listing
+
+
+@dataclass(slots=True)
+class _HeadIndex:
+    """The campaign's cluster heads, fetched once per ``_stream`` (on the first exact finding) and kept up to date
+    with the cards sent during the step."""
+
+    loaded: bool = False
+    heads: list[_Head] = field(default_factory=list)
 
 
 class CampaignRunner:
@@ -282,6 +301,8 @@ class CampaignRunner:
         # Campaigns whose chat got a card or a question below the status message: the status moves down.
         self._below_status: set[str] = set()
         self._web_edit_at: dict[str, datetime] = {}  # campaign id -> when the web progress line was last shown
+        self._metrics_at: dict[str, datetime] = {}  # campaign id -> when its metrics were last recomputed
+        self._metrics_final: set[str] = set()  # ended campaigns whose metrics were recomputed by this process
 
     async def tick(self) -> int:
         """Advance every open (or just finished) campaign by one step; returns how many were seen."""
@@ -336,10 +357,13 @@ class CampaignRunner:
                 log.exception("campaign.runner.failed", extra={"campaign_id": campaign_id})
                 await self.campaigns.set_state(campaign_id, "failed", ACTOR, reason=f"runner_error:{type(exc).__name__}"[:500])
             campaign = await self.campaigns.get(campaign_id) or campaign
+            if campaign.state not in TERMINAL_STATES:
+                await self._metrics(campaign)
         if campaign.state in TERMINAL_STATES:
             await self._close(campaign)
             # Final: a finding whose AI check is still missing is held as unverified, never lost.
             await self._stream(campaign, final=True)
+            await self._metrics(campaign, final=True)
             await self._summary(campaign)
             await self._final_report(campaign)
             line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
@@ -499,6 +523,7 @@ class CampaignRunner:
         deferred = 0
         paused = self._relevance_paused_until is not None and self.now() < self._relevance_paused_until
         skip = set(self._relevance_misses) if paused and not final and skip_misses else set()
+        index = _HeadIndex()  # the dedup candidates: one query per step, not one per finding
         for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step, skip=skip):
             match = await self._judge(campaign, request, finding, final=final)
             if match is None:  # transient miss: neither held nor streamed, retried on a later step
@@ -513,22 +538,28 @@ class CampaignRunner:
                                  extra={"campaign_id": campaign.id, "finding_id": finding.id})
                     await self._record(campaign, finding, match.bucket)
                 continue
-            if await self._deduplicate(campaign, finding, active):
+            if await self._deduplicate(campaign, finding, active, index):
                 continue
             count = await self.store.claim_finding(campaign.id, finding.id)
             if count is None:
                 continue
             if not await self._send_card(campaign, finding, count, active, "exact"):
                 return deferred
+            if index.loaded:  # the card just sent is a head for the findings still to come in this step
+                index.heads.insert(0, _Head(SentFinding(finding, None, count),
+                                            listing_of(finding.payload, url=finding.url, text=finding.text)))
         await self._near_matches(campaign, request, active)
         await self._people(campaign)
         return deferred
 
-    async def _deduplicate(self, campaign: Campaign, finding: StreamFinding, active: bool) -> bool:
+    async def _deduplicate(self, campaign: Campaign, finding: StreamFinding, active: bool,
+                           index: _HeadIndex | None = None) -> bool:
         """The same object as an exact card already sent: store the finding as its duplicate and add its link.
 
         No second card is sent; the head card is edited to show «Также на: ...». Conservative (``dedup.same_object``):
         when in doubt the finding is sent as its own card. A finding without a link is never merged.
+        The heads come from ``index`` (fetched once per step, see ``_stream``). The duplicate is recorded as excluded
+        (``duplicate_of:<head>``) and, in the store, delivered like a sent finding.
         Returns True when the finding was attached (nothing is left to send).
         """
         if not finding.url:
@@ -536,34 +567,43 @@ class CampaignRunner:
         mine = listing_of(finding.payload, url=finding.url, text=finding.text)
         if mine.price is None and mine.area is None:
             return False
+        index = index if index is not None else _HeadIndex()
         try:
-            heads = await self.store.recent_sent_findings(campaign.id)
-            for head in heads:
-                if head.finding.id == finding.id or not same_object(
-                        mine, listing_of(head.finding.payload, url=head.finding.url, text=head.finding.text)):
+            if not index.loaded:
+                index.loaded = True
+                index.heads = [_Head(h, listing_of(h.finding.payload, url=h.finding.url, text=h.finding.text))
+                               for h in await self.store.recent_sent_findings(campaign.id)]
+            for position, head in enumerate(index.heads):
+                if head.sent.finding.id == finding.id or not same_object(mine, head.listing):
                     continue
                 link = {"url": finding.url, "site": site_of(finding.url)}
-                if finding.url == head.finding.url:
+                if finding.url == head.sent.finding.url:
                     link = {}  # the same post again: nothing to add
-                attached = await self.store.attach_to_cluster(finding.id, head.finding.id, link)
+                attached = await self.store.attach_to_cluster(finding.id, head.sent.finding.id, link)
                 if attached is None:
                     continue
                 log.info("campaign.finding_deduplicated", extra={
-                    "campaign_id": campaign.id, "finding_id": finding.id, "head_finding_id": head.finding.id})
-                if len(attached.links) > len(head.links):
-                    await self._edit_head(campaign, head, attached, active)
+                    "campaign_id": campaign.id, "finding_id": finding.id, "head_finding_id": head.sent.finding.id})
+                await self._record(campaign, finding, "excluded", reason=f"duplicate_of:{head.sent.finding.id}")
+                if len(attached.links) > len(head.sent.links):
+                    index.heads[position] = replace(head, sent=replace(head.sent, links=attached.links))
+                    await self._edit_head(campaign, head.sent, attached, active)
                 return True
         except Exception:  # noqa: BLE001 - dedup is an optimisation: on any failure send the card as usual
             log.warning("campaign.dedup_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
         return False
 
     async def _edit_head(self, campaign: Campaign, head: SentFinding, attached: ClusterHead, active: bool) -> None:
-        """Re-render the head card with «Также на: ...» and edit its Telegram message (best effort)."""
+        """Re-render the head card with «Также на: ...» and edit its Telegram message (best effort).
+
+        The card keeps the number it was sent with (stored when it was claimed). The head's post text is loaded only
+        here, for the render (the dedup candidates are fetched without it)."""
         if attached.message_id is None:
             return
-        tail = f"🔎 Найдено: {head.number}" + (" · ищу дальше" if active else "")
-        card = f"{finding_card(campaign, head.finding, cluster_links=attached.links)}\n\n{tail}"
         try:
+            full = await self.store.stream_finding(head.finding.id) or head.finding
+            tail = f"🔎 Найдено: {head.number}" + (" · ищу дальше" if active else "")
+            card = f"{finding_card(campaign, full, cluster_links=attached.links)}\n\n{tail}"
             await self.messenger.edit(campaign.chat_id, attached.message_id, card[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - the link is stored; a lost edit only hides it from the card
             log.warning("campaign.cluster_edit_failed",
@@ -760,12 +800,14 @@ class CampaignRunner:
                  contact_card(card.contact, score=card.score, reasons=card.reasons, also=card.links))
                 for card in ready]
 
-    async def _record(self, campaign: Campaign, finding: StreamFinding, bucket: str) -> None:
-        """Store a held (similar/other) or excluded finding; never blocks the stream."""
+    async def _record(self, campaign: Campaign, finding: StreamFinding, bucket: str, *,
+                      reason: str | None = None) -> None:
+        """Store a held (similar/other) or excluded finding (``reason``: e.g. ``duplicate_of:<head>``); never blocks the stream."""
         if self.recorder is None:
             return
         record = record_of(campaign.id, finding.id, state="excluded" if bucket == "excluded" else "held",
-                           bucket=bucket, payload=finding.payload, text=finding.original or finding.text)
+                           bucket=bucket, payload=finding.payload, text=finding.original or finding.text,
+                           reason=reason)
         await self._recorded(self.recorder.excluded(record) if bucket == "excluded" else self.recorder.held(record))
 
     @staticmethod
@@ -880,6 +922,29 @@ class CampaignRunner:
             return
         self._below_status.add(campaign.id)  # the status message moves below the report
         log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
+
+    async def _metrics(self, campaign: Campaign, *, final: bool = False) -> None:
+        """Recompute the campaign's ``campaign_metrics`` row: at most every ``metrics_seconds`` while it runs, and
+        once (per process) after it ended. Bookkeeping: a failure is logged and never stops the step."""
+        refresh = getattr(self.campaigns, "refresh_metrics", None)
+        if refresh is None:
+            return
+        now = self.now()
+        if final:
+            if campaign.id in self._metrics_final:
+                return
+        else:
+            last = self._metrics_at.get(campaign.id)
+            if last is not None and (now - last).total_seconds() < self.config.metrics_seconds:
+                return
+        try:
+            await refresh(campaign.id)
+        except Exception:  # noqa: BLE001
+            log.warning("campaign.metrics_failed", extra={"campaign_id": campaign.id})
+            return
+        self._metrics_at[campaign.id] = now
+        if final:
+            self._metrics_final.add(campaign.id)
 
     async def _show(self, campaign: Campaign, line: str) -> None:
         """Keep one status message per campaign, always the last one in the chat: it is edited when its

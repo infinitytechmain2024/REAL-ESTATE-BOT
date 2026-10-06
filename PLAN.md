@@ -109,9 +109,9 @@
   Заменяет связку `tolerance.py` + `relevance.py`; ±10 % становится параметром `TaskSpec`.
 - [x] **4.2 Финалист (Fable)**: `bot/campaign/final_report.py` — ранжирование, отчёт
   пользователю: найдено / отклонено по причинам / какие сайты не прочитались и почему.
-- [ ] **4.3 Боевой `reduction-worker`**: снять `mode == "shadow"`, отправка через Recorder-outbox;
+- [x] **4.3 Боевой `reduction-worker`**: снять `mode == "shadow"`, отправка через Recorder-outbox;
   старый `analysis-worker` остаётся для постов Facebook без URL.
-- [ ] **4.4 Метрики**: таблица `campaign_metrics` + `/campaign report <id>`.
+- [x] **4.4 Метрики**: таблица `campaign_metrics` + `/campaign report <id>`.
 
 ## Этап 5 — Режим «Инвесторы» (4–5 дней)
 

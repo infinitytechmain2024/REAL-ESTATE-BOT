@@ -473,10 +473,10 @@ class PostgresWebStore:
                 ticket.url.url_key, "fetched" if result.ok else "failed", result.kind, post_id,
                 None if result.ok else (result.error or "failed")[:80])
             await conn.execute(
-                """update web_campaign_urls set state = $3, kind = $4, detail = $5, finished_at = now()
+                """update web_campaign_urls set state = $3, kind = $4, detail = $5, layer = $6, finished_at = now()
                     where campaign_id = $1::uuid and url_key = $2""",
                 ticket.campaign_id, ticket.url.url_key, "fetched" if result.ok else "failed", result.kind,
-                _detail(result))
+                _detail(result), result.layer)
             if not contacted:  # the site was never asked: its counters and block stay as they are
                 return post_id
             refused = (result.error or "") in _REFUSALS
@@ -681,6 +681,7 @@ class _MemUrl:
     snippet: str = ""
     rendered: bool = False
     scraped: bool = False
+    layer: str | None = None  # the fetch layer that read it (campaign_metrics)
 
 
 @dataclass
@@ -960,6 +961,7 @@ class MemoryWebStore:
         row = self.urls[ticket.campaign_id][ticket.url.url_key]
         row.state, row.kind = ("fetched" if result.ok else "failed"), result.kind
         row.detail = _detail(result)
+        row.layer = result.layer
         self.finished_fetches.append(ticket.url.url_key)
         if result.layer == "none" or (result.via == "search" and result.error is None):  # the site was never asked
             return post_id

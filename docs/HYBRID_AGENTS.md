@@ -38,7 +38,16 @@ Status:
   (`bot/analysis_pipeline/openrouter.py`, also used by `bot/agents/extraction.py`)
   with verbatim `evidence` quotes, district/address/floor/features/condition/
   listing_date, JSON-LD-first rule and a campaign `task_hint` (data only). The
-  reduction worker (Claude + Jev + gate) stays shadow.
+  reduction worker (Claude + Jev + gate) is shadow by default.
+- **Reduction worker live mode implemented (PLAN 4.3).** `AGENT_REDUCTION_MODE=live`
+  (default `shadow`): the worker owns the posts of `AGENT_REDUCTION_SOURCES` (default
+  `website`), claimed through the same lease on `collected_posts` the analysis worker uses.
+  `send` writes the normal `findings` row the campaign runner streams (plus the Recorder
+  outbox row `to_send`), `hold` files a held similar/other finding (`held`), a rules-excluded
+  discard is filed `excluded`; the post becomes `analysed` / `rejected`. Set
+  `ANALYSIS_EXCLUDE_PLATFORMS=website` on `analysis-worker` so it keeps Facebook and the
+  social networks. Duplicates are recorded by the Recorder as `excluded` with
+  `reason = duplicate_of:<head finding id>` (migration 039).
 - Everything else is still **design**.
 
 It upgrades

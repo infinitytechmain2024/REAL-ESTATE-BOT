@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .metrics import REFRESH_SQL, SELECT_SQL, CampaignMetrics, metrics_of
 from .models import TERMINAL_STATES, TRANSITIONS, Campaign, CampaignPlan, can_transition
 
 if TYPE_CHECKING:
@@ -32,6 +33,10 @@ class CampaignStore(Protocol):
     async def latest_for_chat(self, chat_id: int) -> Campaign | None: ...
 
     async def set_search_plan(self, campaign_id: str, search_plan: dict[str, Any]) -> bool: ...
+
+    async def refresh_metrics(self, campaign_id: str) -> CampaignMetrics: ...
+
+    async def campaign_metrics(self, campaign_id: str) -> CampaignMetrics | None: ...
 
 
 def _check_create(source_text: str) -> None:
@@ -125,6 +130,19 @@ class PostgresCampaignStore:
             )
         return row is not None
 
+    async def refresh_metrics(self, campaign_id: str) -> CampaignMetrics:
+        """Recompute the campaign's ``campaign_metrics`` row from the queries, pages and findings in one statement."""
+        key = _uuid(campaign_id)
+        if key is None:
+            raise ValueError("campaign id is not a uuid")
+        return metrics_of(await self.pool.fetchrow(REFRESH_SQL, key))
+
+    async def campaign_metrics(self, campaign_id: str) -> CampaignMetrics | None:
+        """The stored row (as of the last refresh), or None."""
+        key = _uuid(campaign_id)
+        row = await self.pool.fetchrow(SELECT_SQL, key) if key else None
+        return metrics_of(row) if row else None
+
     async def latest_for_chat(self, chat_id: int) -> Campaign | None:
         row = await self.pool.fetchrow(
             """select id::text, plan::text, state, telegram_chat_id, requested_by, source_text,
@@ -141,6 +159,8 @@ class MemoryCampaignStore:
     def __init__(self) -> None:
         self.campaigns: dict[str, Campaign] = {}
         self.audit: list[tuple[str, str, str | None, str]] = []  # (id, actor, old_state, new_state)
+        self.metrics: dict[str, CampaignMetrics] = {}  # tests put the numbers here: nothing else is tallied in memory
+        self.metric_refreshes: list[str] = []  # campaign ids ``refresh_metrics`` was called for
 
     async def create(self, plan: CampaignPlan, *, chat_id: int, requested_by: int,
                      source_text: str, actor: str, spec: dict[str, Any] | None = None) -> str:
@@ -186,6 +206,13 @@ class MemoryCampaignStore:
         plan = current.plan.model_copy(update={"search_plan": dict(search_plan)})
         self.campaigns[campaign_id] = replace(current, plan=plan)
         return True
+
+    async def refresh_metrics(self, campaign_id: str) -> CampaignMetrics:
+        self.metric_refreshes.append(campaign_id)
+        return self.metrics.setdefault(campaign_id, CampaignMetrics(campaign_id))
+
+    async def campaign_metrics(self, campaign_id: str) -> CampaignMetrics | None:
+        return self.metrics.get(campaign_id)
 
     async def latest_for_chat(self, chat_id: int) -> Campaign | None:
         mine = [c for c in self.campaigns.values() if c.chat_id == chat_id]

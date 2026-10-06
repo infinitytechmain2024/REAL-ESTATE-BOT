@@ -31,8 +31,10 @@ def build_task_hint(goal: str | None, place: str | None, spec: dict[str, Any] | 
 
 
 class PostgresAnalysisStore:
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, *, exclude_platforms: tuple[str, ...] = ()):
         self.database_url = database_url
+        # Platforms another worker owns (the live reduction worker takes ``website``): never claimed here.
+        self.exclude_platforms = list(exclude_platforms)
         self.pool: Any = None
 
     async def connect(self):
@@ -63,6 +65,7 @@ class PostgresAnalysisStore:
                        select p.id from collected_posts p join monitoring_sources s on s.id=p.source_id
                         where p.state='normalised' and s.state='active' and s.deleted_at is null
                           and s.vertical in ('real_estate','investors','both')
+                          and s.platform <> all($3::text[])
                           and (p.analysis_claimed_at is null or p.analysis_claimed_at < now() - make_interval(secs => $2))
                         order by p.collected_at
                         for update of p skip locked limit $1)
@@ -78,6 +81,7 @@ class PostgresAnalysisStore:
                                              order by created_at limit 10) c), '[]'::jsonb)::text as comments""",
                 limit,
                 claim_seconds,
+                self.exclude_platforms,
             )
 
     async def save(self, evidence: Evidence, vertical: str, outcome, model: str, claim_token: str | None = None):

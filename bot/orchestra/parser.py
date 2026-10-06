@@ -76,13 +76,18 @@ def parse_scope(arguments: str) -> tuple[str, str]:
 
 
 def parse_campaign(arguments: str) -> tuple[str, str]:
-    """``/campaign <goal>``, ``/campaign status`` or ``/campaign cancel <id>`` -> (action, value)."""
+    """``/campaign <goal>``, ``/campaign status``, ``/campaign report [<id>]`` or ``/campaign cancel <id>`` -> (action, value)."""
     text = arguments.strip()
     if not text:
         raise CommandValidationError("use /campaign <goal>, /campaign status, or /campaign cancel <id>")
     head, _, rest = text.partition(" ")
     if head.lower() == "status" and not rest.strip():
         return ("status", "")
+    if head.lower() == "report":
+        parts = rest.split()
+        if len(parts) > 1:
+            raise CommandValidationError("use /campaign report [<campaign id>]")
+        return ("report", parts[0] if parts else "")
     if head.lower() == "cancel":
         parts = rest.split()
         if len(parts) != 1:

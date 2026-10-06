@@ -12,16 +12,20 @@ from bot.agents.extraction import EXTRACTION_SCHEMA, RawPost, parse_extraction, 
 from bot.agents.gate import Policy, gate
 from bot.agents.jev import QUESTIONS, Answer, parse_answers
 from bot.agents.llm import LLMError, OpenRouterJSON
+from bot.agents.recorder import MemoryRecorder
 from bot.agents.reduction import (
     MemoryReductionStore,
+    Outcome,
     PostgresReductionStore,
     ReductionAgent,
     ReductionConfig,
     ReductionWorker,
+    publication_of,
 )
 from bot.agents.settings import ReductionSettings
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.runner import campaign_request
+from bot.campaign.tolerance import classify
 from tests.test_near_match import GOAL, USER, _seed_findings, listing, needs_db
 from tests.test_near_match import pool as pool
 
@@ -181,7 +185,7 @@ class FakeExtractor:
             self.fail -= 1
             raise LLMError("http_503")
         price = 60_000 if "60" in post.post_id else 45_000
-        return extraction(price)
+        return extraction(price, deal="rent") if "rent" in post.post_id else extraction(price)
 
 
 class FakeDecider:
@@ -257,6 +261,83 @@ async def test_parallel_agents_never_share_a_post() -> None:
     assert {r["worker"] for r in store.rows.values()} == {"w0", "w1", "w2"}
 
 
+# --- live mode (PLAN 4.3) -----------------------------------------------------------------------------------------
+
+
+def web_post(cid: str, pid: str, text: str = POST_TEXT) -> RawPost:
+    return RawPost(pid, cid, f"https://www.idealista.com/inmueble/{pid}/", text, "Piso", "website")
+
+
+async def live(**config):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store, recorder = MemoryReductionStore(campaigns), MemoryRecorder()
+    worker = ReductionWorker(ReductionAgent(FakeExtractor(), FakeDecider()), store, campaigns,
+                             config=ReductionConfig(mode="live", **config), models={"claude": "c", "jev": "j"},
+                             worker_id="w1", recorder=recorder)
+    return campaigns, cid, store, recorder, worker
+
+
+async def test_live_mode_files_a_finding_per_decision_and_records_it_through_the_outbox() -> None:
+    _, cid, store, recorder, worker = await live()
+    for pid in ("p45", "p60", "rent", "junk"):
+        store.add_post(web_post(cid, pid, "hola" if pid == "junk" else POST_TEXT))
+    store.add_post(post(cid, "p45-fb"))  # a Facebook post: the analysis worker's, never claimed here
+    assert await worker.tick() == 4 and ("p45-fb", cid) not in store.rows
+    kinds = {pid: (p.kind, p.bucket, p.why) for pid, p in store.published.items()}
+    assert kinds == {"p45": ("send", "exact", None), "p60": ("hold", "similar", "ai"),
+                     "rent": ("excluded", "excluded", "deal")}
+    assert store.post_states == {"p45": "analysed", "p60": "analysed", "rent": "analysed", "junk": "rejected"}
+    assert all(store.rows[(pid, cid)]["mode"] == "live" for pid in ("p45", "p60", "rent", "junk"))
+    rows = {pid: recorder.rows[(cid, f"finding-{pid}")] for pid in ("p45", "p60", "rent")}
+    assert [(r.state, r.bucket, r.reason) for r in rows.values()] == [
+        ("to_send", "exact", None), ("held", "similar", None), ("excluded", "excluded", "rules:deal")]
+    assert rows["p45"].site == "idealista.com" and rows["p45"].card_text and len(recorder.rows) == 3  # the junk one: none
+
+
+async def test_the_live_finding_has_the_payload_shape_the_runner_reads() -> None:
+    from bot.campaign.models import Campaign  # noqa: F401 - the type the worker passes
+
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    campaign_obj = await campaigns.get(cid)
+    pub = publication_of(web_post(cid, "p45"), Outcome("send", "exact", "gate:send", 0.8, "exact", extraction(), answers(), 2),
+                         campaign_obj, "claude-x")
+    assert pub is not None and (pub.kind, pub.vertical, pub.model) == ("send", "real_estate", "claude-x")
+    assert pub.payload["original_post_link"] == "https://www.idealista.com/inmueble/p45/"
+    assert pub.payload["schema_version"] == "analysis-v6" and pub.payload["price_amount"] == 45_000
+    assert "relevant" not in pub.payload and "red_flags" not in pub.payload  # extraction-only keys stay out
+    assert pub.formatted and 0 <= pub.confidence <= 1
+    assert classify(pub.payload, campaign_request(campaign_obj), vertical="real_estate").bucket == "exact"
+    # a discard that is not the rules' (spam, irrelevant, prefilter) files nothing
+    assert publication_of(web_post(cid, "x"), Outcome("discard", None, "jev:spam", None, "exact", extraction()), campaign_obj) is None
+    assert publication_of(web_post(cid, "x"), Outcome("discard", None, "prefilter:insufficient_content"), campaign_obj) is None
+
+
+async def test_shadow_mode_takes_every_platform_and_files_nothing_and_live_takes_over_shadowed_posts() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store, recorder = MemoryReductionStore(campaigns), MemoryRecorder()
+    shadow = ReductionWorker(ReductionAgent(FakeExtractor(), FakeDecider()), store, campaigns, worker_id="s", recorder=recorder)
+    store.add_post(web_post(cid, "p45"))
+    store.add_post(post(cid, "p45-fb"))
+    assert await shadow.tick() == 2
+    assert store.published == {} and store.post_states == {} and recorder.rows == {}
+    live_worker = ReductionWorker(ReductionAgent(FakeExtractor(), FakeDecider()), store, campaigns,
+                                  config=ReductionConfig(mode="live"), worker_id="l", recorder=recorder)
+    assert await live_worker.tick() == 1  # the website post that was only shadowed; the Facebook one stays with analysis
+    assert set(store.published) == {"p45"} and store.rows[("p45", cid)]["mode"] == "live"
+    assert await live_worker.tick() == 0
+
+
+async def test_live_sources_are_configurable_and_a_post_the_analysis_worker_finished_is_left_alone() -> None:
+    _, cid, store, _, worker = await live(sources=("facebook", "website"))
+    store.add_post(post(cid, "p45-fb"))
+    store.post_states["done"] = "analysed"
+    store.add_post(web_post(cid, "done"))
+    assert await worker.tick() == 1 and set(store.published) == {"p45-fb"}
+
+
 def test_settings_stay_idle_until_switched_on_with_both_models() -> None:
     assert ReductionSettings(_env_file=None).missing() == ["AGENT_REDUCTION_ENABLED"]
     on = ReductionSettings(_env_file=None, AGENT_REDUCTION_ENABLED=True, DATABASE_URL="postgresql://x",
@@ -265,7 +346,12 @@ def test_settings_stay_idle_until_switched_on_with_both_models() -> None:
     assert ReductionSettings(_env_file=None, AGENT_REDUCTION_ENABLED=True, DATABASE_URL="postgresql://x",
                              OPENROUTER_API_KEY="k", OPENROUTER_JEV_MODEL="").missing() == ["OPENROUTER_JEV_MODEL"]
     with pytest.raises(ValueError):
-        ReductionConfig(mode="live")
+        ReductionConfig(mode="paper")
+    with pytest.raises(ValueError):
+        ReductionConfig(mode="live", sources=())  # live needs the platforms it owns
+    live = ReductionSettings(_env_file=None, AGENT_REDUCTION_MODE="Live", AGENT_REDUCTION_SOURCES="website, Facebook").config()
+    assert (live.mode, live.sources) == ("live", ("website", "facebook"))
+    assert ReductionSettings(_env_file=None).config().mode == "shadow"
 
 
 # --- PostgreSQL (migration 025) -----------------------------------------------------------------------
@@ -317,3 +403,114 @@ async def test_models_are_checked_against_the_openrouter_catalogue() -> None:
         lambda _r: httpx.Response(503))))
     with pytest.raises(LLMError, match="catalogue"):
         await down.unknown_models(["x"])
+
+
+async def _seed_posts(pool, cid: str, platform: str, texts: list[str], *, state: str = "normalised") -> list[str]:
+    """One campaign batch of a ``platform`` source with a post per text (state ``normalised``); returns the post ids."""
+    import uuid
+
+    host = "www.idealista.com" if platform == "website" else "www.facebook.com"
+    async with pool.acquire() as conn:
+        source = await conn.fetchval(
+            """insert into monitoring_sources (platform, source_kind, vertical, canonical_url, acquisition_method, state)
+               values ($1, $2, 'real_estate', $3, $4, 'active') returning id""",
+            platform, "website" if platform == "website" else "group", f"https://{host}/s/{uuid.uuid4().hex[:6]}",
+            "scrapling" if platform == "website" else "facebook_connector")
+        batch = await conn.fetchval(
+            """insert into acquisition_batches (platform, acquisition_method, vertical, state, max_items, campaign_id)
+               values ($1, $2, 'real_estate', 'succeeded', 1, $3::uuid) returning id""",
+            platform, "scrapling" if platform == "website" else "facebook_connector", cid)
+        item = await conn.fetchval(
+            "insert into acquisition_batch_items (batch_id, source_id, sequence_no, state) values ($1, $2, 1, 'succeeded') returning id",
+            batch, source)
+        run = await conn.fetchval(
+            "insert into acquisition_runs (source_id, batch_item_id, state, acquisition_method) values ($1, $2, 'succeeded', $3) returning id",
+            source, item, "scrapling" if platform == "website" else "facebook_connector")
+        return [str(await conn.fetchval(
+            """insert into collected_posts (acquisition_run_id, source_id, platform_post_id, canonical_url, body_text,
+                                            state, content_hash)
+               values ($1, $2, $3, $4, $5, $6, $7) returning id""",
+            run, source, str(n), f"https://{host}/inmueble/{uuid.uuid4().hex[:8]}/", text, state, uuid.uuid4().hex))
+            for n, text in enumerate(texts)]
+
+
+class TextExtractor(FakeExtractor):
+    """45 000 € unless the post says 60.000."""
+
+    async def extract(self, task, post, *, notes=""):
+        self.calls.append(post.post_id)
+        return extraction(60_000 if "60.000" in post.text else 45_000)
+
+
+@needs_db
+async def test_postgres_live_reduction_owns_website_posts_and_the_runner_streams_its_findings(pool) -> None:
+    from bot.agents.recorder import PostgresRecorder
+    from bot.analysis_pipeline.store import PostgresAnalysisStore
+    from bot.campaign.runner import CampaignRunner, RunnerConfig
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+    from tests.test_campaign_runner import FakeMessenger
+    from tests.test_near_match import URL
+
+    campaigns = PostgresCampaignStore(pool)
+    cid = await campaigns.create(plan_campaign(GOAL), chat_id=-100, requested_by=USER, source_text=GOAL, actor="t")
+    await campaigns.set_state(cid, "running", "t")
+    exact_text, similar_text = POST_TEXT, POST_TEXT.replace("45.000", "60.000")
+    exact, similar = await _seed_posts(pool, cid, "website", [exact_text, similar_text])
+    (facebook,) = await _seed_posts(pool, cid, "facebook", [POST_TEXT + " Facebook"])
+
+    # The analysis worker told to leave `website` alone claims only the Facebook post (and the lease is the same one).
+    analysis = PostgresAnalysisStore(URL, exclude_platforms=("website",))
+    await analysis.connect()
+    try:
+        assert [str(r["id"]) for r in await analysis.pending(10)] == [facebook]
+        await pool.execute("update collected_posts set analysis_claim_token = null, analysis_claimed_at = null")
+
+        store = PostgresReductionStore(pool)
+        worker = ReductionWorker(ReductionAgent(TextExtractor(), FakeDecider()), store, campaigns,
+                                 config=ReductionConfig(mode="live", sources=("website",)), worker_id="live-1",
+                                 models={"claude": "c", "jev": "j"}, recorder=PostgresRecorder(pool))
+        taken = await store.claim(cid, "live-0", 1, 300, mode="live", sources=("website",))
+        assert [p.post_id for p in taken] == [exact]  # claimed through the posts' own lease ...
+        assert await pool.fetchval("select analysis_claim_token is not null from collected_posts where id = $1::uuid", exact)
+        everything = PostgresAnalysisStore(URL)
+        await everything.connect()
+        try:  # ... so an analysis worker that does not exclude websites cannot take it either
+            assert {str(r["id"]) for r in await everything.pending(10)} == {similar, facebook}
+        finally:
+            await everything.close()
+        await pool.execute("update collected_posts set analysis_claim_token = null, analysis_claimed_at = null where id = $1::uuid", similar)
+        await pool.execute("update collected_posts set analysis_claim_token = null, analysis_claimed_at = null where id = $1::uuid", facebook)
+        await pool.execute("update agent_reductions set claimed_until = now() - interval '1 second' where post_id = $1::uuid", exact)
+        assert await worker.tick() == 2  # the lapsed claim is taken over, the other website post is new; Facebook is not ours
+    finally:
+        await analysis.close()
+
+    states = {r["id"]: r["state"] for r in await pool.fetch("select id::text, state from collected_posts")}
+    assert states == {exact: "analysed", similar: "analysed", facebook: "normalised"}
+    reductions = {r["post_id"]: r for r in await pool.fetch(
+        "select post_id::text, mode, state, action, bucket from agent_reductions")}
+    assert {k: (r["mode"], r["state"], r["action"], r["bucket"]) for k, r in reductions.items()} == {
+        exact: ("live", "done", "send", "exact"), similar: ("live", "done", "hold", "similar")}
+    findings = {r["post_id"]: r for r in await pool.fetch(
+        "select post_id::text, state, vertical, structured_payload::text as payload, analysis_metadata->>'agent' as agent from findings")}
+    assert {k: (r["state"], r["vertical"], r["agent"]) for k, r in findings.items()} == {
+        exact: ("ready", "real_estate", "reduction"), similar: ("ready", "real_estate", "reduction")}
+    assert json.loads(findings[exact]["payload"])["original_post_link"].startswith("https://www.idealista.com/inmueble/")
+    filed = {r["post_id"]: (r["bucket"], r["state"], r["why"]) for r in await pool.fetch(
+        "select f.post_id::text, cf.bucket, cf.state, cf.why from campaign_findings cf join findings f on f.id = cf.finding_id")}
+    assert filed == {similar: ("similar", "held", "ai")}  # the exact one is the runner's to claim
+    outbox = {r["site"] + r["state"] for r in await pool.fetch("select site, state from agent_findings")}
+    assert outbox == {"idealista.comto_send", "idealista.comheld"}
+
+    # The campaign runner streams the finding like any analysis-worker output.
+    messenger = FakeMessenger()
+    runner = CampaignRunner(campaigns, PostgresRunStore(pool, SafetyLimits()), messenger, None, owner_ids={7},
+                            recorder=PostgresRecorder(pool), config=RunnerConfig(relevance_fail_closed=False))
+    await runner.step(cid)
+    assert len(messenger.findings()) == 1 and "Найдено: 1" in messenger.findings()[0]
+    exact_finding = await pool.fetchval("select id from findings where post_id = $1::uuid", exact)
+    assert await pool.fetchval("select state from findings where id = $1", exact_finding) == "delivered"
+    assert await pool.fetchval("select state from agent_findings where site = 'idealista.com' and bucket = 'exact'") == "sent"
+    assert await pool.fetchval("select count(*) from campaign_findings where state = 'sent'") == 1
