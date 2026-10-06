@@ -31,6 +31,8 @@ class CampaignStore(Protocol):
 
     async def latest_for_chat(self, chat_id: int) -> Campaign | None: ...
 
+    async def set_search_plan(self, campaign_id: str, search_plan: dict[str, Any]) -> bool: ...
+
 
 def _check_create(source_text: str) -> None:
     if not source_text or len(source_text) > MAX_SOURCE_TEXT:
@@ -108,6 +110,21 @@ class PostgresCampaignStore:
         """Stop a campaign that has not ended; the runner then cancels its in-flight window."""
         return await self.set_state(campaign_id, "cancelled", actor, reason=f"cancelled_by:{actor}"[:500])
 
+    async def set_search_plan(self, campaign_id: str, search_plan: dict[str, Any]) -> bool:
+        """Store the model's ``SearchPlan`` in ``plan.search_plan``; only when none is stored yet (idempotent)."""
+        key = _uuid(campaign_id)
+        if key is None:
+            return False
+        async with self.pool.acquire() as conn, conn.transaction():
+            await _set_actor(conn, STORE_ACTOR)
+            row = await conn.fetchrow(
+                """update campaigns set plan = jsonb_set(plan, '{search_plan}', $2::jsonb)
+                   where id = $1::uuid and coalesce(plan->'search_plan', 'null'::jsonb) = 'null'::jsonb
+                   returning id""",
+                key, json.dumps(search_plan, ensure_ascii=False),
+            )
+        return row is not None
+
     async def latest_for_chat(self, chat_id: int) -> Campaign | None:
         row = await self.pool.fetchrow(
             """select id::text, plan::text, state, telegram_chat_id, requested_by, source_text,
@@ -161,6 +178,14 @@ class MemoryCampaignStore:
 
     async def cancel(self, campaign_id: str, actor: str) -> bool:
         return await self.set_state(campaign_id, "cancelled", actor, reason=f"cancelled_by:{actor}"[:500])
+
+    async def set_search_plan(self, campaign_id: str, search_plan: dict[str, Any]) -> bool:
+        current = self.campaigns.get(campaign_id)
+        if current is None or current.plan.search_plan is not None:
+            return False
+        plan = current.plan.model_copy(update={"search_plan": dict(search_plan)})
+        self.campaigns[campaign_id] = replace(current, plan=plan)
+        return True
 
     async def latest_for_chat(self, chat_id: int) -> Campaign | None:
         mine = [c for c in self.campaigns.values() if c.chat_id == chat_id]

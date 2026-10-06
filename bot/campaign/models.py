@@ -80,6 +80,8 @@ class CampaignPlan(BaseModel):
     query_seeds: dict[Language, list[str]]
     constraints: dict[str, str | int | None] = Field(default_factory=dict)
     limits: CampaignLimits = Field(default_factory=CampaignLimits)
+    # An LLM-written ``SearchPlan`` (bot/campaign/search_plan.py) as JSON; None until written (or when it failed).
+    search_plan: dict[str, Any] | None = None
 
     @field_validator("languages")
     @classmethod

@@ -58,6 +58,19 @@ class CampaignRunnerSettings(BaseSettings):
     social_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_SOCIAL_MODEL")
     social_model_timeout_seconds: int = Field(default=20, ge=1, le=120, validation_alias="OPENROUTER_SOCIAL_TIMEOUT_SECONDS")
 
+    # The LLM-written search plan of a campaign (bot/campaign/search_plan.py); no key: the old behaviour.
+    plan_model: str = Field(default="anthropic/claude-sonnet-4.5", validation_alias="OPENROUTER_PLAN_MODEL")
+    plan_timeout_seconds: int = Field(default=45, ge=5, le=300, validation_alias="OPENROUTER_PLAN_TIMEOUT_SECONDS")
+    plan_enabled: bool = Field(default=True, validation_alias="CAMPAIGN_SEARCH_PLAN_ENABLED")
+
+    def search_planner(self):  # -> bot.campaign.search_plan.OpenRouterSearchPlanner | None
+        from .search_plan import OpenRouterSearchPlanner
+
+        if not self.plan_enabled or not self.openrouter_api_key:
+            return None
+        return OpenRouterSearchPlanner(api_key=self.openrouter_api_key, model=self.plan_model,
+                                       timeout_seconds=float(self.plan_timeout_seconds))
+
     # The AI relevance check of each campaign finding (bot/campaign/relevance.py); 0 calls: rules only.
     relevance_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_MATCH_MODEL")
     relevance_timeout_seconds: int = Field(default=15, ge=1, le=120, validation_alias="OPENROUTER_MATCH_TIMEOUT_SECONDS")

@@ -11,11 +11,12 @@ Nothing here starts a collector.
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import (
     LANGUAGES,
@@ -28,7 +29,11 @@ from .models import (
 )
 from .spec import TaskSpec
 
+if TYPE_CHECKING:
+    from .search_plan import SearchPlan
+
 MAX_TEXT_CHARS = 2000
+log = logging.getLogger(__name__)
 
 
 class InvalidGoal(ValueError):
@@ -247,6 +252,23 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
         constraints=constraints,
         limits=limits,
     )
+
+
+class SearchPlanner(Protocol):
+    async def plan(self, spec: TaskSpec, plan: CampaignPlan, *, source_text: str = "") -> SearchPlan | None: ...
+
+
+async def plan_with_model(plan: CampaignPlan, spec: TaskSpec, planner: SearchPlanner, *,
+                          source_text: str = "") -> CampaignPlan:
+    """``plan`` with the model's ``SearchPlan`` stored in ``search_plan``; unchanged when the planner fails."""
+    if plan.search_plan is not None:
+        return plan
+    try:
+        found = await planner.plan(spec, plan, source_text=source_text)
+    except Exception as exc:  # noqa: BLE001 - the plan is an improvement, never a requirement
+        log.warning("campaign.search_plan_failed %s", type(exc).__name__)
+        return plan
+    return plan if found is None else plan.model_copy(update={"search_plan": found.to_dict()})
 
 
 def _spec_place(spec: TaskSpec) -> dict[str, str]:

@@ -173,6 +173,8 @@ class QueryTask:
     country_code: str | None = None  # the plan's country (any place in the world)
     required_portals: tuple[str, ...] = ()  # this round must search each of these (``cover_portals``)
     place_level: PlaceLevel = "city"  # what the task names: a city, or a province/region around it
+    search_plan: dict[str, Any] | None = None  # the LLM-written ``SearchPlan`` (bot/campaign/search_plan.py), if any
+    blocked_hosts: frozenset[str] = frozenset()  # ``spec.sources.blocked``: never searched or read for this campaign
 
     @property
     def text(self) -> str:
@@ -202,18 +204,63 @@ class QueryTask:
         return self.location_aliases.get(language or "es") or self.location
 
     def portals(self) -> tuple[str, ...]:
-        """The portals to search with ``site:``, best first: by property kind (Spain), plus the bank ones on request."""
+        """The portals to search with ``site:``, best first: by property kind (Spain), plus the bank ones on request.
+
+        With a search plan its sites come first (priority 1, 2, 3), then the kind list; blocked sites never.
+        """
         if self.vertical == "investors":
             return ()
+        base: tuple[str, ...] = ()
         if self.ukrainian:
-            return UKRAINE_PORTALS
-        if not self.spanish:
-            return ()  # elsewhere: no known portals, the open web only
-        kind = task_kind(self)
-        portals = SPAIN_PORTALS_BY_KIND.get(kind, SPAIN_PORTALS_BY_KIND["apartment"])
-        if _BANK_RE.search(_fold(self.text)):
-            portals = (*portals, *(p for p in SPAIN_BANK_PORTALS if p not in portals))
-        return portals
+            base = UKRAINE_PORTALS
+        elif self.spanish:
+            kind = task_kind(self)
+            base = SPAIN_PORTALS_BY_KIND.get(kind, SPAIN_PORTALS_BY_KIND["apartment"])
+            if _BANK_RE.search(_fold(self.text)):
+                base = (*base, *(p for p in SPAIN_BANK_PORTALS if p not in base))
+        # elsewhere: no known portals, the open web only (plus the sites the plan names from spec.sources)
+        planned = tuple(h for h, _ in sorted(plan_sites(self.search_plan), key=lambda item: item[1]))
+        merged = tuple(dict.fromkeys((*planned, *base)))
+        return tuple(p for p in merged if not any(_on_portal(p, b) for b in self.blocked_hosts))
+
+
+def plan_sites(search_plan: dict[str, Any] | None) -> list[tuple[str, int]]:
+    """``(host, priority)`` of a stored search plan's sites; tolerant of a malformed dict."""
+    out: list[tuple[str, int]] = []
+    for item in (search_plan or {}).get("sites") or []:
+        if isinstance(item, dict) and isinstance(item.get("host"), str) and item["host"]:
+            priority = item.get("priority")
+            out.append((item["host"], priority if isinstance(priority, int) and 1 <= priority <= 3 else 2))
+    return out
+
+
+def plan_queries(search_plan: dict[str, Any] | None) -> list[GeneratedQuery]:
+    """The stored search plan's queries in the plan's order (not yet cleaned or localised)."""
+    out: list[GeneratedQuery] = []
+    for item in (search_plan or {}).get("queries") or []:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            language = item.get("language")
+            text, site = item["text"], item.get("site")
+            if isinstance(site, str) and site and "site:" not in text:
+                text = f"site:{site} {text}"
+            out.append(GeneratedQuery(text, language if language in QUERY_LANGUAGES else None))
+    return out
+
+
+def plan_portal_urls(search_plan: dict[str, Any] | None) -> list[str]:
+    """The stored search plan's direct portal search URLs."""
+    return [item["url"] for item in (search_plan or {}).get("portal_urls") or []
+            if isinstance(item, dict) and isinstance(item.get("url"), str)]
+
+
+def planned_round(task: QueryTask, used: list[str], count: int) -> list[GeneratedQuery]:
+    """Up to ``count`` plan queries not used yet (localised, de-duplicated); plan order is kept."""
+    if not task.search_plan or count <= 0:
+        return []
+    drop = [q for q in plan_queries(task.search_plan)
+            if any(_on_portal(site, b) for site in _sites(q.text) for b in task.blocked_hosts)]
+    candidates = [q for q in plan_queries(task.search_plan) if q not in drop]
+    return dedupe(localise(candidates, task), used, limit=count)
 
 
 _BANK_RE = re.compile("|".join(rf"(?<!\w){re.escape(w)}" for w in SPAIN_BANK_WORDS))
@@ -664,10 +711,13 @@ class FallbackQueryGenerator:
         self.primary, self.fallback = primary, fallback or TemplateQueryGenerator()
 
     async def generate(self, task: QueryTask, *, used: list[str], count: int) -> list[GeneratedQuery]:
-        kept: list[GeneratedQuery] = []
-        if self.primary is not None:
+        kept = planned_round(task, used, count)  # the search plan's queries go first, then the model, then templates
+        if self.primary is not None and len(kept) < count:
             try:
-                kept = local_round(await self.primary.generate(task, used=used, count=count), task, used, count)
+                more = local_round(await self.primary.generate(task, used=[*used, *(q.text for q in kept)],
+                                                               count=count - len(kept)),
+                                   task, [*used, *(q.text for q in kept)], count - len(kept))
+                kept += more
             except QueryGenerationError as exc:
                 log.warning("web_search.query_generation_failed %s %s", exc.code, exc.status)
         if len(kept) < count:

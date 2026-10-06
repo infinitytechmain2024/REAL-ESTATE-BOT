@@ -92,7 +92,7 @@
 
 ## Этап 3 — Архитектор и сборщики (4–6 дней)
 
-- [ ] **3.1 `SearchPlan`** от LLM (`bot/campaign/architect.py` → `plan_with_model`):
+- [x] **3.1 `SearchPlan`** от LLM (`bot/campaign/architect.py` → `plan_with_model`):
   сайты по приоритету, запросы по языкам с ценой/комнатами/районами, URL-слаги порталов
   (например idealista `/venta-viviendas/valencia-valencia/con-precio-hasta_200000,de-dos-dormitorios/`),
   стоп-критерий. Детерминированный `plan_campaign` остаётся фолбэком.

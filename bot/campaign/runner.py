@@ -1069,10 +1069,11 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
         renderer = BrowserRenderer(BrowserSessionClient(runner_settings.browser_url, runner_settings.browser_token),
                                    timeout_seconds=settings.render_timeout_seconds)
     scraper = settings.scraper()
+    planner = runner_settings.search_planner()
     worker = WebSearchWorker(campaigns, PostgresWebStore(pool), searcher, fetcher, FallbackQueryGenerator(model),
-                             renderer=renderer, scraper=scraper, config=config)
+                             renderer=renderer, scraper=scraper, planner=planner, config=config)
     closers = ([searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
-               + ([scraper.aclose] if scraper else []))
+               + ([scraper.aclose] if scraper else []) + ([planner.aclose] if planner else []))
     return worker, settings.poll_seconds, closers
 
 
