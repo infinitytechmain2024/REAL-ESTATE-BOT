@@ -58,7 +58,8 @@ for migration_path in bot/services/db/migrations/001_init.sql \
                       bot/services/db/migrations/027_investor_reach.sql \
                       bot/services/db/migrations/028_reach_company_kind.sql \
                       bot/services/db/migrations/029_web_search_snippets.sql \
-                      bot/services/db/migrations/030_campaign_summary.sql 031_task_draft_steps.sql; do
+                      bot/services/db/migrations/030_campaign_summary.sql \
+                      bot/services/db/migrations/031_task_draft_steps.sql; do
   migration="$(basename "$migration_path")"
   digest="$(checksum "$migration_path")"
   existing="$("${compose[@]}" exec -T postgres sh -ec \
