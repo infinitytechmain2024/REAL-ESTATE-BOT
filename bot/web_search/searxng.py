@@ -18,6 +18,7 @@ class SearchHit:
     url: str
     title: str = ""
     snippet: str = ""
+    engine: str = ""   # which backend produced it (search_backends); empty for SearXNG
 
 
 class SearchError(RuntimeError):

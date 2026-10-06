@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .scrape_api import ScrapeApiClient
+from .search_backends import (
+    BACKEND_NAMES,
+    GoogleCseClient,
+    MergedSearcher,
+    SearchBackend,
+    SerpApiClient,
+)
+from .searxng import SearxngClient
 from .worker import WebSearchConfig
+
+log = logging.getLogger(__name__)
 
 
 class WebSearchSettings(BaseSettings):
@@ -15,6 +27,13 @@ class WebSearchSettings(BaseSettings):
     enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_ENABLED")
     searxng_url: str = Field(default="http://searxng:8080", validation_alias="WEB_SEARCH_SEARXNG_URL")
     searxng_timeout_seconds: float = Field(default=25, ge=3, le=120, validation_alias="WEB_SEARCH_SEARXNG_TIMEOUT_SECONDS")
+    # Search backends: comma list of searxng | google_cse | serpapi. A named backend without its key is skipped.
+    backends_raw: str = Field(default="searxng", validation_alias="WEB_SEARCH_BACKENDS")
+    google_cse_api_key: str = Field(default="", repr=False, validation_alias="GOOGLE_CSE_API_KEY")
+    google_cse_cx: str = Field(default="", validation_alias="GOOGLE_CSE_CX")
+    serpapi_api_key: str = Field(default="", repr=False, validation_alias="SERPAPI_API_KEY")
+    google_cse_daily_cap: int = Field(default=90, ge=0, le=100_000, validation_alias="WEB_SEARCH_GOOGLE_CSE_DAILY_CAP")
+    serpapi_daily_cap: int = Field(default=90, ge=0, le=100_000, validation_alias="WEB_SEARCH_SERPAPI_DAILY_CAP")
     poll_seconds: float = Field(default=15, ge=2, le=600, validation_alias="WEB_SEARCH_POLL_SECONDS")
 
     # Query generation: OpenRouter with the analysis key; without it, deterministic templates.
@@ -91,3 +110,43 @@ class WebSearchSettings(BaseSettings):
             return None
         return ScrapeApiClient(self.scrape_api_url, self.scrape_api_key, timeout_seconds=self.scrape_api_timeout_seconds,
                                max_bytes=self.max_content_bytes)
+
+    def backend_names(self) -> list[str]:
+        names: list[str] = []
+        for raw in self.backends_raw.replace(";", ",").split(","):
+            name = raw.strip().lower()
+            if not name:
+                continue
+            if name not in BACKEND_NAMES:
+                log.warning("web_search.unknown_backend %s", name)
+            elif name not in names:
+                names.append(name)
+        return names or ["searxng"]
+
+    def searcher(self, searxng_client: SearxngClient) -> SearchBackend:
+        """The SearXNG client alone when it is the only usable backend, else a ``MergedSearcher``."""
+        config = self.config()
+        timeout = self.searxng_timeout_seconds
+        backends: list[SearchBackend] = []
+        caps: dict[str, int] = {}
+        for name in self.backend_names():
+            if name == "searxng":
+                backends.append(searxng_client)
+            elif name == "google_cse":
+                if not (self.google_cse_api_key and self.google_cse_cx):
+                    log.warning("web_search.backend_skipped google_cse: GOOGLE_CSE_API_KEY/GOOGLE_CSE_CX missing")
+                    continue
+                backends.append(GoogleCseClient(self.google_cse_api_key, self.google_cse_cx,
+                                                max_results=config.results_per_query, timeout=timeout))
+                caps[name] = self.google_cse_daily_cap
+            elif name == "serpapi":
+                if not self.serpapi_api_key:
+                    log.warning("web_search.backend_skipped serpapi: SERPAPI_API_KEY missing")
+                    continue
+                backends.append(SerpApiClient(self.serpapi_api_key, max_results=config.results_per_query, timeout=timeout))
+                caps[name] = self.serpapi_daily_cap
+        if not backends:
+            return searxng_client
+        if backends == [searxng_client]:
+            return searxng_client
+        return MergedSearcher(backends, max_results=config.results_per_query, daily_caps=caps)

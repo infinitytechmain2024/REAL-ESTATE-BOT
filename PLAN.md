@@ -68,7 +68,7 @@
 - [x] **1.5 Блокировка хоста по слоям**: `web_hosts.blocked_until` → `(host, layer)`;
   403 на слое B переводит хост на слой C, а не блокирует на 12 ч.
   Файл: `bot/web_search/store.py:385`.
-- [ ] **1.6 Второй поисковый бэкенд**: `SearchBackend` протокол; реализации `SearxngClient`
+- [x] **1.6 Второй поисковый бэкенд**: `SearchBackend` протокол; реализации `SearxngClient`
   и `GoogleCseClient` (или SerpAPI). Запрос уходит в оба, результаты сливаются по `url_key`.
   Файл: `bot/web_search/searxng.py` → `bot/web_search/search_backends.py`.
 - [x] **1.7 Классификация URL**: убрать «6 цифр = объявление»; для неизвестных хостов
