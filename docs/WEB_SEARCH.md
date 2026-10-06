@@ -28,8 +28,9 @@
      `failed`, `duplicate`, `capped`, `robots`, `skipped`.
    - `web_hosts` — каждый сайт: его источник, счётчики и временная блокировка
      после трёх отказов подряд (403/429/503) на 12 часов.
-   - `web_search_queries` — запросы кампании (уникальны по смыслу); запрос,
-     который другая кампания искала за последние 72 часа, не ищется снова.
+   - `web_search_queries` — запросы кампании (уникальны по смыслу); другая
+     кампания может повторить запрос; при `WEB_SEARCH_QUERY_REUSE_HOURS` > 0
+     запрос, искавшийся другой кампанией за это время, пропускается.
 4. **Чтение страниц.** Только публичные GET-страницы: без логинов, форм и
    cookies, только публичные адреса, `robots.txt` соблюдается (и его
    `Crawl-delay`), не чаще одного запроса к сайту в
@@ -71,13 +72,17 @@
 
 | Переменная | По умолчанию | Что ограничивает |
 |---|---|---|
-| `WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN` | 40 | запросов на кампанию |
+| `WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN` | 80 | запросов на кампанию |
 | `WEB_SEARCH_QUERIES_PER_ROUND` | 12 | запросов в раунде |
-| `WEB_SEARCH_RESULTS_PER_QUERY` | 10 | результатов с одного запроса |
-| `WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN` | 60 | страниц на кампанию |
-| `WEB_SEARCH_MAX_PAGES_PER_HOST` | 12 | страниц одного сайта на кампанию |
-| `WEB_SEARCH_MAX_LINKS_PER_INDEX` | 10 | ссылок со страницы поиска портала |
-| `WEB_SEARCH_MAX_PAGES_PER_DAY` | 400 | страниц за 24 ч на всю систему |
+| `WEB_SEARCH_RESULTS_PER_QUERY` | 30 | результатов с одного запроса (после слияния страниц) |
+| `WEB_SEARCH_PAGES_PER_QUERY` | 2 | страниц выдачи SearXNG на запрос (1-5; остановка, если страница не дала новых ссылок) |
+| `WEB_SEARCH_QUERY_REUSE_HOURS` | 0 | часов, в течение которых запрос, уже выполненный другой кампанией, пропускается (0: не пропускается; свои повторы кампания не делает никогда) |
+| `WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN` | 400 | страниц на кампанию |
+| `WEB_SEARCH_MAX_PAGES_PER_HOST` | 100 | страниц одного сайта на кампанию |
+| `WEB_SEARCH_MAX_LINKS_PER_INDEX` | 40 | ссылок со страницы поиска портала |
+| `WEB_SEARCH_INDEX_TTL_DAYS` | 7 | через сколько дней страница поиска портала (`index`) читается заново (0: не читается; объявления не читаются повторно никогда) |
+| `WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN` | 15 | чтений в браузере на кампанию (считается в БД) |
+| `WEB_SEARCH_MAX_PAGES_PER_DAY` | 3000 | страниц за 24 ч на всю систему |
 | `WEB_SEARCH_MAX_QUERIES_PER_DAY` | 300 | запросов за 24 ч на всю систему |
 | `WEB_SEARCH_MAX_MINUTES_PER_CAMPAIGN` | 240 | длительность веб-этапа кампании |
 
@@ -108,7 +113,7 @@ https://<сайт>/`).
 
 ```sh
 git pull
-./scripts/apply_migrations.sh                       # применит 021_campaign_web_search.sql
+./scripts/apply_migrations.sh                       # применит 021_campaign_web_search.sql ... 032_web_seen_urls_ttl.sql
 docker compose pull searxng
 docker compose up -d --build searxng campaign-runner
 docker compose logs -f campaign-runner | grep web_search
@@ -122,5 +127,7 @@ docker compose logs -f campaign-runner | grep web_search
   классифайдов читаются лучше. Прокси/VPN может помочь, но не гарантирует.
 - Поисковики внутри SearXNG иногда отдают CAPTCHA или лимит — тогда запрос
   возвращает мало результатов (в логе `web_search.engines_silent`).
-- Страница, прочитанная для одной кампании, другой кампании уже не
-  показывается (так задано: «никогда не читать повторно»).
+- Объявление, прочитанное для одной кампании, другой кампании уже не
+  показывается (так задано: «никогда не читать повторно»). Исключение: страница
+  поиска портала (`index`) читается заново через `WEB_SEARCH_INDEX_TTL_DAYS`,
+  а найденные на ней ссылки проходят обычную дедупликацию.

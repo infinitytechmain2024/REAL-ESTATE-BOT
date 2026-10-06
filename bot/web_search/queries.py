@@ -130,7 +130,7 @@ def dedupe(candidates: list[GeneratedQuery], used: list[str], *, limit: int) -> 
 
 
 PlaceLevel = Literal["city", "province", "region"]
-_REGION_WORDS = re.compile(rf"(?<!\w)(?:provincias?|provincie|province|comunidad(?:es)?|comunitat|regiones?|region|"
+_REGION_WORDS = re.compile(r"(?<!\w)(?:provincias?|provincie|province|comunidad(?:es)?|comunitat|regiones?|region|"
                            r"oblast|cataluna|catalunya|andalucia|andalusia)(?!\w)|(?<!\w)(?:провинц|област|регион)")
 _NOT_REGION = re.compile(r"(?<!\w)(?:comunidad de vecinos|gastos de comunidad|comunidad de propietarios|"
                          r"gastos comunitarios)(?!\w)")

@@ -905,7 +905,7 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
         return None
     config = settings.config()
     searcher = SearxngClient(settings.searxng_url, timeout_seconds=settings.searxng_timeout_seconds,
-                             max_results=config.results_per_query)
+                             max_results=config.results_per_query, pages=config.pages_per_query)
     fetcher = PageFetcher(user_agent=settings.user_agent, request_timeout_seconds=settings.request_timeout_seconds,
                           max_content_bytes=settings.max_content_bytes, host_interval_seconds=settings.host_interval_seconds,
                           proxy_url=settings.proxy_url or None)

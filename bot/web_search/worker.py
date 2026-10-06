@@ -70,7 +70,8 @@ class WebSearchConfig:
     max_queries_per_campaign: int = 40
     max_rounds: int = 8
     queries_per_tick: int = 3
-    results_per_query: int = 10
+    results_per_query: int = 30
+    pages_per_query: int = 2          # SearXNG result pages walked per query (pageno 1..N)
     max_pages_per_campaign: int = 60
     max_pages_per_host: int = 12
     max_links_per_index: int = 10
@@ -78,7 +79,8 @@ class WebSearchConfig:
     max_pages_per_day: int = 400
     max_queries_per_day: int = 300
     max_minutes_per_campaign: int = 240
-    query_reuse_hours: int = 72
+    query_reuse_hours: int = 0        # 0: another campaign may repeat a query; N: it is skipped for N hours
+    index_ttl_days: int = 7           # an index page is read again after this many days (0: never)
     lease_seconds: int = 300
     max_post_chars: int = 8000
     page_runtime_seconds: int = 60
@@ -90,7 +92,8 @@ class WebSearchConfig:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
                 and 1 <= self.queries_per_tick <= 10 and 1 <= self.results_per_query <= 30
                 and 1 <= self.max_pages_per_campaign <= 500 and 1 <= self.max_pages_per_host <= 100
-                and 0 <= self.max_links_per_index <= 30 and 1 <= self.pages_per_tick <= 20
+                and 0 <= self.max_links_per_index <= 100 and 1 <= self.pages_per_query <= 5
+                and 0 <= self.query_reuse_hours <= 720 and 0 <= self.index_ttl_days <= 365 and 1 <= self.pages_per_tick <= 20
                 and 1 <= self.max_pages_per_day <= 10_000 and 1 <= self.max_queries_per_day <= 5_000
                 and 1 <= self.max_rounds <= 50 and 5 <= self.max_minutes_per_campaign <= 7 * 24 * 60
                 and 60 <= self.lease_seconds <= 3600 and 1 <= self.page_runtime_seconds <= 600
@@ -123,7 +126,6 @@ class WebSearchWorker:
             campaigns, store, searcher, fetcher, generator)
         self.config, self.now = config or WebSearchConfig(), now
         self.renderer = renderer
-        self.renders: dict[str, int] = {}   # browser reads per campaign (this process)
         self.token = str(uuid.uuid4())
 
     async def tick(self) -> int:
@@ -246,7 +248,7 @@ class WebSearchWorker:
                     continue
                 candidates.append(Candidate(hit.url, url_key(hit.url), host_of(hit.url), 0, classify_url(hit.url),
                                             query.id, hit.title, hit.snippet))
-            new = await self.store.enqueue(campaign.id, candidates)
+            new = await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
             await self.store.query_done(query.id, ok=True, results=len(hits), new_urls=new)
 
     # -- pages --
@@ -281,7 +283,7 @@ class WebSearchWorker:
                 result = search_result(url, result.error) or result
             await self.store.finish_fetch(ticket, result)
             if children:
-                await self.store.enqueue(campaign.id, children)
+                await self.store.enqueue(campaign.id, children, index_ttl_days=cfg.index_ttl_days)
 
     async def _keep_search_result(self, campaign: Campaign, url: QueuedUrl, error: str | None) -> bool:
         """Store ``url``'s search result as its post without asking the site; False when there is none."""
@@ -309,9 +311,9 @@ class WebSearchWorker:
             return PageResult(False, url.kind, url.url, error="timeout"), []
         parsed = parse_html(page.html, page.url)
         result, children = self._page(url, page.url, parsed, structured(page.html, page.url))
-        if not self._wants_render(campaign_id, result, children):
+        if not await self._wants_render(campaign_id, result, children):
             return result, children
-        self.renders[campaign_id] = self.renders.get(campaign_id, 0) + 1
+        await self.store.mark_rendered(campaign_id, url.url_key)
         try:
             rendered = await asyncio.wait_for(self.renderer.render(page.url), timeout=cfg.page_runtime_seconds)
         except (RenderError, TimeoutError) as exc:
@@ -323,9 +325,9 @@ class WebSearchWorker:
         log.info("web_search.rendered", extra={"campaign_id": campaign_id, "ok": again.ok, "links": len(more)})
         return (again, more) if again.ok and (again.kind == "listing" or more) else (result, children)
 
-    def _wants_render(self, campaign_id: str, result: PageResult, children: list[Candidate]) -> bool:
+    async def _wants_render(self, campaign_id: str, result: PageResult, children: list[Candidate]) -> bool:
         """Only a page the site served (HTTP 200) but drew with JavaScript: no text, or a list without links."""
-        if self.renderer is None or self.renders.get(campaign_id, 0) >= self.config.max_renders_per_campaign:
+        if self.renderer is None or await self.store.renders_used(campaign_id) >= self.config.max_renders_per_campaign:
             return False
         return (not result.ok and result.error == "no_readable_text") or (result.kind == "index" and not children)
 

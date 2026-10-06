@@ -252,3 +252,71 @@ async def test_a_site_that_refuses_bots_gives_posts_from_its_search_results(pool
         "search_snippet": 5}
     assert await pool.fetchval("select blocked_until > now() from web_hosts where host = 'idealista.com'")
     assert await pool.fetchval("select search_title from web_campaign_urls limit 1") == title
+
+
+async def test_another_campaign_may_repeat_a_query_unless_reuse_hours_say_otherwise(pool) -> None:
+    from bot.web_search.models import GeneratedQuery
+
+    store = PostgresWebStore(pool)
+    first, second, third = await new_campaign(pool), await new_campaign(pool), await new_campaign(pool)
+    query = [GeneratedQuery("terreno Boadilla Madrid", "es")]
+    assert await store.add_queries(first, 1, query, reuse_hours=0) == 1
+    await pool.execute("update web_search_queries set state = 'searched', searched_at = now()")
+    assert await store.add_queries(second, 1, query, reuse_hours=0) == 1      # no cross-campaign block
+    assert await store.add_queries(second, 2, query, reuse_hours=0) == 0      # its own repeat: unique key
+    assert await store.add_queries(third, 1, query, reuse_hours=72) == 0      # blocked when > 0
+    assert await pool.fetchval("select state from web_search_queries where campaign_id = $1::uuid", third) == "skipped"
+    assert await pool.fetchval("select state from web_search_queries where campaign_id = $1::uuid", second) == "pending"
+
+
+async def test_an_index_page_is_queued_again_after_its_ttl_and_a_listing_never(pool) -> None:
+    from bot.web_search.models import Candidate
+
+    store = PostgresWebStore(pool)
+    first, second = await new_campaign(pool), await new_campaign(pool)
+    await store.start_run(first)
+    index = QueuedUrl(INDEX_URL, url_key(INDEX_URL), "fotocasa.es", 0, "index")
+    listing = QueuedUrl(LISTING, url_key(LISTING), "idealista.com", 0, "listing")
+    for url in (index, listing):
+        await store.enqueue(first, [Candidate(url.url, url.url_key, url.host, 0, url.kind)])
+        ticket = await store.begin_fetch(first, url, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+        assert not isinstance(ticket, str)
+        await store.finish_fetch(ticket, PageResult(True, url.kind, url.url, "t", "" if url.kind == "index" else "x" * 200))
+    assert await pool.fetchval("select kind from web_seen_urls where url_key = $1", index.url_key) == "index"
+
+    def candidates(cid: str) -> list[Candidate]:
+        return [Candidate(u.url, u.url_key, u.host, 0, u.kind) for u in (index, listing)]
+
+    # fresh: both are duplicates for another campaign
+    assert await store.enqueue(second, candidates(second)) == 0
+    await pool.execute("delete from web_campaign_urls where campaign_id = $1::uuid", second)
+    # 8 days later: the index page is queued, the listing still a duplicate
+    await pool.execute("update web_seen_urls set finished_at = now() - interval '8 days'")
+    assert await store.enqueue(second, candidates(second)) == 1
+    states = dict(await pool.fetch("select kind, state from web_campaign_urls where campaign_id = $1::uuid", second))
+    assert states == {"index": "queued", "listing": "duplicate"}
+    ticket = await store.begin_fetch(second, index, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    assert not isinstance(ticket, str)
+    assert await pool.fetchval("select state from web_seen_urls where url_key = $1", index.url_key) == "fetching"
+    await store.finish_fetch(ticket, PageResult(True, "index", INDEX_URL, "t"))
+    # the TTL disabled (0): never again
+    await pool.execute("update web_seen_urls set finished_at = now() - interval '30 days'")
+    third = await new_campaign(pool)
+    assert await store.enqueue(third, candidates(third), index_ttl_days=0) == 0
+    assert await store.begin_fetch(third, index, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
+                                   index_ttl_days=0) == DUPLICATE
+
+
+async def test_renders_are_counted_in_the_database(pool) -> None:
+    from bot.web_search.models import Candidate
+
+    store = PostgresWebStore(pool)
+    cid, other = await new_campaign(pool), await new_campaign(pool)
+    assert await store.renders_used(cid) == 0
+    await store.enqueue(cid, [Candidate(LISTING, url_key(LISTING), "idealista.com", 0, "listing"),
+                              Candidate(INDEX_URL, url_key(INDEX_URL), "fotocasa.es", 0, "index")])
+    await store.mark_rendered(cid, url_key(LISTING))
+    await store.mark_rendered(cid, url_key(LISTING))  # idempotent
+    assert await store.renders_used(cid) == 1 and await store.renders_used(other) == 0
+    await store.mark_rendered(cid, url_key(INDEX_URL))
+    assert await PostgresWebStore(pool).renders_used(cid) == 2  # survives a new store (a restart)

@@ -218,12 +218,48 @@ async def test_a_query_another_campaign_searched_recently_is_not_searched_again(
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher()
     w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]),
-               cover_portals=False)
+               cover_portals=False, query_reuse_hours=72)
     await run_until_done(w, first)
     second = await campaign(campaigns)
     await run_until_done(w, second)
     assert searcher.calls == [("terreno Boadilla Madrid España", "es-ES")]  # a Spanish campaign searches Spain
     assert [q.state for q in store.queries[second]] == ["skipped"]
+
+
+async def test_by_default_another_campaign_may_repeat_a_query() -> None:
+    campaigns = MemoryCampaignStore()
+    first = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    searcher = FakeSearcher()
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]),
+               cover_portals=False)
+    await run_until_done(w, first)
+    second = await campaign(campaigns)
+    await run_until_done(w, second)
+    assert len(searcher.calls) == 2
+    assert [q.state for q in store.queries[second]] == ["searched"]
+
+
+async def test_an_index_page_is_read_again_after_its_ttl_and_a_listing_never() -> None:
+    campaigns = MemoryCampaignStore()
+    first = await campaign(campaigns)
+    clock = [datetime(2026, 1, 1, tzinfo=UTC)]
+    store = MemoryWebStore(campaigns, now=lambda: clock[0])
+    listing = "https://www.pisos.com/comprar/terreno-boadilla_del_monte-45123456789_100500/"
+    fetcher = FakeFetcher({INDEX_URL: INDEX_HTML})
+    results = [INDEX_URL, listing]
+    gen = ListGenerator(["q one"])
+    await run_until_done(WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, gen,
+                                         config=WebSearchConfig(cover_portals=False), now=lambda: clock[0]), first)
+    assert fetcher.fetched.count(INDEX_URL) == 1 and fetcher.fetched.count(listing) == 1
+    clock[0] += timedelta(days=8)
+    second = await campaign(campaigns)
+    w2 = WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, ListGenerator(["q two"]),
+                         config=WebSearchConfig(cover_portals=False), now=lambda: clock[0])
+    await run_until_done(w2, second)
+    assert fetcher.fetched.count(INDEX_URL) == 2          # the index page again
+    assert fetcher.fetched.count(listing) == 1            # the listing never
+    assert store.urls[second][url_key(listing)].state == "duplicate"
 
 
 def madrid_task(**extra) -> QueryTask:
@@ -686,6 +722,56 @@ async def test_searxng_client_reads_json_results() -> None:
         base_url="http://searxng:8080", transport=httpx.MockTransport(lambda r: httpx.Response(429))))
     with pytest.raises(SearchError, match="http_429"):
         await broken.search("x")
+
+
+def paged_client(pages_payload: dict[int, list[str]], *, pages: int, max_results: int = 30,
+                 seen: list[int] | None = None) -> SearxngClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        pageno = int(request.url.params["pageno"])
+        if seen is not None:
+            seen.append(pageno)
+        return httpx.Response(200, json={"results": [{"url": u} for u in pages_payload.get(pageno, [])]})
+
+    return SearxngClient("http://searxng:8080", max_results=max_results, pages=pages,
+                         client=httpx.AsyncClient(base_url="http://searxng:8080", transport=httpx.MockTransport(handler)))
+
+
+async def test_searxng_client_walks_pages_in_order_and_merges_them() -> None:
+    seen: list[int] = []
+    client = paged_client({1: ["https://a.es/1", "https://a.es/2"], 2: ["https://a.es/3"], 3: ["https://a.es/4"]},
+                          pages=2, seen=seen)
+    assert [h.url for h in await client.search("x")] == ["https://a.es/1", "https://a.es/2", "https://a.es/3"]
+    assert seen == [1, 2]
+    assert len(await client.search("x", pages=3)) == 4  # a per-call override
+
+
+async def test_searxng_client_stops_when_a_page_brings_nothing_new() -> None:
+    seen: list[int] = []
+    client = paged_client({1: ["https://a.es/1"], 2: ["https://a.es/1"], 3: ["https://a.es/9"]}, pages=5, seen=seen)
+    assert [h.url for h in await client.search("x")] == ["https://a.es/1"]
+    assert seen == [1, 2]
+    empty: list[int] = []
+    assert await paged_client({}, pages=5, seen=empty).search("x") == [] and empty == [1]
+
+
+async def test_searxng_client_dedupes_by_url_key_and_caps_results() -> None:
+    client = paged_client({1: ["https://www.idealista.com/inmueble/1/?utm_source=bing", "https://pisos.com/a"],
+                           2: ["https://idealista.com/inmueble/1/", "https://pisos.com/b", "https://pisos.com/c"]},
+                          pages=2, max_results=3)
+    hits = await client.search("x")
+    assert [h.url for h in hits] == ["https://www.idealista.com/inmueble/1/?utm_source=bing", "https://pisos.com/a",
+                                     "https://pisos.com/b"]
+
+
+async def test_searxng_client_keeps_page_one_when_a_later_page_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["pageno"] == "1":
+            return httpx.Response(200, json={"results": [{"url": "https://a.es/1"}]})
+        return httpx.Response(429)
+
+    client = SearxngClient("http://searxng:8080", pages=2, client=httpx.AsyncClient(
+        base_url="http://searxng:8080", transport=httpx.MockTransport(handler)))
+    assert [h.url for h in await client.search("x")] == ["https://a.es/1"]
 
 
 # --- the campaign runner's status -------------------------------------------------------------

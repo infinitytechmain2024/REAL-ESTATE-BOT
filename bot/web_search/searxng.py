@@ -8,6 +8,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from .urls import url_key
+
 log = logging.getLogger(__name__)
 
 
@@ -31,11 +33,12 @@ class Searcher(Protocol):
 
 
 class SearxngClient:
-    """One GET per query, no retries (a failed query is recorded and not searched again)."""
+    """One GET per result page (``pages`` of them), no retries (a failed query is recorded and not searched again)."""
 
-    def __init__(self, base_url: str, *, timeout_seconds: float = 20, max_results: int = 10,
+    def __init__(self, base_url: str, *, timeout_seconds: float = 20, max_results: int = 10, pages: int = 1,
                  client: httpx.AsyncClient | None = None) -> None:
         self.max_results = max_results
+        self.pages = max(1, min(5, pages))
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"), timeout=httpx.Timeout(timeout_seconds), trust_env=False,
             # SearXNG's bot detection wants a forwarded-for header even with the limiter off;
@@ -46,8 +49,48 @@ class SearxngClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def search(self, query: str, *, language: str | None = None) -> list[SearchHit]:
-        params: dict[str, Any] = {"q": query, "format": "json", "safesearch": 0, "pageno": 1, "categories": "general"}
+    async def search(self, query: str, *, language: str | None = None, pages: int | None = None) -> list[SearchHit]:
+        """``pageno`` 1..``pages`` one after another; stops when a page brings nothing new.
+
+        Hits are merged and de-duplicated by ``url_key`` (so tracking-parameter spellings of one page
+        count once) and cut at ``max_results``. A failure on page 1 raises; on a later page it ends the walk.
+        """
+        wanted = max(1, min(5, pages if pages is not None else self.pages))
+        hits: list[SearchHit] = []
+        seen: set[str] = set()
+        silent: set[str] = set()
+        for pageno in range(1, wanted + 1):
+            try:
+                payload = await self._page(query, language, pageno)
+            except SearchError as exc:
+                if pageno == 1:
+                    raise
+                log.warning("web_search.page_failed %s page=%d", exc.code, pageno)
+                break
+            silent.update(str(e[0] if isinstance(e, list | tuple) and e else e)
+                          for e in payload.get("unresponsive_engines") or [])
+            fresh = 0
+            for item in payload.get("results") or []:
+                url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
+                if not url.startswith(("http://", "https://")):
+                    continue
+                key = url_key(url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                fresh += 1
+                hits.append(SearchHit(url, str(item.get("title") or "")[:300], str(item.get("content") or "")[:500]))
+                if len(hits) >= self.max_results:
+                    break
+            if not fresh or len(hits) >= self.max_results:
+                break
+        if silent:
+            log.warning("web_search.engines_silent %s", ",".join(sorted(silent))[:300])
+        return hits
+
+    async def _page(self, query: str, language: str | None, pageno: int) -> dict[str, Any]:
+        params: dict[str, Any] = {"q": query, "format": "json", "safesearch": 0, "pageno": pageno,
+                                  "categories": "general"}
         if language:
             params["language"] = language
         try:
@@ -62,17 +105,4 @@ class SearxngClient:
             payload = response.json()
         except ValueError as exc:
             raise SearchError("not_json") from exc
-        hits: list[SearchHit] = []
-        seen: set[str] = set()
-        for item in payload.get("results") or []:
-            url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
-            if not url.startswith(("http://", "https://")) or url in seen:
-                continue
-            seen.add(url)
-            hits.append(SearchHit(url, str(item.get("title") or "")[:300], str(item.get("content") or "")[:500]))
-            if len(hits) >= self.max_results:
-                break
-        silent = [str(e[0] if isinstance(e, list | tuple) and e else e) for e in payload.get("unresponsive_engines") or []]
-        if silent:
-            log.warning("web_search.engines_silent %s", ",".join(sorted(set(silent)))[:300])
-        return hits
+        return payload if isinstance(payload, dict) else {}

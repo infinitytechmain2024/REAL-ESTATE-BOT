@@ -40,6 +40,8 @@ which of them an investor search already sent.
 listing on a site that refuses bots (Idealista) still becomes a card built from the search result.
 `030_campaign_summary.sql` marks the end-of-campaign summary (what each source gave) as sent, once.
 `031_task_draft_steps.sql` lets a task draft be saved at the `ask` and `target` steps, so clarifying questions are kept.
+`032_web_seen_urls_ttl.sql` lets an index (search/list) page be read again after `WEB_SEARCH_INDEX_TTL_DAYS`
+and keeps the web stage's browser-render count in the database.
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their

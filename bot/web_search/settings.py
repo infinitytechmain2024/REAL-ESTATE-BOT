@@ -22,12 +22,17 @@ class WebSearchSettings(BaseSettings):
     query_timeout_seconds: float = Field(default=30, ge=3, le=120, validation_alias="OPENROUTER_WEB_QUERY_TIMEOUT_SECONDS")
 
     queries_per_round: int = Field(default=12, ge=1, le=30, validation_alias="WEB_SEARCH_QUERIES_PER_ROUND")
-    max_queries_per_campaign: int = Field(default=40, ge=1, le=200, validation_alias="WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN")
-    results_per_query: int = Field(default=10, ge=1, le=30, validation_alias="WEB_SEARCH_RESULTS_PER_QUERY")
-    max_pages_per_campaign: int = Field(default=150, ge=1, le=500, validation_alias="WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN")
-    max_pages_per_host: int = Field(default=30, ge=1, le=100, validation_alias="WEB_SEARCH_MAX_PAGES_PER_HOST")
-    max_links_per_index: int = Field(default=10, ge=0, le=30, validation_alias="WEB_SEARCH_MAX_LINKS_PER_INDEX")
-    max_pages_per_day: int = Field(default=1500, ge=1, le=10_000, validation_alias="WEB_SEARCH_MAX_PAGES_PER_DAY")
+    max_queries_per_campaign: int = Field(default=80, ge=1, le=200, validation_alias="WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN")
+    results_per_query: int = Field(default=30, ge=1, le=30, validation_alias="WEB_SEARCH_RESULTS_PER_QUERY")
+    pages_per_query: int = Field(default=2, ge=1, le=5, validation_alias="WEB_SEARCH_PAGES_PER_QUERY")
+    # Hours a query another campaign searched blocks the same query (0: never; a campaign never repeats its own).
+    query_reuse_hours: int = Field(default=0, ge=0, le=720, validation_alias="WEB_SEARCH_QUERY_REUSE_HOURS")
+    # Days after which an index (search/list) page may be read again; its listing links go through the usual dedup.
+    index_ttl_days: int = Field(default=7, ge=0, le=365, validation_alias="WEB_SEARCH_INDEX_TTL_DAYS")
+    max_pages_per_campaign: int = Field(default=400, ge=1, le=500, validation_alias="WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN")
+    max_pages_per_host: int = Field(default=100, ge=1, le=100, validation_alias="WEB_SEARCH_MAX_PAGES_PER_HOST")
+    max_links_per_index: int = Field(default=40, ge=0, le=100, validation_alias="WEB_SEARCH_MAX_LINKS_PER_INDEX")
+    max_pages_per_day: int = Field(default=3000, ge=1, le=10_000, validation_alias="WEB_SEARCH_MAX_PAGES_PER_DAY")
     max_queries_per_day: int = Field(default=300, ge=1, le=5_000, validation_alias="WEB_SEARCH_MAX_QUERIES_PER_DAY")
     max_minutes_per_campaign: int = Field(default=240, ge=5, le=10_080, validation_alias="WEB_SEARCH_MAX_MINUTES_PER_CAMPAIGN")
     blocked_hosts_raw: str = Field(default="", validation_alias="WEB_SEARCH_BLOCKED_HOSTS")
@@ -54,7 +59,8 @@ class WebSearchSettings(BaseSettings):
     def config(self) -> WebSearchConfig:
         return WebSearchConfig(
             queries_per_round=self.queries_per_round, max_queries_per_campaign=self.max_queries_per_campaign,
-            results_per_query=self.results_per_query, max_pages_per_campaign=self.max_pages_per_campaign,
+            results_per_query=self.results_per_query, pages_per_query=self.pages_per_query,
+            query_reuse_hours=self.query_reuse_hours, index_ttl_days=self.index_ttl_days, max_pages_per_campaign=self.max_pages_per_campaign,
             max_pages_per_host=self.max_pages_per_host, max_links_per_index=self.max_links_per_index,
             max_pages_per_day=self.max_pages_per_day, max_queries_per_day=self.max_queries_per_day,
             max_minutes_per_campaign=self.max_minutes_per_campaign, blocked_hosts=self.blocked_hosts(),

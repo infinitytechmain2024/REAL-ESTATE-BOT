@@ -42,6 +42,7 @@ BATCH_SIZE = 20          # acquisition_batches.max_items is at most 20
 STALE_SECONDS = 3600     # a 'searching' stage untouched this long no longer holds its campaign open
 REFUSALS_TO_BLOCK = 3    # consecutive 403/429 from one site block it for BLOCK_HOURS
 BLOCK_HOURS = 12
+INDEX_TTL_DAYS = 7       # an index (search/list) page is read again after this long; listings never
 TERMINAL = ("completed", "cancelled", "failed")
 _REFUSALS = ("http_401", "http_403", "http_429", "http_503")
 
@@ -68,12 +69,16 @@ class WebStore(Protocol):
     async def pending_queries(self, campaign_id: str, limit: int) -> list[PendingQuery]: ...
     async def query_done(self, query_id: str, *, ok: bool, results: int, new_urls: int,
                          error: str | None = None) -> None: ...
-    async def enqueue(self, campaign_id: str, candidates: list[Candidate]) -> int: ...
+    async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
+                      index_ttl_days: int = INDEX_TTL_DAYS) -> int: ...
     async def next_urls(self, campaign_id: str, limit: int) -> list[QueuedUrl]: ...
     async def host_attempts(self, campaign_id: str, host: str) -> int: ...
+    async def mark_rendered(self, campaign_id: str, url_key: str) -> None: ...
+    async def renders_used(self, campaign_id: str) -> int: ...
     async def mark_url(self, campaign_id: str, url_key: str, state: str, detail: str | None = None) -> None: ...
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
-                          max_runtime_seconds: int, contact_site: bool = True) -> FetchTicket | str: ...
+                          max_runtime_seconds: int, contact_site: bool = True,
+                          index_ttl_days: int = INDEX_TTL_DAYS) -> FetchTicket | str: ...
     async def finish_fetch(self, ticket: FetchTicket, result: PageResult) -> str | None: ...
     async def web_status(self, campaign_id: str) -> WebStatus | None: ...
     async def site_report(self, campaign_id: str) -> list[SiteReport]: ...
@@ -235,7 +240,10 @@ class PostgresWebStore:
 
     async def add_queries(self, campaign_id: str, round_no: int, queries: list[GeneratedQuery], *,
                           reuse_hours: int) -> int:
-        """Store a round; a query another campaign searched within ``reuse_hours`` is stored as skipped."""
+        """Store a round; with ``reuse_hours`` > 0 a query another campaign searched within it is stored as skipped.
+
+        0 (default): campaigns do not block each other; a campaign's own repeats hit the unique key.
+        """
         added = 0
         async with self.pool.acquire() as conn, conn.transaction():
             for query in queries:
@@ -243,8 +251,9 @@ class PostgresWebStore:
                 state = await conn.fetchval(
                     """insert into web_search_queries (campaign_id, round_no, query_text, query_key, language, state)
                        values ($1::uuid, $2, $3, $4, $5,
-                               case when exists (select 1 from web_search_queries
+                               case when $6::int > 0 and exists (select 1 from web_search_queries
                                                   where query_key = $4 and state = 'searched'
+                                                    and campaign_id <> $1::uuid
                                                     and searched_at > now() - make_interval(hours => $6))
                                     then 'skipped' else 'pending' end)
                        on conflict (campaign_id, query_key) do nothing returning state""",
@@ -267,8 +276,11 @@ class PostgresWebStore:
                 where id = $1::uuid and state = 'pending'""",
             query_id, "searched" if ok else "failed", results, new_urls, (error or None) and error[:80])
 
-    async def enqueue(self, campaign_id: str, candidates: list[Candidate]) -> int:
+    async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
+                      index_ttl_days: int = INDEX_TTL_DAYS) -> int:
         """Queue new URLs; one already read by any campaign is recorded as ``duplicate`` and never queued.
+
+        An index page read more than ``index_ttl_days`` ago (0: never) is queued again; listings stay never-twice.
 
         A URL another worker is reading right now is queued: ``begin_fetch`` decides (duplicate, or a
         takeover when that worker's claim is older than the lease).
@@ -284,11 +296,13 @@ class PostgresWebStore:
                               case when s.state = 'duplicate' then now() end, clock_timestamp(),
                               nullif($8, ''), nullif($9, '')
                          from (select case when exists (select 1 from web_seen_urls
-                                                         where url_key = $2 and state <> 'fetching')
+                                                         where url_key = $2 and state <> 'fetching'
+                                                           and not ($10::int > 0 and kind = 'index'
+                                                                    and finished_at < now() - make_interval(days => $10::int)))
                                            then 'duplicate' else 'queued' end as state) s
                        on conflict (campaign_id, url_key) do nothing returning state""",
                     campaign_id, c.url_key, c.url[:2048], c.host, c.depth, c.kind, c.query_id, c.title[:300],
-                    c.snippet[:500])
+                    c.snippet[:500], index_ttl_days)
                 queued += state == "queued"
         return queued
 
@@ -308,6 +322,15 @@ class PostgresWebStore:
             """select count(*) from web_campaign_urls where campaign_id = $1::uuid and host = $2
                   and state in ('fetched', 'failed')""", campaign_id, host))
 
+    async def mark_rendered(self, campaign_id: str, url_key: str) -> None:
+        await self.pool.execute(
+            "update web_campaign_urls set rendered = true where campaign_id = $1::uuid and url_key = $2",
+            campaign_id, url_key)
+
+    async def renders_used(self, campaign_id: str) -> int:
+        return int(await self.pool.fetchval(
+            "select count(*) from web_campaign_urls where campaign_id = $1::uuid and rendered", campaign_id))
+
     async def mark_url(self, campaign_id: str, url_key: str, state: str, detail: str | None = None) -> None:
         await self.pool.execute(
             """update web_campaign_urls set state = $3, detail = $4, finished_at = now()
@@ -315,7 +338,8 @@ class PostgresWebStore:
             campaign_id, url_key, state, detail and detail[:80])
 
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
-                          max_runtime_seconds: int, contact_site: bool = True) -> FetchTicket | str:
+                          max_runtime_seconds: int, contact_site: bool = True,
+                          index_ttl_days: int = INDEX_TTL_DAYS) -> FetchTicket | str:
         """Claim ``url`` for one read; ``contact_site`` False: only its search result is stored (a blocked site too)."""
         import asyncpg
 
@@ -336,11 +360,15 @@ class PostgresWebStore:
                 claimed = await conn.fetchval(
                     """insert into web_seen_urls (url_key, url, host, kind, state, campaign_id)
                        values ($1, $2, $3, $4, 'fetching', $5::uuid)
-                       on conflict (url_key) do update set claimed_at = now(), campaign_id = excluded.campaign_id
-                         where web_seen_urls.state = 'fetching'
-                           and web_seen_urls.claimed_at < now() - make_interval(secs => $6)
+                       on conflict (url_key) do update set state = 'fetching', claimed_at = now(),
+                                                           campaign_id = excluded.campaign_id
+                         where (web_seen_urls.state = 'fetching'
+                                and web_seen_urls.claimed_at < now() - make_interval(secs => $6))
+                            or ($7::int > 0 and web_seen_urls.kind = 'index'
+                                and web_seen_urls.state in ('fetched', 'failed')
+                                and web_seen_urls.finished_at < now() - make_interval(days => $7::int))
                        returning 1""",
-                    url.url_key, url.url[:2048], url.host, url.kind, campaign_id, lease_seconds)
+                    url.url_key, url.url[:2048], url.host, url.kind, campaign_id, lease_seconds, index_ttl_days)
                 if not claimed:
                     raise _Duplicate
                 return FetchTicket(campaign_id, url, source, run_id)
@@ -557,6 +585,7 @@ class _MemUrl:
     detail: str | None = None
     title: str = ""
     snippet: str = ""
+    rendered: bool = False
 
 
 @dataclass
@@ -676,8 +705,9 @@ class MemoryWebStore:
             key = query_key(query.text)
             if any(q.key == key for q in rows):
                 continue
-            recent = any(q.key == key and q.state == "searched" and q.searched_at and q.searched_at > since
-                         for qs in self.queries.values() for q in qs)
+            recent = reuse_hours > 0 and any(
+                q.key == key and q.state == "searched" and q.searched_at and q.searched_at > since
+                for other, qs in self.queries.items() if other != campaign_id for q in qs)
             rows.append(_MemQuery(str(uuid.uuid4()), query.text, key, query.language, round_no,
                                   "skipped" if recent else "pending"))
             added += not recent
@@ -694,7 +724,8 @@ class MemoryWebStore:
                 if q.id == query_id and q.state == "pending":
                     q.state, q.results, q.new_urls, q.searched_at = ("searched" if ok else "failed"), results, new_urls, self.now()
 
-    async def enqueue(self, campaign_id: str, candidates: list[Candidate]) -> int:
+    async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
+                      index_ttl_days: int = INDEX_TTL_DAYS) -> int:
         rows = self.urls.setdefault(campaign_id, {})
         queued = 0
         for c in candidates:
@@ -702,7 +733,8 @@ class MemoryWebStore:
                 continue
             self._order += 1
             seen = self.seen.get(c.url_key)
-            state = "duplicate" if seen is not None and seen["state"] != "fetching" else "queued"
+            expired = seen is not None and self._index_expired(seen, index_ttl_days)
+            state = "duplicate" if seen is not None and seen["state"] != "fetching" and not expired else "queued"
             rows[c.url_key] = _MemUrl(c.url, c.url_key, c.host, c.depth, c.kind, c.query_id, state, self._order,
                                       "seen_before" if state == "duplicate" else None, c.title, c.snippet)
             queued += state == "queued"
@@ -720,6 +752,19 @@ class MemoryWebStore:
         return [QueuedUrl(u.url, u.url_key, u.host, u.depth, u.kind, u.title, u.snippet)  # type: ignore[arg-type]
                 for *_, u in ranked[:limit]]
 
+    def _index_expired(self, seen: dict[str, object], index_ttl_days: int) -> bool:
+        finished = seen.get("finished_at")
+        return bool(index_ttl_days > 0 and seen.get("kind") == "index" and seen["state"] in ("fetched", "failed")
+                    and isinstance(finished, datetime) and finished < self.now() - timedelta(days=index_ttl_days))
+
+    async def mark_rendered(self, campaign_id: str, url_key: str) -> None:
+        row = self.urls.get(campaign_id, {}).get(url_key)
+        if row is not None:
+            row.rendered = True
+
+    async def renders_used(self, campaign_id: str) -> int:
+        return sum(1 for u in self.urls.get(campaign_id, {}).values() if u.rendered)
+
     async def host_attempts(self, campaign_id: str, host: str) -> int:
         return sum(1 for u in self.urls.get(campaign_id, {}).values()
                    if u.host == host and u.state in ("fetched", "failed"))
@@ -730,7 +775,8 @@ class MemoryWebStore:
             row.state, row.detail = state, detail
 
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
-                          max_runtime_seconds: int, contact_site: bool = True) -> FetchTicket | str:
+                          max_runtime_seconds: int, contact_site: bool = True,
+                          index_ttl_days: int = INDEX_TTL_DAYS) -> FetchTicket | str:
         host = self.hosts.setdefault(url.host, {"fetched": 0, "failed": 0, "refusals": 0, "blocked_until": None})
         blocked = host["blocked_until"]
         if contact_site and isinstance(blocked, datetime) and blocked > self.now():
@@ -742,7 +788,8 @@ class MemoryWebStore:
         if url.host in self.busy_hosts:
             return BUSY
         row = self.seen.get(url.url_key)
-        if row is not None and not (row["state"] == "fetching" and row["claimed_at"] < self.now() - timedelta(seconds=lease_seconds)):  # type: ignore[operator]
+        stale = row is not None and row["state"] == "fetching" and row["claimed_at"] < self.now() - timedelta(seconds=lease_seconds)  # type: ignore[operator]
+        if row is not None and not (stale or self._index_expired(row, index_ttl_days)):
             await self.mark_url(campaign_id, url.url_key, DUPLICATE, "seen_before")
             return DUPLICATE
         self.seen[url.url_key] = {"url": url.url, "host": url.host, "state": "fetching", "campaign_id": campaign_id,
