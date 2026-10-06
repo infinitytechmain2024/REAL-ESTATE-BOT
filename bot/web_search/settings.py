@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .fetcher import checked_impersonation
 from .scrape_api import ScrapeApiClient
 from .search_backends import (
     BACKEND_NAMES,
@@ -72,6 +73,8 @@ class WebSearchSettings(BaseSettings):
     # A page the plain fetch was refused (403/429/503, a captcha page) is tried once in the browser
     # (robots.txt still decides first); then the search-result card. Off: only empty JS pages are rendered.
     render_on_refusal: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_ON_REFUSAL")
+    # A refused depth-0 index (search/list) page may use the browser; the scrape API is never used for index pages.
+    render_index_on_refusal: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_INDEX_ON_REFUSAL")
     # Optional last layer for pages both HTTP and the browser were refused: GET {url}?url=<page> with
     # "Authorization: Bearer <key>" (a Zyte / ScraperAPI / Bright Data style unlocker). Empty: off. Never logged.
     scrape_api_url: str = Field(default="", validation_alias="WEB_SEARCH_SCRAPE_API_URL")
@@ -80,11 +83,16 @@ class WebSearchSettings(BaseSettings):
     max_scrape_api_per_campaign: int = Field(default=40, ge=0, le=500, validation_alias="WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN")
     # Optional outbound proxy/VPN for page fetches (http://, https://, socks5://). Never logged.
     # Several proxies may be given comma-separated (one sticky proxy per host).
-    proxy_url: str = Field(default="", validation_alias="WEB_SEARCH_PROXY_URL")
+    proxy_url: str = Field(default="", repr=False, validation_alias="WEB_SEARCH_PROXY_URL")
     # Browser-impersonating fetch via curl_cffi: off | chrome | safari | firefox | a profile name (chrome124).
     impersonate: str = Field(default="chrome", max_length=40, validation_alias="WEB_SEARCH_IMPERSONATE")
     # UA sent on page requests when impersonating; empty: the Chrome 124 / Windows default for the profile.
     browser_user_agent: str = Field(default="", max_length=300, validation_alias="WEB_SEARCH_BROWSER_USER_AGENT")
+
+    @field_validator("impersonate")
+    @classmethod
+    def _known_profile(cls, value: str) -> str:
+        return checked_impersonation(value)
 
     def blocked_hosts(self) -> frozenset[str]:
         return frozenset(h.strip().lower().removeprefix("www.") for h in self.blocked_hosts_raw.replace(",", " ").split()
@@ -101,6 +109,7 @@ class WebSearchSettings(BaseSettings):
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
             cover_portals=self.cover_portals, render_on_refusal=self.render_on_refusal,
+            render_index_on_refusal=self.render_index_on_refusal,
             max_scrape_api_per_campaign=self.max_scrape_api_per_campaign if self.scrape_api_url else 0,
         )
 

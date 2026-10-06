@@ -156,14 +156,39 @@ _PRICE = re.compile(r"\d\s*(?:€|k\s?€|eur\b|euros?\b)|(?:€|eur\b)\s?\d", r
 _AREA = re.compile(r"\d\s*(?:m²|m2|m\^2|metros?\b|mts?\b)", re.IGNORECASE)
 
 
+_POSTAL = re.compile(r"[0-5]\d{4}")                                   # a Spanish postal code: not an ad id by itself
+_ID_MARK = re.compile(r"(?:ref-?|id-?|-id)[a-z]{0,3}$", re.IGNORECASE)  # "ref-", "ref", "id-", "-id" right before a number
+_REF_ID = re.compile(r"(?<![a-z])(?:ref|id)-?[a-z]{0,3}\d{4,}(?!\d)", re.IGNORECASE)
+_WORD_ID = re.compile(r"-(\d{4,})\.?(?:html?)?$", re.IGNORECASE)      # "piso-centro-4567" (end of a segment)
+
+
+def _segment_listing(path: str) -> bool:
+    """A 4+ digit id after ``ref``/``id`` or at the end of a segment that carries a listing word."""
+    if _REF_ID.search(path):
+        return True
+    for segment in path.split("/"):
+        found = _WORD_ID.search(segment)
+        if found and _LISTING_WORD.search(segment[:found.start()]) and not re.fullmatch(r"(?:19|20)\d\d", found.group(1)):
+            return True
+    return False
+
+
 def _generic_listing(path: str) -> bool:
-    """An unknown site's concrete ad: a listing word and a 5+ digit id, or a 6+ digit id that is not a news date."""
+    """An unknown site's concrete ad: a listing word and a 5+ digit id, or a 6+ digit id that is not a news date.
+
+    A bare 5-digit postal code (``/venta/pisos-valencia-46001/``) is no id unless ``.htm(l)`` follows or
+    ``ref-``/``id-`` precedes it."""
     has_word = bool(_LISTING_WORD.search(path))
+    if _segment_listing(path):
+        return True
     for match in _DIGITS.finditer(path):
         number = match.group(0)
         if (len(number) == 8 and _DATE_ID.fullmatch(number)) or _DATE_DIR.search(path[:match.start()]):
             continue
         before, after = path[:match.start()], path[match.end():match.end() + 1]
+        if (len(number) == 5 and _POSTAL.fullmatch(number) and not _ID_MARK.search(before)
+                and not path[match.end():].lower().startswith((".htm", ".html"))):
+            continue
         bounded = (not before or before[-1] in "/_-" or before[-2:].lower() == "id") and (not after or after in "/_.-")
         if has_word or (len(number) >= 6 and bounded):
             return True

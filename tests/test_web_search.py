@@ -958,3 +958,25 @@ async def test_impersonate_off_uses_httpx_with_declared_agent() -> None:
     await f.aclose()
     g = PageFetcher(user_agent="TestBot/1", impersonate="chrome124")
     assert isinstance(g._transport, CurlTransport) and g._transport.profile == "chrome124"
+
+
+def test_generic_rule_ignores_a_bare_postal_code_and_accepts_ref_and_word_ids() -> None:
+    site = "https://agencia-ejemplo.es"
+    for path in ("/venta/pisos-valencia-46001/", "/alquiler/madrid/28001"):
+        assert classify_url(site + path) == "unknown"
+    for path in ("/inmueble/piso-centro-4567", "/casa/ref-1234", "/inmueble/ref-AB1234", "/venta/piso-46001.html"):
+        assert classify_url(site + path) == "listing"
+    # portal regressions
+    assert classify_url("https://www.idealista.com/inmueble/12345678/") == "listing"
+    assert classify_url("https://www.idealista.com/venta-terrenos/madrid-provincia/") == "index"
+    assert classify_url("https://agencia-ejemplo.es/inmueble/venta-parcela-8812345") == "listing"
+
+
+def test_unknown_impersonation_profile_falls_back_to_chrome() -> None:
+    from bot.web_search.fetcher import checked_impersonation
+    from bot.web_search.settings import WebSearchSettings
+
+    assert checked_impersonation("chrome124") == "chrome124" and checked_impersonation("OFF") == "off"
+    assert checked_impersonation("netscape4") == "chrome"
+    assert WebSearchSettings(_env_file=None, impersonate="nope").impersonate == "chrome"
+    assert "proxy" not in repr(WebSearchSettings(_env_file=None, proxy_url="http://user:pw@x:1"))

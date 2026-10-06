@@ -85,7 +85,8 @@ class WebStore(Protocol):
     async def mark_url(self, campaign_id: str, url_key: str, state: str, detail: str | None = None) -> None: ...
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
-                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False) -> FetchTicket | str: ...
+                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False,
+                          scrape_layer: bool = False) -> FetchTicket | str: ...
     async def finish_fetch(self, ticket: FetchTicket, result: PageResult) -> str | None: ...
     async def web_status(self, campaign_id: str) -> WebStatus | None: ...
     async def site_report(self, campaign_id: str) -> list[SiteReport]: ...
@@ -369,10 +370,12 @@ class PostgresWebStore:
 
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
-                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False) -> FetchTicket | str:
+                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False,
+                          scrape_layer: bool = False) -> FetchTicket | str:
         """Claim ``url`` for one read; ``contact_site`` False: only its search result is stored (a blocked site too).
 
-        HOST_BLOCKED: every enabled layer (HTTP, and the browser when ``render_layer``) is blocked for the site.
+        HOST_BLOCKED: every enabled layer (HTTP, the browser when ``render_layer``, the scrape API when
+        ``scrape_layer``) is blocked for the site. The scrape API has no block: with it on, never HOST_BLOCKED.
         """
         import asyncpg
 
@@ -380,7 +383,7 @@ class PostgresWebStore:
             async with self.pool.acquire() as conn, conn.transaction():
                 await _set_actor(conn)
                 source, refusal = await _site_source(conn, url.host, vertical, contact_site=contact_site,
-                                                     render_layer=render_layer)
+                                                     render_layer=render_layer, scrape_layer=scrape_layer)
                 if refusal is not None:
                     await _mark(conn, campaign_id, url.url_key, "skipped", refusal)
                     return refusal
@@ -538,14 +541,15 @@ async def _mark(conn: asyncpg.Connection[asyncpg.Record], campaign_id: str, url_
 
 
 async def _site_source(conn: asyncpg.Connection[asyncpg.Record], host: str, vertical: str, *,
-                       contact_site: bool = True, render_layer: bool = False) -> tuple[str, str | None]:
+                       contact_site: bool = True, render_layer: bool = False,
+                       scrape_layer: bool = False) -> tuple[str, str | None]:
     """The site's monitoring source id, created active on first sight; a refusal code when it may not be read.
 
     An operator can stop the web stage from reading a site by pausing or
     disabling its source (``/pause source:<id>``); a site that kept refusing
     us (403/429) is blocked for a while (unless ``contact_site`` is False: only its search result is kept).
     """
-    blocked = contact_site and await conn.fetchval(
+    blocked = contact_site and not scrape_layer and await conn.fetchval(
         """select coalesce(http_blocked_until > now(), false)
                   and (not $2 or coalesce(render_blocked_until > now(), false))
              from web_hosts where host = $1""", host, render_layer)
@@ -875,9 +879,11 @@ class MemoryWebStore:
 
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
-                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False) -> FetchTicket | str:
+                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False,
+                          scrape_layer: bool = False) -> FetchTicket | str:
         host = self._host(url.host)
-        if contact_site and self._blocked(host, "http") and (not render_layer or self._blocked(host, "render")):
+        if (contact_site and not scrape_layer and self._blocked(host, "http")
+                and (not render_layer or self._blocked(host, "render"))):
             await self.mark_url(campaign_id, url.url_key, "skipped", HOST_BLOCKED)
             return HOST_BLOCKED
         if url.host in self.paused_hosts:

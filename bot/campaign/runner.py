@@ -305,7 +305,8 @@ class CampaignRunner:
             campaign = await self.campaigns.get(campaign_id) or campaign
         if campaign.state in TERMINAL_STATES:
             await self._close(campaign)
-            await self._stream(campaign)
+            # Final: a finding whose AI check is still missing is held as unverified, never lost.
+            await self._stream(campaign, final=True)
             await self._summary(campaign)
             line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
         await self._show(campaign, line)
@@ -424,7 +425,7 @@ class CampaignRunner:
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
         final = waited >= self.config.analysis_grace_seconds
-        if await self._stream(campaign, final=final) and not final:
+        if await self._stream(campaign, final=final, skip_misses=False) and not final:
             return ANALYSIS  # findings still wait for the AI check: do not complete (and lose them) yet
         await self.campaigns.set_state(campaign.id, "completed", ACTOR, reason=reason)
         return ANALYSIS
@@ -452,17 +453,18 @@ class CampaignRunner:
 
     # -- Telegram --
 
-    async def _stream(self, campaign: Campaign, *, final: bool = False) -> int:
+    async def _stream(self, campaign: Campaign, *, final: bool = False, skip_misses: bool = True) -> int:
         """Send each new exact finding once, oldest first; hold the rest and ask about them once.
 
         Returns how many findings wait for a later step (the AI check missed transiently); ``final``
-        (the campaign is ending) treats such a miss as permanent.
+        (the campaign is ending) treats such a miss as permanent. ``skip_misses=False`` (the drain) does not
+        skip remembered misses, so they are counted as deferred instead of being hidden from the completion check.
         """
         active = campaign.state not in TERMINAL_STATES
         request = campaign_request(campaign)
         deferred = 0
         paused = self._relevance_paused_until is not None and self.now() < self._relevance_paused_until
-        skip = set(self._relevance_misses) if paused and not final else set()
+        skip = set(self._relevance_misses) if paused and not final and skip_misses else set()
         for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step, skip=skip):
             match = await self._judge(campaign, request, finding, final=final)
             if match is None:  # transient miss: neither held nor streamed, retried on a later step

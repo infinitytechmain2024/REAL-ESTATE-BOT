@@ -365,6 +365,9 @@ async def test_host_blocks_are_tracked_per_layer(pool) -> None:
                                    render_layer=True) == "host_blocked"
     # without the browser layer the host was blocked after the HTTP refusals alone
     assert await store.begin_fetch(cid, urls[4], vertical="real_estate", lease_seconds=300, max_runtime_seconds=60) == "host_blocked"
+    # the scrape API has no block: with it enabled the host is never host_blocked
+    assert not isinstance(await store.begin_fetch(cid, urls[4], vertical="real_estate", lease_seconds=300,
+                                                  max_runtime_seconds=60, render_layer=True, scrape_layer=True), str)
 
 
 async def test_http_only_refusals_set_the_legacy_block_without_a_browser_layer(pool) -> None:

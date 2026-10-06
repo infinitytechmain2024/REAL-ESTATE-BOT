@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -35,6 +36,7 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
+log = logging.getLogger(__name__)
 Resolver = Callable[[str], Awaitable[list[str]]]
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
 _FORBIDDEN_HOSTS = frozenset({"localhost", "metadata.google.internal"})
@@ -147,6 +149,15 @@ class HttpxTransport:
             await client.aclose()
 
 
+try:
+    from curl_cffi import requests as _curl_requests
+    from curl_cffi.curl import CurlError as _CurlError
+
+    _CURL_ERRORS: tuple[type[BaseException], ...] = (_curl_requests.exceptions.RequestException, _CurlError)
+except Exception:  # noqa: BLE001 -- curl_cffi is optional
+    _CURL_ERRORS = ()
+
+
 class CurlTransport:
     """curl_cffi with a browser TLS/HTTP2 fingerprint; a fresh session per request keeps no cookies."""
 
@@ -168,7 +179,7 @@ class CurlTransport:
             raise FetchError("timeout") from exc
         except (curl.exceptions.ConnectionError, curl.exceptions.ProxyError) as exc:
             raise ConnectFailed(f"network_error:{type(exc).__name__}") from exc
-        except curl.exceptions.RequestException as exc:
+        except _CURL_ERRORS as exc:  # RequestException, or libcurl's own CurlError
             raise FetchError(f"network_error:{type(exc).__name__}") from exc
         finally:
             try:
@@ -189,10 +200,33 @@ def curl_cffi_available() -> bool:
     return True
 
 
+_OFF = ("", "off", "none", "false", "0")
+_ALIASES = frozenset({"chrome", "edge", "safari", "safari_ios", "safari_beta", "safari_ios_beta", "chrome_android",
+                      "firefox", "tor"})  # curl_cffi resolves these to its newest profile of the family
+
+
+def known_impersonation(profile: str) -> bool:
+    """True when curl_cffi knows ``profile`` (a family alias or a ``BrowserType`` name); True when it cannot be checked."""
+    try:
+        from curl_cffi.requests.impersonate import BrowserType
+    except Exception:  # noqa: BLE001 -- no curl_cffi: nothing to validate against, httpx is used anyway
+        return True
+    return profile in _ALIASES or profile in BrowserType.__members__
+
+
+def checked_impersonation(value: str) -> str:
+    """``value`` lower-cased; an unknown profile is a warning and ``chrome`` (``off`` and friends pass as they are)."""
+    raw = value.strip().lower()
+    if raw in _OFF or known_impersonation(raw):
+        return raw
+    log.warning("web_search.unknown_impersonate %s: using chrome", raw[:40])
+    return "chrome"
+
+
 def resolve_impersonation(value: str | None) -> str | None:
     """The curl_cffi profile to use, or None for plain httpx (off, or curl_cffi not importable)."""
-    raw = (os.environ.get("WEB_SEARCH_IMPERSONATE", "chrome") if value is None else value).strip().lower()
-    if raw in ("", "off", "none", "false", "0"):
+    raw = checked_impersonation(os.environ.get("WEB_SEARCH_IMPERSONATE", "chrome") if value is None else value)
+    if raw in _OFF:
         return None
     return raw if curl_cffi_available() else None
 

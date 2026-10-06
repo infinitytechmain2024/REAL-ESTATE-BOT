@@ -236,3 +236,50 @@ async def test_scrape_api_client_refuses_bad_answers(status: int, ctype: str, bo
     client = ScrapeApiClient("https://unlock.example/v1", "k", max_bytes=50, client=httpx.AsyncClient(transport=transport))
     with pytest.raises(FetchError, match=code):
         await client.fetch("https://a.es/x")
+
+
+INDEX = "https://www.idealista.com/venta-terrenos/madrid-provincia/"
+
+
+async def test_a_host_blocked_for_http_and_browser_still_gets_the_scrape_api() -> None:
+    scraper = FakeScraper()
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    until = store.now() + timedelta(hours=5)
+    store._host("idealista.com").update(http_blocked_until=until, render_blocked_until=until, blocked_until=until)
+    fetcher = FakeFetcher()
+    w = WebSearchWorker(campaigns, store, FakeSearcher(default=[URLS[0]], texts={URLS[0]: HIT}), fetcher,
+                        ListGenerator(["terreno Boadilla Madrid"]), renderer=FakeRenderer(fail=True), scraper=scraper,
+                        config=WebSearchConfig(pages_per_tick=1, cover_portals=False))
+    await run_until_done(w, cid)
+    assert fetcher.fetched == [] and scraper.calls == [URLS[0]]
+    assert [p["via"] for p in store.posts] == ["page"]
+
+
+async def test_a_url_no_layer_can_read_is_not_claimed_so_it_spends_no_budget() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    store._host("idealista.com")["http_blocked_until"] = store.now() + timedelta(hours=5)
+    fetcher = FakeFetcher()
+    w = WebSearchWorker(campaigns, store, FakeSearcher(default=URLS[:2], texts={u: HIT for u in URLS}), fetcher,
+                        ListGenerator(["terreno Boadilla Madrid"]), scraper=FakeScraper(),
+                        config=WebSearchConfig(pages_per_tick=1, cover_portals=False, max_scrape_api_per_campaign=0))
+    await run_until_done(w, cid)
+    assert fetcher.fetched == []
+    assert [p["via"] for p in store.posts] == ["search", "search"]
+    assert all(p.get("layer") != "none" for p in store.posts)
+    assert store.hosts["idealista.com"].get("pages_fetched", 0) == 0
+
+
+async def test_a_refused_index_page_gets_the_browser_but_never_the_scrape_api() -> None:
+    scraper, renderer = FakeScraper(), FakeRenderer(fail=True)
+    await setup(INDEX, fetcher=refused(INDEX), renderer=renderer, scraper=scraper)
+    assert renderer.calls == [INDEX] and scraper.calls == []
+
+
+async def test_a_refused_index_page_skips_the_browser_when_the_flag_is_off() -> None:
+    scraper, renderer = FakeScraper(), FakeRenderer(fail=True)
+    await setup(INDEX, fetcher=refused(INDEX), renderer=renderer, scraper=scraper, render_index_on_refusal=False)
+    assert renderer.calls == [] and scraper.calls == []

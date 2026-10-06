@@ -680,3 +680,28 @@ async def test_postgres_relevance_is_stored_once_and_excluded_findings_are_never
     await store.save_relevance(cid, ids["good"], Relevance("reject", "x"))  # never overwritten
     assert (await store.relevance(cid, ids["good"])).verdict == "match"
     assert await store.relevance(cid, ids["moscow"]) is None
+
+
+async def test_drain_does_not_complete_while_a_paused_judge_still_holds_findings() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    campaigns, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()  # the call fails: "a" is remembered as a miss, the judge is paused
+    assert "a" in runner._relevance_misses
+    campaign = await campaigns.get(cid)
+    run = await store.get_run(cid)
+    await runner._drain(campaign, run, "queue_exhausted")
+    assert (await campaigns.get(cid)).state != "completed"
+    assert "a" not in store.buckets and messenger.findings() == []
+
+
+async def test_terminal_step_with_a_paused_judge_holds_findings_before_the_summary() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    campaigns, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    assert "a" not in store.buckets
+    await campaigns.set_state(cid, "cancelled", "campaign:test")
+    await runner.step(cid)
+    assert store.buckets["a"][0] == "similar" and messenger.findings() == []
+    assert (await reasons(store))["a"] == "Не проверено ИИ: сбой проверки"

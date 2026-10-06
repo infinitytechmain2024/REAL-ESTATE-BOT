@@ -88,6 +88,7 @@ class WebSearchConfig:
     max_renders_per_campaign: int = 60
     render_on_refusal: bool = True    # a refused page (403/429/503, a captcha page) is tried once in the browser
     max_scrape_api_per_campaign: int = 40   # scrape-API reads per campaign (0: the layer is off)
+    render_index_on_refusal: bool = True    # a refused depth-0 index page may use the browser (never the scrape API)
     blocked_hosts: frozenset[str] = frozenset()
     cover_portals: bool = True  # every known portal of the country gets its own site: query
 
@@ -270,10 +271,18 @@ class WebSearchWorker:
                 if not await self._keep_search_result(campaign, url, None):
                     await self.store.mark_url(campaign.id, url.url_key, "robots", "robots_txt")
                 continue
+            # Which layers can read this URL right now, decided before a ticket is claimed: a URL no layer can
+            # take is not claimed, so it never spends the page budget or the host cap on a ``layer="none"`` result.
+            layers = await self.store.layer_state(url.host)
+            render_ok, scrape_ok = await self._fallbacks(campaign.id, url, layers)
+            if not (layers.get("http", True) or render_ok or scrape_ok):
+                await self.store.mark_url(campaign.id, url.url_key, "skipped", HOST_BLOCKED)
+                await self._keep_search_result(campaign, url, None)
+                continue
             ticket = await self.store.begin_fetch(campaign.id, url, vertical=campaign.plan.vertical,
                                                   lease_seconds=cfg.lease_seconds,
                                                   max_runtime_seconds=cfg.page_runtime_seconds,
-                                                  render_layer=self._render_layer())
+                                                  render_layer=render_ok, scrape_layer=scrape_ok)
             if isinstance(ticket, str):
                 if ticket == HOST_BLOCKED:  # the site kept refusing us: its search result is all we keep
                     await self._keep_search_result(campaign, url, None)
@@ -283,7 +292,7 @@ class WebSearchWorker:
             budget -= 1
             pages += 1
             await self.store.set_progress(campaign.id, url.host, self._line(None, pages, f"сайт {url.host}"))
-            result, children = await self._read(campaign, url, await self.store.layer_state(url.host))
+            result, children = await self._read(campaign, url, layers)
             if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
                 card = search_result(url, result.error)
                 result = replace(card, layer=result.layer) if card else result
@@ -309,6 +318,23 @@ class WebSearchWorker:
     def _render_layer(self) -> bool:
         """The browser is a fetch layer for refused pages (so a host's browser refusals can block it too)."""
         return self.renderer is not None and self.config.render_on_refusal and self.config.max_renders_per_campaign > 0
+
+    def _may_fall_back(self, url: QueuedUrl) -> tuple[bool, bool]:
+        """(browser, scrape API) allowed for ``url`` after a refusal: only listings and depth-1 children use them;
+        a refused depth-0 index page gets at most the browser (``render_index_on_refusal``), never the scrape API."""
+        if url.kind == "listing" or url.depth >= 1:
+            return True, True
+        return url.kind == "index" and self.config.render_index_on_refusal, False
+
+    async def _fallbacks(self, campaign_id: str, url: QueuedUrl, layers: dict[str, bool]) -> tuple[bool, bool]:
+        """Whether the browser / the scrape API can still read ``url``: allowed, configured, open, within budget."""
+        cfg = self.config
+        may_render, may_scrape = self._may_fall_back(url)
+        render = (may_render and self._render_layer() and layers.get("render", True)
+                  and await self.store.renders_used(campaign_id) < cfg.max_renders_per_campaign)
+        scrape = (may_scrape and self.scraper is not None
+                  and await self.store.scrapes_used(campaign_id) < cfg.max_scrape_api_per_campaign)
+        return render, scrape
 
     async def _read(self, campaign: Campaign, url: QueuedUrl,
                     layers: dict[str, bool] | None = None) -> tuple[PageResult, list[Candidate]]:
@@ -366,13 +392,14 @@ class WebSearchWorker:
         ``finish_fetch``. robots.txt was checked before any layer (``_read_pages``): a disallowed URL never gets here.
         """
         cfg, cid, current = self.config, campaign.id, failed
-        if (self._render_layer() and render_open and self.renderer is not None
+        may_render, may_scrape = self._may_fall_back(url)
+        if (may_render and self._render_layer() and render_open and self.renderer is not None
                 and await self.store.renders_used(cid) < cfg.max_renders_per_campaign):
             await self._leave(url, current)
             current, children = await self._render_refused(cid, url)
             if current.ok:
                 return current, children
-        if self.scraper is not None and await self.store.scrapes_used(cid) < cfg.max_scrape_api_per_campaign:
+        if may_scrape and self.scraper is not None and await self.store.scrapes_used(cid) < cfg.max_scrape_api_per_campaign:
             await self._leave(url, current)
             current, children = await self._scrape(cid, url)
             if current.ok:
