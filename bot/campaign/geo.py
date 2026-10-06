@@ -48,8 +48,16 @@ COUNTRY_NAMES: dict[str, dict[str, str]] = {
 }
 # Conservative: only what a Spanish listing practically never contains (``foreign_markers_hit``).
 FOREIGN_MARKERS: dict[str, tuple[str, ...]] = {
-    "ES": ("Venezuela", "Carabobo", "Valencia, CA", "California", "Bs.", "USD"),
+    "ES": ("Venezuela", "Carabobo", "Valencia, CA", "Bs."),
 }
+# Case-sensitive markers on the raw text: US state «, CA» / «CA 9xxxx» / «California, USA» (not Calle California).
+_FOREIGN_RAW: dict[str, tuple[re.Pattern[str], ...]] = {
+    "ES": (re.compile(r",\s*CA(?!\w)"), re.compile(r"(?<!\w)CA\s+9\d{4}(?!\d)"),
+           re.compile(r"California,?\s+(?:USA|US|U\.S\.A?\.?)(?!\w)|EE\.?\s?UU\.?", re.IGNORECASE)),
+}
+# «USD» is foreign only when the text does not also price the thing in euros.
+_FOREIGN_USD: dict[str, re.Pattern[str]] = {"ES": re.compile(r"(?<!\w)usd(?!\w)")}
+_EURO = re.compile(r"€|(?<!\w)(?:eur|euros?)(?!\w)")
 
 # Second-level labels that are not a country (``.com.ua`` is still Ukrainian, handled by the last label).
 GENERIC_CC = frozenset({"eu", "io", "co", "me", "tv", "ai", "ws", "cc", "fm", "ly", "gg", "to", "app", "so", "sh", "vc"})
@@ -164,12 +172,18 @@ def mentions_place(text: str, names: tuple[str, ...], *, strict: bool = False) -
 def mentions_country(text: str, country: str | None) -> bool:
     """Does ``text`` already name ``country`` (ISO-2) in any of the query languages?"""
     stems = _FOREIGN.get(country or "", ())
-    folded = _fold(text)
-    return any(stem in folded for stem in stems)
+    words = _WORD.findall(_fold(text))
+    return any(w == stem or (not stem.isascii() and w.startswith(stem)) for stem in stems for w in words)
 
 
 def foreign_markers_hit(country: str | None, text: str | None) -> bool:
     """True when ``text`` (a search hit's title and snippet) carries a marker of another place for ``country``."""
     markers = FOREIGN_MARKERS.get(country or "", ())
-    folded = _fold(text or "")
-    return any(re.search(rf"(?<!\w){re.escape(_fold(m))}(?!\w)", folded) for m in markers)
+    raw = text or ""
+    folded = _fold(raw)
+    if any(re.search(rf"(?<!\w){re.escape(_fold(m))}(?!\w)", folded) for m in markers):
+        return True
+    if any(pattern.search(raw) for pattern in _FOREIGN_RAW.get(country or "", ())):
+        return True
+    usd = _FOREIGN_USD.get(country or "")
+    return bool(usd and usd.search(folded) and not _EURO.search(folded))

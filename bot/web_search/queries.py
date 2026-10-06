@@ -130,15 +130,34 @@ def dedupe(candidates: list[GeneratedQuery], used: list[str], *, limit: int) -> 
 
 
 PlaceLevel = Literal["city", "province", "region"]
-_REGION_WORDS = re.compile(r"provinc|провинц|comunidad|comunitat|region|област|регион|oblast|cataluna|catalunya|"
-                           r"andalucia|andalusia", re.IGNORECASE)
+_REGION_WORDS = re.compile(rf"(?<!\w)(?:provincias?|provincie|province|comunidad(?:es)?|comunitat|regiones?|region|"
+                           r"oblast|cataluna|catalunya|andalucia|andalusia)(?!\w)|(?<!\w)(?:провинц|област|регион)")
+_NOT_REGION = re.compile(r"(?<!\w)(?:comunidad de vecinos|gastos de comunidad|comunidad de propietarios|"
+                         r"gastos comunitarios)(?!\w)")
+_PROVINCE = r"(?:provinci\w*|province|region|oblast|провинц\w*|област\w*|регион\w*)"
 
 
 def place_level_of(task_text: str, location: str) -> PlaceLevel:
-    """"region" when the task names a region of ``location`` (or says province/region/область), else "city"."""
-    folded = _fold(task_text)
-    if any(alias in folded for alias in geo.REGIONS.get(location, ())) or _REGION_WORDS.search(folded):
+    """"region" when the task names a region of ``location`` or says province/region/область, else "city".
+
+    A city of the campaign named in the text wins («Valencia, Comunidad Valenciana» is the city) unless a
+    province word sits right next to it («provincia de Valencia», «в Киевской области»).
+    """
+    folded = _NOT_REGION.sub(" ", _fold(task_text))
+    aliases = geo.REGIONS.get(location, ())
+    region = any(alias in folded for alias in aliases) or bool(_REGION_WORDS.search(folded))
+    if not region:
+        return "city"
+    cleaned = folded
+    for alias in sorted(aliases, key=len, reverse=True):
+        cleaned = cleaned.replace(alias, " ")
+    names = geo.place_names(location, regions=False)
+    if not geo.mentions_place(cleaned, names, strict=True):
         return "region"
+    for name in names:
+        n = re.escape(name)
+        if re.search(rf"(?<!\w){_PROVINCE}\s+(?:de\s+|of\s+|в\s+)?{n}(?!\w)|(?<!\w){n}\w*\s+{_PROVINCE}", cleaned):
+            return "region"
     return "city"
 
 
@@ -192,9 +211,12 @@ class QueryTask:
             return ()  # elsewhere: no known portals, the open web only
         kind = task_kind(self)
         portals = SPAIN_PORTALS_BY_KIND.get(kind, SPAIN_PORTALS_BY_KIND["apartment"])
-        if any(word in _fold(self.text) for word in SPAIN_BANK_WORDS):
+        if _BANK_RE.search(_fold(self.text)):
             portals = (*portals, *(p for p in SPAIN_BANK_PORTALS if p not in portals))
         return portals
+
+
+_BANK_RE = re.compile("|".join(rf"(?<!\w){re.escape(w)}" for w in SPAIN_BANK_WORDS))
 
 
 class QueryGenerator(Protocol):

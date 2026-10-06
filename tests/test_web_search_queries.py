@@ -135,3 +135,33 @@ def test_portals_by_kind_and_bank_portals_on_request() -> None:
     assert land_bank.count("sareb.es") == 1 and "haya.es" in land_bank
     assert set(bank) <= set(SPAIN_PORTALS)
     assert task("flat", location="Madrid").portals()[:2] == ("idealista.com", "fotocasa.es")
+
+
+def test_place_level_misfires() -> None:
+    assert place_level_of("piso en Valencia, Comunidad Valenciana", "Valencia") == "city"
+    assert place_level_of("piso en Barcelona, Cataluña", "Barcelona") == "city"
+    assert place_level_of("piso en la Comunidad Valenciana", "Valencia") == "region"
+    assert place_level_of("provincia de Valencia", "Valencia") == "region"
+    assert place_level_of("piso Valencia gastos de comunidad 50€", "Valencia") == "city"
+    assert place_level_of("piso Valencia comunidad de vecinos tranquila", "Valencia") == "city"
+    assert place_level_of("quiero algo regional", "Valencia") == "city"
+    assert place_level_of("квартира в Киевской области", "Kyiv") == "region"
+
+
+def test_foreign_markers_currency_and_california() -> None:
+    assert not geo.foreign_markers_hit("ES", "Piso en Valencia 150.000 € (165,000 USD)")
+    assert geo.foreign_markers_hit("ES", "Apartment Valencia, CA 91355")
+    assert not geo.foreign_markers_hit("ES", "Calle California, Valencia")
+    assert geo.foreign_markers_hit("ES", "Apartamento en Valencia, Carabobo, Bs. 500")
+    assert geo.foreign_markers_hit("ES", "House 300,000 USD")
+
+
+def test_bank_words_are_word_starts() -> None:
+    assert "solvia.es" not in task("riverbank apartment Valencia").portals()
+    assert "solvia.es" in task("piso de banco Valencia").portals()
+
+
+def test_mentions_country_is_word_based() -> None:
+    assert not geo.mentions_country("site:spainhouses.net piso Valencia", "ES")
+    assert geo.mentions_country("piso Valencia España", "ES")
+    assert geo.mentions_country("flat in Spain", "ES")

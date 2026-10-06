@@ -145,7 +145,6 @@ SPAIN_PORTALS_BY_KIND["house"] = SPAIN_PORTALS_BY_KIND["apartment"]
 SPAIN_BANK_PORTALS = ("solvia.es", "servihabitat.com", "alisedainmobiliaria.com", "sareb.es",
                       "altamirainmuebles.com", "haya.es", "hogaria.net", "green-acres.es")
 SPAIN_BANK_WORDS = ("banco", "bank", "embargo", "sareb", "дешев", "cheap", "барат", "barato", "oportunidad")
-SPAIN_LAND_FIRST = ("terrenos.es", "sareb.es")  # for land, searched right after Idealista and Fotocasa
 UKRAINE_PORTALS = ("dom.ria.com", "lun.ua", "olx.ua", "rieltor.ua")
 _GENERIC_LISTING = re.compile(r"(?:^|[/_-])(?:id)?\d{6,}(?:[/_.-]|$)|/(?:inmueble|anuncio|ficha|property|listing|detalle|obyavlenie)[/-][^/]*\d{4,}",
                               re.IGNORECASE)
