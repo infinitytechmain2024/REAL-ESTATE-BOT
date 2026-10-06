@@ -79,8 +79,6 @@ RELEVANCE = {
         "invest",
         "funding",
         "investor",
-        "startup",
-        "capital",
         "инвест",
         "стартап",
         "invers",
