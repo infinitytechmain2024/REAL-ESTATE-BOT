@@ -43,7 +43,7 @@ from .extract import (
     post_text,
 )
 from .fetcher import FetchError, PageFetcher
-from .models import SEARCH_RESULT_NOTE, Candidate, PageResult, QueuedUrl
+from .models import INDEX_RESULT_NOTE, SEARCH_RESULT_NOTE, Candidate, PageResult, QueuedUrl
 from .queries import (
     QueryGenerator,
     QueryTask,
@@ -57,7 +57,7 @@ from .render import Renderer, RenderError
 from .searxng import Searcher, SearchError
 from .store import BUSY, HOST_BLOCKED, WebStore
 from .structured import Structured, facts_block, from_jsonld, structured
-from .urls import classify_url, fetchable, host_of, url_key
+from .urls import classify_page, classify_url, fetchable, host_of, portal_listing, url_key
 
 log = logging.getLogger(__name__)
 MIN_POST_CHARS = 120
@@ -346,7 +346,9 @@ class WebSearchWorker:
                                                         extra_blocked=cfg.blocked_hosts)]:
                     if len(links) < cfg.max_links_per_index and url_key(link) not in {url_key(x) for x in links}:
                         links.append(link)
-                children = [Candidate(link, url_key(link), host_of(link), 1, "listing") for link in links]
+                cards = index_cards(data, final_url)
+                children = [Candidate(link, url_key(link), host_of(link), 1, "listing", None,
+                                      *cards.get(url_key(link), ("", ""))) for link in links]
                 return PageResult(True, "index", final_url, parsed.title), children
         text = post_text(parsed, limit=cfg.max_post_chars)
         facts = data.listing_for(final_url)
@@ -354,6 +356,8 @@ class WebSearchWorker:
             text = f"{facts_block(facts)}\n{text}".strip()[:cfg.max_post_chars]
         if len(text) < MIN_POST_CHARS:
             return PageResult(False, "listing", final_url, parsed.title, error="no_readable_text"), []
+        if url.kind == "unknown" and classify_page(final_url, has_listing_data=facts is not None, text=text) != "listing":
+            return PageResult(False, "unknown", final_url, parsed.title, error="not_a_listing"), []
         return PageResult(True, "listing", final_url, parsed.title, text), []
 
     # -- bookkeeping --
@@ -384,7 +388,44 @@ def search_result(url: QueuedUrl, error: str | None) -> PageResult | None:
     (None: the site was never asked).
     """
     title, snippet = " ".join(url.title.split()), " ".join(url.snippet.split())
-    if url.depth != 0 or classify_url(url.url) != "listing" or not snippet or len(title) + len(snippet) < MIN_SNIPPET_CHARS:
+    if url.depth > 0:  # a link from an index page: only when that page's JSON-LD described it (``index_cards``)
+        if not snippet.startswith("JSON-LD: {") or not (title or url.url):
+            return None
+        text = f"{snippet}\n{title}\n\nСсылка: {url.url}\n{INDEX_RESULT_NOTE.format(host=url.host)}".strip()
+        return PageResult(True, "listing", url.url, title, text, error=error, via="index")
+    if not portal_listing(url.url) or not snippet or len(title) + len(snippet) < MIN_SNIPPET_CHARS:
         return None
     text = f"{title}\n{snippet}\n\nСсылка: {url.url}\n{SEARCH_RESULT_NOTE}"
     return PageResult(True, "listing", url.url, title, text, error=error, via="search")
+
+
+MAX_CARD_SNIPPET = 500  # what the queue keeps of a search snippet (``PostgresWebStore.enqueue``)
+_CARD_KEYS = ("title", "url", "price", "currency", "area_m2", "rooms", "address", "property_type", "deal")
+
+
+def index_cards(data: Structured, page_url: str) -> dict[str, tuple[str, str]]:
+    """url_key -> (title, «JSON-LD: {...}») of the ItemList listings an index page describes itself.
+
+    Only a listing with a title or url and a price, area or rooms; the line is kept in the child's queue row
+    (title and snippet), so ``search_result`` can make the post when the detail page cannot be read, and the
+    detail page, when read, is the only post of that url_key.
+    """
+    cards: dict[str, tuple[str, str]] = {}
+    in_list = {url_key(u) for u in data.item_urls}
+    for listing in data.listings:
+        link = str(listing.get("url") or "")
+        key = url_key(link) if link else ""
+        if not link or key not in in_list or key == url_key(page_url) or key in cards:
+            continue
+        if not (listing.get("title") or link) or not any(k in listing for k in ("price", "area_m2", "rooms")):
+            continue
+        facts = {k: listing[k] for k in _CARD_KEYS if k in listing}
+        line = facts_block(facts)
+        for drop in ("address", "property_type", "deal", "currency", "title"):  # keep the figures, cut the rest
+            if len(line) <= MAX_CARD_SNIPPET:
+                break
+            facts.pop(drop, None)
+            line = facts_block(facts)
+        if len(line) <= MAX_CARD_SNIPPET:
+            cards[key] = (str(listing.get("title") or "")[:300], line)
+    return cards

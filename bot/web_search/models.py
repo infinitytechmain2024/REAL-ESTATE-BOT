@@ -9,6 +9,7 @@ UrlKind = Literal["listing", "index", "unknown"]
 RunState = Literal["searching", "done", "stopped"]
 QUERY_LANGUAGES = ("es", "en", "ru", "uk")
 # The last line of a post built from a search result (``worker.search_result``); the relevance check reads it.
+INDEX_RESULT_NOTE = "Данные со страницы результатов {host}"  # last line of a post built from an index page's JSON-LD
 SEARCH_RESULT_NOTE = "(Страница сайта не прочитана: это заголовок и описание объявления из результатов поиска.)"
 
 
@@ -124,6 +125,8 @@ class PageResult:
 
     ``via`` "search": the site could not be read (``error`` says why, None when it was never
     contacted: robots.txt, a blocked site) and the post is the search engine's title and snippet.
+    ``via`` "index": the same, but the post was built from the listing data (JSON-LD ``ItemList``) of the
+    index page the link was found on.
     """
 
     ok: bool
@@ -133,4 +136,4 @@ class PageResult:
     text: str = ""
     error: str | None = None
     query: str | None = None
-    via: Literal["page", "search"] = "page"
+    via: Literal["page", "search", "index"] = "page"

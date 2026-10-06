@@ -9,6 +9,7 @@ from bot.web_search.fetcher import FetchedPage
 from bot.web_search.render import BrowserRenderer, RenderedPage, RenderError, page_of
 from bot.web_search.store import MemoryWebStore
 from bot.web_search.structured import facts_block, from_jsonld, structured
+from bot.web_search.urls import url_key
 from tests.test_web_search import (
     FakeFetcher,
     FakeSearcher,
@@ -191,3 +192,74 @@ async def test_browser_renderer_leases_the_website_profile_and_releases_it() -> 
 
 def test_fetched_page_type_is_unchanged() -> None:
     assert FetchedPage(PAGE, "<html></html>").url == PAGE
+
+
+# --- listings an index page describes itself (via="index") ----------------------------------
+
+SITE = "https://www.example-pisos.es"
+INDEX = f"{SITE}/venta/terrenos/madrid/"
+
+
+def index_html(extra: list[dict] | None = None) -> str:
+    items = [{"@type": "ListItem", "position": n, "item": {
+        "@type": "Apartment", "name": f"Piso {n}", "url": f"{SITE}/inmueble/{n}0000/",
+        "numberOfRooms": 3, "floorSize": {"value": 80 + n, "unitCode": "MTK"}, "offers": {"price": 100000 * n, "priceCurrency": "EUR"},
+        "address": {"addressLocality": "Madrid"}}} for n in (1, 2)]
+    items.append({"@type": "ListItem", "position": 3, "url": f"{SITE}/inmueble/30000/"})  # a bare link: no card
+    items.extend(extra or [])
+    return html_with({"@type": "ItemList", "itemListElement": items}, body="<div id=app></div>")
+
+
+async def index_run(pages: dict[str, str], errors: dict[str, str] | None = None, **config):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    fetcher = FakeFetcher(pages, errors=errors)
+    w = worker(campaigns, store, FakeSearcher(default=[INDEX]), fetcher, ListGenerator(["terrenos Madrid"]), **config)
+    await run_until_done(w, cid)
+    return store, fetcher
+
+
+async def test_listings_of_an_index_page_become_index_posts_when_the_detail_pages_fail() -> None:
+    errors = {f"{SITE}/inmueble/{n}0000/": "http_403" for n in (1, 2, 3)}
+    store, _ = await index_run({INDEX: index_html()}, errors)
+    posts = {p["url"]: p for p in store.posts}
+    assert set(posts) == {f"{SITE}/inmueble/10000/", f"{SITE}/inmueble/20000/"}  # the bare link has no data
+    first = posts[f"{SITE}/inmueble/10000/"]
+    assert first["via"] == "index" and first["text"].startswith("JSON-LD: {")
+    assert '"price": 100000' in first["text"] and '"rooms": 3' in first["text"] and "Piso 1" in first["text"]
+    assert "Ссылка: " + first["url"] in first["text"] and "Данные со страницы результатов example-pisos.es" in first["text"]
+    assert len({p["url"] for p in store.posts}) == len(store.posts)  # one post per url
+
+
+async def test_a_detail_page_read_later_is_the_only_post_of_its_url() -> None:
+    detail = f"{SITE}/inmueble/10000/"
+    pages = {INDEX: index_html(), detail: html_with({**LISTING, "url": detail}, body="<main><p>Piso en venta. Contacto: agencia.</p></main>")}
+    errors = {f"{SITE}/inmueble/{n}0000/": "http_403" for n in (2, 3)}
+    store, _ = await index_run(pages, errors)
+    posts = {p["url"]: p for p in store.posts}
+    assert posts[detail]["via"] == "page" and "Contacto: agencia" in posts[detail]["text"]
+    assert posts[f"{SITE}/inmueble/20000/"]["via"] == "index"
+    assert [p["url"] for p in store.posts].count(detail) == 1
+
+
+async def test_index_posts_are_capped_by_max_links_per_index() -> None:
+    errors = {f"{SITE}/inmueble/{n}0000/": "http_403" for n in (1, 2, 3)}
+    store, _ = await index_run({INDEX: index_html()}, errors, max_links_per_index=1)
+    assert [p["url"] for p in store.posts] == [f"{SITE}/inmueble/10000/"]
+
+
+async def test_an_unknown_page_is_a_listing_only_with_price_and_area() -> None:
+    plain = "https://blog-ejemplo.es/guia/comprar-piso-en-madrid"
+    priced = "https://blog-ejemplo.es/guia/piso-en-madrid"
+    body = "<main><p>Guía para comprar una vivienda en Madrid: pasos, notaría, impuestos y consejos útiles para el comprador.</p><p>Información general sobre hipotecas, tasaciones, plazos y documentos necesarios. "
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    pages = {plain: f"<html><head><title>Guía</title></head><body>{body}</p></main></body></html>",
+             priced: f"<html><head><title>Piso</title></head><body>{body} Piso de 85 m² por 250.000 €.</p></main></body></html>"}
+    w = worker(campaigns, store, FakeSearcher(default=[plain, priced]), FakeFetcher(pages), ListGenerator(["piso Madrid"]),
+               cover_portals=False)
+    await run_until_done(w, cid)
+    assert [p["url"] for p in store.posts] == [priced]
+    assert store.urls[cid][url_key(plain)].detail == "not_a_listing"

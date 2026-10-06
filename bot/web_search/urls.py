@@ -146,8 +146,28 @@ SPAIN_BANK_PORTALS = ("solvia.es", "servihabitat.com", "alisedainmobiliaria.com"
                       "altamirainmuebles.com", "haya.es", "hogaria.net", "green-acres.es")
 SPAIN_BANK_WORDS = ("banco", "bank", "embargo", "sareb", "дешев", "cheap", "барат", "barato", "oportunidad")
 UKRAINE_PORTALS = ("dom.ria.com", "lun.ua", "olx.ua", "rieltor.ua")
-_GENERIC_LISTING = re.compile(r"(?:^|[/_-])(?:id)?\d{6,}(?:[/_.-]|$)|/(?:inmueble|anuncio|ficha|property|listing|detalle|obyavlenie)[/-][^/]*\d{4,}",
-                              re.IGNORECASE)
+_LISTING_WORD = re.compile(
+    r"(?<![a-z])(?:inmueble|anuncio|ficha|property|listing|detalle|obyavlenie|piso|casa|apartamento|chalet|terreno"
+    r"|parcela|vivienda|venta|alquiler|rent|sale)(?![a-z])", re.IGNORECASE)
+_DIGITS = re.compile(r"(?<!\d)\d{5,}(?!\d)")
+_DATE_DIR = re.compile(r"/(?:19|20)\d\d/(?:0?[1-9]|1[0-2])/")          # /2024/05/ before the id: a news/blog path
+_DATE_ID = re.compile(r"(?:19|20)\d\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])")  # 20240512
+_PRICE = re.compile(r"\d\s*(?:€|k\s?€|eur\b|euros?\b)|(?:€|eur\b)\s?\d", re.IGNORECASE)
+_AREA = re.compile(r"\d\s*(?:m²|m2|m\^2|metros?\b|mts?\b)", re.IGNORECASE)
+
+
+def _generic_listing(path: str) -> bool:
+    """An unknown site's concrete ad: a listing word and a 5+ digit id, or a 6+ digit id that is not a news date."""
+    has_word = bool(_LISTING_WORD.search(path))
+    for match in _DIGITS.finditer(path):
+        number = match.group(0)
+        if (len(number) == 8 and _DATE_ID.fullmatch(number)) or _DATE_DIR.search(path[:match.start()]):
+            continue
+        before, after = path[:match.start()], path[match.end():match.end() + 1]
+        bounded = (not before or before[-1] in "/_-" or before[-2:].lower() == "id") and (not after or after in "/_.-")
+        if has_word or (len(number) >= 6 and bounded):
+            return True
+    return False
 
 
 def portal_of(host: str) -> Portal | None:
@@ -171,4 +191,21 @@ def classify_url(url: str) -> UrlKind:
         if portal.index is not None and portal.index.search(path):
             return "index"
         return "unknown"
-    return "listing" if _GENERIC_LISTING.search(path) else "unknown"
+    return "listing" if _generic_listing(path) else "unknown"
+
+
+def portal_listing(url: str) -> bool:
+    """True only for a concrete ad of a known portal (by its URL regex), never by the generic rule."""
+    portal = portal_of(host_of(url))
+    return portal is not None and bool(portal.listing.search(urlsplit(url).path or "/"))
+
+
+def classify_page(url: str, *, has_listing_data: bool = False, text: str = "") -> UrlKind:
+    """The kind of a page that was read: ``classify_url`` first; an unknown page becomes ``listing`` only
+    when it carries listing JSON-LD (``has_listing_data``) or its text shows both a price and an area."""
+    kind = classify_url(url)
+    if kind != "unknown":
+        return kind
+    if has_listing_data or (_PRICE.search(text) and _AREA.search(text)):
+        return "listing"
+    return "unknown"
