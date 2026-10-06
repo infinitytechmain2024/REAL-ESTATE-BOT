@@ -89,7 +89,7 @@ def test_the_moscow_catalog_card_is_excluded_by_the_rules_alone() -> None:
     assert classify(MOSCOW_CARD, request).bucket == "excluded"
     # Each signal on its own is enough.
     bare = {"summary_ru": "Участок у метро", "deal_type": "sale", "property_type": "land"}
-    assert classify(bare, request).bucket == "exact"
+    assert classify(bare, request).bucket == "similar"  # no area given, a minimum asked: unverified
     assert classify({**bare, "location": "Москва"}, request).bucket == "excluded"
     assert classify({**bare, "country": "RU"}, request).bucket == "excluded"
     assert classify({**bare, "price_amount": 28_609_258, "price_currency": "RUB"}, request).bucket == "excluded"
@@ -98,6 +98,7 @@ def test_the_moscow_catalog_card_is_excluded_by_the_rules_alone() -> None:
     assert classify({**bare, "summary_ru": "43 объявления о продаже участков"}, request).bucket == "excluded"
     assert classify({**bare, "summary_ru": "Средняя стоимость участков 300 000 €"}, request).bucket == "excluded"
     # A Spanish host, a generic one and Madrid itself never exclude.
+    bare = {**bare, "area_m2": 2500}
     for link in ("https://www.idealista.com/inmueble/1/", "https://www.fotocasa.es/x", "https://x.eu/a",
                  "https://www.facebook.com/groups/1/posts/2/"):
         assert classify({**bare, "original_post_link": link}, request).bucket == "exact"
@@ -108,7 +109,7 @@ def test_the_moscow_catalog_card_is_excluded_by_the_rules_alone() -> None:
     (2500, "exact"), (2000, "exact"), (1900, "exact"), (1800, "exact"),  # ±10 % is the criterion itself
     (1600, "similar"), (1500, "similar"),  # 75-90 %: offered with «Одобрить»
     (1400, "excluded"), (900, "excluded"),
-    (None, "exact"),  # an unknown area never downgrades
+    (None, "similar"),  # an unknown area against a minimum is unverified (fail closed)
 ])
 def test_madrid_plots_by_area(area: float | None, bucket: str) -> None:
     match = classify(plot(area), madrid_request())
@@ -158,11 +159,11 @@ class FakeJudge:
         return verdict
 
 
-async def setup(judge: FakeJudge | None = None, **config):
+async def setup(judge: FakeJudge | None = None, **config):  # fail-closed off unless a test asks for it
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
     messenger = ButtonMessenger()
-    runner = CampaignRunner(campaigns, store, messenger, None, config=RunnerConfig(window_cooldown_seconds=0, **config),
+    runner = CampaignRunner(campaigns, store, messenger, None, config=RunnerConfig(**{"window_cooldown_seconds": 0, "relevance_fail_closed": False, **config}),
                             relevance=judge)
     plan = plan_campaign(TASK, vertical="real_estate", location="Madrid")
     cid = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=TASK, actor="telegram:42")
@@ -300,6 +301,52 @@ async def test_the_relevance_cap_is_respected() -> None:
     assert len(messenger.findings()) == 2
 
 
+async def judged(runner: CampaignRunner, campaign_id: str, store: MemoryRunStore, fid: str):
+    (finding,) = [f for f in store.findings[campaign_id] if f.id == fid]
+    return await runner._judge(await runner.campaigns.get(campaign_id), campaign_request(
+        await runner.campaigns.get(campaign_id)), finding)
+
+
+async def test_fail_closed_without_a_judge_holds_exact_as_unverified() -> None:
+    _, store, messenger, runner, cid = await setup(None, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    assert store.buckets["a"][0] == "similar" and messenger.findings() == []
+    match = await judged(runner, cid, store, "a")
+    assert (match.bucket, match.why, match.note) == ("similar", "unverified", "Не проверено ИИ: сбой проверки")
+
+
+async def test_fail_closed_after_a_judge_failure_holds_exact_as_unverified() -> None:
+    _, store, messenger, runner, cid = await setup(FakeJudge(RelevanceError("timeout")), relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    assert store.buckets["a"][0] == "similar" and messenger.findings() == []
+    match = await judged(runner, cid, store, "a")
+    assert (match.bucket, match.note) == ("similar", "Не проверено ИИ: сбой проверки")
+
+
+async def test_fail_closed_past_the_cap_holds_exact_as_unverified() -> None:
+    judge = FakeJudge(MATCH)
+    _, store, messenger, runner, cid = await setup(judge, max_relevance_calls=1, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    add(store, cid, "b", plot(2600))
+    await runner.tick()
+    assert store.buckets["b"][0] == "similar" and len(messenger.findings()) == 1
+    match = await judged(runner, cid, store, "b")
+    assert (match.bucket, match.why, match.note) == ("similar", "unverified", "Не проверено ИИ: лимит проверок исчерпан")
+
+
+async def test_fail_closed_never_touches_investors_and_can_be_switched_off() -> None:
+    _, store, messenger, runner, cid = await setup(None, relevance_fail_closed=True)
+    store.add_finding(cid, "inv", "🏠 inv", payload=plot(None), original="post", vertical="investors")
+    await runner.tick()
+    assert store.buckets["inv"][0] == "exact"
+    _, store, messenger, runner, cid = await setup(None, relevance_fail_closed=False)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    assert store.buckets["a"][0] == "exact" and len(messenger.findings()) == 1
+
+
 def test_parse_relevance_accepts_drift_and_keeps_users_away_from_english() -> None:
     assert set(SCHEMA["required"]) == set(SCHEMA["properties"])
     ok = parse_relevance('{"verdict": "near", "reason": "Метро дальше.", "deviation_ru": "Дальше от метро"}')
@@ -384,7 +431,7 @@ async def test_every_web_query_for_madrid_names_the_place() -> None:
     # Russian/Ukrainian queries carry the Spanish name in Latin letters and stay a minority.
     cyrillic = [q for q in round_ if q.language in ("ru", "uk")]
     assert cyrillic and all("Madrid" in q.text for q in cyrillic) and len(cyrillic) <= 3 + 1
-    assert "terreno Comunidad de Madrid" in [q.text for q in round_]
+    assert "terreno Comunidad de Madrid Madrid España" in [q.text for q in round_]
     for _ in range(3):
         template = await TemplateQueryGenerator().generate(task, used=[], count=12)
         assert all(names_madrid(q.text) for q in template)
@@ -419,7 +466,7 @@ async def test_web_worker_searches_spain_and_drops_foreign_sites() -> None:
                              config=WebSearchConfig(cover_portals=False))
     await worker.tick()  # the round
     await worker.tick()  # the search
-    assert searcher.calls == [("купить участок у метро Madrid", "es-ES")]
+    assert searcher.calls == [("купить участок у метро Madrid Испания", "es-ES")]
     queued = {u.url for u in await store.next_urls(cid, 10)}
     assert queued == {"https://www.idealista.com/inmueble/12345/", "https://www.fotocasa.es/es/x/1/d"}
     assert query_task(await campaigns.get(cid)).country == "ES"

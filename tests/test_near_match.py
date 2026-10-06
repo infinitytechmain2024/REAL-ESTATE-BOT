@@ -111,7 +111,7 @@ async def setup(requested_by: int = USER):
     store = MemoryRunStore(campaigns)
     messenger = ButtonMessenger()
     runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER},
-                            config=RunnerConfig(window_cooldown_seconds=0))
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0))
     cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=requested_by, source_text=GOAL,
                                  actor=f"telegram:{requested_by}")
     await campaigns.set_state(cid, "running", "campaign:test")
@@ -291,7 +291,8 @@ async def test_no_budget_means_everything_is_exact() -> None:
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
     messenger = ButtonMessenger()
-    runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER})
+    runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER},
+                            config=RunnerConfig(relevance_fail_closed=False))
     cid = await campaigns.create(plan_campaign("Купить квартиру в Мадриде"), chat_id=CHAT, requested_by=USER,
                                  source_text="x", actor="telegram:42")
     add(store, cid, "a", 900_000)
@@ -439,3 +440,23 @@ async def test_a_rental_for_a_purchase_is_never_offered_or_sent() -> None:
         await runner.tick()
     assert len(cards(messenger)) == 1 and "90 000" in cards(messenger)[0]
     assert not any("rent" in card for card in cards(messenger))
+
+
+def test_unknown_price_with_a_budget_is_other() -> None:
+    assert classify(listing(None), MADRID_50K).bucket == "other"
+
+
+def test_unknown_area_against_a_minimum_is_similar_and_known_area_is_unchanged() -> None:
+    request = Request(amount=None, deal="sale", location="Madrid", min_area=2000)
+    assert classify({**listing(None), "area_m2": None}, request).bucket == "similar"
+    assert classify(listing(None), request).bucket == "similar"
+    assert classify({**listing(None), "area_m2": 2500}, request).bucket == "exact"
+    assert classify(listing(None), Request(deal="sale", location="Madrid")).bucket == "exact"
+
+
+def test_rooms_lower_than_requested_is_other_unknown_or_more_is_unchanged() -> None:
+    request = Request(deal="sale", location="Madrid", rooms=3)
+    assert classify({**listing(None), "rooms": 2}, request).bucket == "other"
+    assert classify({**listing(None), "rooms": 3}, request).bucket == "exact"
+    assert classify({**listing(None), "rooms": 4}, request).bucket == "exact"
+    assert classify({**listing(None), "rooms": None}, request).bucket == "exact"

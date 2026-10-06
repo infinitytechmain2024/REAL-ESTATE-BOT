@@ -630,7 +630,7 @@ def campaign_runner(pool, messenger: FakeMessenger) -> CampaignRunner:
                                          link("rentmadrid", "Madrid rent", "3 posts a week")]})
     discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, FakeReader(), sleep=Sleeps(), now=lambda: NOW)
     return CampaignRunner(campaigns, PostgresRunStore(pool, SafetyLimits()), messenger, discovery,
-                          config=RunnerConfig(window_cooldown_seconds=0, analysis_grace_seconds=600), owner_ids={OPERATOR})
+                          config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0, analysis_grace_seconds=600), owner_ids={OPERATOR})
 
 
 async def start_campaign(pool) -> str:

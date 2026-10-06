@@ -523,7 +523,7 @@ async def test_the_campaign_completes_after_pending_social_queries_or_the_grace(
     store = MemoryRunStore(campaigns)
     clock = Clock()
     runner = CampaignRunner(campaigns, store, FakeMessenger(), FakeDiscovery(campaigns, store, 5), now=clock,
-                            config=RunnerConfig(window_cooldown_seconds=30, analysis_grace_seconds=0, social_grace_seconds=900))
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=30, analysis_grace_seconds=0, social_grace_seconds=900))
     plan = plan_campaign("Найди квартиры в аренду в Мадриде")
     cid = await campaigns.create(plan, chat_id=-1, requested_by=7, source_text="x", actor="t")
     await runner.tick()

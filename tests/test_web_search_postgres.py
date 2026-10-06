@@ -131,7 +131,7 @@ async def test_web_pages_become_campaign_findings_streamed_once_with_their_links
 
     messenger = FakeMessenger()
     runner = CampaignRunner(PostgresCampaignStore(pool), PostgresRunStore(pool, SafetyLimits()), messenger,
-                            config=RunnerConfig(window_cooldown_seconds=0), owner_ids={OPERATOR},
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0), owner_ids={OPERATOR},
                             web=PostgresWebStore(pool))
     await runner.tick()
     await runner.tick()

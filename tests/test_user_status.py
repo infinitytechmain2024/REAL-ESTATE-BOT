@@ -65,7 +65,7 @@ def build(*, owners: frozenset[int] = frozenset({OWNER}), groups: int = 20, mess
     discovery = FakeDiscovery(campaigns, store, groups)
     clock = Clock()
     runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids=owners,
-                            config=RunnerConfig(window_cooldown_seconds=120, analysis_grace_seconds=600))
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=120, analysis_grace_seconds=600))
     plan = plan_campaign(GOAL).model_copy(update={"limits": CampaignLimits(max_groups=groups)})
     return campaigns, store, messenger, clock, runner, plan
 

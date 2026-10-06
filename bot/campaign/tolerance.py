@@ -45,9 +45,12 @@ Other constraints
   стоимость») too. A payload without ``listing_kind`` is an offer.
 * Area: a minimum area in the task («от 2000 м²», ``min_area_of``) with a
   known ``area_m2``: from 90 % of it (the same ±10 % tolerance as the budget)
-  it is exact, from 75 % similar, below that excluded. An unknown area never
-  downgrades a listing.
-* Rooms are shown on the card but do not change the bucket.
+  it is exact, from 75 % similar, below that excluded. When the task has a
+  minimum area and the listing's area is unknown, it is similar, never exact
+  (fail closed); without a minimum area an unknown area changes nothing.
+* Rooms: when the task names a number of rooms and the listing's known count is
+  lower, it is other; an unknown count (or more rooms) changes nothing.
+* A budget with an unknown listing price is other (see Budget).
 * Findings of the investors vertical carry no prices; they are always exact.
 """
 
@@ -71,7 +74,7 @@ AREA_SIMILAR_FLOOR = 0.75  # from 75 % of the minimum area: similar; below: excl
 Bucket = Literal["exact", "similar", "other", "excluded"]
 _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
-Why = Literal["price", "area", "location", "deal", "kind", "foreign", "currency", "ai"]
+Why = Literal["price", "area", "rooms", "location", "deal", "kind", "foreign", "currency", "ai", "unverified"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -93,6 +96,7 @@ class Request:
     deal: str | None = None
     location: str | None = None  # the plan's place (any place in the world)
     min_area: float | None = None  # «от 2000 м²» in the task, square metres
+    rooms: int | None = None  # the plan's rooms constraint
     country: str | None = None  # ISO-2; derived from ``location`` when not given
 
     @property
@@ -107,6 +111,7 @@ class Match:
     distance: float = 0.0
     why: str | None = None  # the main deviation (``Why``) when not exact
     area: float | None = None  # the listing's area when it is the deviation
+    note: str | None = None  # owner-facing Russian reason (e.g. «Не проверено ИИ: ...»), when not from the rules
 
 
 def worse(a: Match, b: Match) -> Match:
@@ -204,11 +209,13 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         return Request(location=location, country=country)
     amount = constraints.get("max_price")
     deal = constraints.get("deal")
+    rooms = constraints.get("rooms")
     return Request(
         amount=amount if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0 else None,
         deal=deal if deal in ("rent", "sale") else None,
         location=location,
         min_area=min_area_of(text),
+        rooms=rooms if isinstance(rooms, int) and not isinstance(rooms, bool) and rooms > 0 else None,
         country=country,
     )
 
@@ -246,6 +253,12 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
         result = area_match(float(area), request.min_area)
         if result.bucket == "excluded":
             return result
+    elif request.min_area:
+        result = Match("similar", 0.0, "area")  # unknown area against a minimum: unverified
+    listed = payload.get("rooms")
+    if (request.rooms and isinstance(listed, int | float) and not isinstance(listed, bool)
+            and 0 < listed < request.rooms):
+        result = worse(result, Match("other", math.inf, "rooms"))
     if request.location and isinstance(payload.get("location"), str):
         places = find_places(payload["location"])
         if places and request.location not in places:

@@ -61,7 +61,9 @@ class CampaignRunnerSettings(BaseSettings):
     # The AI relevance check of each campaign finding (bot/campaign/relevance.py); 0 calls: rules only.
     relevance_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_MATCH_MODEL")
     relevance_timeout_seconds: int = Field(default=15, ge=1, le=120, validation_alias="OPENROUTER_MATCH_TIMEOUT_SECONDS")
-    relevance_max_calls: int = Field(default=200, ge=0, le=10_000, validation_alias="CAMPAIGN_RELEVANCE_MAX_CALLS")
+    relevance_max_calls: int = Field(default=2000, ge=0, le=10_000, validation_alias="CAMPAIGN_RELEVANCE_MAX_CALLS")
+    # No AI verdict (cap reached, model down, no key): an exact finding is held as similar instead of sent.
+    relevance_fail_closed: bool = Field(default=True, validation_alias="CAMPAIGN_RELEVANCE_FAIL_CLOSED")
 
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors: investor campaigns only; off: never read comments.
@@ -101,6 +103,7 @@ class CampaignRunnerSettings(BaseSettings):
                             refusal_retry_seconds=self.refusal_retry_seconds,
                             social_grace_seconds=self.social_grace_seconds,
                             max_relevance_calls=self.relevance_max_calls,
+                            relevance_fail_closed=self.relevance_fail_closed,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
                             max_people=self.lead_people_max, lead_days=self.lead_days)
 

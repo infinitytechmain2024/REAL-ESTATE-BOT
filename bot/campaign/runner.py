@@ -179,6 +179,10 @@ class WebProgress(Protocol):
     async def web_status(self, campaign_id: str) -> Any: ...
 
 
+UNVERIFIED_CAP = "Не проверено ИИ: лимит проверок исчерпан"
+UNVERIFIED_FAILED = "Не проверено ИИ: сбой проверки"
+
+
 @dataclass(frozen=True)
 class RunnerConfig:
     window_cooldown_seconds: float = 120
@@ -188,7 +192,9 @@ class RunnerConfig:
     # After the last window, how long the campaign waits for social network searches still to come.
     social_grace_seconds: float = 1800
     # AI relevance checks per campaign (``relevance``); past the cap the deterministic rules decide alone.
-    max_relevance_calls: int = 200
+    max_relevance_calls: int = 2000
+    # No AI verdict (cap reached, paused after an error, no judge, failed call): an exact finding becomes similar.
+    relevance_fail_closed: bool = True
     # Which campaigns queue their sent Facebook posts for a comment read (``leads``): all | investors | off,
     # at most ``comment_max_posts`` per campaign. Off unless a comment worker runs beside the runner (``main``).
     comment_leads: str = "off"
@@ -468,22 +474,32 @@ class CampaignRunner:
             log.info("campaign.finding_excluded", extra={"campaign_id": campaign.id, "finding_id": finding.id,
                                                          "why": match.why})
             return match
-        verdict = await self._relevance(campaign, finding)
-        if verdict is None or verdict.verdict is None or verdict.verdict == "match":
+        verdict, note = await self._relevance(campaign, finding)
+        if verdict is None or verdict.verdict is None:
+            if (self.config.relevance_fail_closed and match.bucket == "exact" and finding.vertical != "investors"
+                    and campaign.plan.vertical != "investors"):
+                return Match("similar", match.distance, "unverified", note=note or UNVERIFIED_FAILED)
+            return match
+        if verdict.verdict == "match":
             return match
         if verdict.verdict == "reject":
             return Match("excluded", float("inf"), "ai")
         return match if match.bucket != "exact" else Match("similar", match.distance, "ai")
 
-    async def _relevance(self, campaign: Campaign, finding: StreamFinding) -> Relevance | None:
-        """The stored verdict, or one new AI call (within the cap); None: the rules decide alone."""
+    async def _relevance(self, campaign: Campaign, finding: StreamFinding) -> tuple[Relevance | None, str | None]:
+        """The stored verdict, or one new AI call (within the cap), and why there is none (Russian note).
+
+        No verdict: the rules decide alone, and an exact finding is held as unverified (``_judge``).
+        """
         stored = await self.store.relevance(campaign.id, finding.id)
-        if stored is not None or self.relevance is None:
-            return stored
+        if stored is not None:
+            return stored, (UNVERIFIED_FAILED if stored.verdict is None else None)
+        if self.relevance is None:
+            return None, UNVERIFIED_FAILED
         if self._relevance_paused_until is not None and self.now() < self._relevance_paused_until:
-            return None
+            return None, UNVERIFIED_FAILED
         if await self.store.relevance_calls(campaign.id) >= self.config.max_relevance_calls:
-            return None
+            return None, UNVERIFIED_CAP
         try:
             verdict = await self.relevance.judge(task_data(campaign), finding_data(finding.payload, fallback_text=finding.text,
                                                                                  original=finding.original))
@@ -496,7 +512,7 @@ class CampaignRunner:
         # The reason is for owners (logs); users never see it.
         log.info("campaign.relevance %s: %s", verdict.verdict, verdict.reason,
                  extra={"campaign_id": campaign.id, "finding_id": finding.id})
-        return verdict
+        return verdict, (UNVERIFIED_FAILED if verdict.verdict is None else None)
 
     async def _deviation(self, campaign: Campaign, request: Request, closest: StreamFinding) -> offers.Deviation:
         """What the closest held listing has outside the criteria: price, area, or the AI's phrase."""
@@ -510,6 +526,8 @@ class CampaignRunner:
             requested = f"от {round(request.min_area):,} м²".replace(",", " ")
             return offers.Deviation("area", area_text(match.area), requested, land=land)
         stored = await self.store.relevance(campaign.id, closest.id)
+        if match.bucket == "exact" and (stored is None or stored.verdict is None):
+            return offers.Deviation("other", phrase="не проверенные ИИ", land=land)
         return offers.Deviation("other", phrase=stored.deviation if stored is not None else None, land=land)
 
     async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool, bucket: str) -> bool:

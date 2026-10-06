@@ -94,7 +94,7 @@ def build(messenger: FakeMessenger | None = None):
     messenger = messenger or FakeMessenger()
     clock = Clock()
     runner = CampaignRunner(campaigns, store, messenger, FakeDiscovery(campaigns, store, 3), now=clock,
-                            config=RunnerConfig(), owner_ids={OWNER})
+                            config=RunnerConfig(relevance_fail_closed=False), owner_ids={OWNER})
     return campaigns, store, messenger, clock, runner
 
 
