@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import urlsplit
 
 from .models import AcquisitionMethod, RunRequest
@@ -125,8 +126,10 @@ def parse_campaign_goal(value: str) -> tuple[str, str | None, str | None, dict[s
     city: str | None = None
     place: dict[str, str] | None = None
     words = value.split()
-    while words and "=" in words[0] and words[0].split("=", 1)[0] in {"mode", "city", "place"}:
+    while words and "=" in words[0] and words[0].split("=", 1)[0] in {"mode", "city", "place", "spec"}:
         key, _, raw = words.pop(0).partition("=")
+        if key == "spec":
+            continue  # read by ``parse_campaign_spec``; the goal text and the place do not depend on it
         if key == "mode":
             if raw not in GOAL_MODES or vertical is not None:
                 raise CommandValidationError("mode must be real_estate or investors")
@@ -144,3 +147,33 @@ def parse_campaign_goal(value: str) -> tuple[str, str | None, str | None, dict[s
     if not goal:
         raise CommandValidationError("use /campaign <goal>")
     return goal, vertical, city, place
+
+
+MAX_SPEC_CHARS = 24_000
+
+
+def parse_campaign_spec(value: str) -> dict[str, Any] | None:
+    """The leading ``spec=<base64 JSON>`` token of a queued campaign goal (the intake's ``encode_spec``), if any.
+
+    Returns the decoded object; the dispatcher validates it as a ``TaskSpec``. No token: None.
+    """
+    import base64
+    import binascii
+    import json
+
+    for word in value.split():
+        key, sep, raw = word.partition("=")
+        if not sep or key not in {"mode", "city", "place", "spec"}:
+            return None
+        if key != "spec":
+            continue
+        if len(raw) > MAX_SPEC_CHARS:
+            raise CommandValidationError("spec is too large")
+        try:
+            data = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode())
+        except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+            raise CommandValidationError("spec is not readable") from exc
+        if not isinstance(data, dict):
+            raise CommandValidationError("spec must be an object")
+        return data
+    return None

@@ -111,6 +111,10 @@ services:
       # AI task understanding in intake (same key); without it tasks are read by rules.
       OPENROUTER_INTAKE_MODEL: ${OPENROUTER_INTAKE_MODEL:-openai/gpt-4o-mini}
       OPENROUTER_INTAKE_TIMEOUT_SECONDS: ${OPENROUTER_INTAKE_TIMEOUT_SECONDS:-20}
+      # The interviewer: one AI call per user message until the task is fully specified (same key).
+      OPENROUTER_INTERVIEW_MODEL: ${OPENROUTER_INTERVIEW_MODEL:-anthropic/claude-sonnet-4.5}
+      OPENROUTER_INTERVIEW_TIMEOUT_SECONDS: ${OPENROUTER_INTERVIEW_TIMEOUT_SECONDS:-60}
+      INTERVIEW_MAX_ROUNDS: ${INTERVIEW_MAX_ROUNDS:-10}
       # Live browser for Facebook logins/checkpoints (bot/control_plane/live_view.py).
       # Empty LIVE_VIEW_PUBLIC_URL keeps the feature off.
       LIVE_VIEW_PUBLIC_URL: ${LIVE_VIEW_PUBLIC_URL:-}

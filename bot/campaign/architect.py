@@ -26,6 +26,7 @@ from .models import (
     Language,
     Vertical,
 )
+from .spec import TaskSpec
 
 MAX_TEXT_CHARS = 2000
 
@@ -191,7 +192,7 @@ EXPLICIT_VERTICALS = ("real_estate", "investors")
 
 
 def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str | None = None,
-                  place: Mapping[str, Any] | None = None) -> CampaignPlan:
+                  place: Mapping[str, Any] | None = None, spec: TaskSpec | None = None) -> CampaignPlan:
     """Turn a user goal in ES/EN/RU/UK into a bounded plan, or raise ``InvalidGoal``.
 
     ``vertical`` (real_estate|investors), ``place`` (names per language,
@@ -199,6 +200,10 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
     and ``location`` (any place name) are choices a person already made;
     they override what the text says, so "no vertical" and "several cities"
     cannot fire.
+
+    ``spec`` (the interviewer's ``TaskSpec``) is what the person confirmed: when given, the constraints (deal,
+    price range, rooms, area, property type, districts) are taken from it instead of being read from the text,
+    and a place not passed otherwise comes from it. The text still feeds the query seeds' vertical detection.
     """
     if not isinstance(text, str) or not text.strip():
         raise InvalidGoal("Пустая задача. Напишите, что искать и где, например: «квартиры в аренду в Мадриде».")
@@ -206,6 +211,8 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
         raise InvalidGoal(f"Слишком длинная задача (больше {MAX_TEXT_CHARS} символов). Сократите её.")
     normalized = _norm(text)
     words = _WORD.findall(normalized)
+    if spec is not None and place is None and location is None and spec.place_name():
+        place = _spec_place(spec)
     if place is not None:
         where = world_place(place, locative={"ru": place.get("ru_in"), "uk": place.get("uk_in")},
                             country=place.get("country"))
@@ -224,6 +231,9 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
     max_price = _extract_price(rest)
     deal = _detect_deal(words) if vertical != "investors" else None
     constraints: dict[str, str | int | None] = {"deal": deal, "max_price": max_price, "rooms": rooms}
+    if spec is not None:
+        constraints = _spec_constraints(spec, vertical)
+        deal, max_price, rooms = constraints.get("deal"), constraints.get("max_price"), constraints.get("rooms")  # type: ignore[assignment]
 
     limits = CampaignLimits(max_groups=max_groups) if max_groups is not None else CampaignLimits()
     return CampaignPlan(
@@ -237,6 +247,40 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
         constraints=constraints,
         limits=limits,
     )
+
+
+def _spec_place(spec: TaskSpec) -> dict[str, str]:
+    """The spec's place as the ``place=`` mapping of ``world_place`` (names per language, locatives, country)."""
+    names = {k: v for k, v in spec.place.names.items() if v}
+    place: dict[str, str] = {"en": spec.place_name() or "", **names}
+    if spec.place.country:
+        place["country"] = spec.place.country
+    return place
+
+
+def _whole(value: float | None) -> int | None:
+    return round(value) if value is not None and value >= 1 else None
+
+
+def _spec_constraints(spec: TaskSpec, vertical: str) -> dict[str, str | int | None]:
+    """The plan's constraints from what the person confirmed (rent/sale only for real estate)."""
+    constraints: dict[str, str | int | None] = {"deal": None, "max_price": None, "rooms": None}
+    if vertical == "investors":
+        return constraints
+    constraints["deal"] = spec.deal if spec.deal in ("rent", "sale") else None
+    constraints["max_price"] = _whole(spec.budget.max)
+    constraints["rooms"] = _whole(spec.rooms.min if spec.rooms.min is not None else spec.rooms.max)
+    if (low := _whole(spec.budget.min)) is not None:
+        constraints["min_price"] = low
+    if (low := _whole(spec.area_m2.min)) is not None:
+        constraints["min_area"] = low
+    if (high := _whole(spec.area_m2.max)) is not None:
+        constraints["max_area"] = high
+    if spec.property_type not in (None, "any"):
+        constraints["property_type"] = spec.property_type
+    if spec.place.districts:
+        constraints["districts"] = ", ".join(spec.place.districts)[:200]
+    return constraints
 
 
 def _has(words: list[str], exact: frozenset[str], stems: tuple[str, ...]) -> bool:

@@ -62,6 +62,7 @@ def test_migration_script_is_safe_and_tracks_the_orchestration_migration() -> No
     assert "032_web_seen_urls_ttl.sql" in text
     assert "033_campaign_finding_hold_reason.sql" in text
     assert "034_web_fetch_layers.sql" in text
+    assert "035_campaign_specs.sql" in text
     assert "pg_advisory_xact_lock" in text
     assert "schema_migrations" in text
     assert "Refusing changed already-applied migration" in text

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from bot.campaign.architect import InvalidGoal, plan_campaign
 from bot.campaign.models import TERMINAL_STATES, Campaign
+from bot.campaign.spec import TaskSpec
 from bot.campaign.status_text import DONE, NOTHING, campaign_label
 
 from .models import ClaimedCommand, ClaimLost, CommandReceipt, CommandState, ConfirmedCommand
@@ -17,6 +18,7 @@ from .parser import (
     CommandValidationError,
     parse_campaign,
     parse_campaign_goal,
+    parse_campaign_spec,
     parse_run,
     parse_scope,
 )
@@ -31,6 +33,16 @@ Notifier = Callable[[int, str], Awaitable[None]]
 MAX_BACKOFF_SECONDS = 30.0
 REAP_INTERVAL_SECONDS = 60.0
 NOT_STOPPABLE = "Этот поиск уже завершён или недоступен."
+
+
+def _task_spec(raw: dict[str, Any] | None) -> TaskSpec | None:
+    """The queued ``spec=`` token as a ``TaskSpec``; an unreadable one rejects the command, nothing is stored."""
+    if raw is None:
+        return None
+    try:
+        return TaskSpec.model_validate(raw)
+    except ValueError as exc:
+        raise CommandValidationError("spec is not a valid task description") from exc
 
 
 class OrchestraDispatcher:
@@ -159,10 +171,14 @@ class OrchestraDispatcher:
             user_reply = NOT_STOPPABLE if not cancelled else None if own_only else DONE
         else:
             # Intake queues "mode=<vertical> place=<names> <task>": the person's choices override detection.
+            # ... and, from the interviewer, "spec=<TaskSpec JSON>": the confirmed requirements.
             goal, vertical, city, place = parse_campaign_goal(value)
-            plan = plan_campaign(goal, vertical=vertical, location=city, place=place)  # type: ignore[arg-type]  # InvalidGoal: nothing is stored
+            spec = _task_spec(parse_campaign_spec(value))
+            plan = plan_campaign(goal, vertical=vertical, location=city, place=place,  # type: ignore[arg-type]  # InvalidGoal: nothing is stored
+                                 spec=spec)
+            extra: dict[str, Any] = {"spec": spec.model_dump(mode="json")} if spec is not None else {}
             created = await self.campaigns.create(plan, chat_id=item.chat_id, requested_by=item.user_id,
-                                                  source_text=goal, actor=actor)
+                                                  source_text=goal, actor=actor, **extra)
             result = {"status": "planned", "campaign_id": created, "reply": f"Кампания {created} запланирована: {plan.goal}"}
         try:
             await self.store.complete(item, CommandState.FINISHED, result)

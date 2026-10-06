@@ -859,9 +859,12 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         assert await pool.fetchval("select mode from user_task_drafts where telegram_user_id=$1", user) == "real_estate"
 
         question = await control.handle_text(message("снять квартиру до 1000 €"))
-        assert question.text.startswith("В каком городе искать?")
-        assert await pool.fetchval("select step from user_task_drafts where telegram_user_id=$1", user) == "city"
-        summary = await control.handle_text(message("Мадрид"))
+        assert "В каком городе искать?" in question.text
+        assert await pool.fetchval("select step from user_task_drafts where telegram_user_id=$1", user) == "ask"
+        assert "Сколько комнат" in (await control.handle_text(message("Мадрид"))).text
+        spec_json = await pool.fetchval("select spec::text from user_task_drafts where telegram_user_id=$1", user)
+        assert '"Madrid"' in spec_json  # the draft keeps the TaskSpec across answers (migration 035)
+        summary = await control.handle_callback(user, "task:enough", chat_id=user)
         assert "Город: Мадрид" in summary.text and "Сделка: аренда" in summary.text
         assert await pool.fetchval("select count(*) from orchestration_commands") == 0  # nothing without Запустить
 
@@ -870,7 +873,9 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
         assert await pool.fetchval("select count(*) from orchestration_commands") == 1
         assert (await pool.fetchval("select arguments from orchestration_commands")).startswith("mode=real_estate city=Madrid ")
         assert await dispatcher.process_once()
-        assert await pool.fetchval("select source_text from campaigns") == "снять квартиру до 1000 €"
+        source_text = await pool.fetchval("select source_text from campaigns")
+        assert source_text.startswith("аренда до 1000 €") and source_text.endswith("Задача: снять квартиру до 1000 €")
+        assert await pool.fetchval("select spec->'budget'->>'max' from campaigns") == "1000.0"  # the spec is stored (035)
         owner_notices = [r.text for c, r in inbox if c == OWNER and r.text.startswith("Пользователь ")]
         assert len(owner_notices) == 1 and owner_notices[0].startswith("Пользователь Unknown, ID 777 запустил кампанию: ")
         row = await pool.fetchrow("select requested_by, telegram_chat_id, plan->>'vertical', plan->>'location', plan->'constraints'->>'deal' from campaigns")
@@ -884,31 +889,35 @@ async def test_an_approved_user_gives_a_task_answers_a_question_and_launches_a_c
 
         # Investors mode is authoritative even when the task mentions flats.
         await control.handle_callback(user, "mode:investors", chat_id=user)
-        assert "Проверьте задачу" in (await control.handle_text(message("инвесторы и квартиры в Барселоне"))).text
+        assert "размер вложения" in (await control.handle_text(message("инвесторы и квартиры в Барселоне"))).text
+        await control.handle_callback(user, "task:enough", chat_id=user)
         await control.handle_callback(user, "task:launch", "Ann", "ann", chat_id=user)
         assert (await pool.fetchval("select arguments from orchestration_commands order by created_at desc limit 1")).startswith(
             "mode=investors city=Barcelona ")
         assert await dispatcher.process_once()
         row = await pool.fetchrow("select source_text, plan->>'vertical', plan->>'location' from campaigns where requested_by=$1 "
                                   "order by created_at desc limit 1", user)
-        assert tuple(row) == ("инвесторы и квартиры в Барселоне", "investors", "Barcelona")
+        assert row[0].endswith("Задача: инвесторы и квартиры в Барселоне") and tuple(row)[1:] == ("investors", "Barcelona")
         owner_notices = [r.text for c, r in inbox if c == OWNER and r.text.startswith("Пользователь ")]
         assert len(owner_notices) == 2 and owner_notices[-1].startswith("Пользователь Ann (@ann), ID 777 запустил кампанию: investors")
 
         # Several cities: the typed one is stored, with the task text as written.
         await control.handle_callback(user, "mode:real_estate", chat_id=user)
         question = await control.handle_text(message("квартиры в аренду в Мадриде или Валенсии до 900 €"))
-        assert "несколько городов" in question.text and question.buttons == ()
-        assert "Город: Валенсия" in (await control.handle_text(message("Валенсия"))).text
+        assert "несколько городов" in question.text and "task:skip" not in [b.callback_data for b in question.buttons]
+        assert "Сколько комнат" in (await control.handle_text(message("Валенсия"))).text
+        assert "Город: Валенсия" in (await control.handle_callback(user, "task:enough", chat_id=user)).text
         await control.handle_callback(user, "task:launch", chat_id=user)
         assert await dispatcher.process_once()
         row = await pool.fetchrow("select source_text, plan->>'vertical', plan->>'location' from campaigns where requested_by=$1 "
                                   "order by created_at desc limit 1", user)
-        assert tuple(row) == ("квартиры в аренду в Мадриде или Валенсии до 900 €", "real_estate", "Valencia")
+        assert row[0].endswith("Задача: квартиры в аренду в Мадриде или Валенсии до 900 €")
+        assert tuple(row)[1:] == ("real_estate", "Valencia")
         assert await pool.fetchval("select count(*) from orchestration_commands") == 3
 
         # A day-old summary cannot be launched.
-        assert "Проверьте задачу" in (await control.handle_text(message("квартиры в аренду в Севилье до 800 €"))).text
+        assert "Понял: Севилья" in (await control.handle_text(message("квартиры в аренду в Севилье до 800 €"))).text
+        await control.handle_callback(user, "task:enough", chat_id=user)
         await pool.execute("update user_task_drafts set updated_at = now() - interval '25 hours' where telegram_user_id=$1", user)
         stale = await control.handle_callback(user, "task:launch", "Ann", "ann", chat_id=user)
         assert stale.text == "Черновик устарел, опишите задачу заново."

@@ -27,6 +27,7 @@ from bot.control_plane.intake import (
     key_command,
     mode_menu,
 )
+from bot.control_plane.interviewer import Interviewer
 from bot.control_plane.live_view import (
     PLATFORM_NAMES,
     LiveViewCoordinator,
@@ -43,7 +44,6 @@ from bot.control_plane.models import (
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import ControlPlaneStore
 from bot.control_plane.stt import Transcriber, TranscriptionError
-from bot.control_plane.understanding import Understander
 from bot.control_plane.voice_commands import clean_transcript, spoken_command
 from bot.operators import ROLES, OperatorSet
 
@@ -121,7 +121,7 @@ class ControlPlane:
         intake_store: IntakeStore | None = None,
         offers: near.OfferDesk | None = None,
         campaigns: CampaignStore | None = None,
-        understander: Understander | None = None,
+        interviewer: Interviewer | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
@@ -135,9 +135,10 @@ class ControlPlane:
                              operators=self.operators, auto_operator_ids=settings.auto_operator_user_ids)
         # Mode choice and task intake (bot/control_plane/intake.py); launching always needs "Запустить".
         # Only the owner sees planner details and queue ids in intake replies.
-        # ``understander`` reads tasks with AI; None (tests, no key) keeps the deterministic rules.
+        # ``interviewer`` interviews with AI; None (tests, no key) keeps the deterministic rules.
         self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners,
-                                 technical=self._is_owner, understander=understander)
+                                 technical=self._is_owner, interviewer=interviewer,
+                                 max_rounds=settings.interview_max_rounds)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""
@@ -371,9 +372,10 @@ class ControlPlane:
         text = clean_transcript(transcript.text)
         # Spoken commands (status, pause all, ...) are for those who control collection; a user's words are a task.
         command = spoken_command(text) if self._can_control(message.user_id) else None
-        command_reply = await self._handle_command(message, command or text)
+        # The intake shows a user's voice task back to them once («Я услышал: «…»»).
+        command_reply = await self._handle_command(replace(message, transcript=text) if not command else message, command or text)
         if not owner:
-            # The transcript is internal: nobody but the owner ever sees it echoed back.
+            # Users hear their words back once from the intake («Я услышал»); only the owner gets the transcript block.
             # Operators still see which command a short phrase was mapped to.
             heard = f"Understood as: {command}\n\n" if command else ""
             return replace(command_reply, text=heard + command_reply.text)

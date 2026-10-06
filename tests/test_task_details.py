@@ -1,12 +1,13 @@
-"""«Проверьте задачу» keeps the wishes of the task, as normalised Russian phrases."""
+"""The task card keeps the wishes of the task, as normalised Russian phrases."""
 
 from __future__ import annotations
 
 import pytest
 
 from bot.campaign.architect import find_places
+from bot.campaign.spec import TaskSpec
 from bot.control_plane.details import details, property_type
-from bot.control_plane.intake import Draft, summary
+from bot.control_plane.rules import RuleInterviewer
 
 UK = ("Шукаємо ділянку від тисячі метрів квадратних з будинком або без, в передмісті Мадрида, "
       "близько до метро 5 хвилин на машині, ділянка для забудови. Покупка.")
@@ -31,9 +32,10 @@ def test_ukrainian_city_spellings() -> None:
         assert find_places(text) == ["Madrid"], text
 
 
-def test_summary_shows_type_and_wishes_but_not_the_words() -> None:
-    draft = Draft(1, 1, "real_estate", task=UK)
-    reply = summary(draft, draft.plan())
-    assert "Город: Мадрид" in reply.text and "Сделка: покупка" in reply.text and "Тип: участок" in reply.text
-    assert "Пожелания: площадь от 1 000 м², с домом или без, до метро 5 мин на машине, под застройку, пригород" in reply.text
-    assert "Шукаємо" not in reply.text and "передмісті" not in reply.text
+@pytest.mark.asyncio
+async def test_the_card_shows_type_and_wishes_but_not_the_words() -> None:
+    turn = await RuleInterviewer().interview(mode="real_estate", spec=TaskSpec(mode="real_estate"), dialogue=[], message=UK)
+    card = turn.spec.summary_ru()
+    assert "Город: Мадрид" in card and "Сделка: покупка" in card and "Тип: участок" in card
+    assert "Пожелания: площадь от 1 000 м², с домом или без, до метро 5 мин на машине, под застройку, пригород" in card
+    assert "Шукаємо" not in card and "передмісті" not in card

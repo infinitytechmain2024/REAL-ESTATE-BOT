@@ -15,7 +15,9 @@ MAX_GROUPS = 200
 MAX_WINDOWS = 10
 MAX_SEEDS_PER_LANGUAGE = 6
 MAX_SEED_CHARS = 80
-CONSTRAINT_KEYS = frozenset({"deal", "max_price", "rooms"})
+CONSTRAINT_KEYS = frozenset({"deal", "max_price", "rooms", "min_price", "min_area", "max_area", "property_type",
+                             "districts"})
+PROPERTY_TYPES = frozenset({"apartment", "house", "land", "room", "commercial", "other"})
 
 Language = Literal["es", "en", "ru", "uk"]
 LANGUAGES: tuple[Language, ...] = ("es", "en", "ru", "uk")
@@ -113,10 +115,14 @@ class CampaignPlan(BaseModel):
             raise ValueError(f"unknown constraints: {sorted(unknown)}")
         if value.get("deal") not in (None, "rent", "sale"):
             raise ValueError("deal must be rent, sale or null")
-        for key in ("max_price", "rooms"):
+        for key in ("max_price", "rooms", "min_price", "min_area", "max_area"):
             number = value.get(key)
-            if number is not None and (not isinstance(number, int) or number <= 0):
+            if number is not None and (not isinstance(number, int) or isinstance(number, bool) or number <= 0):
                 raise ValueError(f"{key} must be a positive integer")
+        if value.get("property_type") not in (None, *PROPERTY_TYPES):
+            raise ValueError("property_type must be one of " + ", ".join(sorted(PROPERTY_TYPES)))
+        if value.get("districts") is not None and not isinstance(value["districts"], str):
+            raise ValueError("districts must be a comma-separated string")
         return value
 
     @model_validator(mode="after")
@@ -138,3 +144,5 @@ class Campaign:
     stop_reason: str | None
     created_at: datetime
     finished_at: datetime | None = None
+    # The TaskSpec (bot/campaign/spec.py) as JSON; None for a goal given as free text.
+    spec: dict[str, Any] | None = None

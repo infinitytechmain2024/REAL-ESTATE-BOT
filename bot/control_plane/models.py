@@ -16,6 +16,8 @@ class IncomingMessage:
     voice_file_id: str | None = None
     voice_size: int | None = None
     voice_duration_seconds: int | None = None
+    # The cleaned transcript of a voice note, set by the control plane before the text is handled as a task.
+    transcript: str | None = None
 
     @property
     def kind(self) -> str:

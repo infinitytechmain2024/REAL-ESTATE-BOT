@@ -23,9 +23,14 @@ class ControlPlaneSettings:
     stt_timeout_seconds: float = 60.0
     # Reused from the analysis pipeline; never logged or echoed.
     openrouter_api_key: str = field(default="", repr=False)
-    # AI task understanding in intake (bot/control_plane/understanding.py); needs the key above.
+    # Legacy one-shot task understanding (bot/control_plane/understanding.py); intake now uses the interviewer below.
     intake_model: str = "openai/gpt-4o-mini"
     intake_timeout_seconds: float = 20.0
+    # The interviewer (bot/control_plane/interviewer.py): one call per user message; needs the key above.
+    # A strong model asks better questions; the default is fast and good enough.
+    interview_model: str = "anthropic/claude-sonnet-4.5"
+    interview_timeout_seconds: float = 60.0
+    interview_max_rounds: int = 10
     # Live browser for logins and checkpoints. Empty public URL disables it.
     live_view_public_url: str = ""
     live_view_open_minutes: int = 20
@@ -67,6 +72,9 @@ class ControlPlaneSettings:
             openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", "").strip(),
             intake_model=os.environ.get("OPENROUTER_INTAKE_MODEL", "").strip() or "openai/gpt-4o-mini",
             intake_timeout_seconds=float(_bounded_int("OPENROUTER_INTAKE_TIMEOUT_SECONDS", 20, 1, 120)),
+            interview_model=os.environ.get("OPENROUTER_INTERVIEW_MODEL", "").strip() or "anthropic/claude-sonnet-4.5",
+            interview_timeout_seconds=float(_bounded_int("OPENROUTER_INTERVIEW_TIMEOUT_SECONDS", 60, 1, 180)),
+            interview_max_rounds=_bounded_int("INTERVIEW_MAX_ROUNDS", 10, 1, 30),
             live_view_public_url=_public_url(os.environ.get("LIVE_VIEW_PUBLIC_URL", "")),
             live_view_open_minutes=_bounded_int("LIVE_VIEW_OPEN_MINUTES", 20, 5, 60),
             live_view_request_minutes=_bounded_int("LIVE_VIEW_REQUEST_MINUTES", 60, 10, 1440),

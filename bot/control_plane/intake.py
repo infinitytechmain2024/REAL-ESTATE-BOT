@@ -1,39 +1,30 @@
 """Task intake for people with the ``user`` role (also open to operators and owners).
 
-The person picks a mode like the old bot did (🏡 objects -> ``real_estate``,
-💼 investors -> ``investors``), then writes or says the task. There is no
-fixed script: the task is parsed first and only the critical fields that are
-still missing are asked -- for real estate the city, rent or purchase and the
-budget; for investors the city and who to look for -- at most three short
-questions, all in one message, answered with buttons or one typed reply
-("Мадрид, аренда, до 1200 €"). A complete task skips the questions. Then
-comes «Проверьте задачу» with [Запустить] [Изменить] [Отмена]; only
-"Запустить" queues an Orchestra ``campaign`` command, and the draft is reset
-in the same statement, so a double tap queues one campaign.
+The person picks a mode like the old bot did (🏡 objects -> ``real_estate``, 💼 investors -> ``investors``),
+then writes or says the task. The bot then interviews them like a good agent ("grill me") until the task is
+fully specified: every user message goes to the interviewer (``interviewer.py``, one AI call; the rules in
+``rules.py`` take over when there is no key or a call fails), which fills a ``TaskSpec``
+(``bot/campaign/spec.py``) and asks exactly ONE next question: the most important missing hard field first.
+A complete task asks nothing. Each question carries «Не важно» (the asked field is left open on purpose),
+«Хватит, ищи» (stop asking) and «Отмена»; after ``MAX_ROUNDS`` questions the interview ends anyway. The place
+is the one thing that cannot be skipped: a search needs somewhere to look.
 
-Replies are plain Russian and never repeat what the person said (a voice
-note's transcript stays internal). Owners also see the technical details:
-the planner's goal line, search languages, group windows and the queue id.
+Then comes «Проверьте задачу»: the structured card (``TaskSpec.summary_ru``) with «Запустить» «Изменить»
+«Отмена». «Изменить» lists the fields; changing one re-runs the interviewer with "<field>: <value>" and
+returns to the card, the rest of the task stays. Typing on the card is a correction, not a new task. Only
+«Запустить» queues an Orchestra ``campaign`` command, and the draft is reset in the same statement, so a
+double tap queues one campaign.
 
-The chosen mode and city are authoritative: they are queued as leading
-``mode=<vertical> city=<name>`` tokens that the Orchestra passes to
-``plan_campaign`` as overrides. A draft untouched for 24 hours is treated as
-gone. Owners get a one-line notice when a user launches.
-
-Understanding is done by AI when an ``Understander`` is configured
-(``bot/control_plane/understanding.py``): one call per task and one per
-answer; the model picks the main points and the extra wishes, asks for what
-is missing and writes the «Проверьте задачу» body in Russian. The code still
-enforces the critical fields (a gazetteer city always; the deal once for real
-estate; who to look for once for investors) and caps the questions. Without a
-key, or when a call fails or returns nothing usable, the deterministic
-clarifier (``plan_campaign`` and its gazetteer, ``details.py``) takes over, so
-the bot never breaks. The Orchestra still re-plans the goal and applies its
-quotas and breakers.
+The command keeps the free-text goal for the planner (``goal_text``) and carries the confirmed requirements as
+leading tokens: ``mode=<vertical> city=<name>|place=<names> spec=<TaskSpec JSON>``; the Orchestra plans from
+the spec (constraints) and stores it on the campaign. A voice task is shown back once: «Я услышал: «…»».
+Owners also see the technical details: the planner's goal line, search languages, group windows, queue id.
+A draft untouched for 24 hours is treated as gone. Owners get a one-line notice when a user launches.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -42,55 +33,54 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from bot.campaign import geo
-from bot.campaign.architect import (
-    MAX_TEXT_CHARS,
-    InvalidGoal,
-    find_places,
-    plan_campaign,
-)
+from bot.campaign.architect import MAX_TEXT_CHARS, InvalidGoal, find_places, plan_campaign
 from bot.campaign.models import CampaignPlan
-from bot.control_plane.details import details, property_type
+from bot.campaign.spec import DEAL_RU, INVESTOR_WHO_RU, MODE_TITLES, PROPERTY_RU, TaskSpec
+from bot.control_plane.interviewer import Interviewer, InterviewTurn
 from bot.control_plane.models import Button, CommandEnvelope, IncomingMessage, Reply
-from bot.control_plane.understanding import (
-    MAX_ANSWER_CHARS,
-    MAX_ANSWERS,
-    PROPERTY_RU,
-    TaskUnderstanding,
-    Understander,
-    UnderstandingError,
+from bot.control_plane.rules import (
+    SKIP_WORDS,
+    RuleInterviewer,
+    gazetteer_place,
+    geo_ru,
+    options_for,
+    parse_budget,
+    parse_deal,
+    question_for,
 )
+
+__all__ = ["geo_ru", "parse_budget", "parse_deal"]  # re-exported: the answer parsers live in rules.py
 
 log = logging.getLogger(__name__)
 CommandSink = Callable[[CommandEnvelope], Awaitable[object]]
 OwnerNotice = Callable[[str], Awaitable[None]]
 
 # mode (the plan's vertical) -> button title from the old bot
-MODES: dict[str, str] = {
-    "real_estate": "🏡 Участки и объекты",
-    "investors": "💼 Инвесторы и компании",
-}
+MODES: dict[str, str] = dict(MODE_TITLES)
 DRAFT_TTL = timedelta(hours=24)
-MAX_QUESTIONS = 3
+MAX_ROUNDS = 10  # questions per task; after that the card is shown with what is known (setting INTERVIEW_MAX_ROUNDS)
 MAX_TASK_CHARS = MAX_TEXT_CHARS - 100  # room for the mode word and the answers
+MAX_DIALOGUE = 40
+MAX_HEARD_CHARS = 300
 CANCEL_WORDS = frozenset({"отмена", "отменить", "cancel", "скасувати"})
-SKIP_WORDS = frozenset({"пропустить", "пропуск", "нет", "не важно", "неважно", "skip", "no", "-"})
-DEAL_TEXT = {"rent": "аренда", "sale": "покупка", "any": "не важно"}
+ENOUGH_WORDS = frozenset({"хватит", "хватит, ищи", "хватит ищи", "ищи", "достаточно", "хватит вопросов", "enough"})
+DEAL_TEXT = dict(DEAL_RU)
 EXAMPLES = {"real_estate": "«квартиры в аренду в Мадриде до 1200 €»", "investors": "«инвесторы для стартапа в Барселоне»"}
-ANSWER_EXAMPLES = {"real_estate": "«Мадрид, аренда, до 1200 €»", "investors": "«Мадрид, инвесторы в недвижимость»"}
-# investors: who to look for (word prefixes, casefolded) -> the label shown in the summary
-TARGETS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("инвест", "інвест", "invest", "inversor", "inversion"), "инвесторы"),
-    (("стартап", "startup"), "стартапы"),
-    (("ангел", "angel"), "бизнес-ангелы"),
-    (("фонд", "венчур", "fund", "venture", "vc"), "фонды"),
-    (("компан", "бизнес", "бізнес", "предприним", "підприєм", "фирм", "фірм", "company", "companies",
-      "business", "empresa", "emprendedor", "entrepreneur"), "компании и предприниматели"),
-    (("девелопер", "застройщ", "забудовник", "developer", "promotor"), "девелоперы"),
-    (("недвиж", "нерухом", "real", "inmobil"), "в недвижимость"),
-)
-_TARGET_WORD = re.compile(r"\w+")
-_NUMBER = re.compile(r"(\d{1,3}(?:[ .,]\d{3})+|\d+(?:[.,]\d+)?)\s*(k|к|тыс\w*|тис\w*)?", re.IGNORECASE)
+# «Изменить»: callback code -> (button title, the TaskSpec field the interviewer is pointed at)
+FIELDS: dict[str, dict[str, tuple[str, str]]] = {
+    "real_estate": {
+        "place": ("Место", "place"), "deal": ("Сделка", "deal"), "type": ("Тип", "property_type"),
+        "budget": ("Бюджет", "budget.max"), "rooms": ("Комнаты", "rooms.min"), "area": ("Площадь", "area_m2.min"),
+        "districts": ("Районы", "place.districts"), "wishes": ("Пожелания", "wishes"),
+        "sources": ("Источники", "sources.required"),
+    },
+    "investors": {
+        "who": ("Кого ищем", "investor.who"), "ticket": ("Тикет", "investor.ticket"),
+        "role": ("Роль", "investor.user_role"), "geo": ("География", "investor.geography"),
+        "place": ("Место", "place"), "wishes": ("Пожелания", "wishes"),
+    },
+}
+_WORD = re.compile(r"\w+")
 
 
 @dataclass(slots=True)
@@ -98,81 +88,77 @@ class Draft:
     user_id: int
     chat_id: int
     mode: str | None = None
-    step: str = "idle"  # idle | city | deal | budget | target | summary
-    task: str = ""
+    step: str = "idle"  # idle | ask (a question or a field edit is on screen) | summary (the card is on screen)
+    task: str = ""  # the first message of the task
     message_id: int = 0  # the task's Telegram message: the Orchestra idempotency key
-    city: str | None = None
-    deal: str | None = None  # rent | sale | any
-    budget: int | None = None
-    asked: list[str] = field(default_factory=list)  # slots asked about, in order
-    options: list[str] = field(default_factory=list)  # cities offered when the task named several
     updated_at: datetime | None = None
-    target: str | None = None  # investors: who to look for, when the task did not say
-    pending: list[str] = field(default_factory=list)  # the slots of the question on screen
-    ai: dict[str, Any] | None = None  # the AI's TaskUnderstanding; None = deterministic rules
-    answers: list[str] = field(default_factory=list)  # typed answers and button choices, for the next AI call
-    # The city's names per language and its country (from the AI, or the typed name): any place in the world.
-    place: dict[str, Any] | None = None
+    spec: TaskSpec | None = None  # what is known so far
+    dialogue: list[dict[str, str]] = field(default_factory=list)  # {"role": "user"|"assistant", "text"}
+    rounds: int = 0  # questions asked so far
+    asking: str | None = None  # the spec field of the question on screen
+    editing: str | None = None  # the spec field being changed from «Изменить»
+    forced: bool = False  # «Хватит, ищи» was pressed: no more questions for this task (except a missing place)
 
     def copy(self, **changes: Any) -> Draft:
-        return replace(self, asked=list(self.asked), options=list(self.options), pending=list(self.pending),
-                       ai=dict(self.ai) if self.ai is not None else None, answers=list(self.answers),
-                       place=dict(self.place) if self.place is not None else None, **changes)
-
-    def understanding(self) -> TaskUnderstanding | None:
-        return TaskUnderstanding.load(self.ai) if self.ai is not None else None
+        return replace(self, dialogue=[dict(t) for t in self.dialogue],
+                       spec=self.spec.model_copy(deep=True) if self.spec is not None else None, **changes)
 
     def goal_text(self) -> str:
-        """The task plus the answers given in words (who, deal, budget).
-
-        With an AI understanding: the deal and budget first (the planner reads
-        the first price it finds), the type, the task, then the main points and
-        the extra wishes in Russian, within the planner's length limit.
-        """
-        if (ai := self.understanding()) is not None:
-            return self._ai_goal(ai)
-        parts = [self.task]
-        if self.target:
-            parts.append(self.target)
-        if self.deal in ("rent", "sale"):
-            parts.append(DEAL_TEXT[self.deal])
-        if self.budget:
-            parts.append(f"до {self.budget} €")
-        return " ".join(p for p in parts if p)
-
-    def _ai_goal(self, ai: TaskUnderstanding) -> str:
+        """The task in words for the planner and the owner: the deal and budget first (the planner reads the
+        first price it finds), the type, the task, then the must-haves and the wishes, within the length limit."""
+        spec = self.spec or TaskSpec()
         head: list[str] = []
-        if self.deal in ("rent", "sale"):
-            head.append(DEAL_TEXT[self.deal])
-        if self.budget:
-            currency = ai.currency or "EUR"
-            head.append(f"до {self.budget} €" if currency == "EUR" else f"бюджет {self.budget} {currency}")
-        if self.mode != "investors" and ai.property_type in PROPERTY_RU and ai.property_type != "other":
-            head.append(f"Тип: {PROPERTY_RU[ai.property_type]}.")
-        if self.mode == "investors" and (self.target or ai.target):
-            head.append(f"Кого ищем: {self.target or ai.target}.")
+        if self.mode == "investors":
+            if who := ", ".join(INVESTOR_WHO_RU.get(w, w) for w in spec.investor.who):
+                head.append(f"Кого ищем: {who}.")
+        else:
+            if spec.deal in ("rent", "sale"):
+                head.append(DEAL_TEXT[spec.deal])
+            if spec.budget.max:
+                currency = spec.budget.currency or "EUR"
+                amount = int(spec.budget.max)
+                head.append(f"до {amount} €" if currency == "EUR" else f"бюджет {amount} {currency}")
+            if spec.property_type not in (None, "any", "other"):
+                head.append(f"Тип: {PROPERTY_RU[spec.property_type]}.")  # type: ignore[index]
         tail: list[str] = []
-        if ai.primary:
-            tail.append("Главное: " + "; ".join(ai.primary) + ".")
-        if ai.secondary:
-            tail.append("Дополнительно: " + "; ".join(ai.secondary) + ".")
+        if spec.must_have:
+            tail.append("Главное: " + "; ".join(spec.must_have) + ".")
+        if spec.wishes:
+            tail.append("Дополнительно: " + "; ".join(w.text for w in spec.wishes) + ".")
         head_text, tail_text = " ".join(head), " ".join(tail)
         room = MAX_TEXT_CHARS - len(head_text) - len(tail_text) - 12
         task = self.task if len(self.task) <= room else self.task[:max(room, 0)].rstrip() + "…"
         return " ".join(p for p in (head_text, f"Задача: {task}" if task else "", tail_text) if p)[:MAX_TEXT_CHARS]
 
+    def place_args(self) -> tuple[str | None, dict[str, Any] | None]:
+        """(``location``, ``place``) for the planner: a well-known city by name, any other place with its names."""
+        spec = self.spec
+        name = spec.place_name() if spec else None
+        if spec is None or name is None:
+            return None, None
+        if find_places(name) == [name]:
+            return name, None
+        place: dict[str, Any] = {"en": name, **spec.place.names}
+        if spec.place.country:
+            place["country"] = spec.place.country
+        return None, place
+
     def plan(self) -> CampaignPlan:
         """What the Orchestra will plan; raises ``InvalidGoal``."""
+        location, place = self.place_args()
         return plan_campaign(self.goal_text(), vertical=self.mode,  # type: ignore[arg-type]
-                             location=None if self.place else self.city, place=self.place)
+                             location=location, place=place, spec=self.spec)
 
     def command_arguments(self) -> str:
-        """``mode=<vertical> [place=<names>|city=<name>] <goal>``: the choices travel with the queued command."""
+        """``mode=<vertical> [place=<names>|city=<name>] [spec=<JSON>] <goal>``: the choices travel with the command."""
         tokens = [f"mode={self.mode}"] if self.mode else []
-        if self.place:
-            tokens.append(f"place={encode_place(self.place)}")
-        elif self.city:
-            tokens.append(f"city={self.city.replace(' ', '_')}")
+        location, place = self.place_args()
+        if place:
+            tokens.append(f"place={encode_place(place)}")
+        elif location:
+            tokens.append(f"city={location.replace(' ', '_')}")
+        if self.spec is not None:
+            tokens.append(f"spec={encode_spec(self.spec)}")
         return " ".join([*tokens, self.goal_text()])
 
     def fresh(self) -> Draft:
@@ -180,109 +166,31 @@ class Draft:
         return Draft(self.user_id, self.chat_id, self.mode)
 
     def payload(self) -> dict[str, Any]:
-        return {"task": self.task, "message_id": self.message_id, "city": self.city, "deal": self.deal,
-                "budget": self.budget, "asked": self.asked, "options": self.options, "target": self.target,
-                "pending": self.pending, "ai": self.ai, "answers": self.answers, "place": self.place}
+        return {"task": self.task, "message_id": self.message_id, "dialogue": self.dialogue, "rounds": self.rounds,
+                "asking": self.asking, "editing": self.editing, "forced": bool(self.forced)}
+
+    def spec_json(self) -> str | None:
+        return self.spec.model_dump_json() if self.spec is not None else None
 
     @classmethod
     def load(cls, user_id: int, chat_id: int, mode: str | None, step: str, payload: dict[str, Any],
-             updated_at: datetime | None = None) -> Draft:
+             updated_at: datetime | None = None, spec: dict[str, Any] | None = None) -> Draft:
+        dialogue = [{"role": str(t.get("role")), "text": str(t.get("text"))}
+                    for t in payload.get("dialogue") or [] if isinstance(t, dict)]
         return cls(user_id, chat_id, mode, step, str(payload.get("task") or ""), int(payload.get("message_id") or 0),
-                   payload.get("city"), payload.get("deal"), payload.get("budget"),
-                   list(payload.get("asked") or []), list(payload.get("options") or []), updated_at,
-                   payload.get("target"), list(payload.get("pending") or []),
-                   dict(payload["ai"]) if isinstance(payload.get("ai"), dict) else None,
-                   [str(a) for a in payload.get("answers") or []],
-                   dict(payload["place"]) if isinstance(payload.get("place"), dict) else None)
+                   updated_at, TaskSpec.model_validate(spec) if isinstance(spec, dict) else None, dialogue,
+                   int(payload.get("rounds") or 0), payload.get("asking"), payload.get("editing"),
+                   bool(payload.get("forced")))
 
     def expired(self, now: datetime) -> bool:
         return self.updated_at is not None and now - self.updated_at > DRAFT_TTL
-
-
-@dataclass(frozen=True, slots=True)
-class Question:
-    slot: str  # city | deal | budget | target: the first question; its buttons are shown
-    text: str
-    options: tuple[tuple[str, str], ...] = ()  # (button text, value)
-    also: tuple[str, ...] = ()  # further slots asked in the same message
-
-
-Clarifier = Callable[[Draft], Question | None]
-
-SLOT_QUESTIONS = {
-    "city": "В каком городе искать?",
-    "deal": "Аренда или покупка?",
-    "budget": "Какой бюджет? Например, до 1200 €.",
-    "target": "Кого ищете? Например: инвесторы в недвижимость, стартапы, бизнес-ангелы.",
-}
-SLOT_HINTS = {"city": " Напишите город, район или регион в любой стране.", "budget": " Или нажмите «Пропустить».", "target": ""}
-
-
-def targets(text: str) -> list[str]:
-    """Summary labels for who an investors task looks for; empty when it does not say."""
-    words = _TARGET_WORD.findall(text.casefold())
-    return [label for stems, label in TARGETS if any(w.startswith(stems) for w in words)]
-
-
-def missing_slots(draft: Draft) -> list[str]:
-    """The critical fields the task still lacks, in asking order; raises ``InvalidGoal``.
-
-    The city is always needed. Other slots are asked once: one the person
-    skipped stays in ``draft.asked`` and is not asked again.
-    """
-    city_missing = draft.city is None and len(find_places(draft.task)) != 1
-    # Without a place the planner cannot run; a stand-in reads deal and budget.
-    location = draft.city or ("Madrid" if city_missing else None)
-    plan = plan_campaign(draft.goal_text(), vertical=draft.mode,  # type: ignore[arg-type]
-                         location=None if draft.place else location, place=draft.place)
-    missing = ["city"] if city_missing else []
-
-    def may_ask(slot: str) -> bool:
-        return slot not in draft.asked and len(draft.asked) < MAX_QUESTIONS
-
-    if plan.vertical == "investors":
-        if draft.target is None and not targets(draft.task) and may_ask("target"):
-            missing.append("target")
-        return missing
-    if plan.constraints.get("deal") is None and draft.deal is None and may_ask("deal"):
-        missing.append("deal")
-    if plan.constraints.get("max_price") is None and may_ask("budget"):
-        missing.append("budget")
-    return missing
-
-
-def deterministic_clarifier(draft: Draft) -> Question | None:
-    """What to ask next (every missing field in one message), or None when the task is ready; raises ``InvalidGoal``."""
-    slots = missing_slots(draft)
-    if not slots:
-        return None
-    first = slots[0]
-    options: tuple[tuple[str, str], ...] = ()
-    city_text = SLOT_QUESTIONS["city"]
-    if first == "city":
-        places = find_places(draft.task)
-        if len(places) > 1:
-            names = ", ".join(geo_ru(name) for name in places)
-            city_text = f"Указано несколько городов ({names}). Одна задача — один город. Какой выбрать?"
-    elif first == "deal":
-        options = (("Аренда", "rent"), ("Покупка", "sale"), ("Не важно", "any"))
-    elif first == "budget":
-        options = (("Пропустить", "skip"),)
-    texts = [city_text if slot == "city" else SLOT_QUESTIONS[slot] for slot in slots]
-    if len(slots) == 1:
-        hint = SLOT_HINTS.get(first, "") if texts[0] in SLOT_QUESTIONS.values() else ""
-        return Question(first, texts[0] + hint, options)
-    example = ANSWER_EXAMPLES.get(draft.mode or "", ANSWER_EXAMPLES["real_estate"])
-    lines = ["Уточните, пожалуйста:", *(f"{n}. {q}" for n, q in enumerate(texts, 1)),
-             f"Можно ответить одним сообщением, например {example}."]
-    return Question(first, "\n".join(lines), options, tuple(slots[1:]))
 
 
 class IntakeStore(Protocol):
     async def get(self, user_id: int) -> Draft | None: ...
     async def save(self, draft: Draft) -> None: ...
     async def launch(self, user_id: int) -> Draft | None:
-        """Atomically take a draft that reached the summary and reset it; None if there is none."""
+        """Atomically take a draft that reached the card and reset it; None if there is none."""
         ...
 
 
@@ -306,7 +214,7 @@ class MemoryIntakeStore:
 
 
 class PostgresIntakeStore:
-    """Shares the control plane's pool (migration 018)."""
+    """Shares the control plane's pool (migrations 018, 031, 035)."""
 
     def __init__(self, pool_owner: Any) -> None:
         self._owner = pool_owner
@@ -316,31 +224,35 @@ class PostgresIntakeStore:
 
     async def get(self, user_id: int) -> Draft | None:
         row = await self._pool().fetchrow(
-            "select telegram_chat_id, mode, step, draft::text, updated_at from public.user_task_drafts where telegram_user_id = $1",
-            user_id)
-        return Draft.load(user_id, row[0], row[1], row[2], json.loads(row[3]), row[4]) if row else None
+            """select telegram_chat_id, mode, step, draft::text, updated_at, spec::text
+                 from public.user_task_drafts where telegram_user_id = $1""", user_id)
+        return Draft.load(user_id, row[0], row[1], row[2], json.loads(row[3]), row[4],
+                          json.loads(row[5]) if row[5] else None) if row else None
 
     async def save(self, draft: Draft) -> None:
         await self._pool().execute(
-            """insert into public.user_task_drafts (telegram_user_id, telegram_chat_id, mode, step, draft)
-               values ($1, $2, $3, $4, $5::jsonb)
+            """insert into public.user_task_drafts (telegram_user_id, telegram_chat_id, mode, step, draft, spec)
+               values ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
                on conflict (telegram_user_id) do update set telegram_chat_id = excluded.telegram_chat_id,
-                 mode = excluded.mode, step = excluded.step, draft = excluded.draft, updated_at = now()""",
+                 mode = excluded.mode, step = excluded.step, draft = excluded.draft, spec = excluded.spec,
+                 updated_at = now()""",
             draft.user_id, draft.chat_id, draft.mode, draft.step, json.dumps(draft.payload(), ensure_ascii=False),
+            draft.spec_json(),
         )
 
     async def launch(self, user_id: int) -> Draft | None:
         # The row lock makes a concurrent second tap see step = 'idle' and update nothing.
         row = await self._pool().fetchrow(
             """update public.user_task_drafts d
-                  set step = 'idle', draft = '{}'::jsonb, updated_at = now(), launched_at = now()
-                 from (select telegram_user_id, draft from public.user_task_drafts
+                  set step = 'idle', draft = '{}'::jsonb, spec = null, updated_at = now(), launched_at = now()
+                 from (select telegram_user_id, draft, spec from public.user_task_drafts
                         where telegram_user_id = $1 and step = 'summary' for update) old
                 where d.telegram_user_id = old.telegram_user_id and d.step = 'summary'
-            returning d.telegram_chat_id, d.mode, old.draft::text""",
+            returning d.telegram_chat_id, d.mode, old.draft::text, old.spec::text""",
             user_id,
         )
-        return Draft.load(user_id, row[0], row[1], "summary", json.loads(row[2])) if row else None
+        return Draft.load(user_id, row[0], row[1], "summary", json.loads(row[2]), None,
+                          json.loads(row[3]) if row[3] else None) if row else None
 
 
 def mode_menu(text: str = "Выберите режим:") -> Reply:
@@ -367,160 +279,47 @@ def key_command(text: str) -> str | None:
     return _KEY_COMMANDS.get(text.strip())
 
 
-def parse_deal(text: str) -> str | None:
-    t = text.casefold()
-    if any(w in t for w in ("не важно", "неважно", "любая", "любой", "все равно", "всё равно", "any")):
-        return "any"
-    rent = any(w in t for w in ("аренд", "снять", "сним", "оренд", "rent", "alquiler"))
-    sale = any(w in t for w in ("покуп", "купи", "купл", "продаж", "buy", "sale", "compra", "venta"))
-    return "rent" if rent and not sale else "sale" if sale and not rent else None
-
-
-def parse_budget(text: str) -> int | None:
-    match = _NUMBER.search(text)
-    if not match:
-        return None
-    raw = match.group(1).replace(" ", "")
-    if match.group(2):
-        value = round(float(raw.replace(",", ".")) * 1000)
-    elif re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", raw):
-        value = int(re.sub(r"[.,]", "", raw))
-    else:
-        value = round(float(raw.replace(",", ".")))
-    return value if 0 < value <= 100_000_000 else None
-
-
-def geo_ru(canonical: str) -> str:
-    """The Russian name of a well-known city (``Madrid`` -> «Мадрид»), else the name as it is."""
-    from bot.campaign.architect import GAZETTEER
-
-    return next((p.aliases["ru"] for p in GAZETTEER if p.canonical == canonical), canonical)
-
-
-def _city_ru(plan: CampaignPlan) -> str:
-    return plan.location_aliases.get("ru") or geo_ru(plan.location)
-
-
 def encode_place(place: dict[str, Any]) -> str:
     """The place as one token of the queued command (URL-safe base64 of its JSON, no spaces)."""
-    import base64
-    import json
-
     data = {k: v for k, v in place.items() if isinstance(v, str) and v}
     return base64.urlsafe_b64encode(json.dumps(data, ensure_ascii=False).encode()).decode().rstrip("=")
 
 
-_VAGUE = re.compile(r"(где-?нибудь|где угодно|любо[йме]|неважно|не важно|не знаю|без разницы|anywhere|"
-                    r"somewhere|де завгодно|будь-де)", re.IGNORECASE)
+def encode_spec(spec: TaskSpec) -> str:
+    """The spec as one token of the queued command (URL-safe base64 of its JSON without defaults)."""
+    raw = spec.model_dump_json(exclude_defaults=True).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def typed_place(text: str) -> dict[str, Any] | None:
-    """A reply that is only a place («Убуд, Бали», «в Дубае»): its name as typed, for every language."""
-    name = re.sub(r"^(?:в|во|у|на|in|en)\s+", "", " ".join(text.split()).strip(" .!?"), flags=re.IGNORECASE)
-    if not 2 <= len(name) <= 80 or re.search(r"\d", name) or len(name.split()) > 6 or _VAGUE.search(name):
-        return None
-    return {"en": name, "es": name, "ru": name, "uk": name}
-
-
-def summary(draft: Draft, plan: CampaignPlan, technical: bool = False) -> Reply:
-    """«Проверьте задачу»: what was understood, in Russian; owners also get the planner's details."""
-    lines = [
-        "Проверьте задачу:",
-        f"Режим: {MODES[draft.mode] if draft.mode in MODES else MODES.get(plan.vertical, plan.vertical)}",
-        f"Город: {_city_ru(plan)}",
-    ]
-    if plan.vertical == "investors":
-        found = targets(draft.goal_text())
-        lines.append(f"Кого ищем: {', '.join(found) if found else 'инвесторы и компании'}")
-    else:
-        deal = plan.constraints.get("deal")
-        lines.append(f"Сделка: {DEAL_TEXT.get(str(deal), 'не важно')}")
-        if kind := property_type(draft.task):
-            lines.append(f"Тип: {kind}")
-        price = plan.constraints.get("max_price")
-        lines.append(f"Бюджет: {f'до {price} €' if price else 'не указан'}")
-        if wishes := details(draft.task):
-            lines.append(f"Пожелания: {', '.join(wishes)}")
-    if technical:
-        limits = plan.limits
-        lines += [
-            f"Цель: {plan.goal}",
-            f"Языки поиска: {', '.join(lang.upper() for lang in plan.languages)}",
-            f"Группы: до {limits.max_groups}, окнами по {limits.window_size}",
-        ]
-    lines += ["", "Всё верно? Нажмите «Запустить» внизу, чтобы начать поиск."]
-    return Reply("\n".join(lines), keyboard=TASK_KEYBOARD)
-
-
-def quotes(text: str, source: str, n: int = 7) -> bool:
-    """``text`` repeats ``n`` words in a row from ``source``: a transcript being echoed."""
-    src, out = _TARGET_WORD.findall(source.casefold()), _TARGET_WORD.findall(text.casefold())
-    grams = {tuple(src[i:i + n]) for i in range(len(src) - n + 1)}
-    return any(tuple(out[i:i + n]) in grams for i in range(len(out) - n + 1))
-
-
-def _ai_body(draft: Draft, ai: TaskUnderstanding) -> str:
-    """The AI's own summary; rebuilt from its short lists when it echoes the person's words."""
-    if not quotes(ai.summary_ru, " ".join([draft.task, *draft.answers])):
-        return ai.summary_ru
-    lines = []
-    if ai.primary:
-        lines.append("Главное: " + ", ".join(ai.primary))
-    if ai.secondary:
-        lines.append("Дополнительно: " + ", ".join(ai.secondary))
-    return "\n".join(lines) or "Задача понята."
-
-
-def ai_summary(draft: Draft, ai: TaskUnderstanding, plan: CampaignPlan, technical: bool = False, model: str = "") -> Reply:
-    """«Проверьте задачу» written by the AI; the city the search will use is always visible."""
-    body = _ai_body(draft, ai)
-    lines = ["Проверьте задачу:"]
-    if not geo.mentions_place(body, geo.place_names(plan.location, dict(plan.location_aliases))):
-        lines.append(f"Город: {_city_ru(plan)}")
-    lines.append(body)
-    if technical:
-        limits = plan.limits
-        lines += [
-            "",
-            f"Разбор задачи: ИИ ({model})" if model else "Разбор задачи: ИИ",
-            f"Цель: {plan.goal}",
-            f"Языки поиска: {', '.join(lang.upper() for lang in plan.languages)}",
-            f"Группы: до {limits.max_groups}, окнами по {limits.window_size}",
-        ]
-    lines += ["", "Всё верно? Нажмите «Запустить» внизу, чтобы начать поиск."]
-    return Reply("\n".join(lines), keyboard=TASK_KEYBOARD)
+def _norm(text: str) -> str:
+    return text.casefold().strip(".! ")
 
 
 LAUNCHED = "Принято. Начинаю поиск. Найденные варианты пришлю сюда."
 STOP_HINT = "Чтобы остановить поиск, нажмите «Остановить поиск» внизу или напишите «стоп»."
 STOP_CALLBACK = "search:stop"
-# Words that show an AI question already covers a critical slot.
-_ASKS_ABOUT = {
-    "city": ("город", "где", "район"),
-    "deal": ("аренд", "покуп", "купить", "снять", "сделк"),
-    "target": ("кого", "кто"),
-}
-AI_QUESTION_ROUNDS = 2  # the AI's own (optional) questions stop after two answers
+STALE = "Эта кнопка устарела."
 
 
 def stop_button() -> Button:
     return Button("Остановить поиск", callback_data=STOP_CALLBACK)
-NOT_UNDERSTOOD = {"city": "Не понял город. ", "budget": "Не понял сумму. "}
 
 
 class TaskIntake:
-    def __init__(self, store: IntakeStore, sink: CommandSink, clarifier: Clarifier = deterministic_clarifier,
-                 notify_owners: OwnerNotice | None = None, now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    def __init__(self, store: IntakeStore, sink: CommandSink, notify_owners: OwnerNotice | None = None,
+                 now: Callable[[], datetime] = lambda: datetime.now(UTC),
                  technical: Callable[[int], bool] = lambda _user_id: False,
-                 understander: Understander | None = None) -> None:
+                 interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
-        ``understander`` (optional) reads tasks with AI; without it, or when it
-        fails, the deterministic ``clarifier`` is used.
+        ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
+        ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
         """
-        self.store, self.sink, self.clarifier = store, sink, clarifier
+        self.store, self.sink = store, sink
         self.notify_owners, self.now, self.technical = notify_owners, now, technical
-        self.understander = understander
+        self.interviewer = interviewer
+        self.rules = RuleInterviewer()
+        self.max_rounds = max_rounds
 
     async def _draft(self, user_id: int, chat_id: int) -> Draft:
         draft = await self.store.get(user_id)
@@ -536,75 +335,60 @@ class TaskIntake:
         return draft.mode if draft else None
 
     async def drafting(self, user_id: int) -> bool:
-        """A task is being written (a question or the summary is on screen) and has not expired."""
+        """A task is being written (a question or the card is on screen) and has not expired."""
         draft = await self.store.get(user_id)
         return draft is not None and draft.step != "idle" and not draft.expired(self.now())
 
     async def choose_mode(self, user_id: int, chat_id: int, mode: str) -> Reply:
         if mode not in MODES:
-            return Reply("Эта кнопка устарела.")
+            return Reply(STALE)
         draft = await self._draft(user_id, chat_id)
         draft.mode = mode
         if draft.task:  # a task written before the mode was chosen, or a mode switch mid-task
-            draft.asked, draft.pending, draft.answers, draft.ai = [], [], [], None
-            return await self._start(draft)
+            task, message_id = draft.task, draft.message_id
+            draft = replace(draft.fresh(), task=task, message_id=message_id)
+            return await self._interview(draft, task)
         await self.store.save(draft)
         return Reply(f"Режим: {MODES[mode]}.\nОпишите задачу текстом или голосом, например {EXAMPLES[mode]}.",
                      keyboard=DRAFT_KEYBOARD)
+
+    # --- text -------------------------------------------------------------------------------
 
     async def on_text(self, message: IncomingMessage, text: str) -> Reply:
         assert message.user_id is not None
         text = text.strip()
         draft = await self._draft(message.user_id, message.chat_id)
-        if text.casefold().strip(".! ") in CANCEL_WORDS:
+        if _norm(text) in CANCEL_WORDS:
             return await self._cancel(draft)
-        if draft.step in SLOT_QUESTIONS or draft.step == "ask":
-            if draft.ai is not None:
-                return await self._ai_answer(draft, text)
-            return await self._answer(draft, text)
-        # idle or summary: a new task replaces the old one
+        reply = await self._on_text(draft, message, text)
+        if message.transcript and not self.technical(message.user_id):
+            heard = " ".join(message.transcript.split())
+            heard = heard if len(heard) <= MAX_HEARD_CHARS else heard[:MAX_HEARD_CHARS].rstrip() + "…"
+            reply = replace(reply, text=f"Я услышал: «{heard}»\n\n{reply.text}")
+        return reply
+
+    async def _on_text(self, draft: Draft, message: IncomingMessage, text: str) -> Reply:
+        if draft.spec is not None and draft.step == "ask":
+            word = _norm(text)
+            if draft.editing:
+                return await self._edit_value(draft, text)
+            if word in ENOUGH_WORDS:
+                return await self._enough(draft)
+            if word in SKIP_WORDS and draft.asking and draft.asking != "place":
+                return await self._skip(draft)
+            return await self._interview(draft, text)
+        if draft.spec is not None and draft.step == "summary":
+            return await self._interview(draft, text)  # a correction typed under the card
+        # idle (or a stale step from an older version): a new task
         if len(text) > MAX_TASK_CHARS:
             return Reply(f"Слишком длинная задача (больше {MAX_TASK_CHARS} символов). Сократите её.")
         draft = replace(draft.fresh(), task=text, message_id=message.message_id)
         if draft.mode is None:
             await self.store.save(draft)
             return mode_menu("Сначала выберите режим — задача сохранена:")
-        return await self._start(draft)
+        return await self._interview(draft, text)
 
-    async def _answer(self, draft: Draft, text: str) -> Reply:
-        """One typed reply may answer every question on screen ("Мадрид, аренда, до 1200 €")."""
-        pending = draft.pending or [draft.step]
-        skip = text.casefold().strip(".! ") in SKIP_WORDS
-        filled: set[str] = set()
-        places = find_places(text)
-        if "city" in pending and len(places) == 1:
-            draft.city, draft.place = places[0], None
-            filled.add("city")
-        elif pending == ["city"] and not skip and (typed := typed_place(text)) is not None:
-            draft.city, draft.place = typed["en"], typed  # any place in the world, as typed
-            filled.add("city")
-        if "deal" in pending and (deal := parse_deal(text)) is not None:
-            draft.deal = deal
-            filled.add("deal")
-        if "budget" in pending and not skip and (budget := parse_budget(text)) is not None:
-            draft.budget = budget
-            filled.add("budget")
-        if "target" in pending and not skip and (targets(text) or pending == ["target"]):
-            draft.target = text[:200]
-            filled.add("target")
-        if not filled:
-            if not skip:
-                self._reopen(draft, pending)
-                return await self._advance(draft, prefix=NOT_UNDERSTOOD.get(pending[0], "Не понял ответ. "))
-            # "Пропустить": the optional questions on screen are dropped; a missing city is asked again.
-            return await self._advance(draft, prefix=NOT_UNDERSTOOD["city"] if "city" in pending else "")
-        # Questions of the same message left unanswered come back.
-        self._reopen(draft, [slot for slot in pending if slot not in filled])
-        return await self._advance(draft)
-
-    @staticmethod
-    def _reopen(draft: Draft, slots: list[str]) -> None:
-        draft.asked = [slot for slot in draft.asked if slot not in slots]
+    # --- buttons ----------------------------------------------------------------------------
 
     async def on_button(self, user_id: int, chat_id: int, action: str, value: str, who: str | None = None) -> Reply:
         """``who`` (a label for owners) is given for the ``user`` role: owners hear about their launches."""
@@ -613,184 +397,157 @@ class TaskIntake:
         draft = await self._draft(user_id, chat_id)
         if action == "cancel":
             return await self._cancel(draft)
+        if draft.spec is None or draft.mode not in MODES:
+            return Reply(STALE)
         if action == "edit":
-            await self.store.save(draft.fresh())
-            return Reply("Хорошо. Опишите задачу заново" + (f", например {EXAMPLES[draft.mode]}." if draft.mode else "."))
-        if action != draft.step:
-            return Reply("Эта кнопка устарела.")
-        if draft.ai is not None:
-            return await self._ai_button(draft, action, value)
-        if action == "deal":
-            if value not in DEAL_TEXT:
-                return Reply("Эта кнопка устарела.")
-            draft.deal = value
-        elif action == "budget":
-            draft.budget = None  # skipped; "budget" is already in draft.asked
-        else:
-            return Reply("Эта кнопка устарела.")
-        # The other questions of that message are still open.
-        self._reopen(draft, [slot for slot in draft.pending if slot != action])
-        return await self._advance(draft)
+            return self._edit_menu(draft)
+        if action == "field":
+            return await self._pick_field(draft, value)
+        if action == "back":  # from the field list or an edit prompt: to the card if it was on screen, else the question
+            was_card = draft.step == "summary" or draft.forced
+            draft.editing = None
+            return await self._card(draft) if was_card and draft.spec.place_name() else await self._carry_on(draft)
+        if draft.step != "ask":
+            return Reply(STALE)
+        if action == "skip":
+            return await self._skip(draft)
+        if action == "enough":
+            return await self._enough(draft)
+        if action == "deal" and value in ("rent", "sale") and draft.asking == "deal":
+            return await self._interview(draft, f"Сделка: {DEAL_TEXT[value]}")
+        if action == "role" and value in ("raising", "deploying") and draft.asking == "investor.user_role":
+            return await self._interview(draft, "ищу деньги для проекта" if value == "raising" else "хочу вкладывать")
+        return Reply(STALE)
 
-    # --- AI understanding -------------------------------------------------------------------
+    def _edit_menu(self, draft: Draft) -> Reply:
+        fields = FIELDS[draft.mode or "real_estate"]
+        buttons = tuple(Button(title, callback_data=f"task:field:{code}") for code, (title, _path) in fields.items())
+        return Reply("Что изменить?", (*buttons, Button("Назад", callback_data="task:back")), keyboard=DRAFT_KEYBOARD)
 
-    async def _start(self, draft: Draft) -> Reply:
-        """A new task: AI first, the deterministic rules when it is off or fails."""
-        if await self._understand(draft):
-            return await self._ai_advance(draft)
-        return await self._advance(draft)
+    async def _pick_field(self, draft: Draft, code: str) -> Reply:
+        entry = FIELDS[draft.mode or "real_estate"].get(code)
+        if entry is None:
+            return Reply(STALE)
+        title, path = entry
+        draft.step, draft.editing, draft.asking = "ask", path, path
+        await self.store.save(draft)
+        hint = question_for(draft.spec or TaskSpec(), path)
+        return Reply(f"{title}: напишите новое значение. {hint}", (Button("Назад", callback_data="task:back"),),
+                     keyboard=DRAFT_KEYBOARD)
 
-    async def _understand(self, draft: Draft) -> bool:
-        """One AI call on the task and the answers so far; fills the draft. False = use the rules."""
-        if self.understander is None or draft.mode not in MODES:
-            draft.ai = None
-            return False
-        known = {"city": draft.city, "deal": draft.deal, "budget_max": draft.budget, "target": draft.target}
-        try:
-            ai = await self.understander.understand(mode=draft.mode, task=draft.task, answers=draft.answers, known=known)
-        except Exception as exc:  # noqa: BLE001 - any failure falls back to the deterministic rules
-            log.warning("telegram.intake.understanding_failed",
-                        extra={"user_id": draft.user_id, "error": getattr(exc, "code", type(exc).__name__),
-                               "status": getattr(exc, "status", None)})
-            draft.ai = None
-            return False
-        if not isinstance(ai, TaskUnderstanding) or not ai.summary_ru:
-            log.warning("telegram.intake.understanding_failed", extra={"user_id": draft.user_id, "error": "empty"})
-            draft.ai = None
-            return False
-        draft.ai = ai.payload()
-        # A newer answer may correct a field; a field the AI does not know keeps what was chosen.
-        if ai.city:
-            draft.city, draft.place = ai.city, ai.place
-        draft.deal = (ai.deal or draft.deal) if draft.mode == "real_estate" else None
-        draft.budget = ai.budget_max or draft.budget
-        if draft.mode == "investors":
-            draft.target = ai.target or draft.target
-        log.info("telegram.intake.understood", extra={"user_id": draft.user_id, "questions": len(ai.questions),
-                                                      "primary": len(ai.primary), "secondary": len(ai.secondary)})
-        return True
+    async def _edit_value(self, draft: Draft, text: str) -> Reply:
+        """The new value of the field picked in «Изменить»: the interviewer applies it; the card comes back."""
+        path = draft.editing or ""
+        title = next((t for t, p in FIELDS[draft.mode or "real_estate"].values() if p == path), path)
+        spec = draft.spec or TaskSpec(mode=draft.mode)  # type: ignore[arg-type]
+        if _norm(text) in SKIP_WORDS and path != "place":
+            draft.spec = _cleared(spec, path).mark_unspecified(path)
+            text = "не важно"
+        return await self._interview(draft, f"{title.lower()}: {text}", editing=True)
 
-    def _ai_missing(self, draft: Draft) -> list[str]:
-        """Critical slots the code insists on, whatever the AI asked."""
-        missing = ["city"] if draft.city is None else []
-        if draft.mode == "real_estate" and draft.deal is None and "deal" not in draft.asked:
-            missing.append("deal")
-        if draft.mode == "investors" and draft.target is None and "target" not in draft.asked:
-            missing.append("target")
-        return missing
+    async def _skip(self, draft: Draft) -> Reply:
+        """«Не важно»: the asked field stays open on purpose; the interviewer asks the next one."""
+        spec = draft.spec or TaskSpec(mode=draft.mode)  # type: ignore[arg-type]
+        if draft.asking and draft.asking != "place":
+            draft.spec = spec.mark_unspecified(draft.asking)
+        return await self._interview(draft, "Не важно")
 
-    async def _ai_answer(self, draft: Draft, text: str) -> Reply:
-        was_missing_city = draft.city is None
-        places = find_places(text)
-        if draft.city is None and len(places) == 1:  # a plain city name needs no model to be read
-            draft.city, draft.place = places[0], None
-        self._record_answer(draft, text[:MAX_ANSWER_CHARS])
-        if not await self._understand(draft):
-            return await self._fallback_answer(draft, text)
-        prefix = NOT_UNDERSTOOD["city"] if was_missing_city and draft.city is None else ""
-        return await self._ai_advance(draft, prefix)
+    async def _enough(self, draft: Draft) -> Reply:
+        """«Хватит, ищи»: no more questions; only a missing place is still asked."""
+        draft.forced = True
+        return await self._carry_on(draft, force=True)
 
-    @staticmethod
-    def _record_answer(draft: Draft, text: str) -> None:
-        draft.answers = [*draft.answers, text][-MAX_ANSWERS:]
+    # --- the interview ----------------------------------------------------------------------
 
-    async def _fallback_answer(self, draft: Draft, text: str) -> Reply:
-        """The AI failed mid-dialogue: the rules read this answer and carry on."""
-        draft.ai, draft.answers = None, []
-        draft.pending = ["city", "target"] if draft.mode == "investors" else ["city", "deal", "budget"]
-        draft.step = draft.pending[0]
-        return await self._answer(draft, text)
+    async def _interview(self, draft: Draft, message: str, *, editing: bool = False) -> Reply:
+        """One user message: the interviewer updates the spec and says what to ask next, or the card is shown."""
+        mode = draft.mode or "real_estate"
+        spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
+        turn = await self._turn(draft, mode, spec, message, editing)
+        draft.spec = _enrich(turn.spec, mode)
+        draft.dialogue = [*draft.dialogue, {"role": "user", "text": message[:600]}][-MAX_DIALOGUE:]
+        draft.editing = None
+        return await self._carry_on(draft, turn)
 
-    async def _ai_button(self, draft: Draft, action: str, value: str) -> Reply:
-        if action == "deal":
-            if value not in DEAL_TEXT:
-                return Reply("Эта кнопка устарела.")
-            draft.deal = value
-            answer = f"Сделка: {DEAL_TEXT[value]}"
-        elif action == "ask" and value == "skip":
-            # The optional questions are dropped; the summary the AI already wrote is shown.
-            ai = self._ai(draft)
-            ai.questions = []
-            draft.ai = ai.payload()
-            draft.answers = [*draft.answers, "пропустить"][-MAX_ANSWERS:]
-            return await self._ai_advance(draft)
-        else:
-            return Reply("Эта кнопка устарела.")
-        self._record_answer(draft, answer)
-        if not await self._understand(draft):
-            draft.ai, draft.answers = None, []
-            return await self._advance(draft)
-        return await self._ai_advance(draft)
+    async def _turn(self, draft: Draft, mode: str, spec: TaskSpec, message: str, editing: bool) -> InterviewTurn:
+        """One AI call; the rules answer instead when there is no interviewer or it fails."""
+        if self.interviewer is not None:
+            try:
+                turn = await self.interviewer.interview(mode=mode, spec=spec, dialogue=draft.dialogue, message=message,
+                                                        asking=draft.asking, editing=editing)
+                log.info("telegram.intake.interviewed", extra={"user_id": draft.user_id, "done": turn.done,
+                                                                "round": draft.rounds})
+                return turn
+            except Exception as exc:  # noqa: BLE001 - any failure falls back to the rules
+                log.warning("telegram.intake.interview_failed",
+                            extra={"user_id": draft.user_id, "error": getattr(exc, "code", type(exc).__name__),
+                                   "status": getattr(exc, "status", None)})
+        return await self.rules.interview(mode=mode, spec=spec, dialogue=draft.dialogue, message=message,
+                                          asking=draft.asking, editing=editing)
 
-    @staticmethod
-    def _ai(draft: Draft) -> TaskUnderstanding:
-        ai = draft.understanding()
-        if ai is None:
-            raise UnderstandingError("no_understanding")
-        return ai
+    async def _carry_on(self, draft: Draft, turn: InterviewTurn | None = None, *, force: bool = False) -> Reply:
+        """Ask the next question, or show the card when nothing is left (or the person or the round cap says stop)."""
+        mode = draft.mode or "real_estate"
+        spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
+        missing = spec.missing_hard(mode)
+        capped = force or draft.forced or draft.rounds >= self.max_rounds
+        question = turn.question if turn else None
+        asking = (turn.asking if turn else None) or (missing[0] if missing else None)
+        options = turn.options if turn else ()
+        if question is None and missing and not capped:
+            asking, question = missing[0], question_for(spec, missing[0])
+            options = options_for(missing[0])
+        if capped and "place" in missing:  # the one field that cannot be waved away
+            asking, question, options = "place", question_for(spec, "place"), ()
+            if force:
+                question = "Место нужно в любом случае. " + question
+        elif capped:
+            question = None
+        if question is not None:
+            return await self._ask(draft, turn.understood_ru if turn else "", question, asking, options)
+        return await self._card(draft)
 
-    async def _ai_advance(self, draft: Draft, prefix: str = "") -> Reply:
-        """Ask what is missing (the AI's questions plus the critical ones), else show its summary."""
-        ai = self._ai(draft)
-        missing = self._ai_missing(draft)
-        own = ai.questions if len(draft.answers) < AI_QUESTION_ROUNDS else []
-        # The city question stays first so the cap below never drops it.
-        own = sorted(own, key=lambda q: not ("city" in missing and any(w in q.casefold() for w in _ASKS_ABOUT["city"])))
-        standard = [slot for slot in missing
-                    if not any(word in q.casefold() for q in own for word in _ASKS_ABOUT[slot])]
-        texts = ([SLOT_QUESTIONS[slot] for slot in standard] + own)[:MAX_QUESTIONS]
-        if texts:
-            first = missing[0] if missing and missing[0] in ("city", "deal") else "ask"
-            draft.step, draft.pending = first, [*missing, *(["ask"] if own else [])]
-            draft.asked += [slot for slot in missing if slot not in draft.asked]
-            await self.store.save(draft)
-            if first == "city":
-                options = ()  # any place in the world: typed, never picked from a list
-            elif first == "deal":
-                options = (("Аренда", "rent"), ("Покупка", "sale"), ("Не важно", "any"))
-            else:
-                options = (("Пропустить", "skip"),)
-            if len(texts) == 1:
-                text = texts[0] + (SLOT_HINTS["city"] if first == "city" else "")
-            else:
-                text = "\n".join(["Уточните, пожалуйста:", *(f"{n}. {q}" for n, q in enumerate(texts, 1)),
-                                  "Можно ответить одним сообщением."])
-            buttons = tuple(Button(label, callback_data=f"task:{first}:{value}") for label, value in options)
-            return Reply(prefix + text, buttons, keyboard=None if buttons else DRAFT_KEYBOARD)
+    async def _ask(self, draft: Draft, understood: str, question: str, asking: str | None,
+                   options: tuple[tuple[str, str], ...]) -> Reply:
+        draft.step, draft.asking, draft.rounds = "ask", asking, draft.rounds + 1
+        draft.dialogue = [*draft.dialogue, {"role": "assistant", "text": question[:600]}][-MAX_DIALOGUE:]
+        await self.store.save(draft)
+        buttons = [Button(label, callback_data=f"task:{code}") for label, code in options]
+        if asking and asking != "place":
+            buttons.append(Button("Не важно", callback_data="task:skip"))
+        buttons += [Button("Хватит, ищи", callback_data="task:enough"), Button("Отмена", callback_data="task:cancel")]
+        text = f"Понял: {understood}\n\n{question}" if understood else question
+        return Reply(text, tuple(buttons), keyboard=DRAFT_KEYBOARD)
+
+    async def _card(self, draft: Draft) -> Reply:
+        """«Проверьте задачу»: the structured card with «Запустить» «Изменить» «Отмена» (the bottom keyboard)."""
+        assert draft.spec is not None
         try:
             plan = draft.plan()
         except InvalidGoal as exc:
             await self.store.save(draft.fresh())
-            return Reply(f"{prefix}{exc}\nОпишите задачу иначе, например {EXAMPLES.get(draft.mode or '', EXAMPLES['real_estate'])}.")
-        draft.step, draft.pending = "summary", []
+            return Reply(f"{exc}\nОпишите задачу иначе, например {EXAMPLES.get(draft.mode or '', EXAMPLES['real_estate'])}.")
+        draft.step, draft.asking, draft.editing = "summary", None, None
         await self.store.save(draft)
-        model = getattr(self.understander, "model", "")
-        reply = ai_summary(draft, ai, plan, self.technical(draft.user_id), model)
-        return replace(reply, text=prefix + reply.text)
+        lines = ["Проверьте задачу:", draft.spec.summary_ru()]
+        if self.technical(draft.user_id):
+            limits = plan.limits
+            model = getattr(self.interviewer, "model", "")
+            lines += [
+                "",
+                f"Разбор задачи: интервьюер ({model})" if model else "Разбор задачи: правила",
+                f"Цель: {plan.goal}",
+                f"Языки поиска: {', '.join(lang.upper() for lang in plan.languages)}",
+                f"Группы: до {limits.max_groups}, окнами по {limits.window_size}",
+            ]
+        lines += ["", "Всё верно? Нажмите «Запустить» внизу, чтобы начать поиск."]
+        return Reply("\n".join(lines), keyboard=TASK_KEYBOARD)
 
     async def _cancel(self, draft: Draft) -> Reply:
         await self.store.save(draft.fresh())
         return Reply("Черновик удалён. Опишите новую задачу, когда будете готовы.", keyboard=IDLE_KEYBOARD)
 
-    async def _advance(self, draft: Draft, prefix: str = "") -> Reply:
-        try:
-            question = self.clarifier(draft)
-            plan = None if question else draft.plan()
-        except InvalidGoal as exc:
-            await self.store.save(draft.fresh())
-            return Reply(f"{prefix}{exc}\nОпишите задачу иначе, например {EXAMPLES.get(draft.mode or '', EXAMPLES['real_estate'])}.")
-        if question is not None:
-            slots = [question.slot, *question.also]
-            draft.step, draft.pending = question.slot, slots
-            draft.asked += [slot for slot in slots if slot not in draft.asked]
-            await self.store.save(draft)
-            buttons = tuple(Button(text, callback_data=f"task:{question.slot}:{value}") for text, value in question.options)
-            return Reply(prefix + question.text, buttons, keyboard=None if buttons else DRAFT_KEYBOARD)
-        assert plan is not None
-        draft.step, draft.pending = "summary", []
-        await self.store.save(draft)
-        reply = summary(draft, plan, self.technical(draft.user_id))
-        return replace(reply, text=prefix + reply.text)
+    # --- launch -----------------------------------------------------------------------------
 
     async def _launch(self, user_id: int, who: str | None) -> Reply:
         current = await self.store.get(user_id)
@@ -804,12 +561,11 @@ class TaskIntake:
             plan = draft.plan()
         except InvalidGoal as exc:
             return Reply(f"{exc}\nОпишите задачу заново.")
-        draft.city = plan.location  # pin the city the summary showed, detected or chosen
         try:
             receipt = await self.sink(CommandEnvelope("campaign", draft.command_arguments(), draft.chat_id, user_id, draft.message_id))
         except Exception:
             log.exception("telegram.intake.enqueue_failed", extra={"user_id": user_id})
-            await self.store.save(draft)  # back to the summary: the person may press again
+            await self.store.save(draft)  # back to the card: the person may press again
             return Reply("Не удалось запустить поиск. Попробуйте нажать «Запустить» ещё раз чуть позже.")
         command_id = getattr(receipt, "command_id", None)
         log.info("telegram.intake.launched", extra={"user_id": user_id, "chat_id": draft.chat_id, "command_id": command_id})
@@ -824,3 +580,46 @@ class TaskIntake:
             return Reply(f"{LAUNCHED}\nQueue id: {command_id}. Статус: /campaign status. Остановить: /campaign cancel <id>.",
                          keyboard=SEARCH_KEYBOARD)
         return Reply(f"{LAUNCHED}\n{STOP_HINT}", keyboard=SEARCH_KEYBOARD)
+
+
+def _enrich(spec: TaskSpec, mode: str) -> TaskSpec:
+    """The mode is the person's choice; a well-known city gets its country and names in every language."""
+    spec = spec.model_copy(deep=True)
+    spec.mode = mode  # type: ignore[assignment]
+    name = spec.place.name
+    if name and not spec.place.names and (found := find_places(name)) == [name] and name == found[0]:
+        known = gazetteer_place(name)
+        spec.place = spec.place.model_copy(update={"names": known.get("names", {}),
+                                                   "country": spec.place.country or known.get("country")})
+    return spec
+
+
+def _cleared(spec: TaskSpec, path: str) -> TaskSpec:
+    """A field the person says does not matter any more: its value is dropped (deal and type become «any»)."""
+    spec = spec.model_copy(deep=True)
+    match path:
+        case "deal":
+            spec.deal = "any"
+        case "property_type":
+            spec.property_type = "any"
+        case "budget.max":
+            spec.budget = spec.budget.model_copy(update={"min": None, "max": None})
+        case "rooms.min":
+            spec.rooms = spec.rooms.model_copy(update={"min": None, "max": None})
+        case "area_m2.min":
+            spec.area_m2 = spec.area_m2.model_copy(update={"min": None, "max": None})
+        case "place.districts":
+            spec.place = spec.place.model_copy(update={"districts": []})
+        case "wishes":
+            spec.wishes = []
+        case "sources.required":
+            spec.sources = spec.sources.model_copy(update={"required": [], "extra": []})
+        case "investor.ticket":
+            spec.investor.ticket = spec.investor.ticket.model_copy(update={"min": None, "max": None})
+        case "investor.who":
+            spec.investor.who = []
+        case "investor.user_role":
+            spec.investor.user_role = None
+        case "investor.geography":
+            spec.investor.geography = []
+    return spec

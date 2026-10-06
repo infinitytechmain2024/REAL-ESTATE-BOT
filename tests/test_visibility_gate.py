@@ -222,7 +222,7 @@ async def test_a_user_stops_their_own_running_search(word: str) -> None:
 async def test_otmena_while_writing_a_task_drops_the_draft_not_the_search() -> None:
     control, campaigns, orchestra, campaign_id = await stoppable()
     await press(control, USER, "mode:real_estate")
-    assert "Проверьте задачу" in (await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")).text
+    assert "Сколько комнат" in (await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")).text
     assert (await say(control, USER, "Отмена")).text.startswith("Черновик удалён.")
     assert campaigns.campaigns[campaign_id].state == "discovering" and orchestra.envelopes == []
     # «стоп» always means the search.
@@ -275,6 +275,7 @@ async def test_the_launch_reply_tells_a_user_how_to_stop() -> None:
     assert isinstance(sink, Sink)
     await press(control, USER, "mode:real_estate")
     await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")
+    await press(control, USER, "task:enough")
     launched = await press(control, USER, "task:launch")
     assert "напишите «стоп»" in launched.text
     assert_plain_russian(launched, "launch")
