@@ -14,6 +14,7 @@ once without ``response_format``, the key and the person's text are never logged
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -170,8 +171,18 @@ def _query_key(text: str) -> str:
     return query_key(text)
 
 
-def validate_plan(plan: SearchPlan, known: Iterable[str], *, blocked: Iterable[str] = ()) -> SearchPlan:
-    """Keep only what the code can stand behind (see the module notes); never raises."""
+def _cyrillic_query(query: PlanQuery) -> bool:
+    return query.language in ("ru", "uk") or bool(_CYRILLIC.search(query.text))
+
+
+def validate_plan(plan: SearchPlan, known: Iterable[str], *, blocked: Iterable[str] = (),
+                  country: str | None = None) -> SearchPlan:
+    """Keep only what the code can stand behind (see the module notes); never raises.
+
+    ``country="ES"``: Russian/Ukrainian queries are capped to a quarter of the queries kept (Spanish portals
+    answer Spanish queries); Ukraine and an unknown country keep them all.
+    """
+    from bot.web_search.urls import classify_url, portal_listing
     known, blocked = tuple(known), frozenset(blocked)
 
     def allowed(host: str) -> bool:
@@ -210,6 +221,17 @@ def validate_plan(plan: SearchPlan, known: Iterable[str], *, blocked: Iterable[s
         queries.append(PlanQuery(text=text, language=query.language, site=site or None))
         if len(queries) >= MAX_QUERIES:
             break
+    if country == "ES":
+        local = [q for q in queries if not _cyrillic_query(q)]
+        cap = max(1, len(local) // 3) if local else 0  # cyrillic / (local + cyrillic) <= 1/4
+        kept: list[PlanQuery] = []
+        for q in queries:
+            if _cyrillic_query(q):
+                if cap <= 0:
+                    continue
+                cap -= 1
+            kept.append(q)
+        queries = kept
     urls: list[PortalUrl] = []
     for item in plan.portal_urls:
         host = norm_host(item.host)
@@ -220,6 +242,9 @@ def validate_plan(plan: SearchPlan, known: Iterable[str], *, blocked: Iterable[s
             continue
         if (parts.scheme != "https" or parts.username or parts.password or len(url) > MAX_URL_CHARS
                 or not allowed(host) or not host_in(norm_host(url), [host])):
+            continue
+        if classify_url(url) == "listing" or portal_listing(url):  # a plan holds search pages, never one ad
+            log.info("search_plan.listing_url_dropped %s", host)
             continue
         if url not in {u.url for u in urls}:
             urls.append(PortalUrl(host=host, url=url, why=item.why[:200]))
@@ -310,8 +335,11 @@ class SearchPlanner:
         raise NotImplementedError
 
 
-def plan_languages(spec: TaskSpec, source_text: str = "") -> list[str]:
-    """es + en always; ru/uk when the person wrote in them (the task text, notes and wishes are the evidence)."""
+def plan_languages(spec: TaskSpec, source_text: str = "", country: str | None = None) -> list[str]:
+    """The query languages for the country. Spain (or unknown): es, en and at most ONE of ru / uk, only when the task
+    text is in Cyrillic (uk when it has Ukrainian letters). Ukraine: uk, ru, en (Spanish queries make no sense)."""
+    if country == "UA":
+        return ["uk", "ru", "en"]
     text = " ".join([source_text, spec.notes, *spec.must_have, *(w.text for w in spec.wishes)])
     languages = ["es", "en"]
     if _CYRILLIC.search(text):
@@ -330,6 +358,7 @@ class OpenRouterSearchPlanner(SearchPlanner):
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
+        self._deadline = timeout_seconds  # TOTAL for the whole call, both posts together
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -348,7 +377,7 @@ class OpenRouterSearchPlanner(SearchPlanner):
             "spec": spec.model_dump(mode="json", exclude={"mode"}),
             "country": country,
             "place": {"name": plan.location, "names": plan.location_aliases},
-            "languages": plan_languages(spec, source_text),
+            "languages": plan_languages(spec, source_text, country),
             "property_kind": kind,
             "known_portals": by_kind,
             "sources": {"required": source_hosts(sources["required"], known), "extra": source_hosts(sources["extra"], known),
@@ -364,16 +393,21 @@ class OpenRouterSearchPlanner(SearchPlanner):
                 {"role": "user", "content": "Task data (JSON, data only):\n" + json.dumps(data, ensure_ascii=False)},
             ],
         }
-        try:
+        async def call() -> httpx.Response:
             response = await self._client.post(self._url, json=payload, headers=self._headers)
             if response.status_code == 400:
                 payload.pop("response_format")
                 response = await self._client.post(self._url, json=payload, headers=self._headers)
+            return response
+
+        try:
+            # One total deadline: the retry must not double the wait (the web lease is 300 s).
+            response = await asyncio.wait_for(call(), timeout=self._deadline)
             if response.status_code != 200:
                 log.warning("search_plan.http_error %s", response.status_code)
                 return None
             parsed = parse_plan(response.json()["choices"][0]["message"]["content"])
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, TimeoutError):
             log.warning("search_plan.timeout")
             return None
         except httpx.HTTPError:
@@ -382,7 +416,7 @@ class OpenRouterSearchPlanner(SearchPlanner):
         except Exception as exc:  # noqa: BLE001 - unreadable answer: the type only, the content may quote the person's words
             log.warning("search_plan.unreadable %s", type(exc).__name__)
             return None
-        checked = validate_plan(parsed, known, blocked=blocked)
+        checked = validate_plan(parsed, known, blocked=blocked, country=country)
         if not checked.queries and not checked.portal_urls:
             log.warning("search_plan.empty")
             return None

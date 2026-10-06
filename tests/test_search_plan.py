@@ -280,3 +280,96 @@ async def test_blocked_sources_are_never_searched_or_queued() -> None:
     queued = {r.host for r in store.urls[cid].values()}
     assert queued == {"kyero.com", "fotocasa.es"}  # the idealista portal URL was not queued either
     assert "idealista.com" not in task.portals()
+
+
+# --- review fixes: listing URLs, languages, cap, deadline, blocked index links -----------------------
+
+
+def test_a_listing_url_is_not_a_portal_search_page() -> None:
+    listing = "https://www.idealista.com/inmueble/12345678/"
+    raw = SearchPlan(portal_urls=[PortalUrl(host="idealista.com", url=listing),
+                                  PortalUrl(host="idealista.com", url=IDEALISTA_URL)])
+    assert [u.url for u in validate_plan(raw, ["idealista.com"]).portal_urls] == [IDEALISTA_URL]
+
+
+async def test_worker_queues_portal_urls_with_their_classified_kind() -> None:
+    campaigns, store = MemoryCampaignStore(), MemoryWebStore(None)
+    store.campaigns = campaigns
+    cid = await make_campaign(campaigns, spec())
+    plan = good_plan() | {"portal_urls": [{"host": "idealista.com", "url": "https://www.idealista.com/inmueble/12345678/"},
+                                          {"host": "idealista.com", "url": IDEALISTA_URL}]}
+    campaign = await campaigns.get(cid)
+    await campaigns.set_search_plan(cid, plan)  # a stored plan (old data) may still hold a listing URL
+    w = web_worker(campaigns, store, FakeSearcher(), FallbackQueryGenerator(None))
+    await w._enqueue_portal_urls(await campaigns.get(cid) or campaign)
+    rows = {r.url: r.kind for r in store.urls[cid].values()}
+    assert rows == {IDEALISTA_URL: "index"}
+
+
+def test_languages_follow_the_country_and_the_task_script() -> None:
+    assert plan_languages(spec(), "квартира в Валенсии", "ES") == ["es", "en", "ru"]
+    assert plan_languages(spec(), "квартира в Валенсії", "ES") == ["es", "en", "uk"]  # one of ru / uk, never both
+    assert plan_languages(spec(), "flat in Valencia", "ES") == ["es", "en"]
+    assert plan_languages(spec(), "квартира в Киеве", "UA") == ["uk", "ru", "en"]
+    assert "es" not in plan_languages(spec(), "flat in Kyiv", "UA")
+
+
+def test_spain_caps_cyrillic_queries_to_a_quarter_ukraine_keeps_them() -> None:
+    queries = ([PlanQuery(text=f"piso Valencia zona{n} calle{n}", language="es") for n in range(8)]
+               + [PlanQuery(text=f"квартира Valencia район{n} улица{n}", language="ru") for n in range(6)])
+    capped = validate_plan(SearchPlan(queries=queries), [], country="ES")
+    cyr = [q for q in capped.queries if q.language == "ru"]
+    assert len(cyr) == 2 and len(capped.queries) == 10 and len(cyr) / len(capped.queries) <= 0.25
+    assert sum(q.language == "ru" for q in validate_plan(SearchPlan(queries=queries), [], country="UA").queries) == 6
+
+
+def test_planned_round_applies_the_same_cyrillic_cap() -> None:
+    plan = {"queries": [{"text": f"квартира Valencia район{n}", "language": "ru"} for n in range(6)]
+            + [{"text": f"piso Valencia zona{n}", "language": "es"} for n in range(6)]}
+    out = planned_round(task_with(plan), [], 8)
+    assert len(out) == 8 and sum(q.language == "ru" for q in out) <= 2
+
+
+async def test_the_planner_deadline_is_total_across_both_posts() -> None:
+    import asyncio
+
+    calls: list[int] = []
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        await asyncio.sleep(0.2)
+        return httpx.Response(400)  # triggers the retry without response_format
+
+    p = OpenRouterSearchPlanner(api_key="k", model="m", timeout_seconds=0.3,
+                                client=httpx.AsyncClient(transport=httpx.MockTransport(slow)))
+    task_spec = spec()
+    started = asyncio.get_running_loop().time()
+    assert await p.plan(task_spec, campaign_plan(task_spec)) is None
+    assert asyncio.get_running_loop().time() - started < 0.5 and len(calls) == 2
+
+
+def test_plan_timeout_setting_is_bounded_under_the_web_lease() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from bot.campaign.settings import CampaignRunnerSettings
+
+    with pytest.raises(ValidationError):
+        CampaignRunnerSettings(OPENROUTER_PLAN_TIMEOUT_SECONDS=120)
+
+
+def test_blocked_campaign_hosts_are_filtered_from_index_links() -> None:
+    from bot.web_search.extract import parse_html
+    from bot.web_search.models import QueuedUrl
+    from bot.web_search.urls import url_key
+    from tests.test_web_search import INDEX_HTML, INDEX_URL
+
+    w = web_worker(MemoryCampaignStore(), MemoryWebStore(None), FakeSearcher(), FallbackQueryGenerator(None))
+    queued = QueuedUrl(INDEX_URL, url_key(INDEX_URL), "fotocasa.es", 0, "index")
+    parsed = parse_html(INDEX_HTML, INDEX_URL)
+    from bot.web_search.structured import structured
+
+    data = structured(INDEX_HTML, INDEX_URL)
+    _, open_children = w._page(queued, INDEX_URL, parsed, data)
+    _, blocked_children = w._page(queued, INDEX_URL, parsed, data, blocked=frozenset({"fotocasa.es"}))
+    assert open_children and not blocked_children

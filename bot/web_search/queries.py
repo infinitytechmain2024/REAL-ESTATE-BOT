@@ -260,7 +260,7 @@ def planned_round(task: QueryTask, used: list[str], count: int) -> list[Generate
     drop = [q for q in plan_queries(task.search_plan)
             if any(_on_portal(site, b) for site in _sites(q.text) for b in task.blocked_hosts)]
     candidates = [q for q in plan_queries(task.search_plan) if q not in drop]
-    return dedupe(localise(candidates, task), used, limit=count)
+    return local_round(candidates, task, used, count)  # the same ru/uk cap as every other round
 
 
 _BANK_RE = re.compile("|".join(rf"(?<!\w){re.escape(w)}" for w in SPAIN_BANK_WORDS))

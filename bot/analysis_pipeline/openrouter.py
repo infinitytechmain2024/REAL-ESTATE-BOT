@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date
 from typing import Any
 
 import httpx
@@ -20,6 +21,8 @@ LISTING_KINDS = ["offer", "catalog", "wanted", "other"]
 CONDITIONS = ["new", "good", "needs_renovation"]
 EVIDENCE_KEYS = ("price", "area", "rooms", "location")
 MAX_QUOTE_CHARS = 120
+# Auth, billing, timeout and rate-limit answers say nothing about the post: they stay retryable httpx errors.
+TRANSIENT_4XX = frozenset({401, 402, 403, 408, 429})
 # The one fact schema: the live analysis worker and the shadow reduction extractor (bot/agents/extraction.py)
 # both send exactly this as the structured output, so they agree on every key.
 EXTRACTION_SCHEMA: dict[str, Any] = {
@@ -81,7 +84,10 @@ INSTRUCTIONS = (
     'deal_type ("rent", "sale" or null), property_type (one of "apartment", "room", "house", "studio", "land", "commercial", '
     '"other" or null), rooms (integer or null), who (string or null: the named person, company or fund), '
     'listing_kind ("offer", "catalog", "wanted" or "other"), country (ISO 3166-1 alpha-2 code such as ES, or null), '
-    "area_m2 (number or null: the plot or built area in square metres). "
+    "area_m2 (number or null: the plot or built area in square metres), "
+    "evidence (object {price, area, rooms, location} of verbatim quotes or nulls), district (string or null), "
+    "address (string or null), floor (integer or null), features (array of strings), "
+    'condition ("new", "good", "needs_renovation" or null), listing_date (YYYY-MM-DD string or null). '
     "real_estate means a property offered or wanted for rent or sale: an apartment, room, studio, house, villa, "
     "plot of land (terreno, parcela, solar, finca; участок, земля, сотки), or commercial premises. "
     "investors means someone offering or seeking investment. "
@@ -268,6 +274,68 @@ def _condition(value: object) -> str | None:
     return text if text in CONDITIONS else None
 
 
+def _listing_date(value: object) -> str | None:
+    """``YYYY-MM-DD`` (a real calendar date) or null."""
+    text = _text(value, 40)
+    if not text or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return None
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return None
+    return text
+
+
+_NUMBER_WORDS = {
+    "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8,
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "одна": 1, "одно": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6,
+}
+_AREA_UNITS = re.compile(r"сот|гектар|\bga\b|\bha\b|hect", re.IGNORECASE)
+
+
+def _digit_text(text: str) -> str:
+    """Lower-cased text with the thousands separators of numbers removed («1.200», «180 000» -> «1200», «180000»)."""
+    text = text.lower().replace("\u00a0", " ").replace("\u202f", " ")
+    return re.sub(r"(?<=\d)[.,\s](?=\d{3}(?!\d))", "", text)
+
+
+def _number_present(value: float, text: str) -> bool:
+    return re.search(rf"(?<![\d]){int(value)}(?!\d)", text) is not None
+
+
+def verify_facts(result: AnalysisResult, evidence: Evidence) -> AnalysisResult:
+    """Null ``price_amount`` / ``area_m2`` / ``rooms`` the text does not back.
+
+    A number stays only with a verbatim quote AND its digits in the evidence text (separators ignored). A page whose
+    text starts with ``JSON-LD: {...}`` is authoritative: a value found in that JSON stays even without a quote.
+    """
+    full = _digit_text(f"{evidence.title}\n{evidence.text}")
+    first = evidence.text.lstrip().split("\n", 1)[0]
+    ld = _digit_text(first) if first.startswith("JSON-LD:") else ""
+    quotes = dict(result.evidence)
+    update: dict[str, Any] = {}
+    for field, key in (("price_amount", "price"), ("area_m2", "area"), ("rooms", "rooms")):
+        value = getattr(result, field)
+        if value is None:
+            continue
+        quote = quotes.get(key)
+        ok = bool(ld) and _number_present(value, ld)
+        if not ok and quote and quote.strip():
+            ok = _number_present(value, full)
+            if not ok and key == "area":  # sotki / hectares were converted: the number is not literally there
+                ok = bool(_AREA_UNITS.search(quote))
+            if not ok and key == "rooms":
+                ok = any(_NUMBER_WORDS.get(w) == value for w in re.findall(r"[^\W\d_]+", quote.lower()))
+        if not ok:
+            log.info("analysis.fact_without_evidence %s", field)
+            update[field] = None
+            quotes[key] = None
+    if not update:
+        return result
+    return result.model_copy(update={**update, "evidence": quotes})
+
+
 def parse_result(content: str) -> AnalysisResult:
     """Validate the model's JSON strictly, after fixing harmless formatting drift.
 
@@ -321,7 +389,7 @@ def parse_result(content: str) -> AnalysisResult:
     fixed["floor"] = _floor(data.get("floor"))
     fixed["features"] = _features(data.get("features"))
     fixed["condition"] = _condition(data.get("condition"))
-    fixed["listing_date"] = _text(data.get("listing_date"), 40)
+    fixed["listing_date"] = _listing_date(data.get("listing_date"))
     return AnalysisResult.model_validate(fixed)
 
 
@@ -352,20 +420,25 @@ class OpenRouterAnalyzer:
             ],
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        url = "https://openrouter.ai/api/v1/chat/completions"
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload
-            )
-            if response.status_code == 400:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code in (400, 404):
                 # A model without structured outputs: plain JSON mode, same schema in the prompt.
                 payload["response_format"] = {"type": "json_object"}
-                response = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload
-                )
+                response = await client.post(url, headers=headers, json=payload)
+                if 400 <= response.status_code < 500 and response.status_code not in TRANSIENT_4XX:
+                    # Not even JSON mode: one last try with no response_format at all.
+                    payload.pop("response_format")
+                    response = await client.post(url, headers=headers, json=payload)
+            if 400 <= response.status_code < 500 and response.status_code not in TRANSIENT_4XX:
+                # The request itself is refused: retrying the same post can never help (main.py marks it rejected).
+                log.warning("analysis.request_refused %s", response.status_code)
+                raise ValueError(f"model_request_refused_{response.status_code}")
             response.raise_for_status()
         try:
             content = response.json()["choices"][0]["message"]["content"]
-            return parse_result(content)
+            return verify_facts(parse_result(content), evidence)
         except ValidationError as exc:
             # Field names and error types only: the content may quote the post.
             problems = [f"{'.'.join(str(p) for p in e['loc'])}:{e['type']}" for e in exc.errors()]

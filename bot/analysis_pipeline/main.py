@@ -57,7 +57,11 @@ async def analyse_batch(store, pipeline: AnalysisPipeline, *, batch_size: int, c
             comments=[str(c) for c in json.loads(row["comments"] or "[]")],
         )
         found: list[tuple[str, str, str]] = []
-        hint = await store.task_hint(e.post_id) if hasattr(store, "task_hint") else None
+        try:
+            hint = await store.task_hint(e.post_id) if hasattr(store, "task_hint") else None
+        except Exception as exc:  # noqa: BLE001 - the hint only helps; a failed lookup must not stall the batch
+            log.warning("analysis.task_hint_failed %s %s", e.post_id, type(exc).__name__)
+            hint = None
         try:
             for vertical in verticals:
                 try:

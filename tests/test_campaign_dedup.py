@@ -38,13 +38,16 @@ def test_different_rooms_price_area_deal_or_district_are_not_the_same() -> None:
     assert not same_object(base, flat(price=210_000))
     assert not same_object(base, flat(area=95))
     assert not same_object(base, flat(location="Benimaclet, Valencia"))  # same price and size, other district
+    # the same district alone is not enough once both state a street address
+    assert not same_object(flat(address="Calle Cuba 3", district="Ruzafa"), flat(address="Calle Sueca 9", district="Ruzafa"))
+    assert same_object(flat(address="Calle Cuba 3", district="Ruzafa"), flat(address="C/ Cuba 3, bajo", district="Ruzafa"))
     assert not same_object(base, Listing(price=199_000, area=85, rooms=3, location="Ruzafa", deal="rent", currency="EUR"))
 
 
 def test_a_city_alone_is_not_a_location() -> None:
     assert not same_object(flat(location="Valencia"), flat(location="Valencia, España"))
-    # ... unless the titles are almost identical
-    title = "Piso de tres habitaciones con terraza y garaje"
+    # ... unless the titles are long and almost identical
+    title = "Piso de tres habitaciones con terraza y garaje incluido en venta"
     assert same_object(flat(location="Valencia", title=title), flat(location="Valencia", title=title + " "))
 
 
@@ -55,6 +58,30 @@ def test_an_unknown_dimension_needs_rooms_and_location_to_agree() -> None:
     assert not same_object(flat(area=None, location="Valencia", title="a b c"), flat(area=86, location="Valencia"))
 
 
+def test_other_floor_or_house_number_is_another_flat() -> None:
+    a = flat(address="Calle Colón 5", floor=2, url=IDEALISTA)
+    assert not same_object(a, flat(address="Calle Colón 5", floor=5, url=FOTOCASA))  # one building, two flats
+    assert same_object(a, flat(address="Calle Colón 5", floor=2, url=FOTOCASA))
+    assert not same_object(flat(address="Calle Colón 5", url=IDEALISTA), flat(address="Calle Colón 120", url=FOTOCASA))
+
+
+def test_two_ads_of_one_host_need_the_same_address_and_floor() -> None:
+    one, two = "https://www.idealista.com/inmueble/1/", "https://www.idealista.com/inmueble/2/"
+    assert not same_object(flat(url=one), flat(url=two))  # same price and area, no address
+    assert not same_object(flat(address="Calle Cuba 3", url=one), flat(address="Calle Cuba 3", floor=2, url=two, ))
+    assert same_object(flat(address="Calle Cuba 3", floor=2, url=one), flat(address="Calle Cuba 3", floor=2, url=two))
+    assert same_object(flat(address="Calle Cuba 3", url=one), flat(address="Calle Cuba 3", url=two))
+    assert same_object(flat(address="Calle Cuba 3", url=IDEALISTA), flat(address="Calle Cuba 3", url=FOTOCASA))
+
+
+def test_titles_alone_merge_only_long_titles_with_price_and_area() -> None:
+    long = "Piso reformado de tres habitaciones con terraza ascensor y garaje incluido"
+    assert same_object(flat(location="Valencia", title=long), flat(location="Valencia", title=long))
+    assert not same_object(flat(location="Valencia", title=long, area=None), flat(location="Valencia", title=long, area=None))
+    assert not same_object(flat(location="Valencia", title="Piso con terraza y garaje"),
+                           flat(location="Valencia", title="Piso con terraza y garaje"))
+
+
 def test_object_key_needs_a_price_or_an_area() -> None:
     assert object_key(flat(price=None, area=None)) is None
     assert object_key(flat(price=None)) is not None
@@ -63,7 +90,9 @@ def test_object_key_needs_a_price_or_an_area() -> None:
 
 def test_listing_of_reads_the_payload() -> None:
     got = listing_of({"price_amount": 199000, "price_currency": "eur", "area_m2": 85.0, "rooms": 3,
-                      "location": "Ruzafa", "deal_type": "sale", "summary_ru": "Светлая квартира"}, url=IDEALISTA)
+                      "location": "Ruzafa", "deal_type": "sale", "summary_ru": "Светлая квартира", "floor": 4,
+                      "address": "Calle Cuba 3", "district": "Ruzafa"}, url=IDEALISTA)
+    assert (got.floor, got.address, got.district) == (4, "Calle Cuba 3", "Ruzafa")
     assert (got.price, got.currency, got.area, got.rooms, got.deal, got.url) == (199000.0, "EUR", 85.0, 3, "sale", IDEALISTA)
 
 

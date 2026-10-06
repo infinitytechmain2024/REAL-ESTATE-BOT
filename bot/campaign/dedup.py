@@ -12,8 +12,12 @@ The policy is deliberately conservative: two cards are better than one wrong mer
   location token;
 * rooms equal when both are known; deal (rent/sale) and currency equal when both are known;
 * location tokens overlap. A city alone is not a location (gazetteer cities and
-  generic words such as «calle» are dropped): a district or street token must be
-  shared, or the normalised titles (at least 4 words each) must have a Jaccard similarity of at least 0.8.
+  generic words such as «calle» are dropped): when both have a street address a street token must be shared
+  (a district alone never identifies a flat); otherwise a district or street token must be shared;
+* different ``floor`` (both known) or different house number in the address (both known) is never the same object;
+* two URLs on the SAME host are the same object only with the same address AND floor (or address, price and
+  area with the floor unknown on both): one portal does not list a flat twice;
+* the titles alone merge only with at least 6 words each, Jaccard >= 0.8 and price and area both matching.
 
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
@@ -35,7 +39,7 @@ from .architect import find_places
 PRICE_TOLERANCE = 0.02
 AREA_TOLERANCE = 0.03
 TITLE_JACCARD = 0.8
-MIN_TITLE_WORDS = 4
+MIN_TITLE_WORDS = 6
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _STOP = frozenset({
@@ -60,6 +64,9 @@ class Listing:
     location: str = ""
     title: str = ""
     url: str | None = None
+    floor: int | None = None
+    address: str = ""
+    district: str = ""
 
 
 def _positive(value: object) -> float | None:
@@ -73,6 +80,7 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
     payload = payload or {}
     rooms = payload.get("rooms")
     place = " ".join(str(payload[k]) for k in ("location", "address", "district") if isinstance(payload.get(k), str))
+    floor = payload.get("floor")
     title = str(payload.get("title") or payload.get("summary_ru") or payload.get("summary") or text or "")
     currency = payload.get("price_currency")
     deal = payload.get("deal_type")
@@ -85,6 +93,9 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         location=place,
         title=title,
         url=url or (str(payload["original_post_link"]) if payload.get("original_post_link") else None),
+        floor=int(floor) if isinstance(floor, int | float) and not isinstance(floor, bool) else None,
+        address=str(payload["address"]).strip() if isinstance(payload.get("address"), str) else "",
+        district=str(payload["district"]).strip() if isinstance(payload.get("district"), str) else "",
     )
 
 
@@ -135,6 +146,15 @@ def object_key(listing: Listing) -> str | None:
     return f"{place}|r{listing.rooms or '?'}|p{price}|a{area}"
 
 
+def _house_number(address: str) -> str | None:
+    found = re.search(r"(?<![\w.])(\d{1,4})(?![\w])", _fold(address))
+    return found.group(1) if found else None
+
+
+def _host(url: str | None) -> str:
+    return site_of(url)
+
+
 def same_object(a: Listing, b: Listing) -> bool:
     """True only when the two listings are almost surely one property (see the module notes)."""
     if a.deal and b.deal and a.deal != b.deal:
@@ -143,6 +163,11 @@ def same_object(a: Listing, b: Listing) -> bool:
         return False
     if a.rooms and b.rooms and a.rooms != b.rooms:
         return False
+    if a.floor is not None and b.floor is not None and a.floor != b.floor:
+        return False  # one building, two flats
+    number_a, number_b = _house_number(a.address), _house_number(b.address)
+    if number_a and number_b and number_a != number_b:
+        return False
     price = _close(a.price, b.price, PRICE_TOLERANCE)
     area = _close(a.area, b.area, AREA_TOLERANCE)
     if price is False or area is False:
@@ -150,8 +175,27 @@ def same_object(a: Listing, b: Listing) -> bool:
     if price is None and area is None:
         return False
     place_a, place_b = tokens(a.location), tokens(b.location)
-    shared_place = bool(place_a & place_b)
-    same_title = _jaccard(_title_words(a.title), _title_words(b.title)) >= TITLE_JACCARD
+    street_a, street_b = tokens(a.address), tokens(b.address)
+    both_addressed = bool(a.address.strip() and b.address.strip())
+    if both_addressed:
+        # A district alone does not identify a flat: the street must be shared (and the house number, when both state one).
+        if not (street_a & street_b):
+            return False
+        shared_place = True
+    else:
+        shared_place = bool(place_a & place_b)
+    full = price is not None and area is not None
+    host_a, host_b = _host(a.url), _host(b.url)
+    if host_a and host_a == host_b and a.url != b.url:
+        # Two ads of one portal: the same flat only with the same address and floor (or the same address, price and
+        # area while the floor is unknown on both sides).
+        if not (both_addressed and (street_a & street_b)):
+            return False
+        same_floor = a.floor is not None and a.floor == b.floor
+        if not (same_floor or (a.floor is None and b.floor is None and full)):
+            return False
+    words_a, words_b = _title_words(a.title), _title_words(b.title)
+    same_title = full and len(words_a) >= MIN_TITLE_WORDS and len(words_b) >= MIN_TITLE_WORDS and _jaccard(words_a, words_b) >= TITLE_JACCARD
     if not (shared_place or same_title):
         return False
     if price is None or area is None:  # one dimension unconfirmed: the rest must agree explicitly

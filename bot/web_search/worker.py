@@ -293,8 +293,9 @@ class WebSearchWorker:
         """The plan's direct portal search pages go into the queue as depth-0 index pages (already queued: no-op)."""
         task = query_task(campaign)
         blocked = self.config.blocked_hosts | task.blocked_hosts
-        candidates = [Candidate(u, url_key(u), host_of(u), 0, "index") for u in plan_portal_urls(task.search_plan)
-                      if fetchable(u, blocked)]
+        # The kind is what the URL looks like (an index page is expected; a concrete listing URL is never queued here).
+        candidates = [Candidate(u, url_key(u), host_of(u), 0, classify_url(u)) for u in plan_portal_urls(task.search_plan)
+                      if fetchable(u, blocked) and classify_url(u) != "listing"]
         if candidates:
             await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
 
@@ -365,6 +366,7 @@ class WebSearchWorker:
                 card = search_result(url, result.error)
                 result = replace(card, layer=result.layer) if card else result
             await self.store.finish_fetch(ticket, result)
+            children = [c for c in children if fetchable(c.url, cfg.blocked_hosts | query_task(campaign).blocked_hosts)]
             if children:
                 await self.store.enqueue(campaign.id, children, index_ttl_days=cfg.index_ttl_days)
             await self._track(campaign.id, url.host, None)
@@ -429,7 +431,8 @@ class WebSearchWorker:
                 if looks_blocked(parsed.title, post_text(parsed, limit=cfg.max_post_chars)):
                     failed = PageResult(False, url.kind, page.url, parsed.title, error="captcha")
                 else:
-                    result, children = self._page(url, page.url, parsed, structured(page.html, page.url))
+                    result, children = self._page(url, page.url, parsed, structured(page.html, page.url),
+                                                  blocked=cfg.blocked_hosts | query_task(campaign).blocked_hosts)
                     if not await self._wants_render(campaign.id, result, children):
                         return result, children
                     return await self._render_empty(campaign.id, url, page.url, parsed, result, children)
@@ -526,18 +529,19 @@ class WebSearchWorker:
         return (not result.ok and result.error == "no_readable_text") or (result.kind == "index" and not children)
 
     def _page(self, url: QueuedUrl, final_url: str, parsed: ParsedPage,
-              data: Structured) -> tuple[PageResult, list[Candidate]]:
+              data: Structured, blocked: frozenset[str] | None = None) -> tuple[PageResult, list[Candidate]]:
         cfg = self.config
+        blocked = cfg.blocked_hosts if blocked is None else blocked  # config + the campaign's blocked sources
         kind = classify_url(final_url) if url.kind == "unknown" else url.kind
         if url.depth == 0:
             host = host_of(final_url)
             from_json = [u for u in data.item_urls if host_of(u) == host and url_key(u) != url_key(final_url)
-                         and fetchable(u, cfg.blocked_hosts)]
+                         and fetchable(u, blocked)]
             if kind == "index" or (kind == "unknown" and (looks_like_index(parsed, final_url)
                                                           or len(from_json) >= MIN_INDEX_LINKS)):
                 links: list[str] = []
                 for link in [*from_json, *listing_links(parsed, final_url, limit=cfg.max_links_per_index,
-                                                        extra_blocked=cfg.blocked_hosts)]:
+                                                        extra_blocked=blocked)]:
                     if len(links) < cfg.max_links_per_index and url_key(link) not in {url_key(x) for x in links}:
                         links.append(link)
                 cards = index_cards(data, final_url)
