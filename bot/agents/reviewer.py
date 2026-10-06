@@ -88,7 +88,7 @@ For each criterion give:
 - verdict "unknown": the finding does not say, or you cannot tell. Never guess; do not infer from the price, the
   photos' style or what is usual. Missing information is "unknown", not "fail" and not "pass".
 - quote: a short verbatim quote (at most 200 characters) copied from the finding ("summary", "excerpt",
-  "evidence", "facts" values) that supports the verdict; null only for "unknown". Do not translate or reformat it.
+  "evidence" values; the other fields are extracted facts, not listing text, and cannot be quoted) that supports the verdict; null only for "unknown". Do not translate or reformat it.
 - note_ru: one short Russian sentence: what the finding says about it.
 
 How to compare:
@@ -248,9 +248,25 @@ def _fold(text: str) -> str:
     return _SPACES.sub(" ", text.casefold()).strip(" .,;:«»\"'…")
 
 
+_LETTER = re.compile(r"[^\W\d_]")
+_DIGITS = re.compile(r"\d{2,}")
+MIN_QUOTE_CHARS = 4
+
+
 def haystack_of(finding: dict[str, Any]) -> str:
-    """Everything the reviewer was shown about the finding, folded: a quote must occur in it."""
-    return _fold(" \n ".join(_flat(finding)))
+    """The listing text the reviewer was shown, folded: a ``fail`` quote must occur in it.
+
+    Only the summary, the excerpt of the original and the evidence quotes; the extracted payload fields (price,
+    area, location ...) are facts the analysis derived, not text of the listing, so they never ground a quote.
+    """
+    parts = [*_flat(finding.get("summary")), *_flat(finding.get("excerpt")), *_flat(finding.get("evidence"))]
+    return _fold(" \n ".join(parts))
+
+
+def quote_is_meaningful(quote: str) -> bool:
+    """A quote that can ground a ``fail``: at least 4 characters once folded, with a letter or a run of 2+ digits."""
+    folded = _fold(quote)
+    return len(folded) >= MIN_QUOTE_CHARS and bool(_LETTER.search(folded) or _DIGITS.search(folded))
 
 
 def _name(raw: object) -> str:
@@ -290,7 +306,8 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
         verdict = _VERDICT_WORDS.get(str(row.get("verdict") or "").strip().casefold(), "unknown")
         quote = _clip(row.get("quote"), MAX_QUOTE_CHARS) or None
         note = _clip(row.get("note_ru") or row.get("note"), MAX_NOTE_CHARS)
-        if verdict == "fail" and (quote is None or (haystack and _fold(quote) not in haystack)):
+        if verdict == "fail" and (quote is None or not quote_is_meaningful(quote)
+                                  or (haystack and _fold(quote) not in haystack)):
             verdict, note = "unknown", note or "Противоречие не подтверждено цитатой"
         by_name[wanted[key]] = Criterion(wanted[key], verdict, quote, note)  # type: ignore[arg-type]
     criteria = tuple(by_name.get(n) or Criterion(n, "unknown", None, "Не проверено") for n in expected)

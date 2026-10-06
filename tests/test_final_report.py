@@ -15,6 +15,7 @@ from bot.campaign.final_report import (
     OpenRouterRecommender,
     Tally,
     card_score,
+    facts_for_model,
     fallback_recommendations,
     parse_recommendations,
     rank_cards,
@@ -127,6 +128,28 @@ def test_outcome_rows_become_a_tally() -> None:
     assert (counts.sent_exact, counts.sent_approved, counts.held_similar, counts.held_other) == (5, 1, 5, 1)
     assert (counts.held_unverified, counts.duplicates, counts.excluded) == (4, 2, {"place": 2, "ai": 1})
     assert (counts.sent, counts.held, counts.rejected, counts.total) == (6, 6, 3, 17)
+
+
+def test_a_report_warns_when_most_findings_could_not_be_checked(caplog: pytest.LogCaptureFixture) -> None:
+    few = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 9)])
+    assert few.unverified_majority is True  # 9 of 10
+    with caplog.at_level("WARNING"):
+        text = report_text("цель", few, [], [], [], [])
+    assert "⚠️ Большинство находок не удалось проверить автоматически (9 из 10): проверьте ключ ИИ и лимиты" in text
+    assert "campaign.unverified_majority" in caplog.text
+    exactly = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 9),
+                     OutcomeCount("held", "excluded", "place", 50)])  # the rejected do not dilute the share
+    assert exactly.unverified_majority
+    ok = tally([OutcomeCount("sent", "exact", None, 2), OutcomeCount("held", "similar", "unverified", 4),
+                OutcomeCount("held", "similar", "budget", 4)])
+    assert not ok.unverified_majority and "Большинство находок" not in report_text("цель", ok, [], [], [], [])
+    edge = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 4)])
+    assert not edge.unverified_majority, "exactly 80 % is not more than 80 %"
+
+
+def test_the_model_gets_the_specs_tolerance_when_there_is_one() -> None:
+    assert facts_for_model({}, Tally(), [], [])["tolerance_pct"] == 10
+    assert facts_for_model({}, Tally(), [], [], 5)["tolerance_pct"] == 5
 
 
 # --- the ranking ---------------------------------------------------------------------------------------------------------------

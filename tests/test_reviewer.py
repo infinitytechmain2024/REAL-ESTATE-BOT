@@ -344,3 +344,82 @@ async def test_the_legacy_judge_keeps_the_old_path_and_data() -> None:
     assert "criteria" not in task and "hard" not in task and "evidence" not in finding and "vertical" not in finding
     assert store.buckets["far"][0] == "similar" and store.whys["far"] == "ai" and messenger.findings() == []
     assert (await store.relevance(cid, "far")).review is None
+
+
+# --- review fixes: grounding, the near band, the cost cap ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("quote", ["...", "«»", "3", "в", "  ..  ", "€ 1"])
+def test_a_fail_quote_that_is_too_short_or_empty_of_content_is_unknown(quote: str) -> None:
+    finding = {"summary": "Piso 3 en venta, в центре ... «»", "excerpt": "precio 250.000 € 3 в", "evidence": {}}
+    review = parse_review(answer(("budget", "fail", quote)), expected=["budget"], haystack=haystack_of(finding))
+    assert review.criteria[0].verdict == "unknown" and review.fails == ()
+
+
+def test_a_real_quote_with_letters_or_digit_runs_still_fails_and_payload_fields_do_not_ground_a_quote() -> None:
+    finding = {"summary": "Piso en venta", "excerpt": "Precio 250.000 € negociable", "evidence": {"price": "250.000 €"},
+               "location": "Ruzafa, Valencia", "price": 250_000, "rooms": 3}
+    hay = haystack_of(finding)
+    ok = parse_review(answer(("budget", "fail", "precio 250.000 €")), expected=["budget"], haystack=hay)
+    assert ok.criteria[0].verdict == "fail" and ok.overall == "reject"
+    digits = parse_review(answer(("budget", "fail", "250.000")), expected=["budget"], haystack=hay)
+    assert digits.criteria[0].verdict == "fail"
+    # a quote found only in the extracted payload fields (location, price) is not listing text
+    payload_only = parse_review(answer(("place", "fail", "Ruzafa, Valencia")), expected=["place"], haystack=hay)
+    assert payload_only.criteria[0].verdict == "unknown"
+    # finding_data keeps the facts for the model but the grounding text is only summary + excerpt + evidence
+    data = finding_data({"summary_ru": "Квартира", "location": "Zzyzx", "evidence": {"price": "190 000 €"}},
+                        original="Piso barato", review=True)
+    assert data["location"] == "Zzyzx" and "zzyzx" not in haystack_of(data)
+    assert "190 000 €" in haystack_of(data) and "piso barato" in haystack_of(data)
+
+
+def test_the_near_band_is_kept_only_for_the_one_criterion_the_rules_measured() -> None:
+    price = Match("similar", 0.15, "price")
+    area = Match("similar", 0.2, "area", 1600)
+    assert review_match(price, matrix("reject", budget="fail")) is price
+    assert review_match(area, matrix("reject", area="fail")) is area
+    # price band, but the area failed (or the rooms): not the measured number -> excluded
+    assert review_match(price, matrix("reject", area="fail")).bucket == "excluded"
+    assert review_match(price, matrix("reject", rooms="fail")).bucket == "excluded"
+    assert review_match(area, matrix("reject", budget="fail")).bucket == "excluded"
+    assert review_match(area, matrix("reject", area="fail", rooms="fail")).bucket == "excluded"
+    # a band whose measure is neither price nor area never keeps a fail
+    assert review_match(Match("similar", 0.2, "unverified"), matrix("reject", budget="fail")).bucket == "excluded"
+
+
+async def test_the_reviewer_judge_counts_attempts_including_failed_ones_and_stops_at_the_cap() -> None:
+    class Flaky:
+        model = "fake/reviewer"
+
+        def __init__(self) -> None:
+            self.calls, self.fail = 0, False
+
+        async def review(self, task, finding):
+            self.calls += 1
+            assert "campaign_id" not in task, "bookkeeping is not sent to the model"
+            if self.fail:
+                raise RelevanceError("http_error")
+            return Review((Criterion("place", "pass", None, "ок"),), "match", None, 0.9, self.model, 10)
+
+    reviewer = Flaky()
+    judge = ReviewerJudge(reviewer, max_calls=3)
+    task = {"mode": "real_estate", "campaign_id": "c1"}
+    assert not judge.calls_exhausted("c1")
+    assert (await judge.judge(task, {"summary": "a"})).verdict == "match"
+    reviewer.fail = True
+    for _ in range(2):
+        with pytest.raises(RelevanceError):
+            await judge.judge(task, {"summary": "a"})  # failed attempts count too
+    assert judge.calls_exhausted("c1") and not judge.calls_exhausted("c2")
+    reviewer.fail = False
+    capped = await judge.judge(task, {"summary": "a"})
+    assert capped.verdict is None and capped.review is None and reviewer.calls == 3, "no further call is made"
+    assert (await judge.judge({"mode": "real_estate", "campaign_id": "c2"}, {"summary": "a"})).verdict == "match"
+    assert task_data(valencia(), review=True)["campaign_id"] == "c1"
+
+
+def test_the_review_call_cap_is_a_setting_with_a_default_of_300(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CAMPAIGN_REVIEW_MAX_CALLS", raising=False)
+    assert settings().review_max_calls == 300 and settings().relevance_judge().max_calls == 300
+    assert settings(CAMPAIGN_REVIEW_MAX_CALLS="7").relevance_judge().max_calls == 7

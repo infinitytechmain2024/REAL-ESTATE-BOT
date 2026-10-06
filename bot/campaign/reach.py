@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from bot.web_search.searxng import Searcher, SearchHit
 
 log = logging.getLogger(__name__)
+ENRICH_CONCURRENCY = 3  # public pages opened at the same time
 
 Kind = Literal["investor", "company", "agent", "agency", "fund", "network", "developer", "seeking", "other"]
 KINDS: tuple[Kind, ...] = ("investor", "company", "agent", "agency", "fund", "network", "developer", "seeking", "other")
@@ -618,12 +619,22 @@ class ReachWorker:
         if self.fetcher is not None and self.config.enrich_per_campaign:
             room = self.config.enrich_per_campaign - await self.store.enriched_count(campaign.id)
         places = [campaign.location, *campaign.aliases.values()]
+        targets: list[Stored] = []
+        for item in kept:  # the cap counts attempts: a page that fails to open uses a slot too
+            if len(targets) < room and people.enrichable_url(item.candidate.platform, item.candidate.url):
+                targets.append(item)
+        gate = asyncio.Semaphore(ENRICH_CONCURRENCY)
+
+        async def read(item: Stored) -> people.Enrichment:
+            async with gate:
+                found = await people.enrich(self.fetcher, item.candidate.platform, item.candidate.url,  # type: ignore[arg-type]
+                                            country=campaign.country)
+            return found if found is not None else people.Enrichment()  # attempted: ``enriched_at`` is set, contacts empty
+
+        read_pages = await asyncio.gather(*(read(item) for item in targets))
+        by_key = {item.candidate.url_key: page for item, page in zip(targets, read_pages, strict=True)}
         for item in kept:
-            enrichment = None
-            if room > 0 and people.enrichable_url(item.candidate.platform, item.candidate.url):
-                enrichment = await people.enrich(self.fetcher, item.candidate.platform, item.candidate.url,  # type: ignore[arg-type]
-                                                 country=campaign.country)
-                room -= 1
+            enrichment = by_key.get(item.candidate.url_key)
             probe = Contact(item.candidate.url_key, item.candidate.url, item.candidate.platform, item.judged.kind,
                             item.judged.name, item.candidate.title, item.candidate.snippet, item.judged.summary_ru,
                             contacts=enrichment.contacts() if enrichment else {},

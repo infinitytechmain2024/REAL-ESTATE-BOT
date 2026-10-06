@@ -86,6 +86,8 @@ class CampaignRunnerSettings(BaseSettings):
     judge: str = Field(default="reviewer", pattern="^(reviewer|legacy)$", validation_alias="CAMPAIGN_JUDGE")
     review_model: str = Field(default="anthropic/claude-sonnet-4.5", validation_alias="OPENROUTER_REVIEW_MODEL")
     review_timeout_seconds: int = Field(default=45, ge=5, le=300, validation_alias="OPENROUTER_REVIEW_TIMEOUT_SECONDS")
+    # Reviewer attempts per campaign (failed calls count): past it the finding is held as unverified.
+    review_max_calls: int = Field(default=300, ge=1, le=10_000, validation_alias="CAMPAIGN_REVIEW_MAX_CALLS")
     # The user's final report when a search ends (bot/campaign/final_report.py); the recommendations come from this model.
     final_report_enabled: bool = Field(default=True, validation_alias="CAMPAIGN_FINAL_REPORT")
     final_model: str = Field(default="anthropic/claude-sonnet-4.5", validation_alias="OPENROUTER_FINAL_MODEL")
@@ -105,7 +107,8 @@ class CampaignRunnerSettings(BaseSettings):
         from bot.agents.reviewer import OpenRouterReviewer
 
         return ReviewerJudge(OpenRouterReviewer(api_key=self.openrouter_api_key, model=self.review_model,
-                                                timeout_seconds=float(self.review_timeout_seconds)), legacy)
+                                                timeout_seconds=float(self.review_timeout_seconds)), legacy,
+                             max_calls=self.review_max_calls)
 
     def final_reporter(self):  # -> bot.campaign.final_report.FinalReporter | None
         from .final_report import FinalReporter, OpenRouterRecommender

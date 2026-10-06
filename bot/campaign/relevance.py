@@ -136,7 +136,7 @@ def task_data(campaign: Campaign, *, review: bool = False) -> dict[str, Any]:
     if review:
         from bot.agents.reviewer import review_task  # lazy: the reviewer imports this module
 
-        data.update(review_task(campaign), text=data["task"][:600])
+        data.update(review_task(campaign), text=data["task"][:600], campaign_id=campaign.id)
     return data
 
 
@@ -293,8 +293,14 @@ class ReviewerJudge:
 
     reviews = True
 
-    def __init__(self, reviewer: Reviewer, fallback: RelevanceJudge | None = None) -> None:
+    def __init__(self, reviewer: Reviewer, fallback: RelevanceJudge | None = None, *, max_calls: int = 300) -> None:
         self.reviewer, self.fallback = reviewer, fallback
+        self.max_calls = max_calls
+        self._attempts: dict[str, int] = {}  # campaign id -> reviewer calls attempted (failed ones count)
+
+    def calls_exhausted(self, campaign_id: str | None) -> bool:
+        """True once the campaign has used ``max_calls`` reviewer attempts (the cost cap)."""
+        return campaign_id is not None and self._attempts.get(campaign_id, 0) >= self.max_calls
 
     @property
     def model(self) -> str:
@@ -311,6 +317,14 @@ class ReviewerJudge:
             if self.fallback is not None:
                 return await self.fallback.judge(task, finding)
             return Relevance(None, "reviewer: investors are not reviewed", None, self.model)
+        task = dict(task)
+        campaign_id = task.pop("campaign_id", None)  # bookkeeping for the cap, not for the model
+        if self.calls_exhausted(campaign_id):
+            return Relevance(None, "reviewer: call cap reached", None, self.model)  # permanent miss: held as unverified
+        if campaign_id is not None:
+            if campaign_id not in self._attempts and len(self._attempts) >= 1000:
+                del self._attempts[next(iter(self._attempts))]
+            self._attempts[campaign_id] = self._attempts.get(campaign_id, 0) + 1  # an attempt, whatever its outcome
         review = await self.reviewer.review(task, finding)
         return Relevance(review.overall, review_reason(review), review.deviation_ru, self.model, review.to_dict())
 
@@ -348,8 +362,9 @@ def _criterion_label(name: str) -> str:
 def review_match(rules: Match, review: dict[str, Any]) -> Match:
     """The bucket of a finding from the rules' bucket and the reviewer's matrix (``review.to_dict``).
 
-    * any hard ``fail`` -> excluded (its quote is in the stored matrix), except a number outside the task that the
-      rules had already placed in their «similar» band (the near-match question is kept);
+    * any hard ``fail`` -> excluded (its quote is in the stored matrix), except when the failed criteria are exactly
+      the one number the rules had measured and placed in their «similar» band (budget for ``price``, area for
+      ``area``): the near-match question is kept; a second or another failed criterion excludes;
     * the reviewer's ``reject`` without a failed criterion (not one concrete offer) -> excluded;
     * any hard ``unknown`` -> not exact: held as similar, «Не подтверждено: <criteria>»;
     * ``near`` -> at least similar; all ``pass`` -> the rules' bucket.
@@ -359,7 +374,8 @@ def review_match(rules: Match, review: dict[str, Any]) -> Match:
     fails = [str(c.get("name")) for c in criteria if c.get("verdict") == "fail"]
     unknown = [str(c.get("name")) for c in criteria if c.get("verdict") == "unknown"]
     if fails:
-        if rules.bucket == "similar" and rules.why in ("price", "area") and all(n in NUMERIC for n in fails):
+        measured = {"price": "budget", "area": "area"}.get(rules.why or "")
+        if rules.bucket == "similar" and measured is not None and set(fails) == {measured}:
             return rules
         name = fails[0]
         return Match("excluded", float("inf"), CRITERION_WHY.get(name, "criteria"),

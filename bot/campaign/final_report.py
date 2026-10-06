@@ -34,6 +34,7 @@ DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 MAX_REPORT_CHARS = 3900
 TOP = 10
 MAX_RECOMMENDATIONS = 4
+UNVERIFIED_ALARM_SHARE = 0.8
 MAX_RECOMMENDATION_CHARS = 260
 SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "RUB": "₽", "UAH": "₴"}
 # Rejection reasons (``campaign_findings.why``) in the order the report lists them.
@@ -78,6 +79,12 @@ class Tally:
     @property
     def rejected(self) -> int:
         return sum(self.excluded.values())
+
+    @property
+    def unverified_majority(self) -> bool:
+        """More than 80 % of the sent and held findings could not be checked: the check itself is probably broken."""
+        base = self.sent + self.held
+        return base > 0 and self.held_unverified > UNVERIFIED_ALARM_SHARE * base
 
     @property
     def total(self) -> int:
@@ -214,7 +221,8 @@ def unreadable_line(site: Site) -> str:
 # --- recommendations -----------------------------------------------------------------------------------------------------
 
 
-def facts_for_model(task: dict[str, Any], counts: Tally, sites: Sequence[Site], unreadable: Sequence[Site]) -> dict[str, Any]:
+def facts_for_model(task: dict[str, Any], counts: Tally, sites: Sequence[Site], unreadable: Sequence[Site],
+                    tolerance_pct: float | None = None) -> dict[str, Any]:
     """The aggregated numbers the model writes recommendations from: no listing text, no links, no ids."""
     return {
         "task": task,
@@ -226,7 +234,7 @@ def facts_for_model(task: dict[str, Any], counts: Tally, sites: Sequence[Site], 
         "sites": [{"site": s.host, "links": s.links, "pages_read": s.read, "from_search_snippet": s.from_search,
                    "refused": s.refused, "cards_sent": s.sent, "cards_held": s.held} for s in sites[:12]],
         "unreadable_sites": [s.host for s in unreadable],
-        "tolerance_pct": round(BUDGET_TOLERANCE * 100),
+        "tolerance_pct": tolerance_pct if tolerance_pct else round(BUDGET_TOLERANCE * 100),  # the spec's, else the default
     }
 
 
@@ -349,6 +357,10 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
             summary.append(f"Отклонено: {counts.rejected}")
         if counts.duplicates:
             summary.append(f"Повторы одного объекта на разных сайтах: {counts.duplicates}")
+        if counts.unverified_majority:
+            log.warning("campaign.unverified_majority %s/%s", counts.held_unverified, counts.sent + counts.held)
+            summary.append(f"⚠️ Большинство находок не удалось проверить автоматически "
+                           f"({counts.held_unverified} из {counts.sent + counts.held}): проверьте ключ ИИ и лимиты")
     reasons: list[str] = []
     if counts.excluded:
         order = [r for r in REASONS if r in counts.excluded] + sorted(set(counts.excluded) - set(REASONS))
@@ -379,13 +391,14 @@ class FinalReporter:
             await close()
 
     async def build(self, goal: str, request: Request, outcomes: Sequence[OutcomeCount], sent: Sequence[SentFinding],
-                    sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = ()) -> str:
+                    sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = (),
+                    tolerance_pct: float | None = None) -> str:
         counts = tally(outcomes)
         stats = site_stats(sources, reports, portals)
         unreadable = unreadable_sites(sources, reports, portals)
         funnel, _nothing = site_lines(sources, reports, portals)
         facts = facts_for_model(task_facts(request), counts, sorted(
-            stats.values(), key=lambda s: (-s.sent, -s.links, s.host)), unreadable)
+            stats.values(), key=lambda s: (-s.sent, -s.links, s.host)), unreadable, tolerance_pct)
         return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, await self._advice(facts, counts))
 
     async def _advice(self, facts: dict[str, Any], counts: Tally) -> list[str]:

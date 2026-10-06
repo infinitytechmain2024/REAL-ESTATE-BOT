@@ -133,7 +133,14 @@ _EMAIL = re.compile(r"[\w.+-]{1,64}@[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63})+", re.I
 _NOT_EMAIL_TLD = ("png", "jpg", "jpeg", "gif", "webp", "svg", "css", "js", "ico", "woff", "woff2")
 _NOT_EMAIL_HOST = ("example.com", "sentry.io", "wixpress.com", "domain.com", "email.com")
 _TEL = re.compile(r"""href=["']tel:([+\d\s().-]{7,25})""", re.I)
-_PHONE = re.compile(r"(?<![\w+])\+?\d[\d \-().]{7,17}\d(?!\w)")
+_PHONE = re.compile(r"(?<![\w+])\+\d[\d \-().]{7,17}\d(?!\w)")  # page text: a leading + is required
+_RANGE = re.compile(r"\s[-–—]\s")
+_YEAR = re.compile(r"(?:19|20)\d{2}")
+# t.me paths that are actions or invites, never a channel or a person
+_TME_ACTIONS = frozenset({"joinchat", "addstickers", "addemoji", "share", "proxy", "socks", "setlanguage", "iv",
+                          "login", "c", "boost", "invoice", "giftcode"})
+_PLATFORM_BRANDS = frozenset({"telegram", "t me", "telegram me", "linkedin", "facebook", "instagram", "twitter", "x",
+                              "youtube", "tiktok", "reddit", "whatsapp"})
 _DATE_ATTR = re.compile(r"""(?:datetime|dateModified|datePublished|article:modified_time|article:published_time)"""
                         r"""["']?\s*[:=]\s*["'](\d{4}-\d{2}-\d{2})""", re.I)
 _DATE_TAG = re.compile(r"""<time[^>]*datetime=["'](\d{4}-\d{2}-\d{2})""", re.I)
@@ -181,6 +188,8 @@ def enrichable_url(platform: str, url: str) -> str | None:
         if host_of(url) not in ("t.me", "telegram.me") or not seg:
             return None
         name = seg[1] if seg[0] == "s" and len(seg) > 1 else seg[0]
+        if seg[0].startswith("+") or name.startswith("+") or name.casefold() in _TME_ACTIONS:
+            return None
         return f"https://t.me/s/{name}" if re.fullmatch(r"[A-Za-z0-9_]{3,64}", name) else None
     host = host_of(url)
     if platform != "web" or not host or is_blocked(host) or not fetchable(url):
@@ -194,7 +203,17 @@ def _valid_email(value: str) -> bool:
 
 
 def _phone_ok(value: str) -> bool:
+    """A phone number, not a range («150 000 - 300 000») or a run of years («2019 2020 2021»)."""
+    if _RANGE.search(value):
+        return False
+    groups = re.findall(r"\d+", value)
+    if len(groups) >= 2 and all(_YEAR.fullmatch(g) for g in groups):
+        return False
     return 9 <= len(re.sub(r"\D", "", value)) <= 15
+
+
+def _is_platform_brand(value: str | None) -> bool:
+    return _norm(value) in _PLATFORM_BRANDS
 
 
 def extract(html: str, url: str, platform: str) -> Enrichment:
@@ -221,6 +240,8 @@ def extract(html: str, url: str, platform: str) -> Enrichment:
     title = page.title.strip()
     parts = [p.strip() for p in _TITLE_SEP.split(title) if p.strip()]
     company = (parts[-1] if len(parts) > 1 else (parts[0] if parts else "")) or None
+    if company and _is_platform_brand(company):  # «Name – Telegram»: the host's brand is not the person's company
+        company = None
     description = " ".join((page.text or page.description).split())[:DESCRIPTION_CHARS]
     today = datetime.now(UTC).date()
     dates: list[date] = []
@@ -259,7 +280,7 @@ async def enrich(fetcher: PageFetcherLike, platform: str, url: str, *, country: 
 
 # --- scoring ----------------------------------------------------------------------------------------------
 
-POINTS = {"kind": 40, "geography": 20, "asset": 15, "ticket": 15, "contact": 10, "activity": 5}
+POINTS = {"kind": 40, "company": 10, "snippet_cap": 60, "geography": 20, "asset": 15, "ticket": 15, "contact": 10, "activity": 5}
 ASSET_WORDS: dict[str, tuple[str, ...]] = {
     "residential": ("residential", "vivienda", "жил", "apartment", "piso", "квартир"),
     "commercial": ("commercial", "comercial", "коммерч", "офис", "office", "retail", "local comercial"),
@@ -270,9 +291,10 @@ ASSET_WORDS: dict[str, tuple[str, ...]] = {
 }
 _NUMBER_WORDS = {"k": 1e3, "тыс": 1e3, "thousand": 1e3, "mil": 1e3, "m": 1e6, "mm": 1e6, "mln": 1e6, "млн": 1e6,
                  "million": 1e6, "millones": 1e6}
+_UNIT_AFTER = re.compile(r"\s?(?:m2|m²|м2|м²|km|км|sq)", re.I)
 _AMOUNT = re.compile(
     r"(?P<pre>[€$£]\s?)?(?P<num>\d{1,3}(?:[ ,.]\d{3})+|\d+(?:[.,]\d+)?)\s?"
-    r"(?P<suf>millones|million|thousand|mln|млн|тыс|mil|mm|k|m)?(?![^\W\d_])"
+    r"(?P<suf>millones|million|thousand|mln|млн|тыс|mil|mm|k|m)?(?![^\W_]|²)"
     r"(?P<post>\s?(?:[€$£]|eur\b|usd\b|euros?\b|евро\b|долл))?", re.I)
 
 
@@ -281,6 +303,8 @@ def amounts_in(text: str) -> list[float]:
     found: list[float] = []
     for m in _AMOUNT.finditer(text):
         if not (m.group("pre") or m.group("suf") or m.group("post")):
+            continue
+        if _UNIT_AFTER.match(text, m.end("num")):  # an area or a distance, not money
             continue
         num = m.group("num")
         if re.fullmatch(r"\d{1,3}(?:[ ,.]\d{3})+", num):
@@ -301,19 +325,25 @@ def _text_of(contact: Any) -> str:
                                            info.get("website")) if part)
 
 
-def kind_matches(kind: str, who: Sequence[str]) -> bool:
-    if not who or kind == "company":  # no wish stated, or the judge already matched the kind the task asks for
-        return True
-    return any(kind in WHO_KINDS.get(w, frozenset()) for w in who)
+_FAMILY_OFFICE = re.compile(r"family[\s-]+offices?|семейн\w*\s+офис\w*|сімейн\w*\s+офіс\w*|oficinas?\s+familiar\w*", re.I)
+
+
+def _has_word(text: str, word: str) -> bool:
+    """``word`` as a word of ``text`` (Latin: whole word, an «s» plural allowed; Cyrillic stem: word start)."""
+    word = word.casefold()
+    if word.isascii():
+        return re.search(rf"(?<!\w){re.escape(word)}s?(?!\w)", text) is not None
+    return re.search(rf"(?<!\w){re.escape(word)}", text) is not None
 
 
 def score(contact: Any, spec_investor: Mapping[str, Any] | None, *, places: Sequence[str] = (),
           now: datetime | None = None) -> tuple[int, list[str]]:
     """How well a found contact fits the task, 0..100, with the reasons in Russian.
 
-    kind matches ``who`` +40, the place (``geography`` and ``places``) is named +20, an asset class word +15,
+    kind matches ``who`` +40 (a company with no ``who``: +10), the place (``geography`` and ``places``) is named +20, an asset class word +15,
     a sum within the ticket range +15, a contact (e-mail / phone) +10, activity within a year +5.
-    Without a spec only the place, contact and activity count (the rest is not asked).
+    Without a spec only the place, contact and activity count (the rest is not asked). Without a ``profile_text``
+    (the page was not read: snippet evidence only) the total is capped at 60.
     """
     from . import geo
     from .leads import contacts_in
@@ -323,17 +353,22 @@ def score(contact: Any, spec_investor: Mapping[str, Any] | None, *, places: Sequ
     points = 0
     reasons: list[str] = []
     who = list(spec.get("who") or [])
-    if spec and kind_matches(str(getattr(contact, "kind", "")), who):
+    kind = str(getattr(contact, "kind", ""))
+    if spec and who and any(kind in WHO_KINDS.get(w, frozenset()) for w in who):
         points += POINTS["kind"]
         reasons.append("тип совпадает с запросом")
+    elif spec and not who and kind == "company":  # the judge matched a company; nothing else is known of the kind
+        points += POINTS["company"]
+        reasons.append("компания")
     names = [*places, *(spec.get("geography") or [])]
     place = next((p for p in names if p and geo.mentions_place(text, geo.place_names(str(p)))), None)
     if place:
         points += POINTS["geography"]
         reasons.append(f"упомянут {place}")
     assets = [a for a in spec.get("asset_class") or [] if a]
-    asset = next((a for a in assets if a.casefold() in text.casefold()
-                  or any(w in text.casefold() for w in ASSET_WORDS.get(a.casefold(), ()))), None)
+    plain = _FAMILY_OFFICE.sub(" ", text).casefold()  # «family office» is not «office»
+    asset = next((a for a in assets if _has_word(plain, a)
+                  or any(_has_word(plain, w) for w in ASSET_WORDS.get(a.casefold(), ()))), None)
     if asset:
         points += POINTS["asset"]
         reasons.append(f"класс актива: {asset}")
@@ -356,6 +391,8 @@ def score(contact: Any, spec_investor: Mapping[str, Any] | None, *, places: Sequ
     if last and 0 <= (today - last).days < 365:
         points += POINTS["activity"]
         reasons.append("активен в последний год")
+    if not getattr(contact, "profile_text", None):  # a search snippet alone is thin evidence
+        points = min(points, POINTS["snippet_cap"])
     return min(100, points), reasons
 
 
@@ -374,9 +411,12 @@ def _norm(value: str | None) -> str:
 def person_key(name: str | None, company: str | None, city: str | None) -> str:
     """The identity of a person across platforms: normalised name, company and city (empty: no safe identity).
 
-    A one-word name without a company is no identity (every «Ana» would merge).
+    A one-word name without a company is no identity (every «Ana» would merge); a platform brand (Telegram,
+    LinkedIn ...) is no company.
     """
     n, c = _norm(name), _norm(company)
+    if c in _PLATFORM_BRANDS:  # «Telegram» is where the person was found, not who they work for
+        c = ""
     if not n or (len(n.split()) < 2 and not c):
         return ""
     return f"{n}|{c}|{_norm(city)}"

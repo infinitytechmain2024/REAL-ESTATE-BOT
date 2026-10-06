@@ -257,7 +257,7 @@ def test_the_same_person_on_two_platforms_is_one_card_with_the_best_score_and_al
 def test_groups_come_investors_then_developers_then_agents_each_by_score() -> None:
     contacts = [_contact(1, "agent", title="Madrid"), _contact(2, "developer", title="Madrid"),
                 _contact(3, "fund", title="x"), _contact(4, "fund", title="Madrid"), _contact(5, "network"),
-                _contact(6, "investor", title="Madrid"), _contact(7, "agency", title="Madrid", contacts={"emails": ["a@b.es"]})]
+                _contact(6, "investor", title="Madrid"), _contact(7, "agency", title="Madrid", profile_text="Agencia", contacts={"emails": ["a@b.es"]})]
     cards = build_cards(contacts, {"who": ["fund", "developer", "agency", "network", "private", "agent"]},
                         places=["Madrid"], now=NOW)
     assert [(c.group, c.contact.name[-1]) for c in cards] == [
@@ -286,7 +286,7 @@ async def test_an_investor_search_sends_group_headers_once_cards_by_score_and_me
         _contact(3, "developer", "Dev Dos", title="Madrid"),
         _contact(4, "fund", "Fondo Cuatro", title="x"),
         _contact(5, "fund", "Juan Pérez", platform="linkedin", title="Madrid"),
-        _contact(6, "fund", "juan perez", title="Madrid fondo", contacts={"emails": ["j@b.es"]}),
+        _contact(6, "fund", "juan perez", title="Madrid fondo", profile_text="Fondo", contacts={"emails": ["j@b.es"]}),
     ]
     await runner.step(cid)
     await runner.step(cid)
@@ -348,3 +348,118 @@ def test_settings_default_comment_leads_to_investors_and_pass_the_enrichment_cap
     monkeypatch.setenv("INVESTOR_REACH_ENRICH_PER_CAMPAIGN", "7")
     settings = CampaignRunnerSettings(_env_file=None, DATABASE_URL="postgresql://x", TELEGRAM_TOKEN="t")
     assert settings.comment_leads == "investors" and settings.reach_config().enrich_per_campaign == 7
+
+
+# --- review fixes: telegram pages, phones, scoring ----------------------------------------------------------------------------
+
+TME_PAGE = """<html><head><title>Ana Gómez – Telegram</title></head><body>
+<div class="tgme_widget_message_text">Invertimos en vivienda. Llame al 150 000 - 300 000 o desde 2019 2020 2021</div>
+</body></html>"""
+
+
+def test_a_telegram_page_never_gives_the_platform_as_the_company() -> None:
+    e = extract(TME_PAGE, "https://t.me/s/anagomez", "telegram")
+    assert e.company is None and e.phones == ()
+    assert extract("<title>Telegram</title>", "https://t.me/s/x", "telegram").company is None
+    assert extract("<title>Madrid Investors | Telegram</title>", "https://t.me/s/x", "telegram").company is None
+    assert extract("<title>Hola | Capital Norte</title>", "https://t.me/s/x", "telegram").company == "Capital Norte"
+    # a one-word name is no identity just because the company is a platform brand
+    assert person_key("Ana", "Telegram", "Madrid") == "" and person_key("Ana", "LinkedIn", "Madrid") == ""
+    assert person_key("Ana Gómez", "Telegram", "Madrid") == person_key("Ana Gómez", None, "Madrid")
+
+
+@pytest.mark.parametrize("url", ["https://t.me/joinchat/AAAA", "https://t.me/addstickers/pack", "https://t.me/share/url",
+                                 "https://t.me/+invitehash", "https://t.me/s/joinchat", "https://t.me/s/+hash"])
+def test_telegram_invite_and_action_links_are_never_opened(url: str) -> None:
+    assert enrichable_url("telegram", url) is None
+
+
+def test_page_text_phones_need_a_plus_or_a_tel_link_and_are_not_ranges_or_years() -> None:
+    def phones(body: str) -> tuple[str, ...]:
+        return extract(f"<html><head><title>x</title></head><body><p>{body}</p></body></html>",
+                       "https://a.example/", "web").phones
+
+    assert phones("Precio 150 000 - 300 000 euros") == ()
+    assert phones("Años 2019 2020 2021") == ()
+    assert phones("Llame 612 345 678") == (), "no leading + and no tel: link"
+    assert phones("Llame +34 612 345 678") == ("+34 612 345 678",)
+    assert phones("rango +34 612 - 345 678") == ()
+    tel = extract('<a href="tel:+34612345678">x</a>', "https://a.example/", "web")
+    assert tel.phones == ("+34612345678",)
+
+
+def test_amounts_ignore_areas_and_distances() -> None:
+    assert amounts_in("terreno 500 m2, 1200 m², 3000 м², a 5 km, 2 km de Madrid") == []
+    assert amounts_in("€5 000 m²") == []
+    assert amounts_in("tickets €500k and 120 m2") == [500_000.0]
+
+
+def test_a_company_is_not_a_kind_match_a_snippet_is_capped_and_asset_words_are_whole_words() -> None:
+    fund = {"who": ["fund"], "asset_class": ["land", "commercial"], "geography": ["Madrid"]}
+    # kind +40 only for a real match: a company earns none when who is stated, +10 when it is not
+    assert score(_contact(1, "company", title="x"), {"who": ["fund"]}, now=NOW)[0] == 0
+    assert score(_contact(1, "company", title="x"), {"who": []}, now=NOW) == (10, ["компания"])
+    assert score(_contact(1, "investor", title="x"), {"who": []}, now=NOW)[0] == 0
+    assert score(_contact(1, "fund", title="x"), {"who": ["fund"]}, now=NOW)[0] == 40
+    # the asset words need word boundaries
+    for text in ("Finland landing page", "Family office in Finland", "семейный офис"):
+        assert "класс актива" not in " ".join(score(_contact(2, "fund", title=text, profile_text="x"), fund, now=NOW)[1])
+    for text in ("Land for sale", "Terrenos y lands", "Oficina comercial"):
+        assert any("класс актива" in r for r in score(_contact(2, "fund", title=text, profile_text="x"), fund, now=NOW)[1])
+    office = {"asset_class": ["commercial"]}
+    assert not any("актива" in r for r in score(_contact(3, "fund", title="Family Office Madrid", profile_text="x"),
+                                                office, now=NOW)[1])
+    assert any("актива" in r for r in score(_contact(3, "fund", title="Office space", profile_text="x"), office,
+                                            now=NOW)[1])
+    # snippet-only evidence (no page text) never goes above 60
+    rich = {"who": ["fund"], "asset_class": ["residential"], "geography": ["Madrid"],
+            "ticket": {"min": 500_000, "max": 2_000_000}}
+    snippet = _contact(4, "fund", title="Fondo Madrid vivienda 1 000 000 EUR", contacts={"emails": ["a@b.es"]})
+    assert score(snippet, rich, now=NOW)[0] == 60
+    read = _contact(4, "fund", title="Fondo Madrid vivienda 1 000 000 EUR", profile_text="Fondo",
+                    contacts={"emails": ["a@b.es"]})
+    assert score(read, rich, now=NOW)[0] == 100
+
+
+async def test_the_enrichment_cap_counts_attempts_and_pages_are_read_three_at_a_time() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    class Slow:
+        def __init__(self) -> None:
+            self.running = self.peak = 0
+            self.fetched: list[str] = []
+
+        async def allowed(self, url: str) -> bool:
+            return True
+
+        async def fetch(self, url: str, *, country: str | None = None):
+            self.fetched.append(url)
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+            await asyncio.sleep(0.01)
+            self.running -= 1
+            if "bad" in url:
+                raise RuntimeError("503")
+            return SimpleNamespace(url=url, html=SITE)
+
+    class Judge:
+        model = "m"
+
+        async def judge(self, campaign, candidates):
+            return [Judged("fund", True, 0.9, f"Fund{i}", "Фонд") for i, _ in enumerate(candidates)]
+
+    hits = [SearchHit(f"https://{'bad' if i < 2 else 'ok'}{i}.es/", f"Fondo {i} Madrid", "") for i in range(8)]
+    fetcher = Slow()
+    store = MemoryReachStore([MADRID])
+    worker = ReachWorker(store, FakeSearcher({q.text: hits for q in plan_queries(MADRID)[:1]}), Judge(),
+                         config=ReachConfig(queries_per_tick=1, enrich_per_campaign=5), fetcher=fetcher)
+    await worker.tick()
+    assert len(fetcher.fetched) == 5, "failed fetches use cap slots too"
+    assert fetcher.peak == 3, "at most three pages are read at once"
+    assert await store.enriched_count("c1") == 5
+    failed = [e for k, e in store.enrichments.items() if store.contacts[k].candidate.url.startswith("https://bad")]
+    assert len(failed) == 2 and all(e.contacts() == {} and e.description == "" for e in failed)
+    # the next tick has no room left: nothing more is opened
+    await worker.tick()
+    assert len(fetcher.fetched) == 5
