@@ -952,7 +952,8 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
                              max_results=config.results_per_query, pages=config.pages_per_query)
     fetcher = PageFetcher(user_agent=settings.user_agent, request_timeout_seconds=settings.request_timeout_seconds,
                           max_content_bytes=settings.max_content_bytes, host_interval_seconds=settings.host_interval_seconds,
-                          proxy_url=settings.proxy_url or None)
+                          proxy_url=settings.proxy_url or None, impersonate=settings.impersonate,
+                          browser_user_agent=settings.browser_user_agent or None)
     model = None
     if settings.openrouter_api_key:
         model = OpenRouterQueryGenerator(api_key=settings.openrouter_api_key, model=settings.query_model,

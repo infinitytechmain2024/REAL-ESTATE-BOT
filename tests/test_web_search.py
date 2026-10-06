@@ -91,12 +91,14 @@ class FakeFetcher:
         self.pages = pages or {}
         self.disallow, self.errors = set(disallow), errors or {}
         self.fetched: list[str] = []
+        self.countries: list[str | None] = []
 
     async def allowed(self, url: str) -> bool:
         return url not in self.disallow
 
-    async def fetch(self, url: str) -> FetchedPage:
+    async def fetch(self, url: str, *, country: str | None = None) -> FetchedPage:
         self.fetched.append(url)
+        self.countries.append(country)
         if url in self.errors:
             raise FetchError(self.errors[url])
         return FetchedPage(url, self.pages.get(url, listing_page(url)))
@@ -253,6 +255,7 @@ async def test_an_index_page_is_read_again_after_its_ttl_and_a_listing_never() -
     await run_until_done(WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, gen,
                                          config=WebSearchConfig(cover_portals=False), now=lambda: clock[0]), first)
     assert fetcher.fetched.count(INDEX_URL) == 1 and fetcher.fetched.count(listing) == 1
+    assert set(fetcher.countries) == {"ES"}
     clock[0] += timedelta(days=8)
     second = await campaign(campaigns)
     w2 = WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, ListGenerator(["q two"]),

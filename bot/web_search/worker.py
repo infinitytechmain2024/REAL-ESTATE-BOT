@@ -278,7 +278,7 @@ class WebSearchWorker:
             budget -= 1
             pages += 1
             await self.store.set_progress(campaign.id, url.host, self._line(None, pages, f"сайт {url.host}"))
-            result, children = await self._read(campaign.id, url)
+            result, children = await self._read(campaign, url)
             if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
                 result = search_result(url, result.error) or result
             await self.store.finish_fetch(ticket, result)
@@ -300,29 +300,30 @@ class WebSearchWorker:
         log.info("web_search.search_result_kept", extra={"campaign_id": campaign.id, "host": url.host})
         return True
 
-    async def _read(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
+    async def _read(self, campaign: Campaign, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
         """Plain HTTP first; Scrapling reads the site's JSON-LD; the browser only when HTTP showed nothing."""
         cfg = self.config
         try:
-            page = await asyncio.wait_for(self.fetcher.fetch(url.url), timeout=cfg.page_runtime_seconds)
+            fetch = self.fetcher.fetch(url.url, country=query_task(campaign).country)
+            page = await asyncio.wait_for(fetch, timeout=cfg.page_runtime_seconds)
         except FetchError as exc:
             return PageResult(False, url.kind, url.url, error=exc.code), []
         except TimeoutError:
             return PageResult(False, url.kind, url.url, error="timeout"), []
         parsed = parse_html(page.html, page.url)
         result, children = self._page(url, page.url, parsed, structured(page.html, page.url))
-        if not await self._wants_render(campaign_id, result, children):
+        if not await self._wants_render(campaign.id, result, children):
             return result, children
-        await self.store.mark_rendered(campaign_id, url.url_key)
+        await self.store.mark_rendered(campaign.id, url.url_key)
         try:
             rendered = await asyncio.wait_for(self.renderer.render(page.url), timeout=cfg.page_runtime_seconds)
         except (RenderError, TimeoutError) as exc:
-            log.info("web_search.render_skipped %s", getattr(exc, "code", "timeout"), extra={"campaign_id": campaign_id})
+            log.info("web_search.render_skipped %s", getattr(exc, "code", "timeout"), extra={"campaign_id": campaign.id})
             return result, children
         seen = ParsedPage(rendered.title or parsed.title, parsed.description, rendered.text,
                           tuple(Link(href, text) for href, text in rendered.links))
         again, more = self._page(url, rendered.url, seen, from_jsonld(rendered.jsonld, rendered.url))
-        log.info("web_search.rendered", extra={"campaign_id": campaign_id, "ok": again.ok, "links": len(more)})
+        log.info("web_search.rendered", extra={"campaign_id": campaign.id, "ok": again.ok, "links": len(more)})
         return (again, more) if again.ok and (again.kind == "listing" or more) else (result, children)
 
     async def _wants_render(self, campaign_id: str, result: PageResult, children: list[Candidate]) -> bool:

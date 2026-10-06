@@ -28,7 +28,7 @@ from typing import Any, Literal, Protocol
 
 import httpx
 
-from bot.web_search.models import SEARCH_RESULT_NOTE
+from bot.web_search.models import INDEX_RESULT_NOTE, SEARCH_RESULT_NOTE
 
 from . import geo
 from .models import Campaign
@@ -84,6 +84,8 @@ Example: task "земельный участок от 2000 м² под заст�
 {"verdict": "reject", "reason": "Каталог объявлений в Москве, а не участок под Мадридом.", "deviation_ru": ""}
 Answer with exactly one JSON object {"verdict": ..., "reason": ..., "deviation_ru": ...}. No markdown."""
 
+INDEX_NOTE_PREFIX = INDEX_RESULT_NOTE.split("{")[0]
+
 
 @dataclass(frozen=True, slots=True)
 class Relevance:
@@ -136,7 +138,7 @@ def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", ori
     return {
         "summary": str(summary or "")[:MAX_SUMMARY_CHARS],
         "excerpt": excerpt[:MAX_EXCERPT_CHARS],
-        "from_search": SEARCH_RESULT_NOTE in str(original or ""),  # the note ends the post: check it whole
+        "from_search": SEARCH_RESULT_NOTE in str(original or "") or INDEX_NOTE_PREFIX in str(original or ""),  # the note ends the post: check it whole
         "location": payload.get("location"),
         "country": payload.get("country"),
         "price": payload.get("price_amount"),
