@@ -1,5 +1,7 @@
 # Stage 2 — Make failure visible
 
+> **Note:** `bot/main.py` referred to below has moved to `legacy/bot/main.py` (stage 6.1); this brief is historical.
+
 **Self-contained brief.** Written so a session with no memory of the previous conversation
 can execute it. Everything you need is here or in the repo; nothing depends on chat history.
 

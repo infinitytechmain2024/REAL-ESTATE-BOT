@@ -1,5 +1,24 @@
 # Hybrid multi-agent system: Claude + Jev + Grok review loop
 
+## Статус (что живое, что теневое, что остаётся проектом)
+
+Документ ниже описывает целевую схему; в работе сейчас вот что (общая картина:
+[ARCHITECTURE.md](ARCHITECTURE.md)).
+
+| Часть | Состояние | Где |
+|---|---|---|
+| Извлечение `analysis-v6` (Sonnet, дословные цитаты, JSON-LD первым) | **живое** | `analysis-worker`, `OPENROUTER_ANALYSIS_MODEL` |
+| Рецензент: матрица критериев `pass / fail / unknown` с цитатой на каждую находку | **живое** (это stage 4.1 плана, он заменил прежний одно-словный судья; не путать с SA-6 «Reviewer bridge» этого документа) | `bot/agents/reviewer.py`, `CAMPAIGN_JUDGE=reviewer`, `OPENROUTER_REVIEW_MODEL` |
+| Итоговый отчёт пользователю: причины отклонений, 10 лучших карточек, воронка по сайтам, рекомендации | **живое** (часть SA-4 «Final Analysis») | `bot/campaign/final_report.py`, `OPENROUTER_FINAL_MODEL` |
+| Дедуп объектов: одна карточка на несколько сайтов | **живое** (часть SA-4 «Dedup») | `bot/campaign/dedup.py`, миграция 036 |
+| SA-3 Recorder: каждая находка записывается до отправки | **живое** | `bot/agents/recorder.py`, миграция 024 |
+| SA-2 Reduction agents (Claude извлекает, Jev решает, шлюз) | **теневое**: решения пишутся в `agent_reductions`, ничего не отправляется; выключено по умолчанию | `reduction-worker`, `AGENT_REDUCTION_ENABLED=false`, миграция 025 |
+| SA-0 Planner, SA-1 Platform Searchers | частично заменены: `TaskSpec` + интервьюер, `SearchPlan`, сборщики внутри `campaign-runner` | см. ARCHITECTURE.md |
+| SA-5 Trace Packager, SA-6 Reviewer bridge (Grok), SA-7 Improvement Applier | **только проект**: кода нет | задачи 5.1–5.3 этого документа |
+
+Всё, что ниже строки «Status:», написано раньше и описывает историю фаз; при
+расхождении верна таблица выше.
+
 Status:
 - **Phase 1 implemented.** Migration `024_agent_findings.sql` and the SA-3
   Recorder (`bot/agents/recorder.py`) store every campaign finding before it

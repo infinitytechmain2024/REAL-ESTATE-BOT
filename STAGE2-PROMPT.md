@@ -1,5 +1,7 @@
 # Stage 2 — execution prompt
 
+> **Note:** `bot/main.py` referred to below has moved to `legacy/bot/main.py` (stage 6.1); this brief is historical.
+
 Paste the block below into a fresh Claude Code session opened on this repository.
 It is written to stand alone: it names the branch, the spec to read, the invariants,
 and the commands that decide whether the work is done.
