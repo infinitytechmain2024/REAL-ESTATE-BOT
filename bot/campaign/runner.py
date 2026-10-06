@@ -72,7 +72,19 @@ from .runs import (
     StreamFinding,
     Window,
 )
-from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
+from .status_text import (
+    FACEBOOK,
+    LAYER_NAMES,
+    LIMIT_REASONS,
+    campaign_label,
+    group_status,
+    user_status,
+    web_done_status,
+    web_progress_status,
+)
+from .status_text import (
+    SEARCHING as USER_SEARCHING,
+)
 from .store import CampaignStore
 from .summary import summary_text
 from .tolerance import (
@@ -198,6 +210,7 @@ class RunnerConfig:
     window_cooldown_seconds: float = 120
     analysis_grace_seconds: float = 600
     refusal_retry_seconds: float = 300
+    web_status_seconds: float = 10  # the web progress line is edited at most this often
     max_stream_per_step: int = 20
     # After the last window, how long the campaign waits for social network searches still to come.
     social_grace_seconds: float = 1800
@@ -258,6 +271,7 @@ class CampaignRunner:
         self._relevance_misses: dict[str, int] = {}
         # Campaigns whose chat got a card or a question below the status message: the status moves down.
         self._below_status: set[str] = set()
+        self._web_edit_at: dict[str, datetime] = {}  # campaign id -> when the web progress line was last shown
 
     async def tick(self) -> int:
         """Advance every open (or just finished) campaign by one step; returns how many were seen."""
@@ -796,6 +810,11 @@ class CampaignRunner:
         moved = current.id in self._below_status
         if current.status_message_id is not None and run.status_text == text and not moved:
             return
+        if (not moved and current.status_message_id is not None and text.startswith("Сейчас: сайты")
+                and (run.status_text or "").startswith("Сейчас: сайты")
+                and (self.now() - self._web_edit_at.get(current.id, datetime.min.replace(tzinfo=UTC))).total_seconds()
+                < self.config.web_status_seconds):
+            return  # the counters move every page: one edit per web_status_seconds is enough
         try:
             if current.status_message_id is None:
                 await self._new_status(current, text)
@@ -815,6 +834,8 @@ class CampaignRunner:
             log.warning("campaign.status_update_failed", extra={"campaign_id": current.id})
             return
         self._below_status.discard(current.id)
+        if text.startswith("Сейчас: сайты"):
+            self._web_edit_at[current.id] = self.now()
         await self.store.save_run(current.id, replace(await self.store.get_run(current.id), status_text=text))
 
     async def _status_text(self, campaign: Campaign, line: str) -> str:
@@ -827,6 +848,8 @@ class CampaignRunner:
             text = f"🎯 {campaign.plan.goal}\n{line or STOPPED}"
             if web_active and web.line and web.line != line:
                 text += f"\n{web.line}"
+            if web_active and getattr(web, "progress", None) is not None:
+                text += await self._web_detail(campaign, web.progress)
             if social is not None:
                 if social.searching:
                     query = f" · «{social.query}»" if social.query else ""
@@ -839,13 +862,30 @@ class CampaignRunner:
         if line.startswith("Сейчас: Facebook · ") and line.endswith(" · ищу дальше"):
             # The group being read right now, by its name (like «Ищу на сайте fotocasa.es…» for sites).
             return group_status(line.removeprefix("Сейчас: Facebook · ").removesuffix(" · ищу дальше"))
+        progress = getattr(web, "progress", None)
         if web_active:
+            if progress is not None:
+                return web_progress_status(web.host or progress.host, progress.layer, progress.read, progress.found,
+                                           progress.portals_done, progress.portals_total)
             return user_status("site", site=web.host) if web.host else user_status("web")
         checking = line == ANALYSIS and bool(await self.store.pending_analysis(campaign.id))
         # A network search is shown while Facebook itself is idle (between windows, waiting, at the end).
         facebook_busy = line == SEARCHING or line.startswith("Сейчас: Facebook")
         searching = social.searching if social is not None and not facebook_busy else None
-        return campaign_label(campaign.state, checking=checking, social=searching)
+        label = campaign_label(campaign.state, checking=checking, social=searching)
+        if progress is not None and progress.finished and label in (USER_SEARCHING, FACEBOOK) and searching is None:
+            return web_done_status(progress.read, progress.found)  # the web stage ended: its totals stay on screen
+        return label
+
+    async def _web_detail(self, campaign: Campaign, progress: Any) -> str:
+        """Owners only: the current host's refusals per layer and the cards sent so far."""
+        parts = []
+        if progress.refusals and progress.host:
+            parts.append(f"{progress.host}: отказы " + ", ".join(f"{LAYER_NAMES.get(layer, layer)} {n}" for layer, n in progress.refusals))
+        sent = await self.store.streamed_count(campaign.id)
+        if sent:
+            parts.append(f"карточек отправлено {sent}")
+        return f"\nСайты: {' · '.join(parts)}" if parts else ""
 
     async def _web(self, campaign_id: str) -> Any:
         """The web stage's status, or None (no web stage, or it could not be read: never blocks the runner)."""

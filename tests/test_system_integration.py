@@ -154,7 +154,7 @@ class FakeAnalyzer:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    async def analyze(self, evidence, vertical: str) -> AnalysisResult:
+    async def analyze(self, evidence, vertical: str, task_hint=None) -> AnalysisResult:
         self.calls.append((evidence.canonical_url, vertical))
         text = evidence.text.lower()
         relevant = ("piso" in text) if vertical == "real_estate" else ("inversores" in text)

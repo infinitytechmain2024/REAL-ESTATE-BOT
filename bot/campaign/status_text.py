@@ -36,6 +36,14 @@ _GROUP_PREFIX, _GROUP_SUFFIX = "Ищу в группе Facebook «", "»…"
 MAX_GROUP_CHARS = 60
 _GROUP_UNSAFE = re.compile(r"[«»<>\"`\n\r\t]|https?://|www\.|/", re.IGNORECASE)
 
+_PROGRESS_PREFIX = "Сейчас: сайты"
+_DONE_PREFIX = "Сайты: готово"
+LAYER_NAMES = {"http": "напрямую", "browser": "браузер", "api": "API"}
+_PROGRESS = re.compile(
+    rf"^{_PROGRESS_PREFIX}(?: · (?P<host>[A-Za-z0-9][A-Za-z0-9.\-]{{0,39}})(?: \((?P<layer>[^()]+)\))?)?"
+    r" · прочитано (?P<read>\d+) · найдено (?P<found>\d+)(?: · порталов (?P<done>\d+)/(?P<total>\d+))?$")
+_DONE = re.compile(rf"^{_DONE_PREFIX} · прочитано (\d+) · найдено (\d+)$")
+
 Stage = Literal[
     "accepted", "planning", "discovery", "facebook", "web", "site", "social", "checking",
     "verification", "waiting", "error", "finished",
@@ -53,6 +61,30 @@ def site_status(name: str | None) -> str:
         name = name.split("://", 1)[1]
     name = name.split("/", 1)[0].removeprefix("www.")
     return f"{_SITE_PREFIX}{name}{_SITE_SUFFIX}" if name and _SITE_NAME.match(name) else WEB
+
+
+def web_progress_status(host: str | None, layer: str | None, read: int, found: int, done: int = 0,
+                        total: int = 0) -> str:
+    """«Сейчас: сайты · idealista.com (браузер) · прочитано 37 · найдено 12 · порталов 4/8».
+
+    The host is shown only when it is a plain site name (like ``site_status``), the layer only with a host,
+    and the portals part only when some site is known.
+    """
+    shown = site_status(host)
+    parts = [_PROGRESS_PREFIX]
+    if host and shown != WEB:
+        name = shown[len(_SITE_PREFIX):-len(_SITE_SUFFIX)]
+        label = LAYER_NAMES.get(layer or "")
+        parts.append(f"{name} ({label})" if label else name)
+    parts += [f"прочитано {max(read, 0)}", f"найдено {max(found, 0)}"]
+    if total > 0:
+        parts.append(f"порталов {min(max(done, 0), total)}/{total}")
+    return " · ".join(parts)
+
+
+def web_done_status(read: int, found: int) -> str:
+    """«Сайты: готово · прочитано N · найдено M» once the web stage has ended."""
+    return f"{_DONE_PREFIX} · прочитано {max(read, 0)} · найдено {max(found, 0)}"
 
 
 def group_status(name: str | None) -> str:
@@ -113,6 +145,15 @@ def is_user_status(text: str) -> bool:
         return True
     if text.startswith(_SITE_PREFIX) and text.endswith(_SITE_SUFFIX):
         return site_status(text[len(_SITE_PREFIX):-len(_SITE_SUFFIX)]) == text
+    if text.startswith(_DONE_PREFIX):
+        return _DONE.match(text) is not None
+    if text.startswith(_PROGRESS_PREFIX):
+        m = _PROGRESS.match(text)
+        if m is None or (m["layer"] is not None and m["layer"] not in LAYER_NAMES.values()):
+            return False
+        layer = next((k for k, v in LAYER_NAMES.items() if v == m["layer"]), None)
+        return web_progress_status(m["host"], layer, int(m["read"]), int(m["found"]), int(m["done"] or 0),
+                                   int(m["total"] or 0)) == text
     if text.startswith(_GROUP_PREFIX) and text.endswith(_GROUP_SUFFIX):
         return group_status(text[len(_GROUP_PREFIX):-len(_GROUP_SUFFIX)]) == text
     return False

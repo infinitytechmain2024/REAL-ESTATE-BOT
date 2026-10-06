@@ -27,6 +27,7 @@ from .models import (
     QueuedUrl,
     SiteReport,
     Usage,
+    WebProgress,
     WebRun,
     WebStatus,
 )
@@ -90,6 +91,15 @@ class WebStore(Protocol):
     async def finish_fetch(self, ticket: FetchTicket, result: PageResult) -> str | None: ...
     async def web_status(self, campaign_id: str) -> WebStatus | None: ...
     async def site_report(self, campaign_id: str) -> list[SiteReport]: ...
+    async def funnel(self, campaign_id: str) -> list[tuple[str, int, int, int]]: ...
+    async def host_refusals(self, host: str) -> dict[str, int]: ...
+    def note_progress(self, campaign_id: str, progress: WebProgress) -> None: ...
+
+
+def funnel_totals(rows: list[tuple[str, int, int, int]]) -> tuple[int, int, int, int]:
+    """(read, found, sites done, sites known) from ``funnel`` rows ``(host, queued, read, found)``:
+    a site is done when none of its links is left in the queue."""
+    return (sum(r[2] for r in rows), sum(r[3] for r in rows), sum(1 for r in rows if r[1] == 0), len(rows))
 
 
 _SITE = re.compile(r"site:(?:www\.)?([a-z0-9.-]+)", re.IGNORECASE)
@@ -140,6 +150,24 @@ class _Duplicate(Exception):
 class PostgresWebStore:
     def __init__(self, pool: asyncpg.Pool[asyncpg.Record]) -> None:
         self.pool = pool
+        self.live: dict[str, WebProgress] = {}  # the worker's in-memory progress, shown by ``web_status``
+
+    def note_progress(self, campaign_id: str, progress: WebProgress) -> None:
+        self.live[campaign_id] = progress
+
+    async def funnel(self, campaign_id: str) -> list[tuple[str, int, int, int]]:
+        """Per site: ``(host, links still queued, pages read from the site, listings found)``."""
+        rows = await self.pool.fetch(
+            """select host, count(*) filter (where state = 'queued') as queued,
+                      count(*) filter (where state = 'fetched' and coalesce(detail, '') <> 'search_snippet') as read,
+                      count(*) filter (where state = 'fetched' and kind = 'listing') as found
+                 from web_campaign_urls where campaign_id = $1::uuid group by host order by host""", campaign_id)
+        return [(r["host"], r["queued"], r["read"], r["found"]) for r in rows]
+
+    async def host_refusals(self, host: str) -> dict[str, int]:
+        """The host's consecutive refusals per layer (``http``, ``render``)."""
+        row = await self.pool.fetchrow("select http_refusals, render_refusals from web_hosts where host = $1", host)
+        return {"http": row["http_refusals"], "render": row["render_refusals"]} if row else {}
 
     async def recover(self, lease_seconds: int) -> int:
         """Fail web page runs a crashed worker left ``running`` (their URL is claimed again after the lease)."""
@@ -490,7 +518,8 @@ class PostgresWebStore:
         if row["state"] is None:  # not picked up yet
             return WebStatus(row["campaign_state"] not in TERMINAL, None, "сайты: ждёт запуска")
         active = row["state"] == "searching" and not row["stale"]
-        return WebStatus(active, row["current_host"] if active else None, row["progress"] or "")
+        return WebStatus(active, row["current_host"] if active else None, row["progress"] or "",
+                         self.live.get(campaign_id))
 
 
 def _detail(result: PageResult) -> str | None:
@@ -684,7 +713,24 @@ class MemoryWebStore:
     paused_hosts: set[str] = field(default_factory=set)
     busy_hosts: set[str] = field(default_factory=set)
     finished_fetches: list[str] = field(default_factory=list)  # url_keys, in order
+    live: dict[str, WebProgress] = field(default_factory=dict)
     _order: int = 0
+
+    def note_progress(self, campaign_id: str, progress: WebProgress) -> None:
+        self.live[campaign_id] = progress
+
+    async def funnel(self, campaign_id: str) -> list[tuple[str, int, int, int]]:
+        hosts: dict[str, list[int]] = {}
+        for u in self.urls.get(campaign_id, {}).values():
+            row = hosts.setdefault(u.host, [0, 0, 0])
+            row[0] += u.state == "queued"
+            row[1] += u.state == "fetched" and (u.detail or "") != "search_snippet"
+            row[2] += u.state == "fetched" and u.kind == "listing"
+        return [(h, *row) for h, row in sorted(hosts.items())]  # type: ignore[misc]
+
+    async def host_refusals(self, host: str) -> dict[str, int]:
+        row = self.hosts.get(host)
+        return {"http": int(row["http_refusals"]), "render": int(row["render_refusals"])} if row else {}  # type: ignore[call-overload]
 
     def _campaign_state(self, campaign_id: str) -> str | None:
         campaign = getattr(self.campaigns, "campaigns", {}).get(campaign_id)
@@ -940,4 +986,4 @@ class MemoryWebStore:
         if run is None:
             return WebStatus(state not in TERMINAL, None, "сайты: ждёт запуска") if state else None
         active = run.state == "searching"
-        return WebStatus(active, run.host if active else None, run.progress or "")
+        return WebStatus(active, run.host if active else None, run.progress or "", self.live.get(campaign_id))

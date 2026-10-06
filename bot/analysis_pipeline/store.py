@@ -11,6 +11,25 @@ from .openrouter import PROMPT_VERSION
 ACTOR = "analysis_pipeline"
 
 
+def build_task_hint(goal: str | None, place: str | None, spec: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A small, bounded dict of what the requester wants; empty values are left out."""
+    spec = spec if isinstance(spec, dict) else {}
+    budget = spec.get("budget") if isinstance(spec.get("budget"), dict) else {}
+    rooms = spec.get("rooms") if isinstance(spec.get("rooms"), dict) else {}
+    hint = {
+        "goal": (goal or "")[:200],
+        "place": (place or "")[:80],
+        "deal": spec.get("deal"),
+        "property_type": spec.get("property_type"),
+        "budget_max": budget.get("max"),
+        "budget_currency": budget.get("currency"),
+        "rooms_min": rooms.get("min"),
+        "rooms_max": rooms.get("max"),
+    }
+    hint = {k: v for k, v in hint.items() if v not in (None, "", [])}
+    return hint or None
+
+
 class PostgresAnalysisStore:
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -116,6 +135,27 @@ class PostgresAnalysisStore:
             post_id,
             claim_token,
         )
+
+    async def task_hint(self, post_id: str) -> dict[str, Any] | None:
+        """The campaign's search (goal, place, deal, budget, rooms) for a post collected by a campaign, else None.
+
+        One join: post -> acquisition run -> batch item -> batch -> campaign. The hint is prompt DATA only.
+        """
+        row = await self._pool().fetchrow(
+            """select c.plan->>'goal' as goal, c.plan->>'location' as place, c.spec
+                 from collected_posts p
+                 join acquisition_runs r on r.id=p.acquisition_run_id
+                 join acquisition_batch_items i on i.id=r.batch_item_id
+                 join acquisition_batches b on b.id=i.batch_id
+                 join campaigns c on c.id=b.campaign_id
+                where p.id=$1::uuid""",
+            post_id,
+        )
+        if not row:
+            return None
+        spec = row["spec"]
+        spec = json.loads(spec) if isinstance(spec, str) else (spec or {})
+        return build_task_hint(row["goal"], row["place"], spec)
 
     async def campaign_finding_ids(self, finding_ids: list[str]) -> set[str]:
         """The findings among ``finding_ids`` whose post came from a campaign's Facebook batch or social search."""

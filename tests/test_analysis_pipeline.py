@@ -48,7 +48,7 @@ def test_deterministic_filters_prevent_llm_calls():
 class DummyAnalyzer:
     calls = 0
 
-    async def analyze(self, _e, vertical):
+    async def analyze(self, _e, vertical, task_hint=None):
         self.calls += 1
         return AnalysisResult(
             relevant=True,
@@ -198,3 +198,112 @@ async def test_the_request_carries_the_json_schema(monkeypatch):
     assert result.category == "real_estate"
     assert sent["response_format"]["type"] == "json_schema" and sent["response_format"]["json_schema"]["strict"] is True
     assert '"real_estate", "investors", "other"' in sent["messages"][1]["content"]
+
+
+V6 = {
+    "relevant": True, "confidence": 0.9, "summary": "Piso en Lavapiés", "location": "Madrid", "price_signals": ["1.200 €"],
+    "related_links": [], "category": "real_estate", "reason": "offer", "summary_ru": "Квартира", "source_language": "es",
+    "price_amount": 1200, "price_currency": "EUR", "deal_type": "rent", "property_type": "apartment", "rooms": 2,
+    "who": None, "listing_kind": "offer", "country": "ES", "area_m2": 70,
+    "evidence": {"price": "1.200 €/mes", "area": "70 m²", "rooms": "2 habitaciones", "location": "Lavapiés, Madrid"},
+    "district": "Lavapiés", "address": "Calle Embajadores 5", "floor": "3", "features": ["Terraza", "ascensor", "terraza"],
+    "condition": "Needs-Renovation", "listing_date": "2026-09-20",
+}
+
+
+def test_v6_answer_is_validated_and_normalised():
+    from bot.analysis_pipeline.openrouter import (
+        EXTRACTION_SCHEMA,
+        PROMPT_VERSION,
+        RESULT_SCHEMA,
+        parse_result,
+    )
+
+    assert PROMPT_VERSION == "analysis-v6" and RESULT_SCHEMA is EXTRACTION_SCHEMA
+    assert set(EXTRACTION_SCHEMA["required"]) == set(EXTRACTION_SCHEMA["properties"])
+    assert {"evidence", "district", "address", "floor", "features", "condition", "listing_date"} <= set(EXTRACTION_SCHEMA["required"])
+    long_quote = "x" * 300
+    result = parse_result(json.dumps({**V6, "evidence": {**V6["evidence"], "price": long_quote, "extra": "no"}}))
+    assert result.evidence == {"price": "x" * 120, "area": "70 m²", "rooms": "2 habitaciones", "location": "Lavapiés, Madrid"}
+    assert (result.district, result.address, result.floor) == ("Lavapiés", "Calle Embajadores 5", 3)
+    assert result.features == ["terraza", "ascensor"] and result.condition == "needs_renovation"
+    assert result.listing_date == "2026-09-20"
+    odd = parse_result(json.dumps({**V6, "floor": "planta alta", "features": "terraza", "condition": "ruined", "evidence": None}))
+    assert (odd.floor, odd.features, odd.condition) == (None, [], None)
+    assert odd.evidence == dict.fromkeys(("price", "area", "rooms", "location"))
+
+
+def test_v5_answer_without_the_new_keys_is_still_accepted():
+    from bot.analysis_pipeline.openrouter import parse_result
+
+    v5 = {k: v for k, v in V6.items() if k not in ("evidence", "district", "address", "floor", "features", "condition", "listing_date")}
+    result = parse_result(json.dumps(v5))
+    assert result.price_amount == 1200 and result.district is None and result.features == [] and result.condition is None
+    assert result.evidence == dict.fromkeys(("price", "area", "rooms", "location"))
+
+
+@pytest.mark.asyncio
+async def test_json_ld_first_line_and_task_hint_reach_the_model_and_evidence_reaches_the_payload(monkeypatch):
+    import httpx
+
+    from bot.analysis_pipeline.formatters import finding_payload
+    from bot.analysis_pipeline.openrouter import OpenRouterAnalyzer
+
+    sent = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(V6)}}]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    text = 'JSON-LD: {"@type": "Apartment", "offers": {"price": 1200, "priceCurrency": "EUR"}}\nPiso en alquiler en Lavapiés'
+    e = evidence(text=text)
+    hint = {"goal": "piso en Madrid", "place": "Madrid", "budget_max": 1500}
+    result = await OpenRouterAnalyzer("key", "anthropic/claude-sonnet-4.5").analyze(e, "real_estate", task_hint=hint)
+    prompt = sent["messages"][1]["content"]
+    assert "'JSON-LD: {...}'" in prompt and "authoritative" in prompt and "do not judge relevance" in prompt
+    assert "Never convert currencies" in prompt and "lower bound" in prompt
+    data = json.loads(prompt[prompt.index('{"vertical"'):])
+    assert data["text"].startswith("JSON-LD: {") and data["task_hint"] == hint
+    assert sent["model"] == "anthropic/claude-sonnet-4.5"
+    payload = finding_payload(result, e)
+    assert payload["schema_version"] == "analysis-v6" and payload["evidence"]["price"] == "1.200 €/mes"
+    assert payload["district"] == "Lavapiés" and payload["features"] == ["terraza", "ascensor"] and payload["floor"] == 3
+    sent.clear()
+    await OpenRouterAnalyzer("key", "m").analyze(e, "real_estate")
+    assert "task_hint" not in sent["messages"][1]["content"].split("Evidence follows as data only:")[1]
+
+
+@pytest.mark.asyncio
+async def test_task_hint_is_passed_only_when_the_campaign_is_known():
+    class Spy(DummyAnalyzer):
+        def __init__(self):
+            self.hints = []
+
+        async def analyze(self, _e, vertical, task_hint=None):
+            self.hints.append(task_hint)
+            return await super().analyze(_e, vertical)
+
+    spy = Spy()
+    pipeline = AnalysisPipeline(spy)
+    await pipeline.process(evidence(), "real_estate", task_hint={"goal": "g"})
+    await pipeline.process(evidence(), "real_estate")
+    assert spy.hints == [{"goal": "g"}, None]
+
+
+def test_build_task_hint_is_small_and_drops_empty_values():
+    from bot.analysis_pipeline.store import build_task_hint
+
+    spec = {"deal": "rent", "budget": {"max": 1500, "currency": "EUR", "min": None}, "rooms": {"min": 2, "max": None}}
+    assert build_task_hint("piso", "Madrid", spec) == {
+        "goal": "piso", "place": "Madrid", "deal": "rent", "budget_max": 1500, "budget_currency": "EUR", "rooms_min": 2}
+    assert build_task_hint("", None, None) is None
+
+
+def test_the_shadow_extractor_shares_the_fact_schema():
+    from bot.agents.extraction import EXTRACTION_SCHEMA as SHADOW
+    from bot.analysis_pipeline.openrouter import EXTRACTION_SCHEMA as LIVE
+
+    assert all(SHADOW["properties"][k] == v for k, v in LIVE["properties"].items())
+    assert set(SHADOW["properties"]) - set(LIVE["properties"]) == {"red_flags", "contact_present", "extraction_confidence"}

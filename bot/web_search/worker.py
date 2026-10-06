@@ -30,7 +30,10 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from bot.campaign import geo
+from bot.campaign.architect import SearchPlanner, plan_with_model
 from bot.campaign.models import TERMINAL_STATES, Campaign
+from bot.campaign.search_plan import blocked_hosts_of
+from bot.campaign.spec import TaskSpec
 from bot.campaign.store import CampaignStore
 
 from .extract import (
@@ -43,7 +46,14 @@ from .extract import (
     post_text,
 )
 from .fetcher import FetchError, PageFetcher
-from .models import INDEX_RESULT_NOTE, SEARCH_RESULT_NOTE, Candidate, PageResult, QueuedUrl
+from .models import (
+    INDEX_RESULT_NOTE,
+    SEARCH_RESULT_NOTE,
+    Candidate,
+    PageResult,
+    QueuedUrl,
+    WebProgress,
+)
 from .queries import (
     QueryGenerator,
     QueryTask,
@@ -51,12 +61,13 @@ from .queries import (
     localise,
     missing_portals,
     place_level_of,
+    plan_portal_urls,
     portal_quota,
 )
 from .render import Renderer, RenderError
 from .scrape_api import Scraper
 from .searxng import Searcher, SearchError
-from .store import _REFUSALS, BUSY, HOST_BLOCKED, WebStore
+from .store import _REFUSALS, BUSY, HOST_BLOCKED, WebStore, funnel_totals
 from .structured import Structured, facts_block, from_jsonld, structured
 from .urls import classify_page, classify_url, fetchable, host_of, portal_listing, url_key
 
@@ -110,7 +121,8 @@ def query_task(campaign: Campaign) -> QueryTask:
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
                      constraints=dict(plan.constraints), languages=tuple(plan.languages),
-                     country_code=plan.country, place_level=place_level_of(campaign.source_text, plan.location))
+                     country_code=plan.country, place_level=place_level_of(campaign.source_text, plan.location),
+                     search_plan=plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country))
 
 
 class WebSearchWorker:
@@ -124,6 +136,7 @@ class WebSearchWorker:
         *,
         renderer: Renderer | None = None,
         scraper: Scraper | None = None,
+        planner: SearchPlanner | None = None,
         config: WebSearchConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -131,7 +144,34 @@ class WebSearchWorker:
             campaigns, store, searcher, fetcher, generator)
         self.config, self.now = config or WebSearchConfig(), now
         self.renderer, self.scraper = renderer, scraper
+        self.planner = planner  # writes the campaign's search plan once, before its first round
         self.token = str(uuid.uuid4())
+        self._progress: dict[str, WebProgress] = {}  # campaign id -> live numbers (also shown through the store)
+
+    def progress(self, campaign_id: str) -> WebProgress:
+        """The live progress of the campaign's web stage: current host and layer, pages read, listings found,
+        sites done/known (in memory; empty until the worker has read a page for the campaign)."""
+        return self._progress.get(campaign_id, WebProgress())
+
+    def _set_layer(self, campaign_id: str, layer: str | None) -> None:
+        self._publish(campaign_id, replace(self.progress(campaign_id), layer=layer))
+
+    def _publish(self, campaign_id: str, progress: WebProgress) -> None:
+        self._progress[campaign_id] = progress
+        note = getattr(self.store, "note_progress", None)
+        if note is not None:
+            note(campaign_id, progress)
+
+    async def _track(self, campaign_id: str, host: str | None, layer: str | None, *, finished: bool = False) -> None:
+        """Refresh the progress numbers from the store; a failure only leaves them as they were."""
+        try:
+            read, found, done, total = funnel_totals(await self.store.funnel(campaign_id))
+            names = {"http": "http", "render": "browser"}
+            refusals = tuple((names[k], n) for k, n in (await self.store.host_refusals(host) if host else {}).items()
+                             if n and k in names)
+            self._publish(campaign_id, WebProgress(host, layer, read, found, done, total, refusals, finished))
+        except Exception:  # noqa: BLE001 - progress is cosmetic
+            log.warning("web_search.progress_failed", extra={"campaign_id": campaign_id})
 
     async def tick(self) -> int:
         """One step for every campaign whose web stage is open; returns how many were seen.
@@ -215,6 +255,9 @@ class WebSearchWorker:
 
     async def _new_round(self, campaign: Campaign, used_count: int) -> bool:
         cfg = self.config
+        if used_count == 0:  # the first round: the search plan (once), then its direct portal pages
+            campaign = await self._with_search_plan(campaign)
+            await self._enqueue_portal_urls(campaign)
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
@@ -232,8 +275,32 @@ class WebSearchWorker:
                                             "added": added})
         return bool(queries)
 
+    async def _with_search_plan(self, campaign: Campaign) -> Campaign:
+        """The campaign with its model-written search plan: asked once (idempotent), stored, never required."""
+        if self.planner is None or campaign.plan.search_plan is not None or not campaign.spec:
+            return campaign
+        try:
+            spec = TaskSpec.model_validate(campaign.spec)
+        except ValueError:
+            return campaign
+        planned = await plan_with_model(campaign.plan, spec, self.planner, source_text=campaign.source_text)
+        if planned.search_plan is None:
+            return campaign
+        await self.campaigns.set_search_plan(campaign.id, planned.search_plan)
+        return replace(campaign, plan=planned)
+
+    async def _enqueue_portal_urls(self, campaign: Campaign) -> None:
+        """The plan's direct portal search pages go into the queue as depth-0 index pages (already queued: no-op)."""
+        task = query_task(campaign)
+        blocked = self.config.blocked_hosts | task.blocked_hosts
+        candidates = [Candidate(u, url_key(u), host_of(u), 0, "index") for u in plan_portal_urls(task.search_plan)
+                      if fetchable(u, blocked)]
+        if candidates:
+            await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
+
     async def _search(self, campaign: Campaign, query_count: int, pages: int) -> None:
         task = query_task(campaign)
+        blocked = self.config.blocked_hosts | task.blocked_hosts
         for query in await self.store.pending_queries(campaign.id, self.config.queries_per_tick):
             await self.store.set_progress(campaign.id, None, self._line(query_count, pages, "поиск"))
             try:
@@ -245,7 +312,7 @@ class WebSearchWorker:
                 continue
             candidates: list[Candidate] = []
             for hit in hits[: self.config.results_per_query]:
-                if not fetchable(hit.url, self.config.blocked_hosts):
+                if not fetchable(hit.url, blocked):
                     continue
                 if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
                     continue
@@ -292,6 +359,7 @@ class WebSearchWorker:
             budget -= 1
             pages += 1
             await self.store.set_progress(campaign.id, url.host, self._line(None, pages, f"сайт {url.host}"))
+            await self._track(campaign.id, url.host, "http")
             result, children = await self._read(campaign, url, layers)
             if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
                 card = search_result(url, result.error)
@@ -299,6 +367,7 @@ class WebSearchWorker:
             await self.store.finish_fetch(ticket, result)
             if children:
                 await self.store.enqueue(campaign.id, children, index_ttl_days=cfg.index_ttl_days)
+            await self._track(campaign.id, url.host, None)
 
     async def _keep_search_result(self, campaign: Campaign, url: QueuedUrl, error: str | None) -> bool:
         """Store ``url``'s search result as its post without asking the site; False when there is none."""
@@ -372,6 +441,7 @@ class WebSearchWorker:
                             result: PageResult, children: list[Candidate]) -> tuple[PageResult, list[Candidate]]:
         """A page served with HTTP 200 but drawn by JavaScript: read it once more in the browser."""
         cfg = self.config
+        self._set_layer(campaign_id, "browser")
         await self.store.mark_rendered(campaign_id, url.url_key)
         try:
             rendered = await asyncio.wait_for(self.renderer.render(page_url), timeout=cfg.page_runtime_seconds)
@@ -413,6 +483,7 @@ class WebSearchWorker:
 
     async def _render_refused(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
         cfg = self.config
+        self._set_layer(campaign_id, "browser")
         await self.store.mark_rendered(campaign_id, url.url_key)
         try:
             rendered = await asyncio.wait_for(self.renderer.render(url.url), timeout=cfg.page_runtime_seconds)
@@ -433,6 +504,7 @@ class WebSearchWorker:
 
     async def _scrape(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
         cfg = self.config
+        self._set_layer(campaign_id, "api")
         await self.store.mark_scraped(campaign_id, url.url_key)
         try:
             page = await asyncio.wait_for(self.scraper.fetch(url.url), timeout=cfg.page_runtime_seconds * 2)
@@ -488,6 +560,7 @@ class WebSearchWorker:
         counts = await self.store.counts(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(counts.queries, counts.pages, f"готово ({reason})"))
         await self.store.finish(campaign.id, "done", reason)
+        await self._track(campaign.id, None, None, finished=True)
         log.info("web_search.done", extra={"campaign_id": campaign.id, "reason": reason, "queries": counts.queries,
                                            "pages": counts.pages})
 

@@ -57,10 +57,11 @@ async def analyse_batch(store, pipeline: AnalysisPipeline, *, batch_size: int, c
             comments=[str(c) for c in json.loads(row["comments"] or "[]")],
         )
         found: list[tuple[str, str, str]] = []
+        hint = await store.task_hint(e.post_id) if hasattr(store, "task_hint") else None
         try:
             for vertical in verticals:
                 try:
-                    result = await pipeline.process(e, vertical)
+                    result = await (pipeline.process(e, vertical, task_hint=hint) if hint else pipeline.process(e, vertical))
                 except ValueError:
                     # The model answered outside the schema: not a finding, and not retried.
                     log.warning("analysis.invalid_model_response", extra={"post_id": e.post_id, "vertical": vertical})

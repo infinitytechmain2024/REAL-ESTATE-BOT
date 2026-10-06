@@ -13,6 +13,13 @@ Status:
   - decisions are stored in one table, `agent_reductions`, instead of the
     `agent_extractions` / `agent_decisions` pair of Task 9.1;
   - nothing is sent yet.
+- **Task 3.2 implemented (live extraction).** The `analysis-worker` call itself is
+  now the structured extractor: `analysis-v6` on `OPENROUTER_ANALYSIS_MODEL`
+  (default `anthropic/claude-sonnet-4.5`), one shared `EXTRACTION_SCHEMA`
+  (`bot/analysis_pipeline/openrouter.py`, also used by `bot/agents/extraction.py`)
+  with verbatim `evidence` quotes, district/address/floor/features/condition/
+  listing_date, JSON-LD-first rule and a campaign `task_hint` (data only). The
+  reduction worker (Claude + Jev + gate) stays shadow.
 - Everything else is still **design**.
 
 It upgrades

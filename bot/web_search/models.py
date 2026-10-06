@@ -14,6 +14,26 @@ SEARCH_RESULT_NOTE = "(Страница сайта не прочитана: эт
 
 
 @dataclass(frozen=True, slots=True)
+class WebProgress:
+    """The web stage's live numbers for one campaign (in memory, kept by the worker; see ``WebSearchWorker.progress``).
+
+    ``layer``: ``http`` | ``browser`` | ``api`` (the one reading ``host`` now); ``read``: pages read from the sites;
+    ``found``: pages that are listings (a search-result card counts); ``portals_done``/``portals_total``: sites with
+    nothing left to read / sites known so far; ``refusals``: the current host's consecutive refusals per layer
+    (owners only); ``finished``: the stage has ended.
+    """
+
+    host: str | None = None
+    layer: str | None = None
+    read: int = 0
+    found: int = 0
+    portals_done: int = 0
+    portals_total: int = 0
+    refusals: tuple[tuple[str, int], ...] = ()
+    finished: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class WebStatus:
     """What the campaign runner shows about the web stage.
 
@@ -25,6 +45,7 @@ class WebStatus:
     active: bool
     host: str | None = None
     line: str = ""
+    progress: WebProgress | None = None
 
 
 @dataclass(frozen=True, slots=True)

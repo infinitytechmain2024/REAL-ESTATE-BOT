@@ -87,20 +87,20 @@ def test_extraction_is_the_card_payload_plus_evidence_and_is_lenient() -> None:
         "related_links": [], "category": "real_estate", "reason": "offer", "summary_ru": "Квартира",
         "source_language": "es", "price_amount": "45.000 €", "price_currency": "€", "deal_type": "venta",
         "property_type": "piso", "rooms": 2, "who": None, "listing_kind": "offer", "country": "ES", "area_m2": None,
-        "evidence": {"price": "45.000 euros", "area": None, "place": "Madrid, Centro", "deal": "Vendo", "contact": "privado",
+        "evidence": {"price": "45.000 euros", "area": None, "rooms": "2 hab.", "location": "Madrid, Centro",
                      "extra": "ignored"},
         "red_flags": ["", "precio muy bajo", 5], "contact_present": "true", "extraction_confidence": "86%",
     })
     data = parse_extraction(f"```json\n{content}\n```")
     assert (data["price_amount"], data["price_currency"], data["deal_type"], data["property_type"]) == (
         45000, "EUR", "sale", "apartment")
-    assert data["evidence"] == {"price": "45.000 euros", "area": None, "place": "Madrid, Centro", "deal": "Vendo",
-                                "contact": "privado"}
+    assert data["evidence"] == {"price": "45.000 euros", "area": None, "rooms": "2 hab.",
+                                "location": "Madrid, Centro"}
     assert data["red_flags"] == ["precio muy bajo"] and data["contact_present"] is True
     assert data["extraction_confidence"] == 0.86
     bare = parse_extraction(json.dumps({"relevant": False, "confidence": 0.1, "summary": "x", "category": "other",
                                         "reason": "r", "price_signals": [], "related_links": []}))
-    assert bare["evidence"] == dict.fromkeys(("price", "area", "place", "deal", "contact")) and bare["red_flags"] == []
+    assert bare["evidence"] == dict.fromkeys(("price", "area", "rooms", "location")) and bare["red_flags"] == []
     assert bare["contact_present"] is False and bare["extraction_confidence"] is None
     assert set(EXTRACTION_SCHEMA["required"]) >= {"evidence", "red_flags", "price_amount", "listing_kind"}
 
@@ -292,7 +292,7 @@ async def test_postgres_claims_once_takes_over_lapsed_claims_and_stores_the_trac
     a, b = sorted(first, key=lambda p: p.text)
     await store.done(a, await agent.reduce(a, campaign_obj), policy=agent.policy, models={"claude": "c", "jev": "j"}, mode="shadow")
     row = await pool.fetchrow("select * from agent_reductions where post_id = $1::uuid", a.post_id)
-    assert (row["state"], row["mode"], row["model_calls"], row["prompt_version"]) == ("done", "shadow", 0, "reduction-v1")
+    assert (row["state"], row["mode"], row["model_calls"], row["prompt_version"]) == ("done", "shadow", 0, "reduction-v2")
     assert row["action"] == "discard" and row["reason"].startswith("prefilter:")  # "Vendo piso a": too short
 
     await store.fail(b, "http_503", model_calls=1)

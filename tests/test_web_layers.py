@@ -9,6 +9,7 @@ import pytest
 
 from bot.campaign import MemoryCampaignStore
 from bot.web_search.fetcher import FetchedPage, FetchError
+from bot.web_search.models import WebProgress
 from bot.web_search.render import RenderedPage
 from bot.web_search.scrape_api import ScrapeApiClient
 from bot.web_search.store import MemoryWebStore
@@ -283,3 +284,37 @@ async def test_a_refused_index_page_skips_the_browser_when_the_flag_is_off() -> 
     scraper, renderer = FakeScraper(), FakeRenderer(fail=True)
     await setup(INDEX, fetcher=refused(INDEX), renderer=renderer, scraper=scraper, render_index_on_refusal=False)
     assert renderer.calls == [] and scraper.calls == []
+
+
+async def test_the_worker_keeps_live_progress_per_campaign() -> None:
+    renderer = FakeRenderer(RenderedPage(URLS[0], "Terreno", TEXT))
+    fetcher = refused(URLS[0])
+    store, cid = await setup(URLS[0], URLS[1], fetcher=fetcher, renderer=renderer)
+    status = await store.web_status(cid)
+    progress = status.progress
+    assert progress is not None and progress.finished and progress.host is None
+    assert progress.read == 2 and progress.found == 2          # the 403 page came through the browser
+    assert (progress.portals_done, progress.portals_total) == (1, 1)
+    assert await store.host_refusals("idealista.com") == {"http": 0, "render": 0}
+
+
+async def test_progress_shows_the_current_host_layer_and_refusals_while_a_page_is_read() -> None:
+    seen = []
+
+    class Spy(FakeRenderer):
+        async def render(self, url: str) -> RenderedPage:
+            seen.append(worker.progress(cid))
+            return await super().render(url)
+
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    worker = WebSearchWorker(campaigns, store, FakeSearcher(default=[URLS[0]], texts={URLS[0]: HIT}),
+                             refused(URLS[0]), ListGenerator(["terreno Boadilla Madrid"]),
+                             renderer=Spy(RenderedPage(URLS[0], "Terreno", TEXT)),
+                             config=WebSearchConfig(pages_per_tick=1, cover_portals=False))
+    assert worker.progress("nobody") == WebProgress()
+    await run_until_done(worker, cid)
+    [during] = seen
+    assert (during.host, during.layer) == ("idealista.com", "browser")
+    assert worker.progress(cid).finished

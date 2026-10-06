@@ -5,7 +5,7 @@ from typing import Any
 from .cards import CardTask, render_card
 from .models import AnalysisResult, Evidence
 
-PAYLOAD_VERSION = "analysis-v4"
+PAYLOAD_VERSION = "analysis-v6"
 
 
 def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any]:
@@ -26,6 +26,13 @@ def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any
         "listing_kind": result.listing_kind,
         "country": result.country,
         "area_m2": result.area_m2,
+        "evidence": result.evidence,
+        "district": result.district,
+        "address": result.address,
+        "floor": result.floor,
+        "features": result.features,
+        "condition": result.condition,
+        "listing_date": result.listing_date,
         "original_post_link": evidence.canonical_url,
         "related_links": result.related_links,
     }

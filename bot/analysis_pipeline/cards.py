@@ -188,11 +188,15 @@ def render_card(
         "Цена": _price(payload, deal),
         "Локация": _trim(str(payload["location"]), 200) if payload.get("location") else None,
         "Комнаты": str(payload["rooms"]) if isinstance(payload.get("rooms"), int) and payload["rooms"] > 0 else None,
+        # analysis-v6 (absent in older payloads)
+        "Район": _trim(str(payload["district"]), 120) if payload.get("district") else None,
+        "Этаж": str(payload["floor"]) if isinstance(payload.get("floor"), int) and not isinstance(payload["floor"], bool) else None,
+        "Особенности": ", ".join(str(f) for f in payload["features"][:6]) if isinstance(payload.get("features"), list) and payload["features"] else None,
     }
     if investors:
         order = ["Кто", "Локация", "Цена"]
     else:
-        order = ["Сделка", "Тип", "Цена", "Локация", "Комнаты"]
+        order = ["Сделка", "Тип", "Цена", "Локация", "Район", "Комнаты", "Этаж", "Особенности"]
         if task.deal:
             order = ["Сделка", "Тип"] + [f for f in order if f not in ("Сделка", "Тип")]
         if task.max_price:
