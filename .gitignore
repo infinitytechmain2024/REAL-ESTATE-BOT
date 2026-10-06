@@ -26,8 +26,8 @@ htmlcov/
 *.log
 # Anchored to the repository root on purpose. An unanchored `data/` matches a
 # directory of that name at ANY depth, which silently swallowed the vendored
-# searxng/searx/data package -- SearXNG cannot import without it, so the whole
-# search engine was missing from every clone. See tests/test_deployment.py.
+# legacy/searxng/searx/data package -- SearXNG cannot import without it, so the whole
+# search engine was missing from every clone. See legacy/tests/test_deployment_legacy.py.
 # This rule is only meant for the bot's own runtime directory at the repo root
 # (the Facebook profile and the gate token live there).
 /data/

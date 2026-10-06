@@ -214,7 +214,7 @@ entrypoint stops binding CDP, x11vnc and websockify to loopback.
 
 ## 10. What this replaces
 
-`render.yaml` and the README's Render section remain for the search-only deployment, which
+`legacy/render.yaml` (the retired standalone bot, see `legacy/README.md`) was the search-only deployment, which
 has no browser and no Facebook. They are not the path for the full product: Render cannot
 host a long-lived headed Chrome with a persistent profile, and its IPs are the datacenter
 addresses §1 is about avoiding.
