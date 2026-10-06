@@ -1,0 +1,419 @@
+"""The final report for the person who asked (PLAN 4.2): counts by reason, the ranked top, unreadable sites,
+recommendations, sent once; and migration 038 on PostgreSQL."""
+
+from __future__ import annotations
+
+import json
+from datetime import timedelta
+
+import httpx
+import pytest
+
+from bot.campaign import MemoryCampaignStore, plan_campaign
+from bot.campaign.final_report import (
+    FinalReporter,
+    OpenRouterRecommender,
+    Tally,
+    card_score,
+    fallback_recommendations,
+    parse_recommendations,
+    rank_cards,
+    report_text,
+    tally,
+)
+from bot.campaign.relevance import Relevance, ReviewerJudge
+from bot.campaign.runner import CampaignRunner, RunnerConfig, campaign_request
+from bot.campaign.runs import MemoryRunStore, OutcomeCount, SourceCount
+from bot.web_search.models import SiteReport
+from tests.test_campaign_relevance import _seed, needs_db, plot
+from tests.test_campaign_runner import SUMMARY, Clock, FakeMessenger
+from tests.test_reviewer import ScriptedReviewer
+
+GOAL = "Купить квартиру в Валенсии до 200000 € от 2 комнат"
+OWNER, USER, CHAT = 1, 2, -100
+REPORT = "📋 Отчёт по поиску"
+
+
+def flat(price: int, rooms: int | None, area: int | None, where: str, n: int, **extra) -> dict:
+    return {"schema_version": "analysis-v4", "summary_ru": f"Квартира {n}", "location": f"{where}, Valencia",
+            "country": "ES", "price_amount": price, "price_currency": "EUR", "deal_type": "sale",
+            "property_type": "apartment", "rooms": rooms, "area_m2": area, "listing_kind": "offer",
+            "original_post_link": f"https://www.idealista.com/inmueble/{n}/", **extra}
+
+
+class FakeWeb:
+    def __init__(self, reports: list[SiteReport]) -> None:
+        self.reports = reports
+
+    async def web_status(self, campaign_id: str):
+        return None
+
+    async def site_report(self, campaign_id: str) -> list[SiteReport]:
+        return self.reports
+
+
+class Advice:
+    """The final model: records the facts it was given and answers with fixed recommendations."""
+
+    def __init__(self, *tips: str, error: Exception | None = None) -> None:
+        self.tips, self.error, self.facts = list(tips), error, []
+
+    async def recommend(self, facts: dict) -> list[str]:
+        self.facts.append(facts)
+        if self.error:
+            raise self.error
+        return self.tips
+
+
+SITES = [SiteReport("idealista.com", queries=3, results=25, links=14, from_search=6, refused=8),
+         SiteReport("fotocasa.es", queries=2, results=12, links=9, read=7),
+         SiteReport("habitaclia.com", queries=1, results=4, links=4, refused=4)]
+
+
+async def build(advice=None, *, owner: bool = False, reports=SITES, judge=None, vertical: str = "real_estate"):
+    campaigns = MemoryCampaignStore()
+    store = MemoryRunStore(campaigns)
+    messenger = FakeMessenger()
+    clock = Clock()
+    reporter = FinalReporter(advice)
+    runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids={OWNER} if owner else set(),
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0),
+                            web=FakeWeb(reports) if reports is not None else None, relevance=judge,
+                            final_report=reporter)
+    cid = await campaigns.create(plan_campaign(GOAL, vertical=vertical, location="Valencia"), chat_id=CHAT,
+                                 requested_by=OWNER if owner else USER, source_text=GOAL, actor="test")
+    await campaigns.set_state(cid, "running", "test")
+    store.add_groups(cid, 3)
+    return campaigns, store, messenger, clock, runner, reporter, cid
+
+
+def seed(store: MemoryRunStore, cid: str) -> None:
+    rows = {
+        # sent (exact): the budget is 200 000 €, from 2 rooms
+        "f1": flat(195_000, 3, 85, "Ruzafa", 1), "f2": flat(150_000, 2, 70, "Benimaclet", 2),
+        "f3": flat(199_000, 2, 60, "Campanar", 3), "f4": flat(200_000, 2, None, "El Cabanyal", 4),
+        # the same flat as f1 on another site: one card only
+        "dup": flat(196_000, 3, 85, "Barrio de Ruzafa", 5, original_post_link="https://www.fotocasa.es/es/5/"),
+        # held: a little over the budget (similar), far over it (other)
+        "over": flat(230_000, 3, 90, "Patraix", 6), "far": flat(400_000, 3, 120, "Eixample", 7),
+        # excluded: a rental, another country, a catalog page
+        "rent": flat(900, 2, 60, "Jesus", 8, deal_type="rent"), "pt": flat(150_000, 2, 60, "Lisboa", 9, country="PT"),
+        "cat": flat(150_000, 2, 60, "Valencia", 10, listing_kind="catalog"),
+    }
+    for fid, payload in rows.items():
+        store.add_finding(cid, fid, f"🏠 {fid}", payload=payload, original=f"post {fid}", vertical="real_estate",
+                          url=payload["original_post_link"])
+
+
+async def finish(campaigns, store, runner, clock, cid, state: str = "completed") -> None:
+    await runner._stream(await campaigns.get(cid))
+    await campaigns.set_state(cid, state, "test")
+    clock.at = (await campaigns.get(cid)).finished_at + timedelta(minutes=1)
+
+
+def reports_of(messenger: FakeMessenger) -> list[str]:
+    return [t for _, _, t in messenger.sent if t.startswith(REPORT)]
+
+
+# --- the numbers -------------------------------------------------------------------------------------------------------------
+
+
+def test_outcome_rows_become_a_tally() -> None:
+    counts = tally([OutcomeCount("sent", "exact", None, 4), OutcomeCount("sent", "similar", "budget", 1),
+                    OutcomeCount("sending", "exact", None, 1), OutcomeCount("held", "similar", "budget", 2),
+                    OutcomeCount("held", "similar", "unverified", 3), OutcomeCount("held", "other", "unverified", 1),
+                    OutcomeCount("held", "excluded", "place", 2), OutcomeCount("held", "excluded", None, 1),
+                    OutcomeCount("duplicate", "exact", None, 2)])
+    assert (counts.sent_exact, counts.sent_approved, counts.held_similar, counts.held_other) == (5, 1, 5, 1)
+    assert (counts.held_unverified, counts.duplicates, counts.excluded) == (4, 2, {"place": 2, "ai": 1})
+    assert (counts.sent, counts.held, counts.rejected, counts.total) == (6, 6, 3, 17)
+
+
+# --- the ranking ---------------------------------------------------------------------------------------------------------------
+
+
+async def test_the_best_cards_come_first_by_budget_rooms_area_and_evidence() -> None:
+    campaigns, store, _, clock, runner, _, cid = await build()
+    seed(store, cid)
+    await finish(campaigns, store, runner, clock, cid)
+    request = campaign_request(await campaigns.get(cid))
+    sent = await store.recent_sent_findings(cid)
+    assert {s.finding.id for s in sent} == {"f1", "f2", "f3", "f4"}
+    ranked = rank_cards(sent, request)
+    assert [r.card.finding.id for r in ranked] == ["f3", "f1", "f2", "f4"]  # nearest the budget with the asked rooms first
+    assert all(0 <= r.score <= 1 for r in ranked) and ranked[0].score > ranked[-1].score
+    assert len(rank_cards(sent, request, limit=2)) == 2
+
+    # the pieces of the score
+    assert card_score(flat(200_000, 2, 60, "x", 1), request) > card_score(flat(150_000, 2, 60, "x", 1), request)
+    assert card_score(flat(220_000, 2, 60, "x", 1), request) < card_score(flat(150_000, 2, 60, "x", 1), request)
+    assert card_score(flat(190_000, 2, 60, "x", 1), request) > card_score(flat(190_000, None, 60, "x", 1), request)
+    assert card_score(flat(190_000, 2, 60, "x", 1), request) > card_score({"price_amount": 190_000}, request)
+    assert card_score(None, request) < 0.5
+
+
+# --- the report ---------------------------------------------------------------------------------------------------------------------
+
+
+async def test_the_user_gets_one_report_with_counts_reasons_top_sites_and_advice() -> None:
+    advice = Advice("Поднимите бюджет на 10 %: 2 варианта отклонены по цене.",
+                    "Idealista не читается: включите чтение через API.")
+    campaigns, store, messenger, clock, runner, _, cid = await build(advice)
+    seed(store, cid)
+    await finish(campaigns, store, runner, clock, cid)
+    await runner.step(cid)
+    await runner.step(cid)  # the next tick sends nothing more
+    [text] = reports_of(messenger)
+    assert not text.startswith(SUMMARY) and "🔎" not in text and len(text) < 4000
+    assert messenger.summaries() == []  # a normal user gets no technical summary
+    lines = text.splitlines()
+    assert lines[:2] == [REPORT, "🎯 Валенсия · покупка · до 200 000 € · от 2 комн."]
+    assert "Отправлено вам: 4" in lines and "Похожие, не показаны: 2 (чуть не подошли)" in lines
+    assert "Отклонено: 3" in lines and "Повторы одного объекта на разных сайтах: 1" in lines
+    assert "• другой тип сделки (аренда вместо покупки или наоборот) — 1" in lines
+    assert "• не тот город или район — 1" in lines
+    assert "• не объявление (каталог, статистика, поиск жилья) — 1" in lines
+    # the ten best sent cards, ranked, each with its link
+    best = lines[lines.index("Лучшие варианты (4):") + 1:lines.index("Не удалось прочитать:")]
+    numbered = [line for line in best if line[:2] in ("1.", "2.", "3.", "4.")]
+    places = ("Campanar", "Ruzafa", "Benimaclet", "El Cabanyal")
+    assert [next(w for w in places if w in n) for n in numbered] == list(places)
+    assert numbered[0].startswith("1. 199 000 € · 2 комн. · 60 м² · Campanar, Valencia · карточка №")
+    assert "   https://www.idealista.com/inmueble/3/" in lines
+    # the funnel of each site and the sites that could not be read, with why
+    assert any(line.startswith("• Idealista — 14 ссылок в поиске") for line in lines)
+    assert any(line.startswith("• Fotocasa — 9 ссылок в поиске · прочитано 7") for line in lines)
+    broken = lines[lines.index("Не удалось прочитать:") + 1:lines.index("По источникам:")]
+    assert any(line.startswith("• Habitaclia — сайт не пускает ботов") and "ни одна страница не открылась" in line
+               for line in broken)
+    assert any(line.startswith("• Idealista — сайт не пускает ботов") and "6 объявлений взято из описания" in line
+               for line in broken)
+    assert not any("Fotocasa" in line for line in broken)  # a readable site is not listed there
+    # advice from the model, numbered, after everything else
+    assert lines[-3:] == ["Что можно сделать:", "1. Поднимите бюджет на 10 %: 2 варианта отклонены по цене.",
+                          "2. Idealista не читается: включите чтение через API."]
+    # the model saw aggregated numbers only: no listing text, no links, no ids
+    [facts] = advice.facts
+    assert facts["counts"]["sent_exact"] == 4 and facts["rejected_by_reason"] == {"deal": 1, "place": 1, "kind": 1}
+    assert sorted(facts["unreadable_sites"]) == ["habitaclia.com", "idealista.com"]
+    assert facts["task"] == {"place": "Valencia", "deal": "sale", "budget": 200000, "budget_is_maximum": True,
+                             "currency": "EUR", "rooms_min": 2}
+    blob = json.dumps(facts, ensure_ascii=False)
+    assert "http" not in blob and "Квартира" not in blob and "Campanar" not in blob and "post " not in blob
+    assert messenger.statuses()[-1] != text and messenger.sent[-1][2] == messenger.statuses()[-1]  # status stays last
+
+
+async def test_the_report_is_sent_once_across_restarts_and_retried_when_telegram_fails() -> None:
+    campaigns, store, messenger, clock, runner, reporter, cid = await build(Advice("Совет один."))
+    seed(store, cid)
+    await finish(campaigns, store, runner, clock, cid)
+    messenger.fail = 1  # Telegram is down for the first send: the claim is given back
+    await runner.step(cid)
+    assert reports_of(messenger) == [] and cid not in store.final_reports
+    await runner.step(cid)
+    assert len(reports_of(messenger)) == 1 and cid in store.final_reports
+    # a restart: a new runner over the same stores (the claim lives in the database) sends nothing
+    again = CampaignRunner(campaigns, store, messenger, None, now=clock, final_report=reporter,
+                           config=RunnerConfig(relevance_fail_closed=False))
+    await again.step(cid)
+    await again.step(cid)
+    assert len(reports_of(messenger)) == 1
+
+
+async def test_owners_keep_their_summary_and_also_get_the_report() -> None:
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."), owner=True)
+    seed(store, cid)
+    await finish(campaigns, store, runner, clock, cid)
+    await runner.step(cid)
+    assert len(messenger.summaries()) == 1 and len(reports_of(messenger)) == 1
+    texts = [t for _, _, t in messenger.sent]
+    assert texts.index(messenger.summaries()[0]) < texts.index(reports_of(messenger)[0])
+    assert messenger.summaries()[0].startswith(SUMMARY)
+
+
+async def test_no_report_without_a_reporter_for_old_investor_failed_or_empty_cancelled_campaigns() -> None:
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."))
+    runner.final_report = None
+    seed(store, cid)
+    await finish(campaigns, store, runner, clock, cid)
+    await runner.step(cid)
+    assert reports_of(messenger) == [] and not store.final_reports
+
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."))
+    seed(store, cid)
+    await finish(campaigns, store, runner, clock, cid)
+    clock.at += timedelta(hours=3)  # ended before the report existed
+    await runner.step(cid)
+    assert reports_of(messenger) == []
+
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."))
+    await campaigns.set_state(cid, "failed", "test")
+    clock.at = (await campaigns.get(cid)).finished_at
+    await runner.step(cid)
+    assert reports_of(messenger) == []
+
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."), vertical="investors")
+    await finish(campaigns, store, runner, clock, cid)
+    await runner.step(cid)
+    assert reports_of(messenger) == []
+
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."))
+    await finish(campaigns, store, runner, clock, cid, state="cancelled")  # cancelled at once: nothing to report
+    await runner.step(cid)
+    assert reports_of(messenger) == []
+
+
+async def test_without_a_model_or_when_it_fails_rule_based_advice_is_used() -> None:
+    for advice in (None, Advice(error=httpx.ConnectError("down")), Advice(), Advice(error=ValueError("bad json"))):
+        campaigns, store, messenger, clock, runner, _, cid = await build(advice)
+        seed(store, cid)
+        await finish(campaigns, store, runner, clock, cid)
+        await runner.step(cid)
+        [text] = reports_of(messenger)
+        tail = text[text.index("Что можно сделать:"):]
+        assert "Habitaclia не читается: сайт не пускает ботов" in tail and "Idealista не читается" in tail
+
+    # the rules by themselves
+    facts = {"counts": {"sent_exact": 2}, "rejected_by_reason": {"budget": 5, "place": 4}, "unreadable_sites": []}
+    tips = fallback_recommendations(facts)
+    assert "поднимите бюджет на 10 %" in tips[0] and "соседние районы" in tips[1]
+    assert fallback_recommendations({"counts": {}, "rejected_by_reason": {}, "unreadable_sites": []}) == [
+        "Точных вариантов не нашлось: ослабьте самое жёсткое условие (бюджет, площадь или район) и "
+        "запустите поиск снова."]
+
+
+async def test_an_empty_search_still_reports_what_could_not_be_read() -> None:
+    campaigns, store, messenger, clock, runner, _, cid = await build(None, reports=SITES[:1])
+    await finish(campaigns, store, runner, clock, cid)
+    await runner.step(cid)
+    [text] = reports_of(messenger)
+    assert "Подходящих объявлений не нашлось." in text and "Не удалось прочитать:" in text
+    assert "Лучшие варианты" not in text and "Почему отклонено" not in text
+
+
+def test_the_report_always_fits_one_telegram_message() -> None:
+    from bot.campaign.runs import SentFinding, StreamFinding
+
+    cards = [SentFinding(StreamFinding(f"f{n}", "t", flat(190_000 + n, 2, 70, "Ruzafa" * 5, n,
+                                                          original_post_link="https://www.idealista.com/" + "x" * 150)),
+                         n, n) for n in range(1, 11)]
+    request = campaign_request_of(GOAL)
+    sources = [SourceCount("website", f"site{n}.es", 1, 3, 1, 1, 0) for n in range(12)]
+    reports = [SiteReport(f"site{n}.es", links=5, read=3) for n in range(12)] + [
+        SiteReport(f"closed{n}.es", links=4, refused=4) for n in range(8)]
+    from bot.campaign.final_report import unreadable_sites
+    from bot.campaign.summary import site_lines
+
+    funnel, _ = site_lines(sources, reports, ())
+    text = report_text("Цель " * 30, Tally(10, 0, 3, 2, 1, 4, {"place": 5, "budget": 3}), rank_cards(cards, request),
+                       funnel, unreadable_sites(sources, reports, ()), ["Совет " * 40] * 4)
+    assert len(text) <= 3900 and text.startswith(REPORT) and "Что можно сделать:" in text
+
+
+def campaign_request_of(goal: str):
+    from bot.campaign.tolerance import request_for
+
+    plan = plan_campaign(goal, vertical="real_estate", location="Valencia")
+    return request_for(plan.constraints, location=plan.location, vertical=plan.vertical, text=goal, country=plan.country)
+
+
+# --- the final model over a fake HTTP -----------------------------------------------------------------------------------------------
+
+
+async def test_the_recommender_asks_the_final_model_for_two_to_four_russian_tips() -> None:
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        tips = ["Raise the budget", "Поднимите бюджет на 10 %.", "Поднимите бюджет на 10 %.", "Добавьте район Патрайкс.",
+                "Включите API для Idealista.", "Пятый совет.", "Шестой совет."]
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"recommendations": tips})}}]})
+
+    recommender = OpenRouterRecommender(api_key="k", model="anthropic/claude-opus-4.5",
+                                        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    tips = await recommender.recommend({"counts": {"sent_exact": 1}})
+    assert tips == ["Поднимите бюджет на 10 %.", "Добавьте район Патрайкс.", "Включите API для Idealista.",
+                    "Пятый совет."]  # English dropped, duplicates dropped, at most four
+    assert seen[0]["model"] == "anthropic/claude-opus-4.5" and seen[0]["response_format"]["json_schema"]["strict"]
+    assert "only the given numbers" in seen[0]["messages"][0]["content"]
+    assert parse_recommendations('```json\n{"recommendations": [{"text": "Совет."}]}\n```') == ["Совет."]
+    with pytest.raises(ValueError):
+        parse_recommendations('{"x": 1}')
+    with pytest.raises(ValueError):
+        OpenRouterRecommender(api_key="")
+
+
+# --- PostgreSQL (migration 038) ---------------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def pool():
+    import asyncpg
+
+    from tests.test_campaign_relevance import MIGRATIONS, URL
+
+    conn = await asyncpg.connect(URL)
+    await conn.execute("drop schema public cascade; create schema public;")
+    for path in MIGRATIONS:
+        await conn.execute(path.read_text(encoding="utf-8"))
+    await conn.close()
+    pool = await asyncpg.create_pool(URL, min_size=1, max_size=4)
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
+@needs_db
+async def test_postgres_stores_the_matrix_the_reason_and_the_one_time_report_claim(pool) -> None:
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+
+    columns = {(r["table_name"], r["column_name"]): r["data_type"] for r in await pool.fetch(
+        """select table_name, column_name, data_type from information_schema.columns
+            where (table_name, column_name) in (('campaign_finding_relevance', 'review'), ('campaign_findings', 'why'),
+                                                 ('campaign_runs', 'final_report_sent_at'))""")}
+    assert columns == {("campaign_finding_relevance", "review"): "jsonb", ("campaign_findings", "why"): "text",
+                       ("campaign_runs", "final_report_sent_at"): "timestamp with time zone"}
+
+    campaigns = PostgresCampaignStore(pool)
+    store = PostgresRunStore(pool, SafetyLimits())
+    messenger = FakeMessenger()
+    reviewer = ScriptedReviewer({"PASS": ("pass", "match"), "FAIL": ("fail", "reject"), "UNKNOWN": ("unknown", "near")})
+    advice = Advice("Расширьте район поиска.")
+    runner = CampaignRunner(campaigns, store, messenger, None, relevance=ReviewerJudge(reviewer),
+                            final_report=FinalReporter(advice), config=RunnerConfig(relevance_fail_closed=False))
+    text = "Купить участок от 2000 м² в Мадриде"
+    cid = await campaigns.create(plan_campaign(text, vertical="real_estate", location="Madrid"), chat_id=CHAT,
+                                 requested_by=USER, source_text=text, actor="telegram:2")
+    await campaigns.set_state(cid, "running", "campaign:test")
+    ids = await _seed(pool, cid, {name: {**plot(2500), "summary_ru": f"Участок {word}"}
+                                  for name, word in (("ok", "PASS"), ("bad", "FAIL"), ("maybe", "UNKNOWN"))})
+    await runner.step(cid)
+    rows = {r["finding_id"]: (r["bucket"], r["state"], r["why"], r["hold_reason"]) for r in await pool.fetch(
+        "select finding_id::text, bucket, state, why, hold_reason from campaign_findings")}
+    assert rows == {ids["ok"]: ("exact", "sent", None, None), ids["bad"]: ("excluded", "held", "place", None),
+                    ids["maybe"]: ("similar", "held", "unverified", "Не подтверждено: место")}
+    stored = await store.relevance(cid, ids["bad"])
+    assert stored.verdict == "reject" and stored.review["criteria"][0]["verdict"] == "fail"
+    assert stored.review["criteria"][0]["quote"] == "Boadilla" and stored.review["overall"] == "reject"
+    assert (await store.relevance(cid, ids["ok"])).review["overall"] == "match"
+    await store.save_relevance(cid, ids["ok"], Relevance("reject", "x", None, "m", {"overall": "reject"}))  # once
+    assert (await store.relevance(cid, ids["ok"])).review["overall"] == "match"
+
+    assert sorted((o.state, o.bucket, o.why, o.count) for o in await store.outcome_counts(cid)) == [
+        ("held", "excluded", "place", 1), ("held", "similar", "unverified", 1), ("sent", "exact", None, 1)]
+    # the search had nothing left to read, so that one step also completed it and sent the report
+    [report] = reports_of(messenger)
+    assert "Отправлено вам: 1" in report and "Отклонено: 1" in report and "Расширьте район поиска." in report
+    assert "Похожие, не показаны: 1" in report and "не удалось подтвердить: 1" in report
+    assert await pool.fetchval("select final_report_sent_at is not null from campaign_runs where campaign_id = $1::uuid",
+                               cid)
+    assert not await store.claim_final_report(cid)
+    await runner.step(cid)
+    assert len(reports_of(messenger)) == 1  # sent once
+    await store.release_final_report(cid)
+    assert await pool.fetchval("select final_report_sent_at from campaign_runs where campaign_id = $1::uuid", cid) is None
+    assert await store.claim_final_report(cid) and not await store.claim_final_report(cid)
+    assert await store.relevance_calls(cid) == 3

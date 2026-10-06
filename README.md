@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`036_campaign_finding_clusters.sql` in order. It records SHA-256 checksums in
+`038_finding_review.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -46,6 +46,8 @@ and keeps the web stage's browser-render count in the database.
 `034_web_fetch_layers.sql` tracks a site's refusals and blocks per fetch layer (HTTP, browser) and counts scrape-API reads.
 `035_campaign_specs.sql` adds the structured task (`TaskSpec`, JSON) to campaigns and to the task draft, so the interviewer keeps it across answers.
 `036_campaign_finding_clusters.sql` groups the same property seen on several sites into one card (`cluster_id`, `cluster_links`, `duplicate_of`; state `duplicate`).
+`037_reach_enrichment.sql` adds the investor reach enrichment to `reach_contacts` (`enriched_at`, `contacts`, `profile_text`, `score`).
+`038_finding_review.sql` stores the reviewer's criteria matrix per finding (`review`), the reason a finding was held or excluded (`why`) and marks the user's final report as sent once (`final_report_sent_at`).
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their
@@ -444,292 +446,25 @@ is persisted as a normalized `collected_posts` record for later analysis.
 
 ---
 
-Telegram-бот, который ищет объекты недвижимости и потенциальных партнёров по
-открытым источникам: разбирает запрос через LLM, ищет в собственном инстансе
-SearXNG, читает найденные страницы, фильтрует результаты и присылает каждый
-отдельным сообщением.
+## Legacy: автономный бот
 
-Материалы для BotFather (имя, описания, команды) — в [`bot_description.md`](bot_description.md).
-
----
-
-## Как это работает
-
-```
-сообщение (текст или голос)
-   │
-   ├─ голос → STT (Whisper через OpenAI-совместимый API)
-   │
-   ├─ LLM: извлечение параметров        → ParsedQuery (локация, бюджет, площадь, язык…)
-   ├─ QueryBuilder: 4–6 поисковых строк    на языке региона + английском
-   ├─ SearXNG: параллельный поиск       → слияние и дедупликация по url_hash
-   │  └─ + доп. источники (группы Facebook, Google Maps) — параллельно,
-   │     текст поста приходит уже прочитанным
-   ├─ Supabase: отсев уже показанного
-   ├─ Fetcher: загрузка и извлечение текста топ-N страниц
-   ├─ LLM: оценка, фильтрация, структурирование
-   └─ Supabase: сохранение (UNIQUE user_id + url_hash) → отправка пользователю
-```
-
-После извлечения параметров каждый этап **деградирует, а не падает**: не
-работает парсер — ранжируем по сниппетам; не отвечает LLM-ранкер — отдаём
-результаты поиска с пометкой; недоступен Supabase — результаты всё равно
-отправляются, просто не запоминаются.
-
-Facebook — тот же принцип, только жёстче. Источник читает разметку, которую
-Facebook меняет без предупреждения, поэтому «сломался» — это ожидаемое
-состояние, а не исключительное. Упал, завис, разлогинился, показал
-checkpoint — поиск отвечает тем, что нашёл в вебе, источник попадает в
-список недоступных, а через PIPELINE_SOURCE_TIMEOUT_SECONDS зависший
-источник просто перестают ждать.
-`scripts/pipeline_probe.py` проверяет именно это обещание.
-
-## Структура
-
-```
-bot/
-├── main.py            точка входа: сборка сервисов, polling или webhook
-├── config.py          все настройки из окружения (pydantic-settings v2)
-├── handlers/          /start, текст, голос, кнопки, глобальный обработчик ошибок
-├── keyboards/         только inline-клавиатуры
-├── middlewares/       контекст логов, upsert пользователя, троттлинг
-├── models/            Pydantic-модели: ParsedQuery, SearchHit, StructuredResult…
-├── prompts/           тексты промптов (extract / rank / details)
-├── services/
-│   ├── llm/           абстракция провайдеров + менеджер с фолбэком
-│   ├── stt/           распознавание речи, та же схема
-│   ├── search/        клиент SearXNG и построитель запросов
-│   ├── parser/        загрузка страниц и извлечение текста
-│   ├── db/            репозиторий Supabase + SQL-миграция
-│   └── pipeline.py    оркестрация всего сценария
-└── utils/             нормализация URL и url_hash, работа с текстом
-
-searxng/               полный снимок официального SearXNG (см. searxng/VENDOR.md)
-docker/entrypoint.sh   запуск SearXNG и бота в одном контейнере
-```
-
-## Быстрый старт
-
-### Docker (рекомендуется)
-
-Один контейнер поднимает и SearXNG, и бота — ровно то же самое поедет на Render.
-
-```sh
-python scripts/setup_env.py   # спросит ключи и запишет .env
-docker compose up --build
-```
-
-Скрипт читает ключи скрытым вводом (в терминале и в истории команд они не
-остаются) и пишет `.env` с правами `0600`. Ничего никуда не отправляется —
-ключи попадают только в локальный файл. Можно и вручную: `cp .env.example .env`
-и заполнить `TELEGRAM_TOKEN` плюс ключ одного LLM-провайдера.
-
-### Локально, без Docker
-
-```sh
-make install    # venv, зависимости, Chromium для резервного фетчера
-make setup      # спросит ключи и запишет .env
-make searxng    # терминал 1
-make run        # терминал 2
-```
-
-То же самое руками, если make не нужен:
-
-```sh
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt \
-    -r searxng/requirements.txt -r searxng/requirements-server.txt
-playwright install chromium
-
-cp .env.example .env
-
-# терминал 1 — SearXNG
-SEARXNG_SECRET=dev-secret \
-SEARXNG_SETTINGS_PATH=$PWD/searxng/settings/settings.yml \
-PYTHONPATH=$PWD:$PWD/searxng \
-granian --interface wsgi --host 127.0.0.1 --port 8888 searxng.api_only:application
-
-# терминал 2 — бот
-python -m bot.main
-```
-
-Проверить, что поиск отвечает:
-
-```sh
-curl -s 'http://127.0.0.1:8888/search?q=land+for+sale+cyprus&format=json' | head -c 400
-```
+Прежний автономный Telegram-бот (поиск через встроенный SearXNG, LLM-конвейер,
+Render) не входит в кампанейный стек и не разворачивается. Код, тесты, вендоренный
+SearXNG, `Dockerfile` и `render.yaml` лежат в [`legacy/`](legacy/README.md).
 
 ## Локальная разработка
 
-### Проверки
-
 ```sh
-make check         # всё разом: снимок, lint, импорты, конфиг, миграция, гейт
-make lint          # только ruff
-make probe-gate    # только живой просмотр Facebook
-make check-vendor  # только целостность вендоренного SearXNG
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env              # или: python scripts/setup_env.py
+make check                        # lint, импорты, тесты
 ```
 
-`make check-vendor` проверяет, что снимок SearXNG дошёл до репозитория целиком.
-Проверка появилась не на пустом месте: правило `data/` в корневом `.gitignore`
-(написанное для рабочего каталога бота) не было привязано к корню, а непривязанное
-правило совпадает на любой глубине — и git молча не закоммитил
-`searxng/searx/data/`. Это пакет из 16 файлов, который SearXNG импортирует при
-старте, так что на свежем клоне поиск не поднимался вообще:
-`ImportError: cannot import name 'data' from 'searx'`. На машине, где снимок
-делали, всё работало — файлы просто лежали на диске. Ни lint, ни байт-компиляция
-`searxng/` не трогают, поэтому не поймал никто. Теперь ловит эта проверка — и
-заодно любое другое ignore-правило, дотягивающееся до снимка.
-
-`make probe-gate` — единственная проверка здесь, которая гоняет настоящий код
-по настоящему сценарию: поднимает заглушки вместо noVNC и websockify и дёргает
-гейт так, как это сделал бы телефон (ссылка, страница, сокет, подпротокол,
-кадры в обе стороны, закрытие). Браузер ей не нужен, идёт полсекунды, и именно
-она поймала три ошибки, из-за которых ссылка из Telegram открывалась в пустоту.
-Её же гоняет CI на каждый push.
-
-`ruff format` в `make check` нет намеренно: дерево старше текущего
-форматтера, 16 файлов не прошли бы. Это отдельная уборка, а не условие для
-того, чтобы проверки вообще были.
-
-### macOS на Apple Silicon
-
-Повседневно бот запускается нативно — `make run`, безо всякого Docker, и
-`make browsers` качает arm64-сборку Chromium. Быстро и без эмуляции.
-
-Docker на M-процессоре — это про «проверить перед деплоем», а не про
-повседневную работу: образ собирается под `linux/amd64`, потому что Google не
-выпускает `google-chrome-stable` под arm64. Docker Desktop прогонит его через
-Rosetta (включается в Settings → General → «Use Rosetta for x86/amd64
-emulation», заметно быстрее) или через QEMU (медленно, по умолчанию).
-Платформа уже закреплена в `docker-compose.yml`, отдельных флагов не нужно.
-
-### Facebook локально
-
-Локально ничего из серверной машинерии не нужно: ни Xvfb, ни x11vnc, ни noVNC,
-ни туннеля. Без `FACEBOOK_CDP_URL` бот сам запускает браузер через Playwright и
-просто открывает окно у вас на экране — входите и проходите проверку в нём.
-
-Нужен установленный **Google Chrome** (обычное приложение в `/Applications`):
-сессия Facebook запускается с `channel="chrome"`, то есть настоящим Chrome, а
-не сборкой Chromium из Playwright — у настоящего браузера обычный отпечаток, и
-для автоматизации Facebook это строго лучше. `make browsers` его не качает и
-не должен.
-
-```sh
-FACEBOOK_ENABLED=true
-FACEBOOK_HEADLESS=false                   # чтобы окно было видно
-FACEBOOK_ADMIN_TELEGRAM_IDS=<ваш id>
-FACEBOOK_GROUP_URLS=https://www.facebook.com/groups/...
-# FACEBOOK_CDP_URL и FACEBOOK_DESKTOP_PUBLIC_BASE — не задавать
-```
-
-Профиль ложится в `./data/facebook_profile` и переживает перезапуски, так что
-вход нужен один раз. `/facebook` в Telegram работает и здесь, только кнопки
-«Открыть Facebook» не будет: `FACEBOOK_DESKTOP_PUBLIC_BASE` не задан, ссылку
-выдавать не на что — бот так и напишет и предложит окно на этой машине. Это не
-ошибка, а ровно тот случай, для которого писался запасной текст.
-
-Прочитать реальную группу и посмотреть, что вышло:
-
-```sh
-python scripts/facebook_probe.py "<ссылка на группу>" "<поисковая фраза>"
-```
-
-### Что на Mac проверить нельзя
-
-Xvfb, x11vnc и noVNC — линуксовые, и весь путь «кнопка в Telegram → токен →
-живое окно на сервере» целиком собирается только там. Логику гейта закрывает
-`make probe-gate`, всё остальное — только на VPS (или в Docker на линуксовой
-машине). Зелёный `make check` про этот стек не говорит ничего.
-
-## Настройка
-
-Все параметры — в [`.env.example`](.env.example) с комментариями. Обязательны
-только `TELEGRAM_TOKEN` и ключ одного LLM-провайдера.
-
-### Смена LLM-провайдера
-
-Меняется одной переменной. Все перечисленные провайдеры уже реализованы:
-
-| `LLM_PROVIDER` | Ключ | Комментарий |
-|---|---|---|
-| `openrouter` | `OPENROUTER_API_KEY` | один ключ, большинство моделей |
-| `groq` | `GROQ_API_KEY` | самый быстрый инференс |
-| `together`, `fireworks` | `TOGETHER_API_KEY`, `FIREWORKS_API_KEY` | открытые модели |
-| `anthropic` | `ANTHROPIC_API_KEY` | Claude, через Messages API |
-| `openai` | `OPENAI_API_KEY` | |
-| `nvidia` | `NVIDIA_API_KEY` | NIM / каталог NGC |
-| `openai_compatible` | `LLM_API_KEY` + `LLM_BASE_URL` | vLLM, Ollama, LM Studio и любой другой совместимый endpoint |
-
-Можно задать цепочку резерва — `LLM_FALLBACK_PROVIDERS=anthropic,groq`. Провайдер
-без настроенного ключа просто пропускается, а не считается сбоем.
-
-Разные модели на разные задачи:
-
-```sh
-LLM_MODEL_EXTRACT=openai/gpt-4o-mini              # дешёвая, разбирает запрос
-LLM_MODEL_RANK=anthropic/claude-sonnet-4.5        # умная, ранжирует и пишет описания
-```
-
-### Добавление нового провайдера
-
-Один файл и одна строка декоратора — остальной код не меняется.
-Для OpenAI-совместимого API достаточно трёх атрибутов класса:
-
-```python
-# bot/services/llm/my_provider.py
-from typing import ClassVar
-
-from bot.services.llm.openai_compatible import OpenAICompatibleProvider
-from bot.services.llm.registry import register_llm
-
-
-@register_llm("my_provider")
-class MyProvider(OpenAICompatibleProvider):
-    name: ClassVar[str] = "my_provider"
-    default_base_url: ClassVar[str | None] = "https://api.example.com/v1"
-    api_key_env_vars: ClassVar[tuple[str, ...]] = ("MY_PROVIDER_API_KEY",)
-```
-
-Импортируйте модуль в `bot/services/llm/__init__.py` — и `LLM_PROVIDER=my_provider`
-работает. Для API с другим протоколом наследуйтесь от `LLMProvider` и реализуйте
-`chat()`; `chat_structured()` со схемой и починкой невалидного JSON достанется
-бесплатно. Речь (`bot/services/stt/`) устроена точно так же.
-
-### Распознавание речи
-
-```sh
-STT_PROVIDER=openrouter             # или groq_whisper, openai_whisper, nvidia
-STT_MODEL=openai/whisper-large-v3-turbo
-```
-
-Голосовые Telegram приходят в OGG/Opus, который принимают все перечисленные
-endpoint'ы, — ffmpeg не нужен. `STT_ENABLED=false` вежливо отключает приём
-голоса.
-
-## Supabase
-
-Применить миграцию (SQL-редактор Supabase или `psql`):
-
-```sh
-psql "$SUPABASE_DB_URL" -f bot/services/db/migrations/001_init.sql
-```
-
-Затем указать `SUPABASE_URL` и `SUPABASE_KEY` (**service_role** — на таблицах
-включён RLS без разрешающих политик).
-
-Таблицы: `users`, `searches`, `results`, `feedback`.
-Защита от дубликатов — ограничение `UNIQUE (user_id, url_hash)` на `results`,
-где `url_hash` = SHA-256 от нормализованного URL (`bot/utils/urls.py`: нижний
-регистр хоста, без `www.`, без фрагмента, без `utm_*`/`fbclid`, отсортированные
-параметры, `http` сведён к `https`). Ограничение действует на пользователя, а не
-глобально, — два разных человека могут увидеть один и тот же объект, но каждый
-только один раз.
-
-**Без Supabase бот работает**, но: результаты не сохраняются, дедупликация между
-сессиями не работает и **кнопки под результатами не показываются** — нажатие
-некуда записать. При старте об этом пишется предупреждение.
+`make test` гонит тесты без Postgres (Postgres-тесты пропускаются без
+`SYSTEM_TEST_DATABASE_URL`). `ruff format` в проверках нет намеренно: дерево
+старше текущего форматтера. Тесты прежнего бота — в `legacy/tests/`, pytest их
+не собирает.
 
 ## Деплой на VPS
 
@@ -874,7 +609,7 @@ docker compose logs -f
 Сначала — путь «ссылка из Telegram → живой браузер», без Chrome и без телефона:
 
 ```sh
-docker compose exec bot python scripts/gate_probe.py
+docker compose exec bot python legacy/scripts/gate_probe.py   # legacy bot only
 ```
 
 Скрипт поднимает заглушки вместо noVNC и websockify и дёргает гейт так, как это
@@ -925,46 +660,6 @@ tar czf fb-profile.tgz data/             # бэкап профиля (в нём 
 Бэкап профиля стоит снять сразу после того, как вы первый раз прошли вход и
 проверку: восстановить его быстрее, чем проходить checkpoint заново.
 
-## Деплой на Render
-
-Вариант для бота без Facebook. Постоянно живого браузера, в который можно
-зайти с телефона, здесь не получится — для этого нужен раздел выше.
-
-[`render.yaml`](render.yaml) описывает один Docker-сервис с обоими процессами.
-
-1. New → Blueprint, указать репозиторий.
-2. Заполнить переменные, помеченные `sync: false` (токен, ключи, Supabase).
-3. Deploy.
-
-По умолчанию это **background worker** в режиме polling: публичный URL не нужен,
-а API SearXNG остаётся на loopback, недоступный извне. Фоновые воркеры доступны
-только на платных планах.
-
-Для webhook закомментируйте worker и раскомментируйте web-сервис в конце
-`render.yaml`, затем задайте `TELEGRAM_WEBHOOK_URL` = адрес сервиса. Наружу
-торчит webhook-сервер бота, SearXNG по-прежнему на `127.0.0.1`.
-
-## SearXNG
-
-`searxng/` — полный снимок официального репозитория, коммит и все локальные
-изменения зафиксированы в [`searxng/VENDOR.md`](searxng/VENDOR.md).
-
-Требование «только backend + JSON API» выполнено на уровне маршрутизации, а не
-удалением файлов, — чтобы снимок можно было обновлять:
-
-- `searxng/settings/settings.yml` задаёт `search.formats: [json]`. В upstream
-  стоит `[html]`, при котором `/search?format=json` отдаёт 403.
-- `searxng/api_only.py` — WSGI-обёртка, пропускающая только `/search`,
-  `/healthz`, `/config`, `/stats` и `/metrics`. На `/`, `/preferences`,
-  `/about`, `/static/*`, `/autocompleter` и `/image_proxy` возвращается 404.
-
-Движки: Google, Bing, DuckDuckGo, Brave, Startpage, Mojeek, Qwant, Wikipedia,
-Wikidata. Первые четыре и Qwant с Mojeek в upstream выключены по умолчанию,
-поэтому включены явно и взвешены — универсальные поисковики выше
-энциклопедических.
-
-Обновление снимка — по инструкции в `VENDOR.md`.
-
 ## Полезные команды
 
 ## Browser session manager
@@ -990,19 +685,14 @@ operational API conditions and are never written to the database.
 ```sh
 make help          # список целей
 make setup         # спросить ключи и записать .env
-make install       # venv, зависимости и браузер
-make browsers      # только Chromium для Playwright
-make run           # бот локально
-make searxng       # SearXNG локально
+make install       # venv и зависимости
 make lint          # ruff
-make probe-gate    # живой просмотр Facebook, целиком
-make check-vendor  # целостность вендоренного SearXNG
-make check         # снимок, lint, импорты, конфиг, миграция, гейт
-make check-api     # SearXNG JSON API (SearXNG должен быть запущен)
-make docker-up     # то же, что на Render
+make test          # тесты без Postgres
+make check         # lint, импорты, конфиг, миграция, тесты
+make docker-up     # весь стек docker compose
 ```
 
 ## Лицензии
 
-Код бота — в этом репозитории. `searxng/` распространяется под AGPL-3.0-or-later
-(см. `searxng/LICENSE`) и является немодифицированным снимком стороннего проекта.
+Код бота — в этом репозитории. `legacy/searxng/` распространяется под AGPL-3.0-or-later
+(см. `legacy/searxng/LICENSE`) и является снимком стороннего проекта, в стеке не используется.

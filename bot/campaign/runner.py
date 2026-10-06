@@ -56,13 +56,21 @@ import httpx
 from bot.agents.recorder import PostgresRecorder, Recorder, record_of
 from bot.analysis_pipeline.cards import CardTask, also_on, render_card
 
-from . import offers
+from . import offers, people
 from .dedup import listing_of, same_object, site_of
+from .final_report import FinalReporter, task_title
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
-from .reach import contact_card
-from .relevance import Relevance, RelevanceJudge, finding_data, task_data
+from .reach import contact_card, contact_extras
+from .relevance import (
+    Relevance,
+    RelevanceJudge,
+    finding_data,
+    reason_category,
+    review_match,
+    task_data,
+)
 from .runs import (
     TERMINAL_BATCH_STATES,
     ClusterHead,
@@ -252,6 +260,7 @@ class CampaignRunner:
         web: WebProgress | None = None,
         relevance: RelevanceJudge | None = None,
         recorder: Recorder | None = None,
+        final_report: FinalReporter | None = None,
     ) -> None:
         """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
         status; everyone else sees only the user-safe labels of ``status_text``. ``web``: the
@@ -263,6 +272,7 @@ class CampaignRunner:
         self.owner_ids = frozenset(owner_ids)
         self.web = web
         self.relevance = relevance
+        self.final_report = final_report  # the user's «Отчёт по поиску» (None: not sent)
         self.recorder = recorder
         # After a failed relevance call the model is left alone for a minute: one slow or broken
         # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
@@ -331,6 +341,7 @@ class CampaignRunner:
             # Final: a finding whose AI check is still missing is held as unverified, never lost.
             await self._stream(campaign, final=True)
             await self._summary(campaign)
+            await self._final_report(campaign)
             line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
         await self._show(campaign, line)
 
@@ -495,7 +506,8 @@ class CampaignRunner:
                 continue
             if match.bucket != "exact":
                 reason = match.note if match.why == "unverified" else None
-                if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance, reason):
+                if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance, reason,
+                                                 why=reason_category(match.why)):
                     if reason:
                         log.info("campaign.finding_unverified %s", reason,
                                  extra={"campaign_id": campaign.id, "finding_id": finding.id})
@@ -582,6 +594,8 @@ class CampaignRunner:
                 self._relevance_misses.pop(finding.id, None)
                 return Match("similar", match.distance, "unverified", note=note or UNVERIFIED_FAILED)
             return match
+        if verdict.review:  # the reviewer's criteria matrix decides (see ``relevance.review_match``)
+            return review_match(match, verdict.review)
         if verdict.verdict == "match":
             return match
         if verdict.verdict == "reject":
@@ -613,8 +627,11 @@ class CampaignRunner:
         if await self.store.relevance_calls(campaign.id) >= self.config.max_relevance_calls:
             return None, UNVERIFIED_CAP, False
         try:
-            verdict = await self.relevance.judge(task_data(campaign), finding_data(finding.payload, fallback_text=finding.text,
-                                                                                 original=finding.original))
+            review = bool(getattr(self.relevance, "reviews", False))  # the reviewer also gets the hard criteria
+            verdict = await self.relevance.judge(
+                task_data(campaign, review=review),
+                finding_data(finding.payload, fallback_text=finding.text, original=finding.original, review=review,
+                             vertical=finding.vertical))
         except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules (or closed, see ``_judge``)
             self._relevance_paused_until = self.now() + timedelta(seconds=RELEVANCE_PAUSE_SECONDS)
             code = getattr(exc, "code", type(exc).__name__)
@@ -698,20 +715,50 @@ class CampaignRunner:
             (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
                                         now=self.now()))
             for p in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit)]
+        keyed: list[tuple[str, list[str], str | None, str]] = [(key, [key], None, card) for key, card in cards]
         if len(cards) < limit:
-            cards += [(c.delivery_key, contact_card(c)) for c in await self.store.stored_contacts(
-                campaign.id, location, self.config.lead_days, limit - len(cards))]
-        for key, card in cards:
+            keyed += await self._reach_cards(campaign, location, room - len(cards), limit - len(cards))
+        headers: set[tuple[str, str]] = self.__dict__.setdefault("_reach_headers", set())
+        for key, keys, group, card in keyed:
             if not await self.store.claim_person(campaign.id, key):
                 continue
+            claimed = [key, *[k for k in keys if k != key and await self.store.claim_person(campaign.id, k)]]
             try:
+                if group and (campaign.id, group) not in headers:  # one header line per group, before its first card
+                    await self.messenger.send(campaign.chat_id, people.GROUP_HEADERS[group])
+                    headers.add((campaign.id, group))
                 message_id = await self.messenger.send(campaign.chat_id, card[:MAX_MESSAGE_CHARS])
             except Exception:  # noqa: BLE001 - Telegram down: retry next tick
                 log.warning("campaign.person_send_failed", extra={"campaign_id": campaign.id})
-                await self.store.release_person(campaign.id, key)
+                for k in claimed:
+                    await self.store.release_person(campaign.id, k)
                 return
-            await self.store.person_sent(campaign.id, key, message_id)
+            for k in claimed:
+                await self.store.person_sent(campaign.id, k, message_id)
             self._below_status.add(campaign.id)
+
+    async def _reach_cards(self, campaign: Campaign, location: str, fetch: int,
+                           limit: int) -> list[tuple[str, list[str], str, str]]:
+        """Stored reach contacts of the city as cards: scored against the spec, one per person (the same person on
+        several platforms is merged), ordered investors/funds, developers, agents/networks, then by score.
+
+        Returns ``(delivery key, every merged key, group id, text)``.
+        """
+        stored = await self.store.stored_contacts(campaign.id, location, self.config.lead_days, max(fetch, limit))
+        pool = getattr(self.store, "pool", None)
+        if stored and pool is not None:  # the enrichment columns (migration 037)
+            try:
+                extras = await contact_extras(pool, [c.url_key for c in stored])
+            except Exception:  # noqa: BLE001 - cards without enrichment are still cards
+                log.warning("campaign.reach_extras_failed", extra={"campaign_id": campaign.id})
+                extras = {}
+            stored = [replace(c, **extras[c.url_key]) if c.url_key in extras else c for c in stored]
+        investor = people.investor_of(campaign.spec)
+        places = [location, *campaign.plan.location_aliases.values(), *(investor or {}).get("geography", [])]
+        ready = people.build_cards(stored, investor, places=places, now=self.now())[:limit]
+        return [(card.keys[0], list(card.keys), card.group,
+                 contact_card(card.contact, score=card.score, reasons=card.reasons, also=card.links))
+                for card in ready]
 
     async def _record(self, campaign: Campaign, finding: StreamFinding, bucket: str) -> None:
         """Store a held (similar/other) or excluded finding; never blocks the stream."""
@@ -800,6 +847,39 @@ class CampaignRunner:
             return
         self._below_status.add(campaign.id)  # the status message moves below the summary
         log.info("campaign.summary_sent", extra={"campaign_id": campaign.id})
+
+    async def _final_report(self, campaign: Campaign) -> None:
+        """«Отчёт по поиску» for the person who asked (``final_report``): once, when the campaign completes or is cancelled.
+
+        Same guards as the summary: only for a campaign that ended within ``SUMMARY_WINDOW`` (older ones get none),
+        claimed in the database before it is built (a restart never repeats it), given back when the store or
+        Telegram failed. Investor-only searches have no property cards to report; a cancelled search that found and
+        rejected nothing is not reported.
+        """
+        if (self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None
+                or campaign.plan.vertical == "investors"):
+            return
+        if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_final_report(campaign.id):
+            return
+        try:
+            outcomes = await self.store.outcome_counts(campaign.id)
+            if campaign.state == "cancelled" and not outcomes:
+                return
+            sent = await self.store.recent_sent_findings(campaign.id, 500)
+            sources = await self.store.source_counts(campaign.id)
+            site_report = getattr(self.web, "site_report", None)
+            reports = await site_report(campaign.id) if site_report is not None else []
+            portals = campaign_portals(campaign) if reports else ()
+            request = campaign_request(campaign)
+            title = task_title(request, campaign.plan.location_aliases.get("ru"), campaign.plan.goal)
+            text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals)
+            await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
+        except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
+            log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})
+            await self.store.release_final_report(campaign.id)
+            return
+        self._below_status.add(campaign.id)  # the status message moves below the report
+        log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
 
     async def _show(self, campaign: Campaign, line: str) -> None:
         """Keep one status message per campaign, always the last one in the chat: it is edited when its
@@ -978,23 +1058,20 @@ async def main() -> None:
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
     web = await _web_stage(campaigns, pool, settings)
-    judge = None
-    if settings.openrouter_api_key and settings.relevance_max_calls > 0:
-        from .relevance import OpenRouterRelevanceJudge
-
-        judge = OpenRouterRelevanceJudge(api_key=settings.openrouter_api_key, model=settings.relevance_model,
-                                         timeout_seconds=settings.relevance_timeout_seconds)
-    else:
+    judge = settings.relevance_judge()
+    if judge is None:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
+    final_reporter = settings.final_reporter()
     comments, lead_judge = _comment_worker(settings, pool)
-    reach, reach_closers = _reach_worker(settings, pool)
+    reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None)
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
     store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
-                            web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool))
+                            web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool),
+                            final_report=final_reporter)
     social, generator = _social_worker(settings, pool, campaigns)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
@@ -1027,6 +1104,8 @@ async def main() -> None:
             await close()
         if judge is not None:
             await judge.aclose()
+        if final_reporter is not None:
+            await final_reporter.aclose()
         await messenger.aclose()
         await pool.close()
 
@@ -1102,8 +1181,12 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
     return worker, generator
 
 
-def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
-    """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false."""
+def _reach_worker(settings: Any, pool: Any, fetcher: Any = None) -> tuple[Any, list[Any]]:
+    """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false.
+
+    ``fetcher``: the web stage's PageFetcher, which opens the public page of a relevant result for its contacts
+    (None when the web stage is off: no enrichment).
+    """
     if not settings.reach_enabled:
         return None, []
     from bot.web_search.searxng import SearxngClient
@@ -1119,7 +1202,7 @@ def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
                                      timeout_seconds=settings.leads_timeout_seconds)
     else:
         log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
-    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config())
+    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), fetcher=fetcher)
     return worker, [searcher.aclose] + ([judge.aclose] if judge else [])
 
 

@@ -64,6 +64,8 @@ def test_migration_script_is_safe_and_tracks_the_orchestration_migration() -> No
     assert "034_web_fetch_layers.sql" in text
     assert "035_campaign_specs.sql" in text
     assert "036_campaign_finding_clusters.sql" in text
+    assert "037_reach_enrichment.sql" in text
+    assert "038_finding_review.sql" in text
     assert "pg_advisory_xact_lock" in text
     assert "schema_migrations" in text
     assert "Refusing changed already-applied migration" in text

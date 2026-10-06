@@ -60,7 +60,9 @@ class CampaignRunnerSettings(BaseSettings):
 
     # The LLM-written search plan of a campaign (bot/campaign/search_plan.py); no key: the old behaviour.
     plan_model: str = Field(default="anthropic/claude-sonnet-4.5", validation_alias="OPENROUTER_PLAN_MODEL")
-    plan_timeout_seconds: int = Field(default=45, ge=5, le=300, validation_alias="OPENROUTER_PLAN_TIMEOUT_SECONDS")
+    # A TOTAL deadline for the planner call (both posts); it runs inside a web tick, so it must stay well under the
+    # 300 s web lease: hence le=90.
+    plan_timeout_seconds: int = Field(default=45, ge=5, le=90, validation_alias="OPENROUTER_PLAN_TIMEOUT_SECONDS")
     plan_enabled: bool = Field(default=True, validation_alias="CAMPAIGN_SEARCH_PLAN_ENABLED")
 
     def search_planner(self):  # -> bot.campaign.search_plan.OpenRouterSearchPlanner | None
@@ -79,10 +81,45 @@ class CampaignRunnerSettings(BaseSettings):
     relevance_fail_closed: bool = Field(default=True, validation_alias="CAMPAIGN_RELEVANCE_FAIL_CLOSED")
     # A failed AI call is retried on later steps; after this many misses the finding is held as unverified.
     relevance_retry_limit: int = Field(default=5, ge=1, le=100, validation_alias="CAMPAIGN_RELEVANCE_RETRY_LIMIT")
+    # Who judges a finding against the task: the reviewer (a strong model, a hard-criteria matrix with a quote each,
+    # bot/agents/reviewer.py) or the legacy one-word judge above. The caps and fail-closed rules apply to both.
+    judge: str = Field(default="reviewer", pattern="^(reviewer|legacy)$", validation_alias="CAMPAIGN_JUDGE")
+    review_model: str = Field(default="anthropic/claude-sonnet-4.5", validation_alias="OPENROUTER_REVIEW_MODEL")
+    review_timeout_seconds: int = Field(default=45, ge=5, le=300, validation_alias="OPENROUTER_REVIEW_TIMEOUT_SECONDS")
+    # The user's final report when a search ends (bot/campaign/final_report.py); the recommendations come from this model.
+    final_report_enabled: bool = Field(default=True, validation_alias="CAMPAIGN_FINAL_REPORT")
+    final_model: str = Field(default="anthropic/claude-sonnet-4.5", validation_alias="OPENROUTER_FINAL_MODEL")
+    final_timeout_seconds: int = Field(default=60, ge=5, le=300, validation_alias="OPENROUTER_FINAL_TIMEOUT_SECONDS")
+
+    def relevance_judge(self):  # -> bot.campaign.relevance.RelevanceJudge | None
+        """The campaign judge: the reviewer (``CAMPAIGN_JUDGE=reviewer``, investors go to the legacy judge) or the legacy
+        judge; None without a key or with ``CAMPAIGN_RELEVANCE_MAX_CALLS=0`` (the rules decide alone)."""
+        from .relevance import OpenRouterRelevanceJudge, ReviewerJudge
+
+        if not self.openrouter_api_key or self.relevance_max_calls <= 0:
+            return None
+        legacy = OpenRouterRelevanceJudge(api_key=self.openrouter_api_key, model=self.relevance_model,
+                                          timeout_seconds=self.relevance_timeout_seconds)
+        if self.judge == "legacy":
+            return legacy
+        from bot.agents.reviewer import OpenRouterReviewer
+
+        return ReviewerJudge(OpenRouterReviewer(api_key=self.openrouter_api_key, model=self.review_model,
+                                                timeout_seconds=float(self.review_timeout_seconds)), legacy)
+
+    def final_reporter(self):  # -> bot.campaign.final_report.FinalReporter | None
+        from .final_report import FinalReporter, OpenRouterRecommender
+
+        if not self.final_report_enabled:
+            return None
+        recommender = (OpenRouterRecommender(api_key=self.openrouter_api_key, model=self.final_model,
+                                             timeout_seconds=float(self.final_timeout_seconds))
+                       if self.openrouter_api_key else None)
+        return FinalReporter(recommender)
 
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
-    # all: every campaign; investors: investor campaigns only; off: never read comments.
-    comment_leads: str = Field(default="all", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
+    # all: every campaign; investors (default): investor campaigns only; off: never read comments.
+    comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
     comment_max_posts: int = Field(default=15, ge=0, le=100, validation_alias="CAMPAIGN_COMMENT_MAX_POSTS")
     # An investor search sends the people stored from comments in its city (at most, seen within days).
     lead_people_max: int = Field(default=60, ge=0, le=500, validation_alias="CAMPAIGN_LEAD_PEOPLE_MAX")
@@ -131,13 +168,16 @@ class CampaignRunnerSettings(BaseSettings):
     reach_poll_seconds: int = Field(default=20, ge=5, le=600, validation_alias="INVESTOR_REACH_POLL_SECONDS")
     reach_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_REACH_MODEL")
     reach_model_queries: int = Field(default=10, ge=0, le=30, validation_alias="INVESTOR_REACH_MODEL_QUERIES")
+    # Relevant reach results whose public page is opened for contacts and a description (per campaign; 0: never).
+    reach_enrich_per_campaign: int = Field(default=30, ge=0, le=500, validation_alias="INVESTOR_REACH_ENRICH_PER_CAMPAIGN")
 
     def reach_config(self):  # -> bot.campaign.reach.ReachConfig
         from .reach import ReachConfig
 
         return ReachConfig(queries_per_campaign=self.reach_queries_per_campaign,
                            queries_per_tick=self.reach_queries_per_tick, queries_per_day=self.reach_queries_per_day,
-                           model_queries=self.reach_model_queries)
+                           model_queries=self.reach_model_queries,
+                           enrich_per_campaign=self.reach_enrich_per_campaign)
 
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig

@@ -32,7 +32,7 @@ from bot.web_search.models import INDEX_RESULT_NOTE, SEARCH_RESULT_NOTE
 
 from . import geo
 from .models import Campaign
-from .tolerance import min_area_of
+from .tolerance import Match, min_area_of, worse
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -41,6 +41,7 @@ DEFAULT_MODEL = "openai/gpt-4o-mini"
 MAX_TASK_CHARS = 1500
 MAX_SUMMARY_CHARS = 900
 MAX_EXCERPT_CHARS = 700
+MAX_REVIEW_TEXT_CHARS = 900  # the reviewer reads a little more of the original text
 
 Verdict = Literal["match", "near", "reject"]
 VERDICTS: tuple[Verdict, ...] = ("match", "near", "reject")
@@ -95,6 +96,8 @@ class Relevance:
     reason: str = ""
     deviation: str | None = None
     model: str | None = None
+    # The reviewer's criteria matrix (``bot.agents.reviewer.Review.to_dict``); None for the legacy judge.
+    review: dict[str, Any] | None = None
 
 
 class RelevanceError(RuntimeError):
@@ -111,8 +114,11 @@ class RelevanceJudge(Protocol):
     async def judge(self, task: dict[str, Any], finding: dict[str, Any]) -> Relevance: ...
 
 
-def task_data(campaign: Campaign) -> dict[str, Any]:
-    """What the model is told about the campaign: goal, task text, place and the numbers."""
+def task_data(campaign: Campaign, *, review: bool = False) -> dict[str, Any]:
+    """What the model is told about the campaign: goal, task text, place and the numbers.
+
+    ``review``: for the reviewer, also the hard criteria (from the spec or the plan) and the tolerance.
+    """
     plan = campaign.plan
     country = plan.country or geo.country_of(plan.location)
     data: dict[str, Any] = {
@@ -127,17 +133,37 @@ def task_data(campaign: Campaign) -> dict[str, Any]:
     area = min_area_of(f"{campaign.source_text} {plan.goal}")
     if area:
         data["min_area_m2"] = area
+    if review:
+        from bot.agents.reviewer import review_task  # lazy: the reviewer imports this module
+
+        data.update(review_task(campaign), text=data["task"][:600])
     return data
 
 
-def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", original: str = "") -> dict[str, Any]:
-    """A bounded summary of a finding's payload plus the start of the original post; never the whole post."""
+def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", original: str = "",
+                 review: bool = False, vertical: str | None = None) -> dict[str, Any]:
+    """A bounded summary of a finding's payload plus the start of the original post; never the whole post.
+
+    ``review``: for the reviewer, also the extracted evidence quotes and details, and 900 characters of the text.
+    """
     payload = payload or {}
     summary = payload.get("summary_ru") or payload.get("summary") or fallback_text
     excerpt = " ".join(str(original or "").split())
+    data = _finding_facts(payload, summary, excerpt[:MAX_REVIEW_TEXT_CHARS if review else MAX_EXCERPT_CHARS], original)
+    if review:
+        evidence = payload.get("evidence")
+        data["evidence"] = {str(k): str(v)[:200] for k, v in evidence.items() if v} if isinstance(evidence, dict) else {}
+        for key in ("district", "address", "floor", "features", "condition"):
+            if payload.get(key) not in (None, "", []):
+                data[key] = payload[key]
+        data["vertical"] = vertical
+    return data
+
+
+def _finding_facts(payload: dict[str, Any], summary: object, excerpt: str, original: str) -> dict[str, Any]:
     return {
         "summary": str(summary or "")[:MAX_SUMMARY_CHARS],
-        "excerpt": excerpt[:MAX_EXCERPT_CHARS],
+        "excerpt": excerpt,
         "from_search": SEARCH_RESULT_NOTE in str(original or "") or INDEX_NOTE_PREFIX in str(original or ""),  # the note ends the post: check it whole
         "location": payload.get("location"),
         "country": payload.get("country"),
@@ -245,3 +271,104 @@ class OpenRouterRelevanceJudge:
             raise RelevanceError("timeout") from exc
         except httpx.HTTPError as exc:
             raise RelevanceError("network_error") from exc
+
+
+# --- the reviewer as the judge (CAMPAIGN_JUDGE=reviewer) ---------------------------------------------------------------
+
+
+class Reviewer(Protocol):
+    """``bot.agents.reviewer.OpenRouterReviewer``: one criteria matrix per finding."""
+
+    model: str
+
+    async def review(self, task: dict[str, Any], finding: dict[str, Any]) -> Any: ...
+
+
+class ReviewerJudge:
+    """Adapts the reviewer to the ``RelevanceJudge`` protocol: overall -> verdict, the matrix kept in ``review``.
+
+    ``reviews`` tells the runner to hand over the hard criteria and the evidence quotes. Investor findings have no
+    criteria to check against: they go to ``fallback`` (the legacy judge) or, without one, get no verdict.
+    """
+
+    reviews = True
+
+    def __init__(self, reviewer: Reviewer, fallback: RelevanceJudge | None = None) -> None:
+        self.reviewer, self.fallback = reviewer, fallback
+
+    @property
+    def model(self) -> str:
+        return self.reviewer.model
+
+    async def aclose(self) -> None:
+        for part in (self.reviewer, self.fallback):
+            close = getattr(part, "aclose", None)
+            if close is not None:
+                await close()
+
+    async def judge(self, task: dict[str, Any], finding: dict[str, Any]) -> Relevance:
+        if task.get("mode") == "investors" or finding.get("vertical") == "investors":
+            if self.fallback is not None:
+                return await self.fallback.judge(task, finding)
+            return Relevance(None, "reviewer: investors are not reviewed", None, self.model)
+        review = await self.reviewer.review(task, finding)
+        return Relevance(review.overall, review_reason(review), review.deviation_ru, self.model, review.to_dict())
+
+
+def review_reason(review: Any) -> str:
+    """The owners' one-line reason: what failed, else what is unconfirmed, else that all passed (300 characters)."""
+    parts = [f"{c.name}: {c.note_ru or c.quote or c.verdict}" for c in review.fails]
+    if not parts:
+        parts = [f"{c.name}: не подтверждено" for c in review.unknowns]
+    return ("; ".join(parts) or "Все жёсткие критерии подтверждены")[:300]
+
+
+# Match.why -> the category the final report counts a held or excluded finding under (``campaign_findings.why``).
+CATEGORY = {"price": "budget", "currency": "budget", "location": "place", "foreign": "place", "deal": "deal",
+            "type": "type", "rooms": "rooms", "area": "area", "area_max": "area", "area_unknown": "unverified",
+            "kind": "kind", "unverified": "unverified", "ai": "ai", "criteria": "criteria"}
+# The reviewer's criterion -> the rules' ``Match.why``.
+CRITERION_WHY = {"place": "location", "deal": "deal", "type": "type", "budget": "price", "rooms": "rooms",
+                 "area": "area"}
+CRITERION_RU = {"place": "место", "deal": "тип сделки", "type": "тип объекта", "budget": "бюджет",
+                "rooms": "комнаты", "area": "площадь"}
+NUMERIC = frozenset({"budget", "rooms", "area"})
+
+
+def reason_category(why: str | None) -> str | None:
+    """The stored category of a ``Match.why`` (None for an exact match)."""
+    return CATEGORY.get(why or "", "ai") if why else None
+
+
+def _criterion_label(name: str) -> str:
+    head, _, tail = name.partition(":")
+    return CRITERION_RU.get(name) or (f"{'обязательно' if head == 'must_have' else 'исключить'}: {tail}" if tail else name)
+
+
+def review_match(rules: Match, review: dict[str, Any]) -> Match:
+    """The bucket of a finding from the rules' bucket and the reviewer's matrix (``review.to_dict``).
+
+    * any hard ``fail`` -> excluded (its quote is in the stored matrix), except a number outside the task that the
+      rules had already placed in their «similar» band (the near-match question is kept);
+    * the reviewer's ``reject`` without a failed criterion (not one concrete offer) -> excluded;
+    * any hard ``unknown`` -> not exact: held as similar, «Не подтверждено: <criteria>»;
+    * ``near`` -> at least similar; all ``pass`` -> the rules' bucket.
+    The result is never better than the rules' bucket.
+    """
+    criteria = [c for c in review.get("criteria") or [] if isinstance(c, dict)]
+    fails = [str(c.get("name")) for c in criteria if c.get("verdict") == "fail"]
+    unknown = [str(c.get("name")) for c in criteria if c.get("verdict") == "unknown"]
+    if fails:
+        if rules.bucket == "similar" and rules.why in ("price", "area") and all(n in NUMERIC for n in fails):
+            return rules
+        name = fails[0]
+        return Match("excluded", float("inf"), CRITERION_WHY.get(name, "criteria"),
+                     note="Не подходит: " + ", ".join(_criterion_label(n) for n in fails))
+    if review.get("overall") == "reject":
+        return Match("excluded", float("inf"), "ai")
+    if unknown:
+        return worse(rules, Match("similar", rules.distance, "unverified",
+                                  note="Не подтверждено: " + ", ".join(_criterion_label(n) for n in unknown)))
+    if review.get("overall") == "near":
+        return worse(rules, Match("similar", rules.distance, "ai"))
+    return rules

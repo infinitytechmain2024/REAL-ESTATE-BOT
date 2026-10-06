@@ -104,10 +104,10 @@
 
 ## Этап 4 — Рецензент и финалист (3–4 дня)
 
-- [ ] **4.1 Рецензент (Opus)**: `bot/agents/reviewer.py` — матрица hard-критериев
+- [x] **4.1 Рецензент (Opus)**: `bot/agents/reviewer.py` — матрица hard-критериев
   `pass/fail/unknown` с цитатой на каждый; `unknown` по hard → не `exact`.
   Заменяет связку `tolerance.py` + `relevance.py`; ±10 % становится параметром `TaskSpec`.
-- [ ] **4.2 Финалист (Fable)**: `bot/campaign/final_report.py` — ранжирование, отчёт
+- [x] **4.2 Финалист (Fable)**: `bot/campaign/final_report.py` — ранжирование, отчёт
   пользователю: найдено / отклонено по причинам / какие сайты не прочитались и почему.
 - [ ] **4.3 Боевой `reduction-worker`**: снять `mode == "shadow"`, отправка через Recorder-outbox;
   старый `analysis-worker` остаётся для постов Facebook без URL.
