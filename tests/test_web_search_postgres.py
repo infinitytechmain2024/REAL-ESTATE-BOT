@@ -320,3 +320,71 @@ async def test_renders_are_counted_in_the_database(pool) -> None:
     assert await store.renders_used(cid) == 1 and await store.renders_used(other) == 0
     await store.mark_rendered(cid, url_key(INDEX_URL))
     assert await PostgresWebStore(pool).renders_used(cid) == 2  # survives a new store (a restart)
+
+
+async def test_scrape_api_reads_are_counted_in_the_database(pool) -> None:
+    from bot.web_search.models import Candidate
+
+    store = PostgresWebStore(pool)
+    cid = await new_campaign(pool)
+    await store.enqueue(cid, [Candidate(LISTING, url_key(LISTING), "idealista.com", 0, "listing")])
+    assert await store.scrapes_used(cid) == 0
+    await store.mark_scraped(cid, url_key(LISTING))
+    await store.mark_scraped(cid, url_key(LISTING))
+    assert await PostgresWebStore(pool).scrapes_used(cid) == 1
+
+
+async def test_host_blocks_are_tracked_per_layer(pool) -> None:
+    store = PostgresWebStore(pool)
+    cid = await new_campaign(pool)
+    urls = [QueuedUrl(f"https://www.idealista.com/inmueble/{80000000 + n}/", url_key(f"https://www.idealista.com/inmueble/{80000000 + n}/"),
+                      "idealista.com", 0, "listing") for n in range(5)]
+    assert await store.layer_state("idealista.com") == {"http": True, "render": True}  # unknown host
+    for url in urls[:3]:  # three HTTP refusals; the page was then read by the browser
+        ticket = await store.begin_fetch(cid, url, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
+                                         render_layer=True)
+        assert not isinstance(ticket, str)
+        await store.layer_refused(url.host, "http")
+        await store.finish_fetch(ticket, PageResult(True, "listing", url.url, "t", f"Piso {url.url} " * 20, layer="render"))
+    row = await pool.fetchrow("select * from web_hosts where host = 'idealista.com'")
+    assert row["http_refusals"] == 3 and row["http_blocked_until"] is not None
+    assert row["render_refusals"] == 0 and row["render_blocked_until"] is None and row["blocked_until"] is None
+    assert row["pages_fetched"] == 3
+    assert await store.layer_state("idealista.com") == {"http": False, "render": True}
+    # not blocked for the browser: a fetch is still given out
+    ticket = await store.begin_fetch(cid, urls[3], vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
+                                     render_layer=True)
+    assert not isinstance(ticket, str)
+    # three browser refusals block that layer too, and now the host is blocked altogether
+    for _ in range(3):
+        await store.finish_fetch(ticket, PageResult(False, "listing", urls[3].url, error="render_blocked", layer="render"))
+    row = await pool.fetchrow("select * from web_hosts where host = 'idealista.com'")
+    assert row["render_refusals"] == 3 and row["render_blocked_until"] is not None and row["blocked_until"] is not None
+    assert await store.layer_state("idealista.com") == {"http": False, "render": False}
+    assert await store.begin_fetch(cid, urls[4], vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
+                                   render_layer=True) == "host_blocked"
+    # without the browser layer the host was blocked after the HTTP refusals alone
+    assert await store.begin_fetch(cid, urls[4], vertical="real_estate", lease_seconds=300, max_runtime_seconds=60) == "host_blocked"
+
+
+async def test_http_only_refusals_set_the_legacy_block_without_a_browser_layer(pool) -> None:
+    store = PostgresWebStore(pool)
+    cid = await new_campaign(pool)
+    for n in range(3):
+        url = f"https://www.fotocasa.es/es/comprar/vivienda/madrid/{90000000 + n}/d"
+        queued = QueuedUrl(url, url_key(url), "fotocasa.es", 0, "listing")
+        ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+        assert not isinstance(ticket, str)
+        await store.finish_fetch(ticket, PageResult(False, "listing", url, error="http_403"))
+    row = await pool.fetchrow("select * from web_hosts where host = 'fotocasa.es'")
+    assert row["http_blocked_until"] is not None and row["blocked_until"] is not None
+    assert row["consecutive_refusals"] == 3
+    assert await store.layer_state("fotocasa.es") == {"http": False, "render": True}
+
+
+async def test_migration_034_carries_an_earlier_block_over_to_both_layers(pool) -> None:
+    await pool.execute("insert into web_hosts (host, blocked_until) values ('old.example', now() + interval '5 hours')")
+    sql = next(p for p in MIGRATIONS if p.name.startswith("034_")).read_text(encoding="utf-8")
+    await pool.execute(sql)  # idempotent: applying it again after the data exists
+    row = await pool.fetchrow("select http_blocked_until, render_blocked_until, blocked_until from web_hosts where host = 'old.example'")
+    assert row["http_blocked_until"] == row["render_blocked_until"] == row["blocked_until"]

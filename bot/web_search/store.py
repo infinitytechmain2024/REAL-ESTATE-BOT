@@ -44,7 +44,10 @@ REFUSALS_TO_BLOCK = 3    # consecutive 403/429 from one site block it for BLOCK_
 BLOCK_HOURS = 12
 INDEX_TTL_DAYS = 7       # an index (search/list) page is read again after this long; listings never
 TERMINAL = ("completed", "cancelled", "failed")
-_REFUSALS = ("http_401", "http_403", "http_429", "http_503")
+# What counts as a refusal of one layer: an HTTP status, a captcha/anti-bot page (a 200 that is not the
+# listing) on the HTTP layer, "render_blocked" (the browser got such a page) on the render layer.
+_REFUSALS = ("http_401", "http_403", "http_429", "http_503", "captcha", "render_blocked")
+LAYERS = ("http", "render")
 
 # begin_fetch refusals (the URL's campaign row gets this state; 'busy' leaves it queued)
 DUPLICATE, SOURCE_UNAVAILABLE, HOST_BLOCKED, BUSY = "duplicate", "source_unavailable", "host_blocked", "busy"
@@ -75,10 +78,14 @@ class WebStore(Protocol):
     async def host_attempts(self, campaign_id: str, host: str) -> int: ...
     async def mark_rendered(self, campaign_id: str, url_key: str) -> None: ...
     async def renders_used(self, campaign_id: str) -> int: ...
+    async def mark_scraped(self, campaign_id: str, url_key: str) -> None: ...
+    async def scrapes_used(self, campaign_id: str) -> int: ...
+    async def layer_state(self, host: str) -> dict[str, bool]: ...
+    async def layer_refused(self, host: str, layer: str) -> None: ...
     async def mark_url(self, campaign_id: str, url_key: str, state: str, detail: str | None = None) -> None: ...
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
-                          index_ttl_days: int = INDEX_TTL_DAYS) -> FetchTicket | str: ...
+                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False) -> FetchTicket | str: ...
     async def finish_fetch(self, ticket: FetchTicket, result: PageResult) -> str | None: ...
     async def web_status(self, campaign_id: str) -> WebStatus | None: ...
     async def site_report(self, campaign_id: str) -> list[SiteReport]: ...
@@ -331,6 +338,29 @@ class PostgresWebStore:
         return int(await self.pool.fetchval(
             "select count(*) from web_campaign_urls where campaign_id = $1::uuid and rendered", campaign_id))
 
+    async def mark_scraped(self, campaign_id: str, url_key: str) -> None:
+        await self.pool.execute(
+            "update web_campaign_urls set scraped = true where campaign_id = $1::uuid and url_key = $2",
+            campaign_id, url_key)
+
+    async def scrapes_used(self, campaign_id: str) -> int:
+        return int(await self.pool.fetchval(
+            "select count(*) from web_campaign_urls where campaign_id = $1::uuid and scraped", campaign_id))
+
+    async def layer_state(self, host: str) -> dict[str, bool]:
+        """``{"http": open, "render": open}``: False while that layer of the host is blocked (refusals)."""
+        row = await self.pool.fetchrow(
+            """select coalesce(http_blocked_until > now(), false) as http_blocked,
+                      coalesce(render_blocked_until > now(), false) as render_blocked
+                 from web_hosts where host = $1""", host)
+        return {"http": not (row and row["http_blocked"]), "render": not (row and row["render_blocked"])}
+
+    async def layer_refused(self, host: str, layer: str) -> None:
+        """Count a refusal of ``layer`` the worker left behind for the next layer (the last layer goes through ``finish_fetch``)."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await _set_actor(conn)
+            await _count_refusal(conn, host, layer, True, render_layer=True)
+
     async def mark_url(self, campaign_id: str, url_key: str, state: str, detail: str | None = None) -> None:
         await self.pool.execute(
             """update web_campaign_urls set state = $3, detail = $4, finished_at = now()
@@ -339,14 +369,18 @@ class PostgresWebStore:
 
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
-                          index_ttl_days: int = INDEX_TTL_DAYS) -> FetchTicket | str:
-        """Claim ``url`` for one read; ``contact_site`` False: only its search result is stored (a blocked site too)."""
+                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False) -> FetchTicket | str:
+        """Claim ``url`` for one read; ``contact_site`` False: only its search result is stored (a blocked site too).
+
+        HOST_BLOCKED: every enabled layer (HTTP, and the browser when ``render_layer``) is blocked for the site.
+        """
         import asyncpg
 
         try:
             async with self.pool.acquire() as conn, conn.transaction():
                 await _set_actor(conn)
-                source, refusal = await _site_source(conn, url.host, vertical, contact_site=contact_site)
+                source, refusal = await _site_source(conn, url.host, vertical, contact_site=contact_site,
+                                                     render_layer=render_layer)
                 if refusal is not None:
                     await _mark(conn, campaign_id, url.url_key, "skipped", refusal)
                     return refusal
@@ -371,7 +405,7 @@ class PostgresWebStore:
                     url.url_key, url.url[:2048], url.host, url.kind, campaign_id, lease_seconds, index_ttl_days)
                 if not claimed:
                     raise _Duplicate
-                return FetchTicket(campaign_id, url, source, run_id)
+                return FetchTicket(campaign_id, url, source, run_id, render_layer)
         except _Duplicate:
             await self.mark_url(campaign_id, url.url_key, DUPLICATE, "seen_before")
             return DUPLICATE
@@ -392,7 +426,7 @@ class PostgresWebStore:
                     ticket.source_id, ticket.run_id, ticket.url.url_key, (result.final_url or ticket.url.url)[:2048],
                     result.text, _raw_payload(ticket, result), content_hash(result.text))
             fetched = result.ok and result.via == "page"
-            contacted = result.via == "page" or result.error is not None
+            contacted = result.layer != "none" and (result.via == "page" or result.error is not None)
             if result.ok:
                 await conn.execute(
                     """update acquisition_runs set state = 'succeeded', finished_at = now()
@@ -417,12 +451,9 @@ class PostgresWebStore:
             refused = (result.error or "") in _REFUSALS
             await conn.execute(
                 """update web_hosts set last_fetch_at = now(),
-                          pages_fetched = pages_fetched + $2::int, pages_failed = pages_failed + (1 - $2::int),
-                          consecutive_refusals = case when $3 then consecutive_refusals + 1 else 0 end,
-                          blocked_until = case when $3 and consecutive_refusals + 1 >= $4
-                                               then now() + make_interval(hours => $5) else blocked_until end
-                    where host = $1""",
-                ticket.url.host, int(fetched), refused, REFUSALS_TO_BLOCK, BLOCK_HOURS)
+                          pages_fetched = pages_fetched + $2::int, pages_failed = pages_failed + (1 - $2::int)
+                    where host = $1""", ticket.url.host, int(fetched))
+            await _count_refusal(conn, ticket.url.host, result.layer, refused, render_layer=ticket.render_layer)
             await conn.execute(
                 f"update monitoring_sources set {'last_success_at' if fetched else 'last_failure_at'} = now() where id = $1::uuid",
                 ticket.source_id)
@@ -466,6 +497,34 @@ def _detail(result: PageResult) -> str | None:
     return None if result.ok else (result.error or "failed")[:80]
 
 
+async def _count_refusal(conn: asyncpg.Connection[asyncpg.Record], host: str, layer: str, refused: bool, *,
+                         render_layer: bool) -> None:
+    """One more refusal (or a success: the count restarts) of ``layer``; REFUSALS_TO_BLOCK in a row block that layer.
+
+    ``blocked_until`` is "every enabled layer blocked": set only when HTTP (and the browser, when enabled) are.
+    """
+    if layer == "http":
+        await conn.execute(
+            """update web_hosts set consecutive_refusals = case when $2 then consecutive_refusals + 1 else 0 end,
+                      http_refusals = case when $2 then http_refusals + 1 else 0 end,
+                      http_blocked_until = case when $2 and http_refusals + 1 >= $3
+                                                then now() + make_interval(hours => $4) else http_blocked_until end
+                where host = $1""", host, refused, REFUSALS_TO_BLOCK, BLOCK_HOURS)
+    elif layer == "render":
+        await conn.execute(
+            """update web_hosts set render_refusals = case when $2 then render_refusals + 1 else 0 end,
+                      render_blocked_until = case when $2 and render_refusals + 1 >= $3
+                                                  then now() + make_interval(hours => $4) else render_blocked_until end
+                where host = $1""", host, refused, REFUSALS_TO_BLOCK, BLOCK_HOURS)
+    else:
+        return
+    await conn.execute(
+        """update web_hosts set blocked_until = case when $2 then least(http_blocked_until, render_blocked_until)
+                                                     else http_blocked_until end
+            where host = $1 and http_blocked_until > now() and (not $2 or render_blocked_until > now())""",
+        host, render_layer)
+
+
 async def _set_actor(conn: asyncpg.Connection[asyncpg.Record]) -> None:
     await conn.execute("select set_config('app.actor', $1, true)", ACTOR)
 
@@ -479,7 +538,7 @@ async def _mark(conn: asyncpg.Connection[asyncpg.Record], campaign_id: str, url_
 
 
 async def _site_source(conn: asyncpg.Connection[asyncpg.Record], host: str, vertical: str, *,
-                       contact_site: bool = True) -> tuple[str, str | None]:
+                       contact_site: bool = True, render_layer: bool = False) -> tuple[str, str | None]:
     """The site's monitoring source id, created active on first sight; a refusal code when it may not be read.
 
     An operator can stop the web stage from reading a site by pausing or
@@ -487,7 +546,9 @@ async def _site_source(conn: asyncpg.Connection[asyncpg.Record], host: str, vert
     us (403/429) is blocked for a while (unless ``contact_site`` is False: only its search result is kept).
     """
     blocked = contact_site and await conn.fetchval(
-        "select blocked_until > now() from web_hosts where host = $1", host)
+        """select coalesce(http_blocked_until > now(), false)
+                  and (not $2 or coalesce(render_blocked_until > now(), false))
+             from web_hosts where host = $1""", host, render_layer)
     if blocked:
         return "", HOST_BLOCKED
     url = f"https://{host}/"
@@ -586,6 +647,7 @@ class _MemUrl:
     title: str = ""
     snippet: str = ""
     rendered: bool = False
+    scraped: bool = False
 
 
 @dataclass
@@ -765,6 +827,43 @@ class MemoryWebStore:
     async def renders_used(self, campaign_id: str) -> int:
         return sum(1 for u in self.urls.get(campaign_id, {}).values() if u.rendered)
 
+    async def mark_scraped(self, campaign_id: str, url_key: str) -> None:
+        row = self.urls.get(campaign_id, {}).get(url_key)
+        if row is not None:
+            row.scraped = True
+
+    async def scrapes_used(self, campaign_id: str) -> int:
+        return sum(1 for u in self.urls.get(campaign_id, {}).values() if u.scraped)
+
+    def _host(self, host: str) -> dict[str, object]:
+        return self.hosts.setdefault(host, {"fetched": 0, "failed": 0, "refusals": 0, "blocked_until": None,
+                                            "http_refusals": 0, "http_blocked_until": None,
+                                            "render_refusals": 0, "render_blocked_until": None})
+
+    def _blocked(self, host: dict[str, object], layer: str) -> bool:
+        until = host[f"{layer}_blocked_until"]
+        return isinstance(until, datetime) and until > self.now()
+
+    async def layer_state(self, host: str) -> dict[str, bool]:
+        row = self.hosts.get(host)
+        return {"http": not (row and self._blocked(row, "http")), "render": not (row and self._blocked(row, "render"))}
+
+    async def layer_refused(self, host: str, layer: str) -> None:
+        self._count_refusal(host, layer, True, render_layer=True)
+
+    def _count_refusal(self, host_name: str, layer: str, refused: bool, *, render_layer: bool) -> None:
+        host = self._host(host_name)
+        if layer not in LAYERS:
+            return
+        host[f"{layer}_refusals"] = host[f"{layer}_refusals"] + 1 if refused else 0  # type: ignore[operator]
+        if layer == "http":
+            host["refusals"] = host["http_refusals"]
+        if refused and host[f"{layer}_refusals"] >= REFUSALS_TO_BLOCK:  # type: ignore[operator]
+            host[f"{layer}_blocked_until"] = self.now() + timedelta(hours=BLOCK_HOURS)
+        if self._blocked(host, "http") and (not render_layer or self._blocked(host, "render")):
+            host["blocked_until"] = (min(host["http_blocked_until"], host["render_blocked_until"])  # type: ignore[type-var]
+                                     if render_layer else host["http_blocked_until"])
+
     async def host_attempts(self, campaign_id: str, host: str) -> int:
         return sum(1 for u in self.urls.get(campaign_id, {}).values()
                    if u.host == host and u.state in ("fetched", "failed"))
@@ -776,10 +875,9 @@ class MemoryWebStore:
 
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
-                          index_ttl_days: int = INDEX_TTL_DAYS) -> FetchTicket | str:
-        host = self.hosts.setdefault(url.host, {"fetched": 0, "failed": 0, "refusals": 0, "blocked_until": None})
-        blocked = host["blocked_until"]
-        if contact_site and isinstance(blocked, datetime) and blocked > self.now():
+                          index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False) -> FetchTicket | str:
+        host = self._host(url.host)
+        if contact_site and self._blocked(host, "http") and (not render_layer or self._blocked(host, "render")):
             await self.mark_url(campaign_id, url.url_key, "skipped", HOST_BLOCKED)
             return HOST_BLOCKED
         if url.host in self.paused_hosts:
@@ -794,7 +892,7 @@ class MemoryWebStore:
             return DUPLICATE
         self.seen[url.url_key] = {"url": url.url, "host": url.host, "state": "fetching", "campaign_id": campaign_id,
                                   "claimed_at": self.now(), "finished_at": None, "post_id": None}
-        return FetchTicket(campaign_id, url, f"source:{url.host}", str(uuid.uuid4()))
+        return FetchTicket(campaign_id, url, f"source:{url.host}", str(uuid.uuid4()), render_layer)
 
     async def finish_fetch(self, ticket: FetchTicket, result: PageResult) -> str | None:
         post_id: str | None = None
@@ -811,14 +909,12 @@ class MemoryWebStore:
         row.state, row.kind = ("fetched" if result.ok else "failed"), result.kind
         row.detail = _detail(result)
         self.finished_fetches.append(ticket.url.url_key)
-        if result.via == "search" and result.error is None:  # the site was never asked
+        if result.layer == "none" or (result.via == "search" and result.error is None):  # the site was never asked
             return post_id
-        host = self.hosts[ticket.url.host]
+        host = self._host(ticket.url.host)
         host["fetched" if result.ok and result.via == "page" else "failed"] += 1  # type: ignore[operator]
-        refused = (result.error or "") in _REFUSALS
-        host["refusals"] = host["refusals"] + 1 if refused else 0  # type: ignore[operator]
-        if refused and host["refusals"] >= REFUSALS_TO_BLOCK:  # type: ignore[operator]
-            host["blocked_until"] = self.now() + timedelta(hours=BLOCK_HOURS)
+        self._count_refusal(ticket.url.host, result.layer, (result.error or "") in _REFUSALS,
+                            render_layer=ticket.render_layer)
         return post_id
 
     async def site_report(self, campaign_id: str) -> list[SiteReport]:

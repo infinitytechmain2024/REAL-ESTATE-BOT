@@ -117,6 +117,7 @@ class FetchTicket:
     url: QueuedUrl
     source_id: str
     run_id: str
+    render_layer: bool = False   # the browser layer is enabled for this fetch (host blocks count both layers)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,3 +138,6 @@ class PageResult:
     error: str | None = None
     query: str | None = None
     via: Literal["page", "search", "index"] = "page"
+    # the layer that produced this result or its error: "http", "render" (browser), "scrape" (unlocker API),
+    # "none" (the site was never asked). A refusal counts against that layer's block of the host only.
+    layer: Literal["http", "render", "scrape", "none"] = "http"

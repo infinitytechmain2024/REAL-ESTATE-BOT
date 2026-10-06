@@ -54,8 +54,9 @@ from .queries import (
     portal_quota,
 )
 from .render import Renderer, RenderError
+from .scrape_api import Scraper
 from .searxng import Searcher, SearchError
-from .store import BUSY, HOST_BLOCKED, WebStore
+from .store import _REFUSALS, BUSY, HOST_BLOCKED, WebStore
 from .structured import Structured, facts_block, from_jsonld, structured
 from .urls import classify_page, classify_url, fetchable, host_of, portal_listing, url_key
 
@@ -84,7 +85,9 @@ class WebSearchConfig:
     lease_seconds: int = 300
     max_post_chars: int = 8000
     page_runtime_seconds: int = 60
-    max_renders_per_campaign: int = 15
+    max_renders_per_campaign: int = 60
+    render_on_refusal: bool = True    # a refused page (403/429/503, a captcha page) is tried once in the browser
+    max_scrape_api_per_campaign: int = 40   # scrape-API reads per campaign (0: the layer is off)
     blocked_hosts: frozenset[str] = frozenset()
     cover_portals: bool = True  # every known portal of the country gets its own site: query
 
@@ -97,7 +100,7 @@ class WebSearchConfig:
                 and 1 <= self.max_pages_per_day <= 10_000 and 1 <= self.max_queries_per_day <= 5_000
                 and 1 <= self.max_rounds <= 50 and 5 <= self.max_minutes_per_campaign <= 7 * 24 * 60
                 and 60 <= self.lease_seconds <= 3600 and 1 <= self.page_runtime_seconds <= 600
-                and 0 <= self.max_renders_per_campaign <= 200):
+                and 0 <= self.max_renders_per_campaign <= 200 and 0 <= self.max_scrape_api_per_campaign <= 500):
             raise ValueError("unsafe web search limits")
 
 
@@ -119,13 +122,14 @@ class WebSearchWorker:
         generator: QueryGenerator,
         *,
         renderer: Renderer | None = None,
+        scraper: Scraper | None = None,
         config: WebSearchConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.campaigns, self.store, self.searcher, self.fetcher, self.generator = (
             campaigns, store, searcher, fetcher, generator)
         self.config, self.now = config or WebSearchConfig(), now
-        self.renderer = renderer
+        self.renderer, self.scraper = renderer, scraper
         self.token = str(uuid.uuid4())
 
     async def tick(self) -> int:
@@ -268,7 +272,8 @@ class WebSearchWorker:
                 continue
             ticket = await self.store.begin_fetch(campaign.id, url, vertical=campaign.plan.vertical,
                                                   lease_seconds=cfg.lease_seconds,
-                                                  max_runtime_seconds=cfg.page_runtime_seconds)
+                                                  max_runtime_seconds=cfg.page_runtime_seconds,
+                                                  render_layer=self._render_layer())
             if isinstance(ticket, str):
                 if ticket == HOST_BLOCKED:  # the site kept refusing us: its search result is all we keep
                     await self._keep_search_result(campaign, url, None)
@@ -278,9 +283,10 @@ class WebSearchWorker:
             budget -= 1
             pages += 1
             await self.store.set_progress(campaign.id, url.host, self._line(None, pages, f"сайт {url.host}"))
-            result, children = await self._read(campaign, url)
+            result, children = await self._read(campaign, url, await self.store.layer_state(url.host))
             if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
-                result = search_result(url, result.error) or result
+                card = search_result(url, result.error)
+                result = replace(card, layer=result.layer) if card else result
             await self.store.finish_fetch(ticket, result)
             if children:
                 await self.store.enqueue(campaign.id, children, index_ttl_days=cfg.index_ttl_days)
@@ -300,31 +306,119 @@ class WebSearchWorker:
         log.info("web_search.search_result_kept", extra={"campaign_id": campaign.id, "host": url.host})
         return True
 
-    async def _read(self, campaign: Campaign, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
-        """Plain HTTP first; Scrapling reads the site's JSON-LD; the browser only when HTTP showed nothing."""
+    def _render_layer(self) -> bool:
+        """The browser is a fetch layer for refused pages (so a host's browser refusals can block it too)."""
+        return self.renderer is not None and self.config.render_on_refusal and self.config.max_renders_per_campaign > 0
+
+    async def _read(self, campaign: Campaign, url: QueuedUrl,
+                    layers: dict[str, bool] | None = None) -> tuple[PageResult, list[Candidate]]:
+        """Layers: plain HTTP (+ Scrapling JSON-LD), then the browser, then an optional scrape API.
+
+        ``layers``: which layers of the host are open (``store.layer_state``). A page the site refused (403/429/503,
+        a captcha page) goes to the next layer instead of straight to the search-result card; a layer the host
+        blocked is skipped. The empty-JavaScript-page render (HTTP 200, no text) is as before.
+        """
         cfg = self.config
+        layers = layers or {"http": True, "render": True}
+        failed = PageResult(False, url.kind, url.url, error="http_blocked", layer="none")  # HTTP skipped: blocked
+        if layers.get("http", True):
+            try:
+                fetch = self.fetcher.fetch(url.url, country=query_task(campaign).country)
+                page = await asyncio.wait_for(fetch, timeout=cfg.page_runtime_seconds)
+            except FetchError as exc:
+                failed = PageResult(False, url.kind, url.url, error=exc.code)
+            except TimeoutError:
+                failed = PageResult(False, url.kind, url.url, error="timeout")
+            else:
+                parsed = parse_html(page.html, page.url)
+                if looks_blocked(parsed.title, post_text(parsed, limit=cfg.max_post_chars)):
+                    failed = PageResult(False, url.kind, page.url, parsed.title, error="captcha")
+                else:
+                    result, children = self._page(url, page.url, parsed, structured(page.html, page.url))
+                    if not await self._wants_render(campaign.id, result, children):
+                        return result, children
+                    return await self._render_empty(campaign.id, url, page.url, parsed, result, children)
+            if failed.error not in RENDER_ON:
+                return failed, []
+        return await self._next_layers(campaign, url, failed, render_open=layers.get("render", True))
+
+    async def _render_empty(self, campaign_id: str, url: QueuedUrl, page_url: str, parsed: ParsedPage,
+                            result: PageResult, children: list[Candidate]) -> tuple[PageResult, list[Candidate]]:
+        """A page served with HTTP 200 but drawn by JavaScript: read it once more in the browser."""
+        cfg = self.config
+        await self.store.mark_rendered(campaign_id, url.url_key)
         try:
-            fetch = self.fetcher.fetch(url.url, country=query_task(campaign).country)
-            page = await asyncio.wait_for(fetch, timeout=cfg.page_runtime_seconds)
-        except FetchError as exc:
-            return PageResult(False, url.kind, url.url, error=exc.code), []
-        except TimeoutError:
-            return PageResult(False, url.kind, url.url, error="timeout"), []
-        parsed = parse_html(page.html, page.url)
-        result, children = self._page(url, page.url, parsed, structured(page.html, page.url))
-        if not await self._wants_render(campaign.id, result, children):
-            return result, children
-        await self.store.mark_rendered(campaign.id, url.url_key)
-        try:
-            rendered = await asyncio.wait_for(self.renderer.render(page.url), timeout=cfg.page_runtime_seconds)
+            rendered = await asyncio.wait_for(self.renderer.render(page_url), timeout=cfg.page_runtime_seconds)
         except (RenderError, TimeoutError) as exc:
-            log.info("web_search.render_skipped %s", getattr(exc, "code", "timeout"), extra={"campaign_id": campaign.id})
+            log.info("web_search.render_skipped %s", getattr(exc, "code", "timeout"), extra={"campaign_id": campaign_id})
             return result, children
         seen = ParsedPage(rendered.title or parsed.title, parsed.description, rendered.text,
                           tuple(Link(href, text) for href, text in rendered.links))
         again, more = self._page(url, rendered.url, seen, from_jsonld(rendered.jsonld, rendered.url))
-        log.info("web_search.rendered", extra={"campaign_id": campaign.id, "ok": again.ok, "links": len(more)})
+        log.info("web_search.rendered", extra={"campaign_id": campaign_id, "ok": again.ok, "links": len(more)})
         return (again, more) if again.ok and (again.kind == "listing" or more) else (result, children)
+
+    async def _next_layers(self, campaign: Campaign, url: QueuedUrl, failed: PageResult, *,
+                           render_open: bool) -> tuple[PageResult, list[Candidate]]:
+        """The HTTP layer was refused or blocked: the browser (once, within its budget), then the scrape API.
+
+        A refusal of a layer left behind is counted for the host here; the last layer's result goes through
+        ``finish_fetch``. robots.txt was checked before any layer (``_read_pages``): a disallowed URL never gets here.
+        """
+        cfg, cid, current = self.config, campaign.id, failed
+        if (self._render_layer() and render_open and self.renderer is not None
+                and await self.store.renders_used(cid) < cfg.max_renders_per_campaign):
+            await self._leave(url, current)
+            current, children = await self._render_refused(cid, url)
+            if current.ok:
+                return current, children
+        if self.scraper is not None and await self.store.scrapes_used(cid) < cfg.max_scrape_api_per_campaign:
+            await self._leave(url, current)
+            current, children = await self._scrape(cid, url)
+            if current.ok:
+                return current, children
+        return current, []
+
+    async def _leave(self, url: QueuedUrl, result: PageResult) -> None:
+        """Count ``result``'s refusal against its layer of the host when another layer takes over."""
+        if result.layer in ("http", "render") and (result.error or "") in REFUSALS:
+            await self.store.layer_refused(url.host, result.layer)
+
+    async def _render_refused(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
+        cfg = self.config
+        await self.store.mark_rendered(campaign_id, url.url_key)
+        try:
+            rendered = await asyncio.wait_for(self.renderer.render(url.url), timeout=cfg.page_runtime_seconds)
+        except (RenderError, TimeoutError) as exc:
+            code = getattr(exc, "code", "timeout")
+            log.info("web_search.render_failed %s", code, extra={"campaign_id": campaign_id, "host": url.host})
+            return PageResult(False, url.kind, url.url, error=f"render:{code}"[:80], layer="render"), []
+        if looks_blocked(rendered.title, rendered.text):
+            log.info("web_search.render_refused", extra={"campaign_id": campaign_id, "host": url.host})
+            return PageResult(False, url.kind, url.url, rendered.title, error="render_blocked", layer="render"), []
+        seen = ParsedPage(rendered.title, "", rendered.text, tuple(Link(href, text) for href, text in rendered.links))
+        result, children = self._page(url, rendered.url, seen, from_jsonld(rendered.jsonld, rendered.url))
+        log.info("web_search.rendered_after_refusal", extra={"campaign_id": campaign_id, "ok": result.ok,
+                                                             "links": len(children)})
+        if result.ok and (result.kind == "listing" or children):
+            return replace(result, layer="render"), children
+        return PageResult(False, url.kind, rendered.url, rendered.title, error="no_readable_text", layer="render"), []
+
+    async def _scrape(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
+        cfg = self.config
+        await self.store.mark_scraped(campaign_id, url.url_key)
+        try:
+            page = await asyncio.wait_for(self.scraper.fetch(url.url), timeout=cfg.page_runtime_seconds * 2)
+        except FetchError as exc:
+            return PageResult(False, url.kind, url.url, error=exc.code, layer="scrape"), []
+        except TimeoutError:
+            return PageResult(False, url.kind, url.url, error="scrape_timeout", layer="scrape"), []
+        parsed = parse_html(page.html, page.url)
+        if looks_blocked(parsed.title, post_text(parsed, limit=cfg.max_post_chars)):
+            return PageResult(False, url.kind, url.url, parsed.title, error="captcha", layer="scrape"), []
+        result, children = self._page(url, page.url, parsed, structured(page.html, page.url))
+        log.info("web_search.scraped", extra={"campaign_id": campaign_id, "ok": result.ok, "links": len(children)})
+        return replace(result, layer="scrape"), children
 
     async def _wants_render(self, campaign_id: str, result: PageResult, children: list[Candidate]) -> bool:
         """Only a page the site served (HTTP 200) but drew with JavaScript: no text, or a list without links."""
@@ -379,6 +473,18 @@ class WebSearchWorker:
             parts.append(f"страниц {pages}/{self.config.max_pages_per_campaign} ·")
         parts.append(doing)
         return " ".join(parts)
+
+
+BLOCK_MARKERS = ("captcha", "datadome", "are you a robot", "access denied")
+MAX_BLOCK_PAGE_CHARS = 400
+REFUSALS = _REFUSALS
+RENDER_ON = ("http_403", "http_429", "http_503", "captcha")   # HTTP refusals that send the page to the next layer
+
+
+def looks_blocked(title: str, text: str) -> bool:
+    """A short page that is an anti-bot wall (captcha, DataDome, «are you a robot», access denied), not a listing."""
+    body = " ".join((text or "").split())
+    return len(body) < MAX_BLOCK_PAGE_CHARS and any(m in f"{title} {body}".lower() for m in BLOCK_MARKERS)
 
 
 def search_result(url: QueuedUrl, error: str | None) -> PageResult | None:

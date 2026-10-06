@@ -53,25 +53,25 @@
 - [ ] **1.1 Пробник**: запустить `scripts/portal_probe.py` по всем 20 порталам с VPS,
   результат в `docs/PORTALS.md` (портал · статус · слой, который читает · JSON-источник).
   Сюда же внести список обязательных сайтов клиента.
-- [ ] **1.2 Слой A — структурированные источники**: модуль `bot/web_search/sources/`:
+- [x] **1.2 Слой A — структурированные источники**: модуль `bot/web_search/sources/`:
   Idealista API (`IDEALISTA_API_KEY/SECRET`, OAuth), JSON-эндпоинты Fotocasa/Habitaclia,
   JSON-LD `ItemList` с индексных страниц **сохраняется** как находки (цена, м², комнаты).
   Файл-точка: `bot/web_search/worker.py:333`.
-- [ ] **1.3 Слой B — httpx → `curl_cffi`** с `impersonate="chrome"`, браузерный UA,
+- [x] **1.3 Слой B — httpx → `curl_cffi`** с `impersonate="chrome"`, браузерный UA,
   полный набор Accept-заголовков, `Accept-Language` по стране; `WEB_SEARCH_PROXY_URL`
   поддерживает список прокси с ротацией (резидентные/ISP).
   Файл: `bot/web_search/fetcher.py:91`.
-- [ ] **1.4 Слой C — браузер на 403**: `render.py` вызывается и для 403/429, не только для
+- [x] **1.4 Слой C — браузер на 403**: `render.py` вызывается и для 403/429, не только для
   пустого текста; профиль `web-search-render` с stealth (Camoufox или playwright-stealth).
   Для DataDome — опциональный `SCRAPE_API_URL/KEY` (Zyte / ScraperAPI / Bright Data) как
   последний слой. Файлы: `bot/web_search/render.py`, `bot/web_search/worker.py:277, 323`.
-- [ ] **1.5 Блокировка хоста по слоям**: `web_hosts.blocked_until` → `(host, layer)`;
+- [x] **1.5 Блокировка хоста по слоям**: `web_hosts.blocked_until` → `(host, layer)`;
   403 на слое B переводит хост на слой C, а не блокирует на 12 ч.
   Файл: `bot/web_search/store.py:385`.
 - [ ] **1.6 Второй поисковый бэкенд**: `SearchBackend` протокол; реализации `SearxngClient`
   и `GoogleCseClient` (или SerpAPI). Запрос уходит в оба, результаты сливаются по `url_key`.
   Файл: `bot/web_search/searxng.py` → `bot/web_search/search_backends.py`.
-- [ ] **1.7 Классификация URL**: убрать «6 цифр = объявление»; для неизвестных хостов
+- [x] **1.7 Классификация URL**: убрать «6 цифр = объявление»; для неизвестных хостов
   объявление = есть JSON-LD `RealEstateListing/Offer` или цена+м² в тексте.
   Файл: `bot/web_search/urls.py:137`.
 

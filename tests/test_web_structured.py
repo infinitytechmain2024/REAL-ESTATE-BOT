@@ -148,20 +148,18 @@ async def test_a_javascript_page_is_read_in_the_browser_once() -> None:
     assert post["text"].startswith("JSON-LD:") and "Boadilla" in post["text"]
 
 
-async def test_the_browser_is_not_used_for_refusals_and_is_capped() -> None:
+async def test_the_browser_read_of_javascript_pages_is_capped() -> None:
     shell = "<html><body><div id=root></div></body></html>"
     urls = [f"https://site{n}.es/inmueble/{n}/" for n in range(4)]
     campaigns = MemoryCampaignStore()
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
-    refused = "https://blocked.es/inmueble/9/"
-    fetcher = FakeFetcher({u: shell for u in urls}, errors={refused: "http_403"})
+    fetcher = FakeFetcher({u: shell for u in urls})
     renderer = FakeRenderer(fail=True)
-    w = worker(campaigns, store, FakeSearcher(default=[refused, *urls]), fetcher, ListGenerator(["parcela Madrid"]),
+    w = worker(campaigns, store, FakeSearcher(default=urls), fetcher, ListGenerator(["parcela Madrid"]),
                max_renders_per_campaign=2)
     w.renderer = renderer
     await run_until_done(w, cid)
-    assert refused not in renderer.calls
     assert len(renderer.calls) == 2           # the cap
     assert store.posts == []                  # a failed browser read keeps the HTTP result (no text)
 

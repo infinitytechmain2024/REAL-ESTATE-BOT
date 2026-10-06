@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .scrape_api import ScrapeApiClient
 from .worker import WebSearchConfig
 
 
@@ -48,7 +49,16 @@ class WebSearchSettings(BaseSettings):
     # Pages drawn by JavaScript (HTTP 200 but empty): read once more in the browser (the Agent Reach path).
     render_enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_ENABLED")
     render_timeout_seconds: float = Field(default=30, ge=5, le=60, validation_alias="WEB_SEARCH_RENDER_TIMEOUT_SECONDS")
-    max_renders_per_campaign: int = Field(default=15, ge=0, le=200, validation_alias="WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN")
+    max_renders_per_campaign: int = Field(default=60, ge=0, le=200, validation_alias="WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN")
+    # A page the plain fetch was refused (403/429/503, a captcha page) is tried once in the browser
+    # (robots.txt still decides first); then the search-result card. Off: only empty JS pages are rendered.
+    render_on_refusal: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_ON_REFUSAL")
+    # Optional last layer for pages both HTTP and the browser were refused: GET {url}?url=<page> with
+    # "Authorization: Bearer <key>" (a Zyte / ScraperAPI / Bright Data style unlocker). Empty: off. Never logged.
+    scrape_api_url: str = Field(default="", validation_alias="WEB_SEARCH_SCRAPE_API_URL")
+    scrape_api_key: str = Field(default="", repr=False, validation_alias="WEB_SEARCH_SCRAPE_API_KEY")
+    scrape_api_timeout_seconds: float = Field(default=60, ge=5, le=180, validation_alias="WEB_SEARCH_SCRAPE_API_TIMEOUT_SECONDS")
+    max_scrape_api_per_campaign: int = Field(default=40, ge=0, le=500, validation_alias="WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN")
     # Optional outbound proxy/VPN for page fetches (http://, https://, socks5://). Never logged.
     # Several proxies may be given comma-separated (one sticky proxy per host).
     proxy_url: str = Field(default="", validation_alias="WEB_SEARCH_PROXY_URL")
@@ -71,5 +81,13 @@ class WebSearchSettings(BaseSettings):
             max_minutes_per_campaign=self.max_minutes_per_campaign, blocked_hosts=self.blocked_hosts(),
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
-            cover_portals=self.cover_portals,
+            cover_portals=self.cover_portals, render_on_refusal=self.render_on_refusal,
+            max_scrape_api_per_campaign=self.max_scrape_api_per_campaign if self.scrape_api_url else 0,
         )
+
+    def scraper(self) -> ScrapeApiClient | None:
+        """The scrape-API layer, or None when ``WEB_SEARCH_SCRAPE_API_URL`` is empty."""
+        if not self.scrape_api_url:
+            return None
+        return ScrapeApiClient(self.scrape_api_url, self.scrape_api_key, timeout_seconds=self.scrape_api_timeout_seconds,
+                               max_bytes=self.max_content_bytes)
