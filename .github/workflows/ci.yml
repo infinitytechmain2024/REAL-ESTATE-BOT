@@ -55,7 +55,7 @@ jobs:
         run: make check-imports BIN="$(dirname "$(which python)")"
 
       - name: Golden tests (web search queries)
-        run: python -m pytest -q tests/test_web_search_queries.py
+        run: python -m pytest tests/golden tests/test_web_search_queries.py -q
 
       - name: Unit tests
         # PostgreSQL-backed tests skip without their *_TEST_DATABASE_URL; the

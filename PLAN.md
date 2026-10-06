@@ -45,7 +45,7 @@
 - [x] **0.8 `.env.example`**: `CAMPAIGN_RELEVANCE_MAX_CALLS=2000`, `WEB_SEARCH_MAX_PAGES_PER_HOST=100`,
   `WEB_SEARCH_MAX_LINKS_PER_INDEX=40`, `WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN=80`,
   `WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN=400`. Лимит рендеров хранить в БД, не в памяти.
-- [ ] **0.9 Золотой тест**: `tests/golden/` — 10 задач с ожидаемыми `task_kind`, порталами и
+- [x] **0.9 Золотой тест**: `tests/golden/` — 10 задач с ожидаемыми `task_kind`, порталами и
   обязательными словами в запросах. Запускается в CI.
 
 ## Этап 1 — Доступ к порталам (3–5 дней)
@@ -137,12 +137,11 @@
 
 | Переменная | Значение | Роль |
 |---|---|---|
-| `OPENROUTER_INTERVIEW_MODEL` | `anthropic/claude-opus-5-5` | интервьюер |
-| `OPENROUTER_PLAN_MODEL` | `anthropic/claude-opus-5-5` | архитектор |
-| `OPENROUTER_EXTRACT_MODEL` | `anthropic/claude-sonnet-5-5` | сборщик |
-| `OPENROUTER_REVIEW_MODEL` | `anthropic/claude-opus-5-5` | рецензент |
-| `OPENROUTER_FINAL_MODEL` | `anthropic/claude-opus-5-5` (или Fable, если доступен в OpenRouter) | финалист |
-| `OPENROUTER_INTAKE_MODEL` | `anthropic/claude-haiku-4-5` | разбор ответов |
+| `OPENROUTER_INTERVIEW_MODEL` | `anthropic/claude-sonnet-4.5` | интервьюер |
+| `OPENROUTER_PLAN_MODEL` | `anthropic/claude-sonnet-4.5` | архитектор |
+| `OPENROUTER_ANALYSIS_MODEL` | `anthropic/claude-sonnet-4.5` | сборщик |
+| `OPENROUTER_REVIEW_MODEL` | `anthropic/claude-sonnet-4.5` | рецензент |
+| `OPENROUTER_FINAL_MODEL` | `anthropic/claude-sonnet-4.5` | финалист |
 
 ## Критерии приёмки всего плана
 
