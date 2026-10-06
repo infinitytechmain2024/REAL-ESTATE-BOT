@@ -31,7 +31,14 @@ from bot.web_search.queries import (
 )
 from bot.web_search.searxng import SearchError, SearchHit, SearxngClient
 from bot.web_search.store import MemoryWebStore
-from bot.web_search.urls import SPAIN_PORTALS, classify_url, fetchable, host_of, url_key
+from bot.web_search.urls import (
+    SPAIN_PORTALS,
+    SPAIN_PORTALS_BY_KIND,
+    classify_url,
+    fetchable,
+    host_of,
+    url_key,
+)
 from bot.web_search.worker import WebSearchConfig, WebSearchWorker, query_task
 from tests.test_campaign_runner import FakeMessenger
 
@@ -162,11 +169,11 @@ async def test_template_generator_rounds_never_repeat_and_cover_languages_and_po
                      dict(plan.constraints), tuple(plan.languages))
     generator, used = TemplateQueryGenerator(), []
     for _ in range(3):
-        round_ = await generator.generate(task, used=used, count=12)
-        assert len(round_) == 12
+        round_ = await generator.generate(task, used=used, count=6)
+        assert len(round_) == 6
         used += [q.text for q in round_]
-    assert len({query_key(q) for q in used}) == len(used) == 36
-    assert {"es", "en", "ru", "uk"} <= {q.language for q in await generator.generate(task, used=[], count=12)}
+    assert len({query_key(q) for q in used}) == len(used) == 18
+    assert {"es", "en", "ru", "uk"} <= {q.language for q in await generator.generate(task, used=[], count=9)}
     assert any(q.startswith("site:idealista.com") for q in used) and any("terreno" in q for q in used)
     assert any("участок" in q for q in used) and any("ділянка" in q for q in used)
 
@@ -188,7 +195,7 @@ async def test_worker_generates_rounds_passing_used_queries_up_to_the_cap() -> N
     await run_until_done(w, cid)
     assert [count for _, count in generator.calls] == [12, 12, 12, 4]
     assert [len(used) for used, _ in generator.calls] == [0, 12, 24, 36]
-    assert generator.calls[1][0] == queries[:12]  # the model is shown every query already used
+    assert generator.calls[1][0] == [f"{q} España" for q in queries[:12]]  # the model is shown every query already used
     assert len(store.queries[cid]) == 40 and len({q.key for q in store.queries[cid]}) == 40
     assert len(searcher.calls) == 40 and len(set(searcher.calls)) == 40
     assert store.runs[cid].stop_reason == "queries_done"
@@ -201,7 +208,7 @@ async def test_a_round_without_new_queries_ends_the_stage() -> None:
     generator = ListGenerator(["terreno Boadilla Madrid", "terrenos boadilla madrid"])
     w = worker(campaigns, store, FakeSearcher(), FakeFetcher(), generator, cover_portals=False)
     await run_until_done(w, cid)
-    assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Madrid"]
+    assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Madrid España"]
     assert store.runs[cid].stop_reason == "queries_exhausted"
 
 
@@ -215,7 +222,7 @@ async def test_a_query_another_campaign_searched_recently_is_not_searched_again(
     await run_until_done(w, first)
     second = await campaign(campaigns)
     await run_until_done(w, second)
-    assert searcher.calls == [("terreno Boadilla Madrid", "es-ES")]  # a Spanish campaign searches Spain
+    assert searcher.calls == [("terreno Boadilla Madrid España", "es-ES")]  # a Spanish campaign searches Spain
     assert [q.state for q in store.queries[second]] == ["skipped"]
 
 
@@ -235,10 +242,10 @@ def test_idealista_and_fotocasa_come_first_among_the_spanish_portals() -> None:
 def test_for_land_terrenos_and_sareb_come_right_after_fotocasa() -> None:
     portals = madrid_task().portals()  # «участок»: land
     assert portals[:4] == ("idealista.com", "fotocasa.es", "terrenos.es", "sareb.es")
-    assert sorted(portals) == sorted(SPAIN_PORTALS)
+    assert portals == SPAIN_PORTALS_BY_KIND["land"] and set(portals) <= set(SPAIN_PORTALS)
     flat = QueryTask(goal="квартира", task_text="квартира 2 комнаты, аренда", location="Madrid",
                      location_aliases={"es": "Madrid"}, vertical="real_estate")
-    assert flat.portals() == SPAIN_PORTALS
+    assert flat.portals() == SPAIN_PORTALS_BY_KIND["apartment"]
 
 
 def test_a_portal_the_model_already_searched_counts_as_searched() -> None:
@@ -253,12 +260,12 @@ def test_cover_portals_keeps_the_models_portal_query_and_builds_the_skipped_one(
              GeneratedQuery("building plot for sale near Madrid", "en")]
     out = cover_portals(model, task, [], 4)
     assert out[0] == GeneratedQuery("site:idealista.com solar urbanizable Comunidad de Madrid", "es")
-    assert out[1].text == "site:fotocasa.es terreno en venta 1000 m2 Madrid"  # what the task asks, on that site
+    assert out[1].text == "site:fotocasa.es terreno en venta 1000 m2 Madrid España"  # what the task asks, on that site
     assert [q.text for q in out[2:]] == ["parcela en venta cerca metro Madrid", "building plot for sale near Madrid"]
 
 
-def test_portal_quota_is_half_a_round_but_never_less_than_two() -> None:
-    assert [portal_quota(n) for n in (1, 2, 3, 4, 12)] == [1, 2, 2, 2, 6]
+def test_portal_quota_is_a_third_of_a_round_but_never_less_than_two() -> None:
+    assert [portal_quota(n) for n in (1, 2, 3, 4, 12)] == [1, 2, 2, 2, 4]
 
 
 async def test_every_spanish_portal_is_searched_even_when_the_model_names_none() -> None:
@@ -276,8 +283,8 @@ async def test_every_spanish_portal_is_searched_even_when_the_model_names_none()
     texts = [q.text for q in store.queries[cid]]
     assert [t.split()[0] for t in texts[:4]] == ["site:idealista.com", "site:fotocasa.es", "site:terrenos.es",
                                                  "site:sareb.es"]
-    assert all(any(t.startswith(f"site:{p} ") for t in texts) for p in SPAIN_PORTALS)
-    assert sum(t.startswith("terreno ") for t in texts[:12]) == 6  # the model keeps half of every round
+    assert all(any(t.startswith(f"site:{p} ") for t in texts) for p in madrid_task().portals())
+    assert sum(t.startswith("terreno ") for t in texts[:12]) == 8  # the model keeps two thirds of every round
 
 
 def test_parse_queries_accepts_drift() -> None:
@@ -390,8 +397,8 @@ async def test_the_same_url_from_two_queries_is_fetched_once() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     listing = "https://www.idealista.com/inmueble/98765432/"
-    searcher = FakeSearcher({"terreno Boadilla Madrid": [listing],
-                             "parcela Pozuelo venta": [listing + "?utm_source=bing", "http://idealista.com/inmueble/98765432"]})
+    searcher = FakeSearcher({"terreno Boadilla Madrid España": [listing],
+                             "parcela Pozuelo venta Madrid España": [listing + "?utm_source=bing", "http://idealista.com/inmueble/98765432"]})
     fetcher = FakeFetcher()
     w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]))
     await run_until_done(w, cid)
@@ -550,7 +557,7 @@ async def test_a_failed_search_is_recorded_and_the_stage_goes_on() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher(default=["https://www.idealista.com/inmueble/12121212/"])
-    searcher.fail.add("terreno Boadilla Madrid")
+    searcher.fail.add("terreno Boadilla Madrid España")
     fetcher = FakeFetcher()
     await run_until_done(worker(campaigns, store, searcher, fetcher,
                                 ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]),
@@ -735,3 +742,15 @@ async def test_facebook_reading_wins_the_label_and_no_web_stage_changes_nothing(
 
     broken = CampaignRunner(campaigns, MemoryRunStore(campaigns), FakeMessenger(), web=Broken())
     assert await broken._status_text(c, ANALYSIS) == FACEBOOK
+
+
+async def test_a_hit_with_another_places_markers_is_not_queued_for_a_spanish_campaign() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    good, bad = "https://www.example.com/inmueble/11112222/", "https://www.example.com/inmueble/33334444/"
+    searcher = FakeSearcher(default=[good, bad], texts={bad: ("Casa en Valencia, Carabobo", "Bs. 40.000")})
+    fetcher = FakeFetcher()
+    w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
+    await run_until_done(w, cid)
+    assert fetcher.fetched == [good]

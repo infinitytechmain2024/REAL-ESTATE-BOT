@@ -431,7 +431,7 @@ async def test_every_web_query_for_madrid_names_the_place() -> None:
     # Russian/Ukrainian queries carry the Spanish name in Latin letters and stay a minority.
     cyrillic = [q for q in round_ if q.language in ("ru", "uk")]
     assert cyrillic and all("Madrid" in q.text for q in cyrillic) and len(cyrillic) <= 3 + 1
-    assert "terreno Comunidad de Madrid Madrid España" in [q.text for q in round_]
+    assert "terreno Comunidad de Madrid España" in [q.text for q in round_]
     for _ in range(3):
         template = await TemplateQueryGenerator().generate(task, used=[], count=12)
         assert all(names_madrid(q.text) for q in template)

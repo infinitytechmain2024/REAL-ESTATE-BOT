@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from bot.campaign import PostgresCampaignStore, plan_campaign
-from bot.campaign.runner import CampaignRunner
+from bot.campaign.runner import CampaignRunner, RunnerConfig
 from bot.social_search.adapters import Block, SocialItem
 from bot.social_search.queries import QueryPlanner, normalise_query
 from bot.social_search.store import PostgresSocialStore, source_url
@@ -211,7 +211,8 @@ async def test_social_findings_stream_to_the_campaign_like_facebook_posts(pool) 
 
     # The campaign streams it as a Russian card, exactly once.
     messenger = ButtonMessenger()
-    runner = CampaignRunner(campaigns, runs, messenger, None, owner_ids={7})
+    runner = CampaignRunner(campaigns, runs, messenger, None, owner_ids={7},
+                            config=RunnerConfig(relevance_fail_closed=False))
     await runner.step(cid)
     await runner.step(cid)
     assert len(cards(messenger)) == 1 and "45 000" in cards(messenger)[0]

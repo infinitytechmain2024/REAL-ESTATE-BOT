@@ -10,6 +10,9 @@ little that is needed to tell that it is clearly in another country:
 * ``foreign_tld`` -- a host under another country's code (``.ru``, ``.ua``,
   ``.by``, ``.kz``, ``.pl`` ...); generic endings (``.com``, ``.net``,
   ``.org``, ``.eu``, ``.info``, ``.io`` ...) are never foreign;
+* ``COUNTRY_NAMES`` / ``mentions_country`` -- how a query names its country (España, Spain, Испания);
+* ``FOREIGN_MARKERS`` / ``foreign_markers_hit`` -- words that give away a search hit from another
+  place with the same name (Valencia in Venezuela or California for a Spanish campaign);
 * ``foreign_places`` -- a few well-known cities and country names outside the
   gazetteer (Москва, Минск, Warszawa, Россия ...) with their country.
 
@@ -36,6 +39,16 @@ REGIONS: dict[str, tuple[str, ...]] = {
     "Sevilla": ("provincia de sevilla", "andalucia", "andalusia"),
     "Marbella": ("costa del sol",),
     "Kyiv": ("київська область", "киевская область", "kyiv oblast", "kyiv region"),
+}
+
+# The country as a search query writes it, per query language.
+COUNTRY_NAMES: dict[str, dict[str, str]] = {
+    "ES": {"es": "España", "en": "Spain", "ru": "Испания", "uk": "Іспанія"},
+    "UA": {"es": "Ucrania", "en": "Ukraine", "ru": "Украина", "uk": "Україна"},
+}
+# Conservative: only what a Spanish listing practically never contains (``foreign_markers_hit``).
+FOREIGN_MARKERS: dict[str, tuple[str, ...]] = {
+    "ES": ("Venezuela", "Carabobo", "Valencia, CA", "California", "Bs.", "USD"),
 }
 
 # Second-level labels that are not a country (``.com.ua`` is still Ukrainian, handled by the last label).
@@ -108,9 +121,11 @@ def host_of_link(link: object) -> str | None:
     return found.group(1).lower() if found else None
 
 
-def place_names(location: str, aliases: dict[str, str] | None = None) -> tuple[str, ...]:
-    """Every name of a campaign's place a search query may carry: city aliases and regions, folded."""
-    names = {_fold(location), *(_fold(a) for a in (aliases or {}).values() if a), *(_fold(r) for r in REGIONS.get(location, ()))}
+def place_names(location: str, aliases: dict[str, str] | None = None, *, regions: bool = True) -> tuple[str, ...]:
+    """Every name of a campaign's place a search query may carry: city aliases and (``regions``) regions, folded."""
+    names = {_fold(location), *(_fold(a) for a in (aliases or {}).values() if a)}
+    if regions:
+        names |= {_fold(r) for r in REGIONS.get(location, ())}
     # «Ubud, Bali»: each part names the place too.
     names |= {part.strip() for name in list(names) if "," in name for part in name.split(",") if len(part.strip()) >= 3}
     for place in GAZETTEER:
@@ -119,19 +134,42 @@ def place_names(location: str, aliases: dict[str, str] | None = None) -> tuple[s
     return tuple(sorted(n for n in names if n))
 
 
-def latin_place_names(location: str, aliases: dict[str, str] | None = None) -> tuple[str, ...]:
-    return tuple(n for n in place_names(location, aliases) if re.fullmatch(r"[a-z0-9 .'-]+", n))
+def latin_place_names(location: str, aliases: dict[str, str] | None = None, *,
+                      regions: bool = True) -> tuple[str, ...]:
+    return tuple(n for n in place_names(location, aliases, regions=regions) if re.fullmatch(r"[a-z0-9 .'-]+", n))
 
 
-def mentions_place(text: str, names: tuple[str, ...]) -> bool:
-    """Does ``text`` name the place? Whole words, Cyrillic stems as word prefixes, hashtags as substrings."""
+def mentions_place(text: str, names: tuple[str, ...], *, strict: bool = False) -> bool:
+    """Does ``text`` name the place? Whole words, Cyrillic stems as word prefixes, hashtags as substrings.
+
+    ``strict`` (a city, not a region): no substring rule («valenciana» is not «valencia») and a Cyrillic
+    stem only with a case ending of at most three letters («Валенсии» yes, «валенсийское» no).
+    """
     folded = _fold(text)
     words = _WORD.findall(folded)
     for name in names:
         if " " in name:
             if name in folded:
                 return True
+        elif strict:
+            if any(word == name or (not name.isascii() and word.startswith(name) and len(word) <= len(name) + 3)
+                   for word in words):
+                return True
         elif any(word == name or (not name.isascii() and word.startswith(name)) or
                  (len(name) >= 5 and name in word) for word in words):
             return True
     return False
+
+
+def mentions_country(text: str, country: str | None) -> bool:
+    """Does ``text`` already name ``country`` (ISO-2) in any of the query languages?"""
+    stems = _FOREIGN.get(country or "", ())
+    folded = _fold(text)
+    return any(stem in folded for stem in stems)
+
+
+def foreign_markers_hit(country: str | None, text: str | None) -> bool:
+    """True when ``text`` (a search hit's title and snippet) carries a marker of another place for ``country``."""
+    markers = FOREIGN_MARKERS.get(country or "", ())
+    folded = _fold(text or "")
+    return any(re.search(rf"(?<!\w){re.escape(_fold(m))}(?!\w)", folded) for m in markers)

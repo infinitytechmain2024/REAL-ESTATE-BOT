@@ -382,7 +382,8 @@ async def test_postgres_holds_similar_until_approved_and_answers_once(pool) -> N
     campaigns = PostgresCampaignStore(pool)
     store = PostgresRunStore(pool, SafetyLimits())
     messenger = ButtonMessenger()
-    runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER})
+    runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER},
+                            config=RunnerConfig(relevance_fail_closed=False))
     cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
                                  actor="telegram:42")
     await campaigns.set_state(cid, "running", "campaign:test")

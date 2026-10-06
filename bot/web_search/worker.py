@@ -50,6 +50,7 @@ from .queries import (
     cover_portals,
     localise,
     missing_portals,
+    place_level_of,
     portal_quota,
 )
 from .render import Renderer, RenderError
@@ -102,7 +103,7 @@ def query_task(campaign: Campaign) -> QueryTask:
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
                      constraints=dict(plan.constraints), languages=tuple(plan.languages),
-                     country_code=plan.country)
+                     country_code=plan.country, place_level=place_level_of(campaign.source_text, plan.location))
 
 
 class WebSearchWorker:
@@ -240,6 +241,8 @@ class WebSearchWorker:
                 if not fetchable(hit.url, self.config.blocked_hosts):
                     continue
                 if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
+                    continue
+                if geo.foreign_markers_hit(task.country, f"{hit.title} {hit.snippet}"):  # Valencia in Venezuela/CA
                     continue
                 candidates.append(Candidate(hit.url, url_key(hit.url), host_of(hit.url), 0, classify_url(hit.url),
                                             query.id, hit.title, hit.snippet))

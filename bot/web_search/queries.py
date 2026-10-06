@@ -11,13 +11,16 @@ drift normalised before use, one request, a hard timeout, the key never logged.
 failed): portal, property and deal words per language around the city names.
 
 Whatever produced them, ``localise`` makes every query carry the campaign's
-place (city or region; repaired by appending the city, dropped if that does
-not fit), and for a Spanish target lets a Russian or Ukrainian query through
+place (repaired by appending the city, dropped if that does not fit) and its
+country (España/Spain/Испания; only when the country is known). For a city
+campaign (``QueryTask.place_level`` "city") a region name («Comunitat Valenciana»,
+«valenciana») is not the place; only a region/province campaign accepts one. And for a Spanish target lets a Russian or Ukrainian query through
 only with the Spanish place name in Latin letters («купить участок Madrid»),
 at most a quarter of a round: the rest is Spanish and English.
 
-``cover_portals`` makes every known portal of the country (``urls.SPAIN_PORTALS``:
-Idealista and Fotocasa first) get its own ``site:`` query: a portal the model
+``cover_portals`` makes every known portal for the task's property kind
+(``urls.SPAIN_PORTALS_BY_KIND``: Idealista and Fotocasa first; the bank portals
+only when the task asks for a bargain) get its own ``site:`` query: a portal the model
 already searched counts as covered; one it skipped is still searched, with a
 query built from the task, the first missing ones taking up to half a round.
 
@@ -33,14 +36,14 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 
 from bot.campaign import geo
 
 from .models import QUERY_LANGUAGES, GeneratedQuery
-from .urls import SPAIN_LAND_FIRST, SPAIN_PORTALS, UKRAINE_PORTALS
+from .urls import SPAIN_BANK_PORTALS, SPAIN_BANK_WORDS, SPAIN_PORTALS_BY_KIND, UKRAINE_PORTALS
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -126,6 +129,19 @@ def dedupe(candidates: list[GeneratedQuery], used: list[str], *, limit: int) -> 
 # --- what the generator gets -----------------------------------------------------------------
 
 
+PlaceLevel = Literal["city", "province", "region"]
+_REGION_WORDS = re.compile(r"provinc|провинц|comunidad|comunitat|region|област|регион|oblast|cataluna|catalunya|"
+                           r"andalucia|andalusia", re.IGNORECASE)
+
+
+def place_level_of(task_text: str, location: str) -> PlaceLevel:
+    """"region" when the task names a region of ``location`` (or says province/region/область), else "city"."""
+    folded = _fold(task_text)
+    if any(alias in folded for alias in geo.REGIONS.get(location, ())) or _REGION_WORDS.search(folded):
+        return "region"
+    return "city"
+
+
 @dataclass(frozen=True, slots=True)
 class QueryTask:
     goal: str
@@ -137,6 +153,11 @@ class QueryTask:
     languages: tuple[str, ...] = QUERY_LANGUAGES
     country_code: str | None = None  # the plan's country (any place in the world)
     required_portals: tuple[str, ...] = ()  # this round must search each of these (``cover_portals``)
+    place_level: PlaceLevel = "city"  # what the task names: a city, or a province/region around it
+
+    @property
+    def text(self) -> str:
+        return f"{self.task_text} {self.goal}"
 
     @property
     def country(self) -> str | None:
@@ -162,16 +183,18 @@ class QueryTask:
         return self.location_aliases.get(language or "es") or self.location
 
     def portals(self) -> tuple[str, ...]:
+        """The portals to search with ``site:``, best first: by property kind (Spain), plus the bank ones on request."""
         if self.vertical == "investors":
             return ()
         if self.ukrainian:
             return UKRAINE_PORTALS
         if not self.spanish:
             return ()  # elsewhere: no known portals, the open web only
-        if task_kind(self) == "land":  # land: the land portal and Sareb's land stock right after the two leaders
-            return (*SPAIN_PORTALS[:2], *SPAIN_LAND_FIRST,
-                    *(p for p in SPAIN_PORTALS[2:] if p not in SPAIN_LAND_FIRST))
-        return SPAIN_PORTALS
+        kind = task_kind(self)
+        portals = SPAIN_PORTALS_BY_KIND.get(kind, SPAIN_PORTALS_BY_KIND["apartment"])
+        if any(word in _fold(self.text) for word in SPAIN_BANK_WORDS):
+            portals = (*portals, *(p for p in SPAIN_BANK_PORTALS if p not in portals))
+        return portals
 
 
 class QueryGenerator(Protocol):
@@ -276,20 +299,32 @@ _CYRILLIC = re.compile(r"[а-яёіїєґ]", re.IGNORECASE)
 
 def localise(queries: list[GeneratedQuery], task: QueryTask) -> list[GeneratedQuery]:
     """Every query names the campaign's place; repaired by appending it, else dropped (see the module notes)."""
-    names = geo.place_names(task.location, task.location_aliases)
-    latin = geo.latin_place_names(task.location, task.location_aliases)
+    city = task.place_level == "city"
+    names = geo.place_names(task.location, task.location_aliases, regions=not city)
+    latin = geo.latin_place_names(task.location, task.location_aliases, regions=not city)
     out: list[GeneratedQuery] = []
     for query in queries:
         text = clean_query(query.text)
         if text is None:
             continue
         needed = latin if task.spanish and _cyrillic(query) else names
-        if not geo.mentions_place(text, needed):
+        if not geo.mentions_place(text, needed, strict=city):
             text = clean_query(f"{text} {task.place_alias(query.language)}")
-            if text is None or not geo.mentions_place(text, needed):
+            if text is None or not geo.mentions_place(text, needed, strict=city):
                 continue
-        out.append(GeneratedQuery(text, query.language))
+        out.append(GeneratedQuery(with_country(text, task, query.language), query.language))
     return out
+
+
+def with_country(text: str, task: QueryTask, language: str | None) -> str:
+    """``text`` plus the country's name in the query's language, unless it names one or is too long."""
+    country = task.country
+    if not country or geo.mentions_country(text, country):
+        return text
+    language = language if language in QUERY_LANGUAGES else ("ru" if _CYRILLIC.search(text) else "es")
+    names = geo.COUNTRY_NAMES.get(country, {})
+    name = names.get(language) or names.get("en")
+    return (name and clean_query(f"{text} {name}")) or text
 
 
 def _cyrillic(query: GeneratedQuery) -> bool:
@@ -316,8 +351,8 @@ def local_round(candidates: list[GeneratedQuery], task: QueryTask, used: list[st
 
 
 def portal_quota(count: int) -> int:
-    """How many slots of a ``count``-query round the not-yet-searched portals may take: half, at least 2."""
-    return min(count, max(2, -(-count // 2)))
+    """How many slots of a ``count``-query round the not-yet-searched portals may take: a third, at least 2."""
+    return min(count, max(2, count // 3))
 
 
 def _sites(text: str) -> set[str]:
@@ -341,14 +376,15 @@ def missing_portals(task: QueryTask, used: list[str]) -> tuple[str, ...]:
 
 
 def portal_query(task: QueryTask, portal: str) -> GeneratedQuery:
-    """A ``site:`` query for ``portal`` built from the task: property type, deal, size, place."""
+    """A ``site:`` query for ``portal`` built from the task: property type, deal, size, budget, rooms, place, country."""
     language = "uk" if task.ukrainian else "es"
     kind = task_kind(task)
     term = _KIND_TERMS[kind].get(language, ("",))[0]
     deal_word = _DEAL_TERMS.get(task.constraints.get("deal"), _DEAL_TERMS[None]).get(language, ("",))[0]
     size = _size(task.task_text)
-    words = [f"site:{portal}", term, deal_word, f"{size} m2" if size else "", task.place_alias(language)]
-    return GeneratedQuery(" ".join(w for w in words if w), language)
+    words = [f"site:{portal}", term, deal_word, f"{size} m2" if size else "", *budget_words(task, language, kind),
+             task.place_alias(language)]
+    return GeneratedQuery(with_country(" ".join(w for w in words if w), task, language), language)
 
 
 def cover_portals(queries: list[GeneratedQuery], task: QueryTask, used: list[str],
@@ -398,6 +434,7 @@ class OpenRouterQueryGenerator:
             "vertical": task.vertical,
             "constraints": {k: v for k, v in task.constraints.items() if v is not None},
             "languages": list(task.languages),
+            "place_level": task.place_level,
             "portals": list(task.portals()),
             "required_portals": list(task.required_portals),
             "count": count,
@@ -437,13 +474,21 @@ class OpenRouterQueryGenerator:
 
 # --- the deterministic fallback ---------------------------------------------------------------
 
+# Checked in this order (``task_kind``); a stem matches from a word's start, Latin ones up to an optional plural.
 _KIND_WORDS: dict[str, tuple[str, ...]] = {
     "land": ("land", "plot", "terreno", "parcela", "solar", "участ", "земл", "ділянк", "сотк"),
     "house": ("house", "casa", "chalet", "villa", "дом", "будин", "вилл"),
-    "room": ("room", "habitaci", "комнат", "кімнат"),
-    "commercial": ("office", "local", "nave", "warehouse", "офис", "склад", "магазин", "коммерч"),
-    "apartment": ("apartment", "flat", "piso", "квартир", "студи", "апартамент"),
+    "commercial": ("office", "oficina", "local", "nave", "warehouse", "офис", "склад", "магазин", "коммерч"),
+    "apartment": ("apartment", "apartamento", "flat", "piso", "квартир", "студи", "апартамент"),
 }
+_WORD_RE = {kind: re.compile("|".join(
+    rf"(?<!\w){w}(?:e?s)?(?!\w)" if w.isascii() else rf"(?<!\w){w}" for w in words)) for kind, words in _KIND_WORDS.items()}
+# «room» only as a word of its own (not «bedroom»), and not a count («2 rooms», «от 2 комнат», «dos habitaciones»).
+_ROOM_RE = re.compile(r"(?<!\w)(?:rooms?(?!\w)|habitacion(?:es)?(?!\w)|комнат|кімнат)")
+_COUNT_BEFORE = frozenset({
+    "from", "от", "від", "desde", "min", "минимум", "un", "una", "uno", "dos", "tres", "cuatro", "cinco", "seis",
+    "one", "two", "three", "four", "five", "six", "один", "одна", "одну", "две", "два", "три", "четыре", "пять",
+    "шесть", "дві", "чотири", "пʼять", "шість"})
 _KIND_TERMS: dict[str, dict[str, tuple[str, ...]]] = {
     "land": {"es": ("terreno", "parcela", "solar urbanizable", "finca rústica"), "en": ("land plot", "building plot"),
              "ru": ("участок", "земельный участок"), "uk": ("ділянка", "земельна ділянка")},
@@ -465,18 +510,62 @@ _DEAL_TERMS: dict[str | None, dict[str, tuple[str, ...]]] = {
 _AROUND = {"es": "afueras", "en": "near", "ru": "пригород", "uk": "передмістя"}
 
 
+def _wants_a_room(text: str) -> bool:
+    for found in _ROOM_RE.finditer(text):
+        before = re.split(r"[^\w]*$", text[:found.start()])[0].split()
+        previous = re.sub(r"[+\-]+$", "", before[-1]) if before else ""
+        if text[:found.start()].rstrip().endswith("+") or previous in _COUNT_BEFORE or previous[-1:].isdigit():
+            continue
+        return True
+    return False
+
+
 def task_kind(task: QueryTask) -> str:
+    """land, house, commercial, apartment or room (checked in this order); "investors"; else apartment."""
     if task.vertical == "investors":
         return "investors"
-    text = _fold(f"{task.task_text} {task.goal}")
-    for kind, words in _KIND_WORDS.items():
-        if any(word in text for word in words):
+    text = _fold(task.text)
+    for kind in ("land", "house", "commercial", "apartment"):
+        if _WORD_RE[kind].search(text):
             return kind
-    return "apartment"
+    return "room" if _wants_a_room(text) else "apartment"
+
+
+_PRICE = {"es": "hasta {}", "en": "under {}", "ru": "до {}", "uk": "до {}"}
+_ROOMS = {"es": ("habitación", "habitaciones", "habitaciones"), "en": ("bedroom", "bedrooms", "bedrooms"),
+          "ru": ("комната", "комнаты", "комнат"), "uk": ("кімната", "кімнати", "кімнат")}
+
+
+def _whole(value: Any) -> int | None:
+    try:
+        number = int(float(str(value).replace(" ", "")))
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def budget_words(task: QueryTask, language: str, kind: str) -> list[str]:
+    """«hasta 200000», «2 habitaciones» (en/ru/uk likewise) for the known budget and rooms; none for investors."""
+    if kind == "investors":
+        return []
+    out: list[str] = []
+    price = _whole(task.constraints.get("max_price"))
+    if price:
+        out.append(_PRICE.get(language, _PRICE["en"]).format(price))
+    rooms = _whole(task.constraints.get("rooms"))
+    if rooms and kind in ("apartment", "house"):
+        one, few, many = _ROOMS.get(language, _ROOMS["en"])
+        if language in ("ru", "uk"):
+            noun = one if rooms % 10 == 1 and rooms % 100 != 11 else (
+                few if 2 <= rooms % 10 <= 4 and not 12 <= rooms % 100 <= 14 else many)
+        else:
+            noun = one if rooms == 1 else few
+        out.append(f"{rooms} {noun}")
+    return out
 
 
 class TemplateQueryGenerator:
-    """Deterministic queries from the plan: portals, property and deal words, city names, suburbs."""
+    """Deterministic queries from the plan: portals, property and deal words, budget, rooms, city names, one suburb."""
 
     model = "template"
 
@@ -489,26 +578,32 @@ class TemplateQueryGenerator:
         order = ("uk", "ru", "en", "es") if task.ukrainian else ("es", "en", "ru", "uk")
         languages = [lang for lang in order if lang in task.languages]
         out: list[GeneratedQuery] = []
+        around = False
         portals = task.portals()
         main = languages[0] if languages else "es"
         for lang in languages:
             city = task.place_alias(lang)
             for term in _KIND_TERMS[kind].get(lang, ()):
+                extra = " ".join(budget_words(task, lang, kind))
                 for deal_word in _DEAL_TERMS.get(deal, _DEAL_TERMS[None]).get(lang, ("",)):
-                    out.append(GeneratedQuery(" ".join(p for p in (term, deal_word, city) if p), lang))
-                if kind != "investors":
+                    out.append(GeneratedQuery(" ".join(p for p in (term, deal_word, extra, city) if p), lang))
+                if kind != "investors" and not around:  # one «afueras/near» query per round, no more
+                    around = True
                     out.append(GeneratedQuery(f"{term} {_AROUND[lang]} {city}", lang))
         size = _size(task.task_text)
         if size and kind != "investors":
             for lang in languages:
                 city = task.place_alias(lang)
                 for term in _KIND_TERMS[kind].get(lang, ())[:2]:
-                    out.append(GeneratedQuery(f"{term} {size} m2 {city}", lang))
+                    extra = " ".join(budget_words(task, lang, kind))
+                    out.append(GeneratedQuery(" ".join(p for p in (term, f"{size} m2", extra, city) if p), lang))
         city = task.location_aliases.get(main) or task.location
         first_term = _KIND_TERMS[kind].get(main, ("",))[0]
         deal_word = _DEAL_TERMS.get(deal, _DEAL_TERMS[None]).get(main, ("",))[0]
+        extra = " ".join(budget_words(task, main, kind))
         for portal in portals:
-            out.append(GeneratedQuery(" ".join(p for p in (f"site:{portal}", first_term, deal_word, city) if p), main))
+            out.append(GeneratedQuery(" ".join(p for p in (f"site:{portal}", first_term, deal_word, extra, city) if p),
+                                      main))
         # interleave: one per language first, then portals, so a short round is already varied
         return _interleave(out, portals)
 

@@ -13,7 +13,7 @@ from bot.agents.recorder import (
     simhash64,
     site_of,
 )
-from bot.campaign.runner import CampaignRunner
+from bot.campaign.runner import CampaignRunner, RunnerConfig
 from tests.test_near_match import (
     CHAT,
     GOAL,
@@ -149,7 +149,7 @@ async def test_postgres_rows_follow_the_stream(pool) -> None:  # noqa: F811
     campaigns = PostgresCampaignStore(pool)
     messenger = ButtonMessenger()
     runner = CampaignRunner(campaigns, PostgresRunStore(pool, SafetyLimits()), messenger, None, owner_ids={OWNER},
-                            recorder=PostgresRecorder(pool))
+                            recorder=PostgresRecorder(pool), config=RunnerConfig(relevance_fail_closed=False))
     cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
                                  actor="telegram:42")
     await campaigns.set_state(cid, "running", "campaign:test")
