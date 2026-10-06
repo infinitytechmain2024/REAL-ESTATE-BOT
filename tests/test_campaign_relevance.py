@@ -115,7 +115,7 @@ def test_madrid_plots_by_area(area: float | None, bucket: str) -> None:
     match = classify(plot(area), madrid_request())
     assert match.bucket == bucket
     if bucket == "similar":
-        assert match.why == "area" and match.area == area
+        assert (match.why, match.area) == (("area", area) if area is not None else ("area_unknown", None))
 
 
 def test_a_catalog_page_or_a_wanted_post_in_madrid_is_excluded() -> None:
@@ -307,33 +307,106 @@ async def judged(runner: CampaignRunner, campaign_id: str, store: MemoryRunStore
         await runner.campaigns.get(campaign_id)), finding)
 
 
+async def reasons(store: MemoryRunStore) -> dict[str, str | None]:
+    return {k: v for k, v in store.hold_reasons.items()}
+
+
 async def test_fail_closed_without_a_judge_holds_exact_as_unverified() -> None:
     _, store, messenger, runner, cid = await setup(None, relevance_fail_closed=True)
     add(store, cid, "a", plot(2500))
     await runner.tick()
     assert store.buckets["a"][0] == "similar" and messenger.findings() == []
+    assert (await reasons(store))["a"] == "Не проверено ИИ: сбой проверки"
     match = await judged(runner, cid, store, "a")
     assert (match.bucket, match.why, match.note) == ("similar", "unverified", "Не проверено ИИ: сбой проверки")
 
 
-async def test_fail_closed_after_a_judge_failure_holds_exact_as_unverified() -> None:
-    _, store, messenger, runner, cid = await setup(FakeJudge(RelevanceError("timeout")), relevance_fail_closed=True)
+async def test_a_paused_judge_leaves_the_finding_unstreamed_and_it_is_sent_once_the_judge_is_back() -> None:
+    judge = FakeJudge(RelevanceError("timeout"), MATCH)
+    _, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True)
     add(store, cid, "a", plot(2500))
+    add(store, cid, "b", plot(2600))
+    await runner.tick()  # a: the call fails; b: judge paused. Neither held nor streamed.
+    assert "a" not in store.buckets and "b" not in store.buckets and messenger.findings() == []
+    assert len(judge.calls) == 1 and await store.relevance(cid, "a") is None
+    await runner.tick()  # still paused: no new call
+    assert len(judge.calls) == 1 and messenger.findings() == []
+    runner._relevance_paused_until = None  # the pause is over
     await runner.tick()
-    assert store.buckets["a"][0] == "similar" and messenger.findings() == []
-    match = await judged(runner, cid, store, "a")
-    assert (match.bucket, match.note) == ("similar", "Не проверено ИИ: сбой проверки")
+    assert store.buckets["a"][0] == "exact" and store.buckets["b"][0] == "exact"
+    assert len(messenger.findings()) == 2 and not store.hold_reasons
 
 
-async def test_fail_closed_past_the_cap_holds_exact_as_unverified() -> None:
+async def test_a_paused_judge_does_not_block_the_batch_behind_it() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    _, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True, max_stream_per_step=1)
+    for n in range(3):
+        add(store, cid, f"f{n}", plot(2500 + n))
+    await runner.tick()  # f0 fails and is remembered; the paused judge defers nothing new at the front
+    assert [f.id for f in await store.unstreamed_findings(cid, 5, skip=set(runner._relevance_misses))] == ["f1", "f2"]
+    await runner.tick()
+    await runner.tick()
+    assert not [f for f in await store.unstreamed_findings(cid, 5, skip=set(runner._relevance_misses))]
+    assert len(judge.calls) == 1 and messenger.findings() == []
+
+
+async def test_a_call_that_keeps_failing_is_held_similar_after_the_retry_limit() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    _, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True, relevance_retry_limit=3)
+    add(store, cid, "a", plot(2500))
+    for attempt in (1, 2):
+        await runner.tick()
+        runner._relevance_paused_until = None
+        assert "a" not in store.buckets and len(judge.calls) == attempt
+    await runner.tick()  # the third failure: permanent
+    assert len(judge.calls) == 3 and store.buckets["a"][0] == "similar" and messenger.findings() == []
+    assert (await reasons(store))["a"] == "Не проверено ИИ: сбой проверки"
+    stored = await store.relevance(cid, "a")
+    assert stored is not None and stored.verdict is None
+    assert "a" not in runner._relevance_misses
+
+
+async def test_the_cap_and_a_missing_judge_hold_similar_at_once_with_the_reason() -> None:
     judge = FakeJudge(MATCH)
     _, store, messenger, runner, cid = await setup(judge, max_relevance_calls=1, relevance_fail_closed=True)
     add(store, cid, "a", plot(2500))
     add(store, cid, "b", plot(2600))
     await runner.tick()
-    assert store.buckets["b"][0] == "similar" and len(messenger.findings()) == 1
-    match = await judged(runner, cid, store, "b")
-    assert (match.bucket, match.why, match.note) == ("similar", "unverified", "Не проверено ИИ: лимит проверок исчерпан")
+    assert len(messenger.findings()) == 1 and store.buckets["b"][0] == "similar"
+    assert (await reasons(store))["b"] == "Не проверено ИИ: лимит проверок исчерпан"
+    held = await store.held_findings(cid, "similar", 5)
+    assert [f.hold_reason for f in held] == ["Не проверено ИИ: лимит проверок исчерпан"]
+
+
+async def test_the_question_about_unverified_findings_is_neutral_and_area_unknown_is_named() -> None:
+    _, store, _, runner, cid = await setup(None, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    deviation = await runner._deviation(await runner.campaigns.get(cid), madrid_request(),
+                                        (await store.held_findings(cid, "similar", 1))[0])
+    assert deviation.kind == "unverified"
+    assert near.similar_question(deviation, exact_found=True) == (
+        "Есть ещё варианты, которые не удалось проверить автоматически. Показать?")
+    assert "ИИ" not in near.similar_question(deviation, exact_found=False)
+    off = (await setup(None, relevance_fail_closed=False))[3]
+    assert (await off._deviation(await runner.campaigns.get(cid), madrid_request(),
+                                 (await store.held_findings(cid, "similar", 1))[0])).kind == "other"
+    unknown = await runner._deviation(await runner.campaigns.get(cid), madrid_request(),
+                                      type(held := (await store.held_findings(cid, "similar", 1))[0])(
+                                          "z", "t", plot(None), vertical=held.vertical))
+    assert unknown.phrase == "площадь не указана"
+    assert near.similar_question(unknown, exact_found=True) == "Есть ещё похожие варианты (площадь не указана). Показать?"
+
+
+async def test_a_campaign_does_not_complete_while_findings_wait_for_the_judge_but_not_forever() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    campaigns, store, _, runner, cid = await setup(judge, relevance_fail_closed=True, analysis_grace_seconds=0)
+    add(store, cid, "a", plot(2500))
+    campaign = await campaigns.get(cid)
+    await runner._stream(campaign)
+    assert "a" not in store.buckets
+    assert await runner._stream(campaign, final=True) == 0  # ending: a miss is permanent
+    assert store.buckets["a"][0] == "similar"
 
 
 async def test_fail_closed_never_touches_investors_and_can_be_switched_off() -> None:

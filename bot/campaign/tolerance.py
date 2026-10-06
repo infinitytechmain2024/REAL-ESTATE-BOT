@@ -74,7 +74,7 @@ AREA_SIMILAR_FLOOR = 0.75  # from 75 % of the minimum area: similar; below: excl
 Bucket = Literal["exact", "similar", "other", "excluded"]
 _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
-Why = Literal["price", "area", "rooms", "location", "deal", "kind", "foreign", "currency", "ai", "unverified"]
+Why = Literal["price", "area", "rooms", "location", "deal", "kind", "foreign", "currency", "ai", "unverified", "area_unknown"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -254,7 +254,7 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
         if result.bucket == "excluded":
             return result
     elif request.min_area:
-        result = Match("similar", 0.0, "area")  # unknown area against a minimum: unverified
+        result = Match("similar", 0.0, "area_unknown")  # unknown area against a minimum: unverified
     listed = payload.get("rooms")
     if (request.rooms and isinstance(listed, int | float) and not isinstance(listed, bool)
             and 0 < listed < request.rooms):

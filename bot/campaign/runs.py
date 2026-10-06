@@ -12,7 +12,8 @@ from __future__ import annotations
 import json
 import math
 import uuid
-from dataclasses import dataclass, field
+from collections.abc import Collection
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit
@@ -91,6 +92,7 @@ class StreamFinding:
     confidence: float | None = None
     vertical: str | None = None
     url: str | None = None  # the post's own link (a Facebook post's comments are read for leads)
+    hold_reason: str | None = None  # why it is held unverified (owner-facing note), from ``hold_finding``
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,13 +129,15 @@ class RunStore(Protocol):
                            actor: str) -> WindowStart | None: ...
     async def cancel_window_batch(self, batch_id: str, actor: str) -> None: ...
     async def pending_analysis(self, campaign_id: str) -> int: ...
-    async def unstreamed_findings(self, campaign_id: str, limit: int) -> list[StreamFinding]: ...
+    async def unstreamed_findings(self, campaign_id: str, limit: int,
+                                  skip: Collection[str] = ()) -> list[StreamFinding]: ...
     async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None: ...
     async def finding_sent(self, finding_id: str, message_id: int) -> None: ...
     async def release_finding(self, finding_id: str) -> None: ...
     async def streamed_count(self, campaign_id: str) -> int: ...
     # exact / similar / other (migration 019, ``tolerance`` and ``offers``)
-    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None) -> bool: ...
+    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None,
+                           reason: str | None = None) -> bool: ...
     async def held_findings(self, campaign_id: str, bucket: str, limit: int) -> list[StreamFinding]: ...
     async def claim_held(self, campaign_id: str, finding_id: str) -> int | None: ...
     async def exact_count(self, campaign_id: str) -> int: ...
@@ -384,7 +388,8 @@ class PostgresRunStore:
         return int(await self.pool.fetchval(
             f"""select count(*) {_CAMPAIGN_POSTS} and p.state = 'normalised'""", campaign_id))
 
-    async def unstreamed_findings(self, campaign_id: str, limit: int) -> list[StreamFinding]:
+    async def unstreamed_findings(self, campaign_id: str, limit: int,
+                                  skip: Collection[str] = ()) -> list[StreamFinding]:
         rows = await self.pool.fetch(
             f"""select f.id::text as id,
                        coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
@@ -395,8 +400,9 @@ class PostgresRunStore:
                   join collected_posts p on p.id = f.post_id
                  where {_IN_CAMPAIGN} and f.state in ('ready', 'delivery_failed')
                    and not exists (select 1 from campaign_findings cf where cf.finding_id = f.id)
+                   and f.id::text <> all($2::text[])
                  order by f.created_at, f.id limit {int(limit)}""",
-            campaign_id,
+            campaign_id, list(skip),
         )
         return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
                               r["confidence"], r["vertical"], r["url"]) for r in rows]
@@ -471,12 +477,13 @@ class PostgresRunStore:
         await self.pool.execute("update campaign_runs set summary_sent_at = null where campaign_id = $1::uuid",
                                 campaign_id)
 
-    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None) -> bool:
+    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None,
+                           reason: str | None = None) -> bool:
         """File a similar/other finding without sending it; False if it already has a bucket."""
         return bool(await self.pool.fetchval(
-            """insert into campaign_findings (finding_id, campaign_id, bucket, distance, state)
-               values ($1::uuid, $2::uuid, $3, $4, 'held') on conflict do nothing returning 1""",
-            finding_id, campaign_id, bucket, _distance(distance),
+            """insert into campaign_findings (finding_id, campaign_id, bucket, distance, state, hold_reason)
+               values ($1::uuid, $2::uuid, $3, $4, 'held', $5) on conflict do nothing returning 1""",
+            finding_id, campaign_id, bucket, _distance(distance), reason[:300] if reason else None,
         ))
 
     async def held_findings(self, campaign_id: str, bucket: str, limit: int) -> list[StreamFinding]:
@@ -486,7 +493,7 @@ class PostgresRunStore:
                        coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
                        f.structured_payload::text as payload, coalesce(p.body_text, '') as original,
                        f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical,
-                       p.canonical_url as url
+                       p.canonical_url as url, cf.hold_reason
                   from campaign_findings cf
                   join findings f on f.id = cf.finding_id
                   join collected_posts p on p.id = f.post_id
@@ -495,7 +502,7 @@ class PostgresRunStore:
             campaign_id, bucket,
         )
         return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
-                              r["confidence"], r["vertical"], r["url"]) for r in rows]
+                              r["confidence"], r["vertical"], r["url"], r["hold_reason"]) for r in rows]
 
     async def social_activity(self, campaign_id: str) -> SocialActivity:
         rows = await self.pool.fetch(
@@ -732,6 +739,7 @@ class MemoryRunStore:
         self.collector_running = False  # a batch run / acquisition run / launch holds the profile
         self.recovered: list[str] = []  # actors that freed the profile
         self.buckets: dict[str, tuple[str, float | None]] = {}  # finding -> (bucket, distance)
+        self.hold_reasons: dict[str, str | None] = {}  # finding -> why it was held unverified
         self.held: dict[str, dict[str, None]] = {}  # cid -> held finding ids, in filing order
         self.desk = MemoryOfferDesk()  # the control plane's side of campaign_offers
         self.social: dict[str, SocialActivity] = {}  # cid -> social search activity
@@ -862,9 +870,11 @@ class MemoryRunStore:
     async def social_activity(self, campaign_id: str) -> SocialActivity:
         return self.social.get(campaign_id, SocialActivity())
 
-    async def unstreamed_findings(self, campaign_id: str, limit: int) -> list[StreamFinding]:
+    async def unstreamed_findings(self, campaign_id: str, limit: int,
+                                  skip: Collection[str] = ()) -> list[StreamFinding]:
         done = self.streamed.get(campaign_id, {})
-        return [f for f in self.findings.get(campaign_id, []) if f.id not in done and f.id not in self.buckets][:limit]
+        return [f for f in self.findings.get(campaign_id, [])
+                if f.id not in done and f.id not in self.buckets and f.id not in skip][:limit]
 
     async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None:
         done = self.streamed.setdefault(campaign_id, {})
@@ -916,10 +926,12 @@ class MemoryRunStore:
     async def release_summary(self, campaign_id: str) -> None:
         self.summaries.discard(campaign_id)
 
-    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None) -> bool:
+    async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None,
+                           reason: str | None = None) -> bool:
         if finding_id in self.buckets or finding_id in self.streamed.get(campaign_id, {}):
             return False
         self.buckets[finding_id] = (bucket, _distance(distance))
+        self.hold_reasons[finding_id] = reason[:300] if reason else None
         self.held.setdefault(campaign_id, {})[finding_id] = None
         return True
 
@@ -928,7 +940,7 @@ class MemoryRunStore:
         by_id = {f.id: f for f in self.findings.get(campaign_id, [])}
         ids = [i for i in order if self.buckets[i][0] == bucket]
         ids.sort(key=lambda i: (self.buckets[i][1] is None, self.buckets[i][1] or 0.0, order.index(i)))
-        return [by_id[i] for i in ids[:limit]]
+        return [replace(by_id[i], hold_reason=self.hold_reasons.get(i)) for i in ids[:limit]]
 
     async def claim_held(self, campaign_id: str, finding_id: str) -> int | None:
         held = self.held.get(campaign_id, {})

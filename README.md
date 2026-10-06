@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`031_task_draft_steps.sql` in order. It records SHA-256 checksums in
+`033_campaign_finding_hold_reason.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -42,6 +42,7 @@ listing on a site that refuses bots (Idealista) still becomes a card built from 
 `031_task_draft_steps.sql` lets a task draft be saved at the `ask` and `target` steps, so clarifying questions are kept.
 `032_web_seen_urls_ttl.sql` lets an index (search/list) page be read again after `WEB_SEARCH_INDEX_TTL_DAYS`
 and keeps the web stage's browser-render count in the database.
+`033_campaign_finding_hold_reason.sql` stores why a finding was held unverified (the AI check could not run), for owners.
 
 Future Telegram, controlled workers, and persistent browser services are
 intentional disabled placeholders under the Compose `future` profile. Their

@@ -64,6 +64,8 @@ class CampaignRunnerSettings(BaseSettings):
     relevance_max_calls: int = Field(default=2000, ge=0, le=10_000, validation_alias="CAMPAIGN_RELEVANCE_MAX_CALLS")
     # No AI verdict (cap reached, model down, no key): an exact finding is held as similar instead of sent.
     relevance_fail_closed: bool = Field(default=True, validation_alias="CAMPAIGN_RELEVANCE_FAIL_CLOSED")
+    # A failed AI call is retried on later steps; after this many misses the finding is held as unverified.
+    relevance_retry_limit: int = Field(default=5, ge=1, le=100, validation_alias="CAMPAIGN_RELEVANCE_RETRY_LIMIT")
 
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors: investor campaigns only; off: never read comments.
@@ -104,6 +106,7 @@ class CampaignRunnerSettings(BaseSettings):
                             social_grace_seconds=self.social_grace_seconds,
                             max_relevance_calls=self.relevance_max_calls,
                             relevance_fail_closed=self.relevance_fail_closed,
+                            relevance_retry_limit=self.relevance_retry_limit,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
                             max_people=self.lead_people_max, lead_days=self.lead_days)
 

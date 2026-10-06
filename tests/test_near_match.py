@@ -427,6 +427,26 @@ async def test_postgres_holds_similar_until_approved_and_answers_once(pool) -> N
     assert await store.claim_finding(cid, ids["f90"]) is None
 
 
+@needs_db
+async def test_postgres_persists_the_hold_reason_and_skips_listed_findings(pool) -> None:
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+
+    campaigns = PostgresCampaignStore(pool)
+    store = PostgresRunStore(pool, SafetyLimits())
+    cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
+                                 actor="telegram:42")
+    ids = await _seed_findings(pool, cid, {"a": 52_000, "b": 53_000, "c": 54_000})
+    assert [f.id for f in await store.unstreamed_findings(cid, 5, skip=[ids["a"]])] == [ids["b"], ids["c"]]
+    note = "Не проверено ИИ: лимит проверок исчерпан"
+    assert await store.hold_finding(cid, ids["a"], "similar", 0.0, note)
+    assert await store.hold_finding(cid, ids["b"], "similar", 0.0)
+    assert not await store.hold_finding(cid, ids["a"], "similar", 0.0, "other")
+    held = {f.id: f.hold_reason for f in await store.held_findings(cid, "similar", 5)}
+    assert held == {ids["a"]: note, ids["b"]: None}
+
+
 async def test_a_rental_for_a_purchase_is_never_offered_or_sent() -> None:
     campaigns, store, messenger, runner, cid, control = await setup()
     add(store, cid, "rent", 900, deal="rent")

@@ -79,6 +79,7 @@ from .tolerance import (
 
 log = logging.getLogger(__name__)
 RELEVANCE_PAUSE_SECONDS = 60
+MAX_TRACKED_MISSES = 5000
 
 ACTOR = "campaign:runner"
 SEARCHING = "Сейчас: поиск групп Facebook"
@@ -195,6 +196,8 @@ class RunnerConfig:
     max_relevance_calls: int = 2000
     # No AI verdict (cap reached, paused after an error, no judge, failed call): an exact finding becomes similar.
     relevance_fail_closed: bool = True
+    # A failed AI call (not a pause) is retried on a later step; after this many misses for one finding it is held.
+    relevance_retry_limit: int = 5
     # Which campaigns queue their sent Facebook posts for a comment read (``leads``): all | investors | off,
     # at most ``comment_max_posts`` per campaign. Off unless a comment worker runs beside the runner (``main``).
     comment_leads: str = "off"
@@ -207,7 +210,7 @@ class RunnerConfig:
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
                 or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100
-                or not 0 <= self.max_relevance_calls <= 10_000 or self.comment_leads not in COMMENT_MODES
+                or not 0 <= self.max_relevance_calls <= 10_000 or not 1 <= self.relevance_retry_limit <= 100 or self.comment_leads not in COMMENT_MODES
                 or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500
                 or not 1 <= self.lead_days <= 3650):
             raise ValueError("unsafe campaign runner settings")
@@ -242,6 +245,8 @@ class CampaignRunner:
         # After a failed relevance call the model is left alone for a minute: one slow or broken
         # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
         self._relevance_paused_until: datetime | None = None
+        # Finding id -> failed AI calls so far (in memory, bounded); ids here are skipped while the judge is paused.
+        self._relevance_misses: dict[str, int] = {}
         # Campaigns whose chat got a card or a question below the status message: the status moves down.
         self._below_status: set[str] = set()
 
@@ -418,7 +423,9 @@ class CampaignRunner:
             return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
-        await self._stream(campaign)
+        final = waited >= self.config.analysis_grace_seconds
+        if await self._stream(campaign, final=final) and not final:
+            return ANALYSIS  # findings still wait for the AI check: do not complete (and lose them) yet
         await self.campaigns.set_state(campaign.id, "completed", ACTOR, reason=reason)
         return ANALYSIS
 
@@ -445,39 +452,62 @@ class CampaignRunner:
 
     # -- Telegram --
 
-    async def _stream(self, campaign: Campaign) -> None:
-        """Send each new exact finding once, oldest first; hold the rest and ask about them once."""
+    async def _stream(self, campaign: Campaign, *, final: bool = False) -> int:
+        """Send each new exact finding once, oldest first; hold the rest and ask about them once.
+
+        Returns how many findings wait for a later step (the AI check missed transiently); ``final``
+        (the campaign is ending) treats such a miss as permanent.
+        """
         active = campaign.state not in TERMINAL_STATES
         request = campaign_request(campaign)
-        for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step):
-            match = await self._judge(campaign, request, finding)
+        deferred = 0
+        paused = self._relevance_paused_until is not None and self.now() < self._relevance_paused_until
+        skip = set(self._relevance_misses) if paused and not final else set()
+        for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step, skip=skip):
+            match = await self._judge(campaign, request, finding, final=final)
+            if match is None:  # transient miss: neither held nor streamed, retried on a later step
+                deferred += 1
+                continue
             if match.bucket != "exact":
-                if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance):
+                reason = match.note if match.why == "unverified" else None
+                if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance, reason):
+                    if reason:
+                        log.info("campaign.finding_unverified %s", reason,
+                                 extra={"campaign_id": campaign.id, "finding_id": finding.id})
                     await self._record(campaign, finding, match.bucket)
                 continue
             count = await self.store.claim_finding(campaign.id, finding.id)
             if count is None:
                 continue
             if not await self._send_card(campaign, finding, count, active, "exact"):
-                return
+                return deferred
         await self._near_matches(campaign, request, active)
         await self._people(campaign)
+        return deferred
 
-    async def _judge(self, campaign: Campaign, request: Request, finding: StreamFinding) -> Match:
+    async def _judge(self, campaign: Campaign, request: Request, finding: StreamFinding, *,
+                     final: bool = False) -> Match | None:
         """The finding's bucket: the deterministic rules, then the AI verdict (stored once) on top.
 
         reject -> excluded; near -> at least similar; match -> the rules' bucket. Anything the
-        rules exclude is never sent to the model.
+        rules exclude is never sent to the model. ``None``: the AI check missed for a transient reason
+        (judge paused, one call failed): the finding is retried on a later step, up to ``relevance_retry_limit``.
         """
         match = classify(finding.payload, request, vertical=finding.vertical)
         if match.bucket == "excluded":
             log.info("campaign.finding_excluded", extra={"campaign_id": campaign.id, "finding_id": finding.id,
                                                          "why": match.why})
             return match
-        verdict, note = await self._relevance(campaign, finding)
+        verdict, note, transient = await self._relevance(campaign, finding)
+        if verdict is not None and verdict.verdict is not None:
+            self._relevance_misses.pop(finding.id, None)
         if verdict is None or verdict.verdict is None:
             if (self.config.relevance_fail_closed and match.bucket == "exact" and finding.vertical != "investors"
                     and campaign.plan.vertical != "investors"):
+                if transient and not final:
+                    self._miss(finding.id, 0)  # remembered, so a paused judge does not block the batch
+                    return None
+                self._relevance_misses.pop(finding.id, None)
                 return Match("similar", match.distance, "unverified", note=note or UNVERIFIED_FAILED)
             return match
         if verdict.verdict == "match":
@@ -486,33 +516,45 @@ class CampaignRunner:
             return Match("excluded", float("inf"), "ai")
         return match if match.bucket != "exact" else Match("similar", match.distance, "ai")
 
-    async def _relevance(self, campaign: Campaign, finding: StreamFinding) -> tuple[Relevance | None, str | None]:
-        """The stored verdict, or one new AI call (within the cap), and why there is none (Russian note).
+    def _miss(self, finding_id: str, add: int) -> int:
+        """Failed AI calls of one finding so far (``add`` more); the table is bounded."""
+        if finding_id not in self._relevance_misses and len(self._relevance_misses) >= MAX_TRACKED_MISSES:
+            del self._relevance_misses[next(iter(self._relevance_misses))]
+        count = self._relevance_misses[finding_id] = self._relevance_misses.get(finding_id, 0) + add
+        return count
 
-        No verdict: the rules decide alone, and an exact finding is held as unverified (``_judge``).
+    async def _relevance(self, campaign: Campaign,
+                         finding: StreamFinding) -> tuple[Relevance | None, str | None, bool]:
+        """The stored verdict, or one new AI call (within the cap); the owner-facing note and whether a miss is transient.
+
+        No verdict: the rules decide alone, and an exact finding is held as unverified (``_judge``) --
+        at once for a permanent cause (no judge, cap reached, stored null verdict), after a later retry
+        for a transient one (judge paused, a failed call that stored nothing).
         """
         stored = await self.store.relevance(campaign.id, finding.id)
         if stored is not None:
-            return stored, (UNVERIFIED_FAILED if stored.verdict is None else None)
+            return stored, (UNVERIFIED_FAILED if stored.verdict is None else None), False
         if self.relevance is None:
-            return None, UNVERIFIED_FAILED
+            return None, UNVERIFIED_FAILED, False
         if self._relevance_paused_until is not None and self.now() < self._relevance_paused_until:
-            return None, UNVERIFIED_FAILED
+            return None, UNVERIFIED_FAILED, True
         if await self.store.relevance_calls(campaign.id) >= self.config.max_relevance_calls:
-            return None, UNVERIFIED_CAP
+            return None, UNVERIFIED_CAP, False
         try:
             verdict = await self.relevance.judge(task_data(campaign), finding_data(finding.payload, fallback_text=finding.text,
                                                                                  original=finding.original))
-        except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules
+        except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules (or closed, see ``_judge``)
             self._relevance_paused_until = self.now() + timedelta(seconds=RELEVANCE_PAUSE_SECONDS)
             code = getattr(exc, "code", type(exc).__name__)
             log.warning("campaign.relevance_failed %s", code, extra={"campaign_id": campaign.id, "finding_id": finding.id})
+            if self.config.relevance_fail_closed and self._miss(finding.id, 1) < self.config.relevance_retry_limit:
+                return None, UNVERIFIED_FAILED, True  # nothing stored: the finding is judged again later
             verdict = Relevance(None, f"error:{code}"[:300], None, getattr(self.relevance, "model", None))
         await self.store.save_relevance(campaign.id, finding.id, verdict)
         # The reason is for owners (logs); users never see it.
         log.info("campaign.relevance %s: %s", verdict.verdict, verdict.reason,
                  extra={"campaign_id": campaign.id, "finding_id": finding.id})
-        return verdict, (UNVERIFIED_FAILED if verdict.verdict is None else None)
+        return verdict, (UNVERIFIED_FAILED if verdict.verdict is None else None), False
 
     async def _deviation(self, campaign: Campaign, request: Request, closest: StreamFinding) -> offers.Deviation:
         """What the closest held listing has outside the criteria: price, area, or the AI's phrase."""
@@ -525,9 +567,11 @@ class CampaignRunner:
         if match.why == "area" and match.area is not None and request.min_area:
             requested = f"от {round(request.min_area):,} м²".replace(",", " ")
             return offers.Deviation("area", area_text(match.area), requested, land=land)
+        if match.why == "area_unknown":
+            return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
+        if self.config.relevance_fail_closed and closest.hold_reason:  # held unverified (stored note: owners only)
+            return offers.Deviation("unverified", land=land)
         stored = await self.store.relevance(campaign.id, closest.id)
-        if match.bucket == "exact" and (stored is None or stored.verdict is None):
-            return offers.Deviation("other", phrase="не проверенные ИИ", land=land)
         return offers.Deviation("other", phrase=stored.deviation if stored is not None else None, land=land)
 
     async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool, bucket: str) -> bool:
