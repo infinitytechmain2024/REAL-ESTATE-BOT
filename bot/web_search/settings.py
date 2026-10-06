@@ -50,7 +50,12 @@ class WebSearchSettings(BaseSettings):
     render_timeout_seconds: float = Field(default=30, ge=5, le=60, validation_alias="WEB_SEARCH_RENDER_TIMEOUT_SECONDS")
     max_renders_per_campaign: int = Field(default=15, ge=0, le=200, validation_alias="WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN")
     # Optional outbound proxy/VPN for page fetches (http://, https://, socks5://). Never logged.
+    # Several proxies may be given comma-separated (one sticky proxy per host).
     proxy_url: str = Field(default="", validation_alias="WEB_SEARCH_PROXY_URL")
+    # Browser-impersonating fetch via curl_cffi: off | chrome | safari | firefox | a profile name (chrome124).
+    impersonate: str = Field(default="chrome", max_length=40, validation_alias="WEB_SEARCH_IMPERSONATE")
+    # UA sent on page requests when impersonating; empty: the Chrome 124 / Windows default for the profile.
+    browser_user_agent: str = Field(default="", max_length=300, validation_alias="WEB_SEARCH_BROWSER_USER_AGENT")
 
     def blocked_hosts(self) -> frozenset[str]:
         return frozenset(h.strip().lower().removeprefix("www.") for h in self.blocked_hosts_raw.replace(",", " ").split()

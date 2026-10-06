@@ -34,6 +34,7 @@ from bot.web_search.store import MemoryWebStore
 from bot.web_search.urls import (
     SPAIN_PORTALS,
     SPAIN_PORTALS_BY_KIND,
+    classify_page,
     classify_url,
     fetchable,
     host_of,
@@ -389,6 +390,22 @@ def test_url_identity_site_and_portal_classification() -> None:
     assert not fetchable("https://example.es/login?next=/")
     assert not fetchable("https://blocked.example/x", frozenset({"blocked.example"}))
     assert fetchable("https://www.fotocasa.es/es/comprar/terreno/x/183456789/d")
+
+
+def test_generic_rule_needs_a_listing_word_and_id_or_a_long_id_that_is_not_a_date() -> None:
+    news = "https://diario-ejemplo.es/2024/05/123456-noticia"
+    assert classify_url(news) == "unknown"
+    assert classify_url("https://diario-ejemplo.es/noticias/20240512-cierre-del-mercado") == "unknown"
+    assert classify_url("https://agencia-ejemplo.es/inmueble/12345678/") == "listing"
+    assert classify_url("https://agencia-ejemplo.es/piso-en-venta-12345") == "listing"
+    assert classify_url("https://agencia-ejemplo.es/ref/id1234567/") == "listing"
+    assert classify_url("https://agencia-ejemplo.es/blog/post-1234") == "unknown"
+    text = "Piso de 85 m² en Madrid por 250.000 €"
+    assert classify_page(news) == "unknown"
+    assert classify_page(news, text=text) == "listing"
+    assert classify_page(news, text="Piso de 85 m² en Madrid") == "unknown"
+    assert classify_page(news, has_listing_data=True) == "listing"
+    assert classify_page("https://www.idealista.com/venta-terrenos/madrid/", text=text) == "index"
 
 
 def test_index_page_yields_concrete_listing_links_on_the_same_site() -> None:
@@ -840,3 +857,101 @@ async def test_a_hit_with_another_places_markers_is_not_queued_for_a_spanish_cam
     w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
     await run_until_done(w, cid)
     assert fetcher.fetched == [good]
+
+
+class FakeTransport:
+    """Scripted Transport: ``routes`` maps url -> (status, headers, body) or an exception to raise."""
+
+    profile = "chrome"
+
+    def __init__(self, routes: dict) -> None:
+        self.routes, self.calls = routes, []
+
+    def open(self, url: str, *, headers: dict, proxy: str | None):
+        from contextlib import asynccontextmanager
+
+        from bot.web_search.fetcher import TransportResponse
+
+        @asynccontextmanager
+        async def ctx():
+            self.calls.append((url, dict(headers), proxy))
+            route = self.routes[url]
+            if isinstance(route, dict):  # per-proxy behaviour
+                route = route[proxy]
+            if isinstance(route, Exception):
+                raise route
+            status, hdrs, body = route
+
+            async def chunks():
+                yield body
+            yield TransportResponse(status, {"content-type": "text/html", **hdrs}, chunks())
+        return ctx()
+
+
+async def test_fetcher_follows_redirects_by_hand_and_sends_browser_headers() -> None:
+    t = FakeTransport({
+        "https://a.es/robots.txt": (404, {}, b""),
+        "https://a.es/x": (302, {"location": "/y"}, b""),
+        "https://a.es/y": (200, {}, b"<html>ok</html>"),
+    })
+    f = PageFetcher(user_agent="TestBot/1", resolver=public, sleep=Sleeps(), transport=t)
+    page = await f.fetch("https://a.es/x", country="UA")
+    assert page.url == "https://a.es/y" and "ok" in page.html
+    headers = t.calls[0][1]
+    assert "Chrome/124" in headers["User-Agent"] and "TestBot" not in headers["User-Agent"]
+    assert headers["Accept-Language"].startswith("uk-UA,uk")
+    assert headers["Sec-Fetch-Mode"] == "navigate" and headers["Upgrade-Insecure-Requests"] == "1"
+    assert await f.allowed("https://a.es/y")  # robots.txt fetched, matched against the declared UA
+    robots_headers = next(h for u, h, _ in t.calls if u.endswith("/robots.txt"))
+    assert "Sec-Fetch-Mode" not in robots_headers
+
+
+async def test_fetcher_limits_redirects_and_keeps_error_codes() -> None:
+    loop = {f"https://a.es/{i}": (301, {"location": f"/{i + 1}"}, b"") for i in range(10)}
+    f = PageFetcher(user_agent="TestBot/1", resolver=public, sleep=Sleeps(), transport=FakeTransport(loop))
+    with pytest.raises(FetchError, match="too_many_redirects"):
+        await f.fetch("https://a.es/0")
+    assert len(f._transport.calls) == 5
+    f = PageFetcher(user_agent="TestBot/1", resolver=public, sleep=Sleeps(),
+                    transport=FakeTransport({"https://a.es/z": (403, {}, b"")}))
+    with pytest.raises(FetchError, match="http_403"):
+        await f.fetch("https://a.es/z")
+
+
+async def test_fetcher_revalidates_every_redirect_hop() -> None:
+    async def resolver(host: str) -> list[str]:
+        return ["10.0.0.1"] if host == "intranet.es" else ["93.184.216.34"]
+
+    t = FakeTransport({"https://a.es/x": (302, {"location": "https://intranet.es/"}, b"")})
+    f = PageFetcher(user_agent="TestBot/1", resolver=resolver, sleep=Sleeps(), transport=t)
+    with pytest.raises(FetchError, match="private_target_forbidden"):
+        await f.fetch("https://a.es/x")
+
+
+async def test_proxy_is_sticky_per_host_and_falls_back_on_connect_error() -> None:
+    from bot.web_search.fetcher import ConnectFailed, pick_proxies
+
+    proxies = ["http://p0:1", "http://p1:1", "http://p2:1"]
+    assert pick_proxies("a.es", proxies) == pick_proxies("a.es", proxies)
+    assert sorted(pick_proxies("a.es", proxies)) == sorted(proxies)
+    assert pick_proxies("a.es", []) == []
+    first = pick_proxies("a.es", proxies)[0]
+    ok = (200, {}, b"<html>ok</html>")
+    t = FakeTransport({"https://a.es/x": {p: (ConnectFailed("network_error:ConnectError") if p == first else ok)
+                                         for p in proxies}})
+    f = PageFetcher(user_agent="TestBot/1", resolver=public, sleep=Sleeps(), transport=t,
+                    proxy_url=",".join(proxies))
+    await f.fetch("https://a.es/x")
+    used = [p for _, _, p in t.calls if p]
+    assert used[0] == first and used[1] == pick_proxies("a.es", proxies)[1]
+
+
+async def test_impersonate_off_uses_httpx_with_declared_agent() -> None:
+    from bot.web_search.fetcher import CurlTransport, HttpxTransport
+
+    f = PageFetcher(user_agent="TestBot/1", impersonate="off")
+    assert isinstance(f._transport, HttpxTransport) and f.profile is None
+    assert f.request_headers()["User-Agent"] == "TestBot/1"
+    await f.aclose()
+    g = PageFetcher(user_agent="TestBot/1", impersonate="chrome124")
+    assert isinstance(g._transport, CurlTransport) and g._transport.profile == "chrome124"

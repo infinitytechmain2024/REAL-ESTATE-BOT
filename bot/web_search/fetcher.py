@@ -7,19 +7,29 @@
   including its ``Crawl-delay`` (capped at 30 s).
 * At least ``host_interval_seconds`` between two requests to one host.
 * Hard request timeout, HTML only, a byte cap, cookies dropped after each request.
-* ``proxy_url`` (``WEB_SEARCH_PROXY_URL``, http:// or socks5://) routes every
-  request through an outbound proxy/VPN when set. It is never logged.
+* ``proxy_url`` (``WEB_SEARCH_PROXY_URL``, http:// or socks5://; a comma-separated
+  list is allowed) routes every request through an outbound proxy/VPN when set.
+  A host is pinned to one proxy (crc32(host) % n) so a site sees one IP; the next
+  one is tried only when the connection fails. Proxy values are never logged.
+* ``impersonate`` (``WEB_SEARCH_IMPERSONATE``: off|chrome|safari|firefox or a
+  curl_cffi profile such as chrome124) sends requests with a real browser's TLS/HTTP2
+  fingerprint and headers via curl_cffi; ``off`` or a missing curl_cffi falls back to
+  httpx. robots.txt is always matched against the declared bot ``user_agent``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import re
 import socket
 import time
-from collections.abc import Awaitable, Callable
+import zlib
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from typing import Protocol
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
@@ -67,6 +77,145 @@ class _Robots:
     denied: bool = False            # robots.txt unreachable (5xx/network): nothing allowed until expires
 
 
+DEFAULT_ACCEPT_LANGUAGE = "es-ES,es;q=0.9,en;q=0.8,ru;q=0.6,uk;q=0.5"
+ACCEPT_LANGUAGE_BY_COUNTRY = {
+    "ES": "es-ES,es;q=0.9,en;q=0.8",
+    "UA": "uk-UA,uk;q=0.9,ru;q=0.8,en;q=0.7",
+}
+BROWSER_USER_AGENTS = {
+    "chrome": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/124.0.0.0 Safari/537.36",
+    "firefox": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "safari": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+              "Version/17.4 Safari/605.1.15",
+}
+_HTML_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+
+
+class ConnectFailed(FetchError):
+    """The connection (or the proxy) could not be opened; the next proxy may be tried."""
+
+
+@dataclass
+class TransportResponse:
+    status: int
+    headers: dict[str, str]          # lower-case names
+    chunks: AsyncIterator[bytes]
+
+
+class Transport(Protocol):
+    """One GET without redirects or cookies. Raises ``FetchError("timeout")``,
+    ``ConnectFailed`` or ``FetchError("network_error:...")``."""
+
+    def open(self, url: str, *, headers: dict[str, str], proxy: str | None) -> AbstractAsyncContextManager[TransportResponse]: ...
+
+    async def aclose(self) -> None: ...
+
+
+class HttpxTransport:
+    def __init__(self, *, timeout_seconds: float = 20, client: httpx.AsyncClient | None = None) -> None:
+        self._timeout = timeout_seconds
+        self._injected = client
+        self._clients: dict[str | None, httpx.AsyncClient] = {}
+
+    def _client(self, proxy: str | None) -> httpx.AsyncClient:
+        if self._injected is not None:
+            return self._injected
+        if proxy not in self._clients:
+            self._clients[proxy] = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout), follow_redirects=False,
+                                                     trust_env=False, proxy=proxy)
+        return self._clients[proxy]
+
+    @asynccontextmanager
+    async def open(self, url: str, *, headers: dict[str, str], proxy: str | None) -> AsyncIterator[TransportResponse]:
+        client = self._client(proxy)
+        try:
+            async with client.stream("GET", url, headers=headers) as response:
+                yield TransportResponse(response.status_code, {k.lower(): v for k, v in response.headers.items()},
+                                        response.aiter_bytes())
+        except httpx.TimeoutException as exc:
+            raise FetchError("timeout") from exc
+        except (httpx.ConnectError, httpx.ProxyError) as exc:
+            raise ConnectFailed(f"network_error:{type(exc).__name__}") from exc
+        except httpx.HTTPError as exc:
+            raise FetchError(f"network_error:{type(exc).__name__}") from exc
+        finally:
+            client.cookies.clear()  # never carry a session from one page to the next
+
+    async def aclose(self) -> None:
+        for client in self._clients.values():
+            await client.aclose()
+
+
+class CurlTransport:
+    """curl_cffi with a browser TLS/HTTP2 fingerprint; a fresh session per request keeps no cookies."""
+
+    def __init__(self, *, profile: str, timeout_seconds: float = 20) -> None:
+        self.profile = profile
+        self._timeout = timeout_seconds
+
+    @asynccontextmanager
+    async def open(self, url: str, *, headers: dict[str, str], proxy: str | None) -> AsyncIterator[TransportResponse]:
+        from curl_cffi import requests as curl
+
+        session = curl.AsyncSession(impersonate=self.profile, timeout=self._timeout)  # type: ignore[arg-type]
+        response = None
+        try:
+            response = await session.get(url, headers=headers, proxy=proxy, allow_redirects=False, stream=True)
+            yield TransportResponse(response.status_code, {k.lower(): v for k, v in response.headers.items()},
+                                    response.aiter_content())
+        except curl.exceptions.Timeout as exc:
+            raise FetchError("timeout") from exc
+        except (curl.exceptions.ConnectionError, curl.exceptions.ProxyError) as exc:
+            raise ConnectFailed(f"network_error:{type(exc).__name__}") from exc
+        except curl.exceptions.RequestException as exc:
+            raise FetchError(f"network_error:{type(exc).__name__}") from exc
+        finally:
+            try:
+                if response is not None:
+                    await response.aclose()
+            finally:
+                await session.close()
+
+    async def aclose(self) -> None:
+        return None
+
+
+def curl_cffi_available() -> bool:
+    try:
+        from curl_cffi.requests import AsyncSession  # noqa: F401
+    except Exception:  # noqa: BLE001 -- missing wheel or broken libcurl: fall back to httpx
+        return False
+    return True
+
+
+def resolve_impersonation(value: str | None) -> str | None:
+    """The curl_cffi profile to use, or None for plain httpx (off, or curl_cffi not importable)."""
+    raw = (os.environ.get("WEB_SEARCH_IMPERSONATE", "chrome") if value is None else value).strip().lower()
+    if raw in ("", "off", "none", "false", "0"):
+        return None
+    return raw if curl_cffi_available() else None
+
+
+def browser_family(profile: str) -> str:
+    for family in ("firefox", "safari"):
+        if profile.startswith(family):
+            return family
+    return "chrome"
+
+
+def split_proxies(value: str | None) -> list[str]:
+    return [p.strip() for p in (value or "").split(",") if p.strip()]
+
+
+def pick_proxies(host: str, proxies: list[str]) -> list[str]:
+    """Proxies in the order to try for ``host``: its sticky one first, then the others."""
+    if not proxies:
+        return []
+    start = zlib.crc32(host.encode("utf-8")) % len(proxies)
+    return proxies[start:] + proxies[:start]
+
+
 class PageFetcher:
     def __init__(
         self,
@@ -76,32 +225,42 @@ class PageFetcher:
         max_content_bytes: int = 2_000_000,
         host_interval_seconds: float = 5.0,
         proxy_url: str | None = None,
+        impersonate: str | None = None,
+        browser_user_agent: str | None = None,
+        accept_language: str = DEFAULT_ACCEPT_LANGUAGE,
         resolver: Resolver = resolve_public_addresses,
         client: httpx.AsyncClient | None = None,
+        transport: Transport | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not 3 <= request_timeout_seconds <= 120 or not 10_000 <= max_content_bytes <= 10_000_000 or host_interval_seconds < 0:
             raise ValueError("unsafe web fetcher limits")
-        self.user_agent = user_agent
+        self.user_agent = user_agent  # declared bot identity: robots.txt is matched against it
         self.max_content_bytes = max_content_bytes
         self.host_interval_seconds = host_interval_seconds
+        self.accept_language = accept_language
+        self._proxies = split_proxies(proxy_url)
         self._resolver, self._sleep, self._clock = resolver, sleep, clock
-        self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(request_timeout_seconds), follow_redirects=False, trust_env=False,
-            proxy=proxy_url or None,
-            headers={"User-Agent": user_agent,
-                     "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
-                     "Accept-Language": "es-ES,es;q=0.9,en;q=0.8,ru;q=0.6,uk;q=0.5"},
-        )
+        self._owns_transport = transport is None
+        # An injected httpx client or transport is used as given; otherwise impersonate via curl_cffi when possible.
+        self.profile: str | None = None if (client is not None or transport is not None) else resolve_impersonation(impersonate)
+        if transport is not None:
+            self._transport: Transport = transport
+            self.profile = getattr(transport, "profile", None)
+        elif self.profile:
+            self._transport = CurlTransport(profile=self.profile, timeout_seconds=request_timeout_seconds)
+        else:
+            self._transport = HttpxTransport(timeout_seconds=request_timeout_seconds, client=client)
+            self._owns_transport = client is None
+        self.browser_user_agent = browser_user_agent or BROWSER_USER_AGENTS[browser_family(self.profile or "chrome")]
         self._robots: dict[str, _Robots] = {}
         self._last: dict[str, float] = {}
         self._host_locks: dict[str, asyncio.Lock] = {}
 
     async def aclose(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
+        if self._owns_transport:
+            await self._transport.aclose()
 
     # -- robots.txt --
 
@@ -140,50 +299,76 @@ class PageFetcher:
 
     # -- pages --
 
-    async def fetch(self, url: str) -> FetchedPage:
-        final_url, body = await self._get(url, max_bytes=self.max_content_bytes, html_only=True)
+    async def fetch(self, url: str, *, country: str | None = None) -> FetchedPage:
+        language = ACCEPT_LANGUAGE_BY_COUNTRY.get((country or "").upper(), self.accept_language)
+        final_url, body = await self._get(url, max_bytes=self.max_content_bytes, html_only=True, language=language)
         return FetchedPage(final_url, _decode(body))
 
-    async def _get(self, url: str, *, max_bytes: int, html_only: bool) -> tuple[str, bytes]:
+    def request_headers(self, *, language: str | None = None, html: bool = True) -> dict[str, str]:
+        language = language or self.accept_language
+        if not self.profile:  # plain httpx: the declared bot identity, as before
+            return {"User-Agent": self.user_agent,
+                    "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", "Accept-Language": language}
+        if not html:  # robots.txt and the like: no navigation headers
+            return {"User-Agent": self.browser_user_agent, "Accept": "*/*", "Accept-Language": language}
+        return {"User-Agent": self.browser_user_agent, "Accept": _HTML_ACCEPT, "Accept-Language": language,
+                "Upgrade-Insecure-Requests": "1", "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1"}
+
+    async def _get(self, url: str, *, max_bytes: int, html_only: bool, language: str | None = None) -> tuple[str, bytes]:
         current = url
         for hop in range(5):
             host = await self._validate(current)
             async with self._lock(host):
                 await self._pace(host, current)
                 try:
-                    async with self._client.stream("GET", current) as response:
-                        if response.status_code in (301, 302, 303, 307, 308):
-                            location = response.headers.get("location")
-                            if not location:
-                                raise FetchError("redirect_missing_location")
-                            if hop == 4:
-                                raise FetchError("too_many_redirects")
-                            current = urljoin(str(response.url), location)
-                            continue
-                        if response.status_code >= 400:
-                            raise FetchError(f"http_{response.status_code}")
-                        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                        if html_only and content_type and not content_type.startswith(_HTML_TYPES):
-                            raise FetchError("not_html")
-                        declared = response.headers.get("content-length")
-                        if declared and declared.isdigit() and int(declared) > max_bytes:
-                            raise FetchError("too_large")
-                        chunks: list[bytes] = []
-                        received = 0
-                        async for chunk in response.aiter_bytes():
-                            received += len(chunk)
-                            if received > max_bytes:
-                                raise FetchError("too_large")
-                            chunks.append(chunk)
-                        return str(response.url), b"".join(chunks)
-                except httpx.TimeoutException as exc:
-                    raise FetchError("timeout") from exc
-                except httpx.HTTPError as exc:
-                    raise FetchError(f"network_error:{type(exc).__name__}") from exc
+                    redirect = await self._once(current, host, max_bytes=max_bytes, html_only=html_only,
+                                                headers=self.request_headers(language=language, html=html_only))
                 finally:
-                    self._client.cookies.clear()  # never carry a session from one page to the next
                     self._last[host] = self._clock()
+            if isinstance(redirect, bytes):
+                return current, redirect
+            if hop == 4:
+                raise FetchError("too_many_redirects")
+            current = urljoin(current, redirect[0])
         raise FetchError("too_many_redirects")
+
+    async def _once(self, url: str, host: str, *, max_bytes: int, html_only: bool,
+                    headers: dict[str, str]) -> bytes | tuple[str]:
+        """One hop: the body, or ``(location,)`` for a redirect. Tries the next proxy only on connect failure."""
+        candidates: list[str | None] = list(pick_proxies(host, self._proxies)) or [None]
+        for index, proxy in enumerate(candidates):
+            try:
+                async with self._transport.open(url, headers=headers, proxy=proxy) as response:
+                    return await self._read(response, max_bytes=max_bytes, html_only=html_only)
+            except ConnectFailed:
+                if index == len(candidates) - 1:
+                    raise
+        raise FetchError("network_error:no_route")  # unreachable
+
+    @staticmethod
+    async def _read(response: TransportResponse, *, max_bytes: int, html_only: bool) -> bytes | tuple[str]:
+        if response.status in (301, 302, 303, 307, 308):
+            location = response.headers.get("location")
+            if not location:
+                raise FetchError("redirect_missing_location")
+            return (location,)
+        if response.status >= 400:
+            raise FetchError(f"http_{response.status}")
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if html_only and content_type and not content_type.startswith(_HTML_TYPES):
+            raise FetchError("not_html")
+        declared = response.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > max_bytes:
+            raise FetchError("too_large")
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in response.chunks:
+            received += len(chunk)
+            if received > max_bytes:
+                raise FetchError("too_large")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def _lock(self, host: str) -> asyncio.Lock:
         return self._host_locks.setdefault(host, asyncio.Lock())
