@@ -36,7 +36,7 @@ from .tolerance import Match, min_area_of, worse
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-PROMPT_VERSION = "relevance-v2"
+PROMPT_VERSION = "relevance-v3"
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 MAX_TASK_CHARS = 1500
 MAX_SUMMARY_CHARS = 900
@@ -74,6 +74,8 @@ Answer:
   (a catalog or search-results page, a list of many ads, price statistics, someone who is looking for a property,
   news, an advert for a service); a main requirement clearly not met.
 
+"task.approved_deviations" (when present) are compromises the person approved in advance: budget_pct, area_pct,
+rooms_delta, nearby_areas, other. A finding that differs only within them is "match", not "near".
 Read "excerpt" (the start of the original listing) as well as "summary": the summary may miss or garble details.
 A finding taken from a search result ("from_search": true) has only a title and a short snippet: judge what it
 states and treat missing details as unknown, not as a reason to reject. A price far above the budget (more than
@@ -133,6 +135,10 @@ def task_data(campaign: Campaign, *, review: bool = False) -> dict[str, Any]:
     area = min_area_of(f"{campaign.source_text} {plan.goal}")
     if area:
         data["min_area_m2"] = area
+    deviations = {k: v for k, v in ((campaign.spec or {}).get("deviations") or {}).items()
+                  if v not in (None, "", [], False) and k != "asked"}
+    if deviations:
+        data["approved_deviations"] = deviations
     if review:
         from bot.agents.reviewer import review_task  # lazy: the reviewer imports this module
 
@@ -340,7 +346,8 @@ def review_reason(review: Any) -> str:
 # Match.why -> the category the final report counts a held or excluded finding under (``campaign_findings.why``).
 CATEGORY = {"price": "budget", "currency": "budget", "location": "place", "foreign": "place", "deal": "deal",
             "type": "type", "rooms": "rooms", "area": "area", "area_max": "area", "area_unknown": "unverified",
-            "kind": "kind", "unverified": "unverified", "ai": "ai", "criteria": "criteria"}
+            "kind": "kind", "unverified": "unverified", "ai": "ai", "criteria": "criteria",
+            "approved_deviation": "approved"}
 # The reviewer's criterion -> the rules' ``Match.why``.
 CRITERION_WHY = {"place": "location", "deal": "deal", "type": "type", "budget": "price", "rooms": "rooms",
                  "area": "area"}
@@ -362,6 +369,8 @@ def _criterion_label(name: str) -> str:
 def review_match(rules: Match, review: dict[str, Any]) -> Match:
     """The bucket of a finding from the rules' bucket and the reviewer's matrix (``review.to_dict``).
 
+    * an approved deviation (``rules.why == "approved_deviation"``) is not a fail: a failed criterion the deviation
+      covers (``rules.covers``) is ignored; the result stays ``exact`` with its note;
     * any hard ``fail`` -> excluded (its quote is in the stored matrix), except when the failed criteria are exactly
       the one number the rules had measured and placed in their «similar» band (budget for ``price``, area for
       ``area``): the near-match question is kept; a second or another failed criterion excludes;
@@ -372,6 +381,12 @@ def review_match(rules: Match, review: dict[str, Any]) -> Match:
     """
     criteria = [c for c in review.get("criteria") or [] if isinstance(c, dict)]
     fails = [str(c.get("name")) for c in criteria if c.get("verdict") == "fail"]
+    if rules.why == "approved_deviation":
+        # The person approved this compromise in the interview: a failed criterion it covers is not a fail.
+        covered = [n for n in fails if n in rules.covers]
+        if covered and len(covered) == len(fails) and review.get("overall") == "reject":
+            review = {**review, "overall": "match"}
+        fails = [n for n in fails if n not in rules.covers]
     unknown = [str(c.get("name")) for c in criteria if c.get("verdict") == "unknown"]
     if fails:
         measured = {"price": "budget", "area": "area"}.get(rules.why or "")

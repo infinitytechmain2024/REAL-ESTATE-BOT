@@ -16,10 +16,10 @@ from bot.campaign.status_text import (
     FACEBOOK,
     NOTHING,
     SEARCHING,
-    WEB,
     campaign_label,
     is_user_status,
-    site_status,
+    site_line,
+    social_line,
     user_status,
 )
 from bot.operators import OperatorSet
@@ -28,10 +28,11 @@ from tests.test_campaign_runner import GOAL, Clock, FakeDiscovery, FakeMessenger
 from tests.test_orchestra_dispatcher import FakeStore, claimed
 
 USER, OWNER, CHAT = 7, 99, -100
-ALLOWED = {"Принято. Начинаю поиск.", "Ищу…", "Ищу в Facebook…", "Ищу в интернете…", "Нашёл вариант, проверяю…",
+ALLOWED = {"Принято. Начинаю поиск.", "Ищу…", "Ищу в Facebook…", "🔎 Проверяю найденное",
            "Поиск завершён.", "Пока ничего подходящего не нашёл.",
            "Ищу в TikTok…", "Ищу в Instagram…", "Ищу в LinkedIn…"}
-GROUP_4 = "Ищу в группе Facebook «Group 4»…"  # the group being read, by its name
+# the group being read, by its name, with its link embedded
+GROUP_4 = '🔎 Сейчас ищу в Facebook в группе <a href="https://www.facebook.com/groups/g004/">Group 4</a>'
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", re.I)
 FORBIDDEN = ("window", "окно", "20", "batch", "campaign", "Кампания", "кампания", "orchestra", "Orchestra",
              "/campaign", "групп", "Queue", "Пауза", "verification", "🎯")
@@ -39,7 +40,7 @@ LATIN_WORD = re.compile(r"[A-Za-z]{2,}")
 
 
 def assert_user_safe(text: str) -> None:
-    if text.startswith("Ищу в группе Facebook «"):  # the group's own name, checked by group_status
+    if text.startswith("🔎 Сейчас ищу "):  # one place, linked; checked by is_user_status
         assert is_user_status(text), text
         return
     from bot.campaign.status_text import LIMIT_NOTE
@@ -54,7 +55,7 @@ def assert_user_safe(text: str) -> None:
 class FlakyMessenger(FakeMessenger):
     """Every edit fails with an arbitrary Telegram error."""
 
-    async def edit(self, chat_id: int, message_id: int, text: str) -> None:
+    async def edit(self, chat_id: int, message_id: int, text: str, *, parse_mode: str | None = None) -> None:
         raise RuntimeError("telegram 400: Bad Request: message is not modified")
 
 
@@ -117,22 +118,24 @@ async def full_search(runner: CampaignRunner, campaigns, store, clock, plan, req
 def test_every_stage_maps_to_an_allowed_label() -> None:
     assert user_status("planning") == user_status("discovery") == SEARCHING
     assert user_status("facebook") == FACEBOOK
-    assert user_status("web") == WEB
+    assert user_status("web") == SEARCHING  # no site known yet: no place to name
     assert user_status("checking") == CHECKING
     assert user_status("finished", found=3) == DONE
     assert user_status("finished", found=0) == NOTHING
     assert user_status("verification", facebook_started=True) == FACEBOOK
     assert user_status("error") == SEARCHING
-    assert user_status("site", site="https://www.idealista.com/alquiler/madrid") == "Ищу на сайте idealista.com…"
-    assert user_status("site", site="<b>batch 20</b> / window") == WEB
-    assert user_status("site") == WEB
+    assert user_status("site", site="https://www.idealista.com/alquiler/madrid") == (
+        '🔎 Сейчас ищу на сайте <a href="https://idealista.com/">idealista.com</a>')
+    assert user_status("site", site="<b>batch 20</b> / window") == SEARCHING
+    assert user_status("site") == SEARCHING
     for state in ("planned", "discovering", "running", "paused_verification", "completed", "cancelled", "failed", "??"):
         for found in (0, 1):
             for checking in (False, True):
                 label = campaign_label(state, found=found, checking=checking)
                 assert label in ALLOWED and is_user_status(label)
-    assert is_user_status(site_status("fotocasa.es"))
-    assert not is_user_status("Ищу на сайте окно 20…")
+    assert is_user_status(site_line("fotocasa.es"))
+    assert not is_user_status("🔎 Сейчас ищу на сайте окно 20")
+    assert not is_user_status("Ищу в интернете…")
     assert not is_user_status("Сейчас: Facebook · окно 1 ждёт запуска")
 
 
@@ -148,7 +151,7 @@ async def test_a_normal_user_sees_only_allowed_statuses_through_a_whole_search()
     for text in shown:
         assert_user_safe(text)
     assert timeline(messenger) == [SEARCHING, FACEBOOK, GROUP_4, FACEBOOK, CHECKING, DONE]
-    sent_statuses = [t for _, _, t in messenger.sent if "🔎" not in t]
+    sent_statuses = [t for _, mid, t in messenger.sent if mid in messenger.status_ids or "🔎" not in t]
     # One status message at a time: it moved below the card and the old one was deleted.
     assert len(sent_statuses) - len(messenger.deleted) == 1, (sent_statuses, messenger.deleted)
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
@@ -219,7 +222,7 @@ async def test_a_failing_status_edit_never_breaks_the_run() -> None:
     assert (await campaigns.get(cid)).state == "completed"
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
     # Edits fail, but the status still moved below the card once (sent anew, the old one deleted).
-    assert [t for _, _, t in messenger.sent if "🔎" not in t] == [SEARCHING, CHECKING]
+    assert [t for _, mid, t in messenger.sent if mid in messenger.status_ids or "🔎" not in t] == [SEARCHING, CHECKING]
     assert len(messenger.deleted) == 1
     assert messenger.summaries() == []  # «Итог поиска» is for owners only
 
@@ -281,20 +284,27 @@ async def test_campaign_notices_to_the_owner_stay_technical() -> None:
 # --- social networks (bot.social_search) -----------------------------------------------------
 
 
-def test_social_labels_are_allowed_and_carry_no_technical_text() -> None:
+def test_social_lines_link_the_query_and_carry_no_technical_text() -> None:
     from bot.campaign.status_text import INSTAGRAM, LINKEDIN, TIKTOK
 
     assert (TIKTOK, INSTAGRAM, LINKEDIN) == ("Ищу в TikTok…", "Ищу в Instagram…", "Ищу в LinkedIn…")
-    for platform, label in (("tiktok", TIKTOK), ("instagram", INSTAGRAM), ("linkedin", LINKEDIN)):
-        assert user_status("social", platform=platform) == label
-        assert campaign_label("running", social=platform) == label and is_user_status(label)
-        assert_user_safe(label)
+    assert social_line("tiktok", "terrenomadrid", "https://www.tiktok.com/tag/terrenomadrid") == (
+        '🔎 Сейчас ищу в TikTok: <a href="https://www.tiktok.com/tag/terrenomadrid">terrenomadrid</a>')
+    assert social_line("linkedin", "business angel & Madrid") == (
+        '🔎 Сейчас ищу в LinkedIn: <a href="https://www.linkedin.com/search/results/content/?keywords='
+        'business+angel+%26+Madrid">business angel &amp; Madrid</a>')
+    assert social_line("instagram") == '🔎 Сейчас ищу в <a href="https://www.instagram.com/">Instagram</a>'
+    assert social_line("myspace", "x") is None
+    for platform in ("tiktok", "instagram", "linkedin"):
+        for line in (social_line(platform), social_line(platform, "запрос <b>")):
+            assert line is not None and is_user_status(line) and "<b>" not in line
+            assert_user_safe(line)
+        assert user_status("social", platform=platform) == social_line(platform)
         # Checking a finding and the end of the search win over the network label.
         assert campaign_label("running", social=platform, checking=True) == CHECKING
         assert campaign_label("completed", social=platform, found=1) == DONE
     assert user_status("social", platform="myspace") == SEARCHING
     assert campaign_label("running", social="myspace") == FACEBOOK
-    assert not is_user_status("Ищу в TikTok · #terrenomadrid…")
 
 
 async def test_a_user_sees_the_network_while_facebook_is_idle_and_owners_see_the_query_and_notes() -> None:
@@ -304,15 +314,18 @@ async def test_a_user_sees_the_network_while_facebook_is_idle_and_owners_see_the
     cid = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="telegram:7")
     await runner.tick()  # discovery, first window waits for facebook-runner
     store.social[cid] = SocialActivity(searching="tiktok", query="terrenomadrid", pending=True,
+                                       url="https://www.tiktok.com/tag/terrenomadrid",
                                        notes=("instagram: нет готового профиля — войдите через /login instagram",))
     await runner.tick()
-    assert timeline(messenger)[-1] == "Ищу в Facebook…"  # Facebook reads a window: its label stays
+    # The network search is the newest change: it is the one place shown (Facebook has no group read yet).
+    assert timeline(messenger)[-1] == (
+        '🔎 Сейчас ищу в TikTok: <a href="https://www.tiktok.com/tag/terrenomadrid">terrenomadrid</a>')
     store.finish_batch(next(b for _, b, s in store.windows[cid] if s == "active"))
     await runner.tick()  # the window closed; Facebook idles through the cooldown
-    assert timeline(messenger)[-1] == "Ищу в TikTok…"
+    assert "tiktok.com/tag/terrenomadrid" in timeline(messenger)[-1]
     for text in statuses(messenger):
-        assert text in ALLOWED, text
-        assert "профил" not in text and "terrenomadrid" not in text
+        assert text in ALLOWED or is_user_status(text), text
+        assert "профил" not in text
 
     owner_campaigns, owner_store, owner_messenger, _, owner_runner, owner_plan = build()
     oid = await owner_campaigns.create(owner_plan, chat_id=CHAT, requested_by=OWNER, source_text=GOAL, actor="t")
@@ -323,78 +336,203 @@ async def test_a_user_sees_the_network_while_facebook_is_idle_and_owners_see_the
     assert "Соцсети: linkedin · «business angel Madrid»" in shown and "/login tiktok" in shown
 
 
-def test_the_group_being_read_is_named_only_when_the_name_is_safe() -> None:
-    from bot.campaign.status_text import group_status
+def test_the_group_line_names_the_group_with_its_link_and_escapes_everything() -> None:
+    from bot.campaign.status_text import group_line
 
-    assert group_status("Pisos en Madrid · alquiler") == "Ищу в группе Facebook «Pisos en Madrid · alquiler»…"
-    assert is_user_status(group_status("Недвижимость Испании"))
-    for junk in (None, "", "123456789012345", "https://www.facebook.com/groups/x", "<b>x</b>", "a/b", "«x»"):
-        assert group_status(junk) == FACEBOOK, junk
-    long = group_status("Квартиры " * 20)
-    assert long.endswith("…»…") and len(long) < 100 and is_user_status(long)
-    assert not is_user_status("Ищу в группе Facebook «https://x»…")
-
-
-# --- the website stage's live line: «сайт · слой · прочитано / найдено» ---------------------------------
-
-
-def test_web_status_texts_for_every_state() -> None:
-    from bot.campaign.status_text import web_done_status, web_progress_status
-
-    assert (web_progress_status("idealista.com", "browser", 37, 12, 4, 8)
-            == "Сейчас: сайты · idealista.com (браузер) · прочитано 37 · найдено 12 · порталов 4/8")
-    assert web_progress_status("www.fotocasa.es", "http", 3, 1, 0, 2) == (
-        "Сейчас: сайты · fotocasa.es (напрямую) · прочитано 3 · найдено 1 · порталов 0/2")
-    assert web_progress_status("x.com", "api", 1, 0, 0, 1).startswith("Сейчас: сайты · x.com (API) ·")
-    assert web_progress_status(None, None, 0, 0) == "Сейчас: сайты · прочитано 0 · найдено 0"  # between pages
-    assert web_progress_status("bad host <b>", "http", 2, 1) == "Сейчас: сайты · прочитано 2 · найдено 1"
-    assert web_done_status(37, 12) == "Сайты: готово · прочитано 37 · найдено 12"
-    for text in (web_progress_status("idealista.com", "browser", 37, 12, 4, 8), web_done_status(0, 0),
-                 web_progress_status(None, None, 5, 2)):
-        assert is_user_status(text), text
-        assert_user_safe(text) if "Сейчас" not in text and "Сайты" not in text else None
-    assert not is_user_status("Сейчас: сайты · idealista.com (браузер) · прочитано 37 · найдено 12 · порталов 4/8 · 9")
-    assert not is_user_status("Сейчас: сайты · idealista.com (http_403) · прочитано 1 · найдено 1")
-    assert not is_user_status("Сайты: готово · прочитано x · найдено 1")
+    url = "https://www.facebook.com/groups/pisos/"
+    assert group_line("Pisos en Madrid · alquiler", url) == (
+        f'🔎 Сейчас ищу в Facebook в группе <a href="{url}">Pisos en Madrid · alquiler</a>')
+    assert is_user_status(group_line("Недвижимость Испании", url))
+    for junk in (None, "", "123456789012345", "https://www.facebook.com/groups/x"):  # no readable name:
+        assert group_line(junk, url) == f'🔎 Сейчас ищу в Facebook в <a href="{url}">группе</a>', junk  # «группе» links
+    hostile = group_line("<b>x</b>", url)
+    assert hostile == f'🔎 Сейчас ищу в Facebook в группе <a href="{url}">&lt;b&gt;x&lt;/b&gt;</a>' and is_user_status(hostile)
+    long = group_line("Квартиры " * 20, url)
+    assert long.count("…") == 1 and len(long) < 160 and is_user_status(long)
+    assert len(re.search(r">([^<]+)</a>", long).group(1)) == 60
+    # a link that is not http(s) is dropped, the name stays
+    assert group_line("Pisos", "javascript:alert(1)") == "🔎 Сейчас ищу в Facebook в группе Pisos"
+    assert not is_user_status('🔎 Сейчас ищу в Facebook в группе <a href="https://x">a<b></a>')
 
 
-async def test_users_get_the_web_progress_line_and_owners_the_technical_one_with_refusals() -> None:
-    from bot.web_search.models import WebProgress, WebStatus
+def test_site_investor_and_link_lines() -> None:
+    from bot.campaign.status_text import reach_line
+
+    # the page being read now is the link; the text is the host without www.
+    assert site_line("www.Idealista.com", "https://www.idealista.com/alquiler/madrid/") == (
+        '🔎 Сейчас ищу на сайте <a href="https://www.idealista.com/alquiler/madrid/">idealista.com</a>')
+    assert site_line("idealista.com") == '🔎 Сейчас ищу на сайте <a href="https://idealista.com/">idealista.com</a>'
+    # a URL with quotes and markup is escaped inside the attribute
+    nasty = site_line("x.es", 'https://x.es/a"b<c>&d')
+    assert nasty == '🔎 Сейчас ищу на сайте <a href="https://x.es/a&quot;b&lt;c&gt;&amp;d">x.es</a>' and is_user_status(nasty)
+    # a page of another site is not trusted for this host; no host and no URL means no place
+    assert site_line("x.es", "https://evil.com/p") == '🔎 Сейчас ищу на сайте <a href="https://x.es/">x.es</a>'
+    assert site_line(None, "https://pisos.com/a") == '🔎 Сейчас ищу на сайте <a href="https://pisos.com/a">pisos.com</a>'
+    assert site_line("<b>x</b>", None) is None and site_line(None, None) is None
+    assert site_line("x.es", "javascript:alert(1)") == '🔎 Сейчас ищу на сайте <a href="https://x.es/">x.es</a>'
+    assert reach_line("linkedin") == '🔎 Сейчас ищу на <a href="https://linkedin.com/">linkedin.com</a>'
+    assert reach_line("reddit", "https://www.reddit.com/r/a/comments/1/x") == (
+        '🔎 Сейчас ищу на <a href="https://www.reddit.com/r/a/comments/1/x">reddit.com</a>')
+    assert reach_line("reddit", "https://evil.com/") == '🔎 Сейчас ищу на <a href="https://reddit.com/">reddit.com</a>'
+    assert reach_line("web") is None and reach_line(None) is None
+    assert is_user_status(reach_line("x")) and is_user_status(CHECKING) and CHECKING == "🔎 Проверяю найденное"
+
+
+# --- the website stage's live line: only the place, with its link --------------------------------------
+
+
+class Web:
+    """A web stage fake: ``progress`` is what the worker publishes (the page read now), ``host`` the stored host."""
+
+    def __init__(self, progress, *, active: bool = True, host: str | None = None) -> None:
+        self.progress, self.active, self.host = progress, active, host
+        self.line = "сайты: страниц 37/60 · сайт idealista.com"
+
+    async def web_status(self, campaign_id: str):
+        from bot.web_search.models import WebStatus
+
+        return WebStatus(self.active, self.host if self.active else None, self.line, self.progress)
+
+
+async def test_users_get_only_the_site_being_read_and_owners_also_the_technical_lines_with_counts() -> None:
+    from bot.web_search.models import WebProgress
     from tests.test_campaign_runner import create, make
 
-    class Web:
-        progress = WebProgress("idealista.com", "browser", 37, 12, 4, 8, (("http", 3), ("browser", 1)))
-
-        async def web_status(self, campaign_id: str) -> WebStatus:
-            return WebStatus(True, "idealista.com", "сайты: страниц 37/60 · сайт idealista.com", self.progress)
-
     campaigns, _, messenger, _, clock, runner, plan = make()
-    web = Web()
+    web = Web(WebProgress("idealista.com", "browser", 37, 12, 4, 8, (("http", 3), ("browser", 1)),
+                          url="https://www.idealista.com/alquiler-viviendas/madrid/?p=3&q=\"x\""), host="idealista.com")
     runner.web = web
     user_cid = await campaigns.create(plan, chat_id=-1, requested_by=8, source_text=GOAL, actor="telegram:8")
     owner_cid = await create(campaigns, plan)
     await runner.step(user_cid)
     await runner.step(owner_cid)
     user_text = next(t for c, _, t in messenger.sent if c == -1)
-    assert user_text == "Сейчас: сайты · idealista.com (браузер) · прочитано 37 · найдено 12 · порталов 4/8"
+    link = 'https://www.idealista.com/alquiler-viviendas/madrid/?p=3&amp;q=&quot;x&quot;'
+    assert user_text == f'🔎 Сейчас ищу на сайте <a href="{link}">idealista.com</a>'
+    assert not any(word in user_text for word in ("прочитано", "найдено", "порталов", "Сейчас: сайты", "Ищу в интернете"))
+    assert is_user_status(user_text)
     owner_text = next(t for c, _, t in messenger.sent if c == CHAT)
+    lines = owner_text.split("\n")
+    assert lines[0].startswith("🎯 ") and lines[1] == user_text  # the new line comes first, under the goal
     assert "сайты: страниц 37/60" in owner_text and "idealista.com: отказы напрямую 3, браузер 1" in owner_text
+    # every status message is HTML, with no link preview; they are the only HTML messages
+    assert set(messenger.modes) == {"HTML"} and len(messenger.modes) == 2
 
-    # one message edited in place; the counters moving every page are throttled to one edit per interval
-    web.progress = WebProgress("idealista.com", "http", 40, 13, 4, 8)
+    # the next page of the same site: one edit per web_status_seconds
+    web.progress = WebProgress("idealista.com", "http", 40, 13, 4, 8, url="https://www.idealista.com/a/2")
     await runner.step(user_cid)
-    edits = len(messenger.edits)
+    assert messenger.edits == []  # throttled: the change waits for the next allowed edit
     clock.advance(11)
     await runner.step(user_cid)
-    assert len(messenger.edits) == edits + 1 and "прочитано 40" in messenger.edits[-1][2]
+    assert len(messenger.edits) == 1 and messenger.edits[-1][2] == (
+        '🔎 Сейчас ищу на сайте <a href="https://www.idealista.com/a/2">idealista.com</a>')
+    assert messenger.modes[-1] == "HTML"
 
-    class Done(Web):
-        progress = WebProgress(None, None, 52, 17, 8, 8, finished=True)
-
-        async def web_status(self, campaign_id: str) -> WebStatus:
-            return WebStatus(False, None, "сайты: готово", self.progress)
-
-    runner.web = Done()
+    # another site: the line changes at the next allowed edit, never earlier
+    web.progress, web.host = WebProgress("fotocasa.es", "http", 41, 13, 4, 8, url="https://www.fotocasa.es/es/"), "fotocasa.es"
+    await runner.step(user_cid)
+    assert len(messenger.edits) == 1
     clock.advance(11)
     await runner.step(user_cid)
-    assert messenger.edits[-1][2] == "Сайты: готово · прочитано 52 · найдено 17"
+    assert "fotocasa.es</a>" in messenger.edits[-1][2] and len(messenger.edits) == 2
+    await runner.step(user_cid)
+    assert len(messenger.edits) == 2  # the same line again: nothing to edit
+
+    # the web stage ended while Facebook idles: no counts, only the plain label
+    web.active, web.progress = False, WebProgress(None, None, 52, 17, 8, 8, finished=True)
+    clock.advance(11)
+    await runner.step(user_cid)
+    assert messenger.edits[-1][2] == FACEBOOK and "52" not in messenger.edits[-1][2]
+
+
+async def test_the_site_falls_back_to_the_stored_host_and_a_stage_without_a_site_has_no_place() -> None:
+    from bot.web_search.models import WebProgress
+    from tests.test_campaign_runner import make
+
+    campaigns, _, _, _, _, runner, plan = make()
+    cid = await campaigns.create(plan, chat_id=-1, requested_by=8, source_text=GOAL, actor="telegram:8")
+    campaign = await campaigns.get(cid)
+    runner.web = Web(None, host="www.fotocasa.es")  # a worker in another process: the progress is unknown
+    assert await runner._status_text(campaign, "") == '🔎 Сейчас ищу на сайте <a href="https://fotocasa.es/">fotocasa.es</a>'
+    runner.web = Web(WebProgress(None, None, 0, 0))  # planning queries: no site yet
+    assert await runner._status_text(campaign, "") == SEARCHING
+    runner.web = Web(WebProgress("<b>x</b>", "http", 1, 0, url="javascript:alert(1)"), host="<b>x</b>")
+    assert await runner._status_text(campaign, "") == SEARCHING  # a hostile host is not a place
+
+
+async def test_a_facebook_group_with_and_without_a_name_and_a_hostile_name_in_the_status() -> None:
+    from bot.campaign.runs import Window
+    from tests.test_campaign_runner import make
+
+    campaigns, _, _, _, _, runner, plan = make()
+    cid = await campaigns.create(plan, chat_id=-1, requested_by=8, source_text=GOAL, actor="telegram:8")
+    campaign = await campaigns.get(cid)
+    url = "https://www.facebook.com/groups/pisos/"
+    for name, expect in (("Pisos Madrid", f'в группе <a href="{url}">Pisos Madrid</a>'),
+                         ("<b>x</b>", f'в группе <a href="{url}">&lt;b&gt;x&lt;/b&gt;</a>'),
+                         ("1234567890", f'в <a href="{url}">группе</a>')):
+        runner._group_now[cid] = (name, url)
+        text = await runner._status_text(campaign, f"Сейчас: Facebook · {name} · ищу дальше")
+        assert text == f"🔎 Сейчас ищу в Facebook {expect}", text
+    assert Window(1, "b", "running", "G", url).current_group_url == url
+
+
+async def test_the_newest_change_wins_between_parallel_stages_and_judging_has_its_own_line() -> None:
+    from bot.campaign.runner import ANALYSIS
+    from bot.campaign.runs import ReachActivity, SocialActivity
+    from bot.web_search.models import WebProgress
+    from tests.test_campaign_runner import make
+
+    campaigns, store, _, _, clock, runner, plan = make()
+    cid = await campaigns.create(plan, chat_id=-1, requested_by=8, source_text=GOAL, actor="telegram:8")
+    campaign = await campaigns.get(cid)
+    web = runner.web = Web(WebProgress("pisos.com", "http", 1, 0, url="https://www.pisos.com/a"), host="pisos.com")
+    def pisos(page: str) -> str:
+        return f'🔎 Сейчас ищу на сайте <a href="https://www.pisos.com/{page}">pisos.com</a>'
+
+    assert await runner._status_text(campaign, "") == pisos("a")
+    clock.advance(5)
+    store.social[cid] = SocialActivity(searching="tiktok", query="terreno madrid", url="https://www.tiktok.com/search?q=t")
+    assert await runner._status_text(campaign, "") == (
+        '🔎 Сейчас ищу в TikTok: <a href="https://www.tiktok.com/search?q=t">terreno madrid</a>')
+    clock.advance(5)  # the site moves on: it changed last
+    web.progress = WebProgress("pisos.com", "http", 2, 0, url="https://www.pisos.com/b")
+    assert await runner._status_text(campaign, "") == pisos("b")
+    clock.advance(5)
+    store.reach[cid] = ReachActivity("linkedin", "site:linkedin.com/in inversor madrid")
+    assert await runner._status_text(campaign, "") == '🔎 Сейчас ищу на <a href="https://linkedin.com/">linkedin.com</a>'
+    clock.advance(5)
+    store.normalised[cid] = 3  # posts are being judged
+    assert await runner._status_text(campaign, ANALYSIS) == "🔎 Проверяю найденное"
+    clock.advance(5)
+    web.progress = WebProgress("pisos.com", "http", 3, 0, url="https://www.pisos.com/c")
+    assert await runner._status_text(campaign, ANALYSIS) == pisos("c")
+    store.social.pop(cid), store.reach.pop(cid)
+    web.active = False
+    store.normalised[cid] = 0
+    assert await runner._status_text(campaign, ANALYSIS) == SEARCHING  # nothing specific: the fixed label
+
+
+async def test_the_telegram_messenger_sends_html_only_when_asked() -> None:
+    import json
+
+    import httpx
+
+    from bot.campaign.runner import TelegramMessenger
+
+    bodies: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append((request.url.path.rsplit("/", 1)[1], json.loads(request.content)))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 5}})
+
+    messenger = TelegramMessenger("t", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await messenger.send(1, "<b>card</b> 🏠")
+    await messenger.edit(1, 5, "<b>card</b> 🏠")
+    await messenger.send(1, "🔎 Сейчас ищу", parse_mode="HTML")
+    await messenger.edit(1, 5, "🔎 Сейчас ищу", parse_mode="HTML")
+    assert [m for m, _ in bodies] == ["sendMessage", "editMessageText", "sendMessage", "editMessageText"]
+    assert all("parse_mode" not in body for _, body in bodies[:2])  # cards and questions stay plain text
+    assert all(body["parse_mode"] == "HTML" for _, body in bodies[2:])
+    assert all(body["disable_web_page_preview"] is True for _, body in bodies)
+    await messenger.aclose()

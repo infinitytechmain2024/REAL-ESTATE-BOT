@@ -148,7 +148,9 @@ async def test_investors_ask_for_the_city_who_the_ticket_and_the_role() -> None:
     assert "размер вложения" in ticket.text
     role = await say(control, USER, "до 500 тыс €")
     assert "Вы ищете деньги для своего проекта" in role.text
-    summary = await press(control, USER, "task:role:deploying")
+    generic = await press(control, USER, "task:role:deploying")
+    assert "Какие проекты и стадии" in generic.text
+    summary = await say(control, USER, "стартапы на ранней стадии")
     assert "Город: Барселона" in summary.text and "Кого ищем: частные инвесторы, фонды" in summary.text
     assert "Тикет: до 500000 €" in summary.text and "Ваша роль: вкладываю деньги" in summary.text
     # Without a ticket the ticket question is asked, even when everything else is said.

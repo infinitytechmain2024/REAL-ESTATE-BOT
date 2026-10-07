@@ -25,12 +25,14 @@ from bot.campaign.spec import ASKABLE_PATHS, TaskSpec
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-PROMPT_VERSION = "interview-v1"
+PROMPT_VERSION = "interview-v2"
 MAX_DIALOGUE_TURNS = 12
 MAX_TURN_CHARS = 600
 MAX_MESSAGE_CHARS = 2000
 MAX_QUESTION_CHARS = 400
 MAX_UNDERSTOOD_CHARS = 400
+MAX_CHOICES = 4  # answer buttons the model may offer under a question
+MAX_CHOICE_CHARS = 60
 _CYRILLIC = re.compile(r"[А-Яа-яЁёІіЇїЄє]")
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
@@ -53,6 +55,7 @@ class InterviewTurn:
     understood_ru: str = ""  # what was understood from the message, one short Russian line
     asking: str | None = None  # the spec field path the question is about, when known
     options: tuple[tuple[str, str], ...] = ()  # (button text, "action:value") shortcuts for the question
+    choices: tuple[str, ...] = ()  # the model's suggested answers (up to 4): buttons that send their text as the answer
 
 
 class Interviewer(Protocol):
@@ -87,13 +90,43 @@ RULES
 5. If a word or name is unclear, looks garbled by voice recognition or could mean several things, do NOT guess
    and do not put it into the spec: ask to confirm, offering your best reading ("«в БУД» — это Убуд на Бали?").
    A word in Ukrainian, Spanish or English is translated, not transliterated: «вілли» = виллы.
-6. When no hard field is missing (and nothing is unclear), set done=true and question=null. Do not keep asking
-   about soft fields (wishes, exclusions, sources): take them from what the person volunteers.
-7. `understood_ru`: one short Russian line saying what you took from THIS message ("Мадрид, аренда, до 1200 €").
+6. The interview has THREE PARTS, in this order. A person who gave everything in one message is still interviewed:
+   the questions below are the point of the interview. Never set done=true before part C is answered.
+   A. HARD FIELDS (rule 3): one question at a time, as above.
+   B. TASK-SPECIFIC ROUND. When no hard field is missing, write the 2-5 questions that would MOST change where and how
+      to search, or how to judge the results, for THIS task, and ask them ONE per turn, the most important first,
+      with asking="context.answers". Never ask what the spec or the dialogue already answers. Think like an agent:
+      - flat or house for sale: floor, lift, terrace/balcony, condition, new build or resale, to live in or to rent out,
+        mortgage, timeline, plot size / pool / parking (house);
+      - land: buildable classification, utilities, road access, what the person wants to build, size;
+      - rent: lease term, pets, furnished, move-in date, who will live there;
+      - investors (the person looks for money): stage of the project, total raise, equity or debt, timeline, track
+        record, what the investor gets; (the person invests): sectors, stage, ticket, how involved, geography;
+      - a region or a province instead of a city: which towns or areas inside it, how far from the coast or the centre;
+      - a foreign country: language of the listings, legal limits for foreigners, taxes, residency goals.
+      When a message answers such a question, put the NEW pair into spec.context.answers:
+      [{"question": "<your question as asked>", "answer": "<what the person said, near verbatim, up to 400 chars>"}]
+      (the code appends it; never resend old pairs) and also use the answer for other fields (must_have, wishes,
+      exclude, area_m2, place.districts...). «Не важно» to such a question adds no pair. Stop part B when the
+      questions that matter are answered; do not pad it with trivia.
+   C. ONE DEVIATION QUESTION, always, with asking="deviations": «Если точных вариантов не будет, что допустимо?»
+      with concrete options built from THIS spec, e.g. «бюджет до +10 % (до 220 000 €)», «соседние районы: Eixample,
+      Quatre Carreres», «площадь от 55 м²», «нет, только точные». Put 2-4 such options (each up to 40 characters,
+      Russian) in "options"; the person presses one or writes freely. Parse the answer into spec.deviations:
+      budget_pct (number: allowed % above the maximum budget), area_pct (% below the minimum area), rooms_delta
+      (whole rooms fewer), nearby_areas (names of neighbouring districts or towns), radius_km, other (short Russian
+      phrases for anything else, e.g. «без лифта ок до 2 этажа»), asked=true. Several may be combined. «Нет, только
+      точные» means asked=true, budget_pct=0, area_pct=0. For investors the question is about acceptable
+      compromises too (smaller or larger ticket, a neighbouring country or another investor type).
+   Only after C is answered (spec.deviations.asked is true) set done=true and question=null. The code ends the
+   interview itself when the person presses «Хватит, ищи», so never offer that yourself.
+7. Questions in parts B and C are Russian, short, plain: B with 2-4 example answers («Например: ...»), C as above.
+   `understood_ru`: one short Russian line saying what you took from THIS message ("Мадрид, аренда, до 1200 €").
    Never quote the person's words, never copy a transcript, never invent. Empty string if nothing new.
 8. If editing is true: the message is "<field>: <new value>"; apply it, keep everything else, set done=true.
 
-SPEC SHAPE (return only the fields you change or fill; omitted fields stay as they are; arrays replace):
+SPEC SHAPE (return only the fields you change or fill; omitted fields stay as they are; arrays replace, except
+context.answers where you return only the NEW pairs):
 {"place": {"name": "<English name, e.g. Madrid, Ubud Bali>", "country": "<ISO-2>", "level": "city|province|region",
            "districts": [], "radius_km": null,
            "names": {"ru": "...", "es": "...", "uk": "...", "ru_in": "<Russian prepositional without в>",
@@ -107,13 +140,17 @@ SPEC SHAPE (return only the fields you change or fill; omitted fields stay as th
               "yield_min": null, "geography": ["..."], "languages": ["es", "ru"],
               "user_role": "raising (the person looks for money) | deploying (the person invests) | null"},
  "sources": {"required": [], "extra": [], "blocked": []},
- "delivery": {"max_results": null, "show_similar": false}, "notes": "", "unspecified": []}
+ "delivery": {"max_results": null, "show_similar": false},
+ "deviations": {"budget_pct": null, "area_pct": null, "rooms_delta": null, "radius_km": null, "nearby_areas": [],
+                "other": [], "asked": false},
+ "context": {"answers": [{"question": "...", "answer": "..."}]}, "notes": "", "unspecified": []}
 Never set "mode". Place: anywhere in the world; never guess it from the language of the message (Ukrainian words
 do not mean Kyiv); "near <city>" or a suburb -> that city with the suburb in districts when it is a district.
 
 OUTPUT: exactly one JSON object, no markdown:
 {"spec": {...partial...}, "question": "<one Russian question>" | null, "done": true|false,
- "understood_ru": "...", "asking": "<field path the question is about>" | null}
+ "understood_ru": "...", "asking": "<field path the question is about, \"context.answers\" for part B,
+ \"deviations\" for part C>" | null, "options": ["<up to 4 short answer buttons>"]}
 
 EXAMPLE (real_estate). spec is empty, message: "ищу квартиру в аренду в Валенсии, до 900 евро, чтобы можно
 было с собакой" ->
@@ -122,9 +159,18 @@ EXAMPLE (real_estate). spec is empty, message: "ищу квартиру в ар�
  "budget": {"max": 900, "currency": "EUR"}, "must_have": ["можно с собакой"]},
  "question": "Сколько комнат нужно? Например: студия, 1, 2, от 2 до 3.", "done": false,
  "understood_ru": "Квартира в аренду в Валенсии, до 900 €, с собакой", "asking": "rooms.min"}
-Next message "не важно" with asking "rooms.min" ->
-{"spec": {"unspecified": ["rooms.min"]}, "question": null, "done": true, "understood_ru": "Количество комнат не важно",
- "asking": null}
+Next message "не важно" with asking "rooms.min" (hard fields are done, part B starts) ->
+{"spec": {"unspecified": ["rooms.min"]}, "question": "Есть ли строгие пожелания к дому: лифт, этаж, ремонт? Например: «лифт обязателен», «не ниже 3 этажа», «после ремонта».",
+ "done": false, "understood_ru": "Количество комнат не важно", "asking": "context.answers"}
+Next message "лифт обязательно, последний этаж не хочу" with asking "context.answers" (part B is over, part C follows) ->
+{"spec": {"context": {"answers": [{"question": "Есть ли строгие пожелания к дому: лифт, этаж, ремонт?", "answer": "лифт обязательно, последний этаж не хочу"}]},
+ "must_have": ["лифт"], "exclude": ["последний этаж"]},
+ "question": "Если точных вариантов не будет, что допустимо? Например: бюджет до +10 % (до 990 €), соседние районы, или только точные.",
+ "done": false, "understood_ru": "Лифт обязателен, последний этаж не нужен", "asking": "deviations",
+ "options": ["бюджет до +10 % (до 990 €)", "соседние районы", "нет, только точные"]}
+Next message "бюджет до 10 % и можно в Руссафе" with asking "deviations" ->
+{"spec": {"deviations": {"budget_pct": 10, "nearby_areas": ["Руссафа"], "asked": true}}, "question": null, "done": true,
+ "understood_ru": "Допустимо: бюджет +10 %, район Руссафа", "asking": null}
 
 EXAMPLE (investors). spec is empty, message: "хочу найти инвесторов для проекта апарт-отеля в Малаге" ->
 {"spec": {"place": {"name": "Malaga", "country": "ES", "names": {"ru": "Малага", "es": "Málaga",
@@ -159,7 +205,16 @@ def parse_turn(content: str, current: TaskSpec) -> InterviewTurn:
     asking = _text(data.get("asking"), 40)
     if asking not in ASKABLE_PATHS:  # an invented or group-level path would point the next answer at nothing
         asking = None
-    return InterviewTurn(spec, question, done or question is None, understood, asking if question else None)
+    choices = _choices(data.get("options")) if question else ()
+    return InterviewTurn(spec, question, done or question is None, understood, asking if question else None, (), choices)
+
+
+def _choices(value: object) -> tuple[str, ...]:
+    """The model's suggested answers: up to four short distinct strings, else none."""
+    if not isinstance(value, list):
+        return ()
+    items = [t for t in (_text(v, MAX_CHOICE_CHARS) for v in value) if t]
+    return tuple(dict.fromkeys(items))[:MAX_CHOICES]
 
 
 def _text(value: object, limit: int) -> str | None:

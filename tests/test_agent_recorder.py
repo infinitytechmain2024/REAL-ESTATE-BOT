@@ -76,10 +76,10 @@ async def test_an_exact_card_is_stored_before_it_is_sent_then_marked_sent() -> N
         order.append("stored")
         await to_send(record)
 
-    async def spy_send(chat, text):
+    async def spy_send(chat, text, **kwargs):
         if "🔎" in text:
             order.append("sent")
-        return await send(chat, text)
+        return await send(chat, text, **kwargs)
 
     runner.recorder.to_send, messenger.send = spy_to_send, spy_send
     add(store, cid, "f45", 45_000)

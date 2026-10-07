@@ -39,7 +39,7 @@ from bot.campaign.tolerance import BUDGET_TOLERANCE, min_area_of
 from .llm import LLMError, OpenRouterJSON
 
 log = logging.getLogger(__name__)
-PROMPT_VERSION = "reviewer-v1"
+PROMPT_VERSION = "reviewer-v2"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 MAX_QUOTE_CHARS = 200
 MAX_NOTE_CHARS = 200
@@ -97,7 +97,11 @@ How to compare:
   (quote the location). A "level" of province or region means anywhere inside it.
 - deal: sale vs rent. type: apartment (a studio counts), house, land, commercial. Different kind is a fail.
 - budget, rooms, area: numbers compare with the tolerance: a maximum ("max") is met up to max * (1 + tolerance_pct/100);
-  a minimum ("min") from min * (1 - tolerance_pct/100). A price in another currency than the task's: "unknown"
+  a minimum ("min") from min * (1 - tolerance_pct/100). "task.deviations" (when present) are compromises the person
+  approved in advance: area_pct replaces tolerance_pct for the area, rooms_delta allows that many rooms fewer than
+  the minimum, nearby_areas are accepted as the place, "other" are free-text compromises; a finding that differs
+  only within them is "pass" (say so in note_ru), never "fail". "task.context" is the person's own answers to the
+  interview: use it to understand what the must-haves mean, not as extra criteria. A price in another currency than the task's: "unknown"
   unless the listing also gives the task's currency. For a budget with only a maximum, anything cheaper passes.
   Rooms: "rooms.min" is a minimum count of rooms or bedrooms as the listing counts them; do not convert.
 - must_have:<item>: the listing must state it (a terrace, a lift, parking ...). exclude:<item>: the listing must
@@ -161,8 +165,17 @@ def _span(low: Any, high: Any) -> dict[str, float] | None:
     return span or None
 
 
+def _deviations(campaign: Campaign) -> dict[str, Any]:
+    raw = (campaign.spec or {}).get("deviations")
+    return {k: v for k, v in raw.items() if v not in (None, "", [], False) and k != "asked"} if isinstance(raw, dict) else {}
+
+
 def tolerance_pct(campaign: Campaign) -> float:
-    """The task's tolerance on numbers: the spec's ``tolerance_pct`` when it has one, else ``BUDGET_TOLERANCE``."""
+    """The task's tolerance on numbers: the approved ``deviations.budget_pct`` (0 = only exact), else the spec's
+    ``tolerance_pct``, else ``BUDGET_TOLERANCE``."""
+    approved = ((campaign.spec or {}).get("deviations") or {}).get("budget_pct")
+    if isinstance(approved, int | float) and not isinstance(approved, bool) and 0 <= approved <= 50:
+        return float(approved)
     value = _number((campaign.spec or {}).get("tolerance_pct"))
     return value if value is not None and value <= 50 else round(BUDGET_TOLERANCE * 100, 2)
 
@@ -217,7 +230,14 @@ def expected_criteria(hard: dict[str, Any]) -> list[str]:
 def review_task(campaign: Campaign) -> dict[str, Any]:
     """The task part of the reviewer's input (``relevance.task_data`` adds it for a reviewer)."""
     hard = hard_criteria(campaign)
-    return {"hard": hard, "criteria": expected_criteria(hard), "tolerance_pct": tolerance_pct(campaign)}
+    task: dict[str, Any] = {"hard": hard, "criteria": expected_criteria(hard), "tolerance_pct": tolerance_pct(campaign)}
+    if deviations := _deviations(campaign):
+        task["deviations"] = deviations  # compromises the person approved: not a fail
+    answers = ((campaign.spec or {}).get("context") or {}).get("answers")
+    if isinstance(answers, list) and answers:  # the person's own answers to the interview, verbatim
+        task["context"] = [{"q": str(a.get("question"))[:200], "a": str(a.get("answer"))[:400]}
+                           for a in answers[:20] if isinstance(a, dict)]
+    return task
 
 
 # --- reading the answer ---------------------------------------------------------------------------------------------

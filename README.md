@@ -175,7 +175,7 @@ their own when the window passes (failures also after the next success).
 ### Bounded analysis pipeline
 
 `analysis-worker` (default stack; idle without `OPENROUTER_API_KEY`) runs the
-pipeline every `ANALYSIS_POLL_SECONDS` (60). It reads only normalised posts, rejects
+pipeline every `ANALYSIS_POLL_SECONDS` (15). It reads only normalised posts, rejects
 stale/spam/irrelevant evidence deterministically, then requests strict JSON
 from OpenRouter with the same `OPENROUTER_API_KEY`. It stores the model,
 prompt version, language, confidence and a stable finding key (migration

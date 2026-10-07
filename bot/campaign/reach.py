@@ -531,7 +531,7 @@ class ReachStore(Protocol):
     async def open_campaigns(self) -> list[ReachCampaign]: ...
     async def used_queries(self, campaign_id: str) -> set[str]: ...
     async def queries_today(self) -> int: ...
-    async def set_current(self, campaign_id: str, query: str | None) -> None: ...
+    async def set_current(self, campaign_id: str, query: str | None, platform: str | None = None) -> None: ...
     async def record_query(self, campaign_id: str, query: ReachQuery, *, hits: int, kept: int,
                            error: str | None = None) -> None: ...
     async def known(self, url_keys: Sequence[str]) -> set[str]: ...
@@ -591,7 +591,7 @@ class ReachWorker:
     async def _run(self, campaign: ReachCampaign, query: ReachQuery) -> None:
         from bot.web_search.searxng import SearchError
 
-        await self.store.set_current(campaign.id, query.text)
+        await self.store.set_current(campaign.id, query.text, query.platform)
         try:
             hits = await self.searcher.search(query.text, language=query.language)
         except SearchError as exc:
@@ -708,11 +708,12 @@ class PostgresReachStore:
         return int(await self.pool.fetchval(
             "select count(*) from reach_queries where created_at > now() - interval '1 day'"))
 
-    async def set_current(self, campaign_id: str, query: str | None) -> None:
+    async def set_current(self, campaign_id: str, query: str | None, platform: str | None = None) -> None:
         await self.pool.execute(
-            """insert into campaign_reach (campaign_id, current) values ($1::uuid, $2)
-               on conflict (campaign_id) do update set current = excluded.current, updated_at = now()""",
-            campaign_id, query and query[:300])
+            """insert into campaign_reach (campaign_id, current, platform) values ($1::uuid, $2, $3)
+               on conflict (campaign_id) do update set current = excluded.current, platform = excluded.platform,
+                   updated_at = now()""",
+            campaign_id, query and query[:300], query and platform)
 
     async def record_query(self, campaign_id: str, query: ReachQuery, *, hits: int, kept: int,
                            error: str | None = None) -> None:
@@ -802,7 +803,7 @@ class MemoryReachStore:
     async def queries_today(self) -> int:
         return self.today
 
-    async def set_current(self, campaign_id: str, query: str | None) -> None:
+    async def set_current(self, campaign_id: str, query: str | None, platform: str | None = None) -> None:
         self.current[campaign_id] = query
 
     async def record_query(self, campaign_id: str, query: ReachQuery, *, hits: int, kept: int,

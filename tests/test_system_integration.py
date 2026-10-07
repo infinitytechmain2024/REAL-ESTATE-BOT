@@ -669,7 +669,10 @@ async def test_campaign_from_command_to_streamed_finding_and_completion(pool) ->
     fb.during_read = look
     assert await facebook_runner(pool, fb).step() is True
     assert fb.reads == [PISOS, RENT]
-    assert reading == [f"🎯 {(await runner.campaigns.get(campaign_id)).plan.goal}\nСейчас: Facebook · Pisos alquiler Madrid · ищу дальше"]
+    goal = (await runner.campaigns.get(campaign_id)).plan.goal
+    group_url = await pool.fetchval("select canonical_url from campaign_groups where name = 'Pisos alquiler Madrid'")
+    assert reading == [f"🎯 {goal}\n🔎 Сейчас ищу в Facebook в группе "
+                       f'<a href="{group_url}">Pisos alquiler Madrid</a>\nСейчас: Facebook · Pisos alquiler Madrid · ищу дальше']
     assert await pool.fetchval("select state from acquisition_batches") == "succeeded"
 
     digest = Telegram()

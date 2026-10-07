@@ -80,6 +80,7 @@ class Window:
     batch_id: str
     batch_state: str
     current_group: str | None = None  # name of the group being read right now
+    current_group_url: str | None = None  # its Facebook address
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +143,15 @@ class SocialActivity:
     query: str | None = None
     pending: bool = False
     notes: tuple[str, ...] = ()
+    url: str | None = None  # the search page the running query has open
+
+
+@dataclass(frozen=True, slots=True)
+class ReachActivity:
+    """The investor reach stage (``bot.campaign.reach``): the platform its running query is aimed at, if any."""
+
+    platform: str | None = None
+    query: str | None = None
 
 
 RECOVERY_ACTOR = "campaign:runner:recovery"
@@ -182,7 +192,9 @@ class RunStore(Protocol):
     async def open_offer(self, campaign_id: str, bucket: str) -> bool: ...
     async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None: ...
     async def drop_offer(self, campaign_id: str, bucket: str) -> None: ...
+    async def approve_offer(self, campaign_id: str, bucket: str, decided_by: int) -> bool: ...
     async def social_activity(self, campaign_id: str) -> SocialActivity: ...
+    async def reach_activity(self, campaign_id: str) -> ReachActivity: ...
     # the AI relevance verdict, once per finding (migration 023, ``relevance``)
     async def relevance(self, campaign_id: str, finding_id: str) -> Relevance | None: ...
     async def save_relevance(self, campaign_id: str, finding_id: str, relevance: Relevance) -> None: ...
@@ -314,12 +326,18 @@ class PostgresRunStore:
                          from acquisition_batch_items i
                          join monitoring_sources s on s.id = i.source_id
                          join campaign_groups g on g.campaign_id = w.campaign_id and g.canonical_url = s.canonical_url
-                        where i.batch_id = w.batch_id and i.state = 'running' limit 1) as current_group
+                        where i.batch_id = w.batch_id and i.state = 'running' limit 1) as current_group,
+                      (select g.canonical_url
+                         from acquisition_batch_items i
+                         join monitoring_sources s on s.id = i.source_id
+                         join campaign_groups g on g.campaign_id = w.campaign_id and g.canonical_url = s.canonical_url
+                        where i.batch_id = w.batch_id and i.state = 'running' limit 1) as current_group_url
                  from campaign_windows w join acquisition_batches b on b.id = w.batch_id
                 where w.campaign_id = $1::uuid and w.state = 'active'""",
             campaign_id,
         )
-        return Window(row["window_no"], row["batch_id"], row["state"], row["current_group"]) if row else None
+        return (Window(row["window_no"], row["batch_id"], row["state"], row["current_group"],
+                       row["current_group_url"]) if row else None)
 
     async def close_window(self, campaign_id: str, window: Window, actor: str) -> None:
         """Groups read by the batch become collected, the rest skipped; the window finishes."""
@@ -659,7 +677,7 @@ class PostgresRunStore:
 
     async def social_activity(self, campaign_id: str) -> SocialActivity:
         rows = await self.pool.fetch(
-            """select platform, state, current_query, note from campaign_social_state
+            """select platform, state, current_query, note, current_url from campaign_social_state
                 where campaign_id = $1::uuid order by platform""", campaign_id)
         running = next((r for r in rows if r["state"] == "running"), None)
         return SocialActivity(
@@ -667,7 +685,14 @@ class PostgresRunStore:
             query=running["current_query"] if running else None,
             pending=any(r["state"] in ("pending", "running") for r in rows),
             notes=tuple(r["note"] for r in rows if r["note"]),
+            url=running["current_url"] if running else None,
         )
+
+    async def reach_activity(self, campaign_id: str) -> ReachActivity:
+        row = await self.pool.fetchrow(
+            "select platform, current from campaign_reach where campaign_id = $1::uuid and state = 'running'",
+            campaign_id)
+        return ReachActivity(row["platform"], row["current"]) if row and row["current"] else ReachActivity()
 
     async def claim_held(self, campaign_id: str, finding_id: str) -> int | None:
         """Take the send slot of a held finding (held -> sending); None if it is not held any more."""
@@ -694,6 +719,15 @@ class PostgresRunStore:
             """insert into campaign_offers (campaign_id, bucket) values ($1::uuid, $2)
                on conflict do nothing returning 1""",
             campaign_id, bucket,
+        ))
+
+    async def approve_offer(self, campaign_id: str, bucket: str, decided_by: int) -> bool:
+        """The requester approved this bucket in advance (the interview's deviations): no question is ever asked.
+        Idempotent: False when the bucket already has an offer row (asked, approved or declined)."""
+        return bool(await self.pool.fetchval(
+            """insert into campaign_offers (campaign_id, bucket, state, decided_at, decided_by)
+               values ($1::uuid, $2, 'approved', now(), $3) on conflict do nothing returning 1""",
+            campaign_id, bucket, decided_by,
         ))
 
     async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None:
@@ -920,6 +954,7 @@ class MemoryRunStore:
         self.deliveries: dict[tuple[str, str], int | None] = {}  # (cid, person) -> message id (None = sending)
         self.contacts: dict[str, list[Contact]] = {}  # city -> relevant reach results, in the order they are offered
         self.reaching: set[str] = set()  # campaigns whose reach stage still runs
+        self.reach: dict[str, ReachActivity] = {}  # cid -> the reach query running now
         self.summaries: set[str] = set()  # campaigns whose summary was claimed
         self.cluster_links: dict[str, list[dict[str, str]]] = {}  # head finding -> other sightings
         self.duplicates: dict[str, str] = {}  # duplicate finding -> head finding (stored, never sent)
@@ -984,7 +1019,7 @@ class MemoryRunStore:
                 batch = self.batches[batch_id]
                 running = next((u for u, s in batch.items.items() if s == "running"), None)
                 name = next((g.name for g in self.groups.get(campaign_id, []) if g.canonical_url == running), None)
-                return Window(window_no, batch_id, batch.state, name)
+                return Window(window_no, batch_id, batch.state, name, running if name else None)
         return None
 
     async def close_window(self, campaign_id: str, window: Window, actor: str) -> None:
@@ -1197,6 +1232,12 @@ class MemoryRunStore:
         self.desk.offers[(campaign_id, bucket)] = MemoryOffer(campaign.requested_by if campaign else 0)
         return True
 
+    async def approve_offer(self, campaign_id: str, bucket: str, decided_by: int) -> bool:
+        if (campaign_id, bucket) in self.desk.offers:
+            return False
+        self.desk.offers[(campaign_id, bucket)] = MemoryOffer(decided_by, "approved", decided_by)
+        return True
+
     async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None:
         self.desk.offers[(campaign_id, bucket)].message_id = message_id
 
@@ -1247,3 +1288,6 @@ class MemoryRunStore:
 
     async def reach_pending(self, campaign_id: str) -> bool:
         return campaign_id in self.reaching
+
+    async def reach_activity(self, campaign_id: str) -> ReachActivity:
+        return self.reach.get(campaign_id, ReachActivity())

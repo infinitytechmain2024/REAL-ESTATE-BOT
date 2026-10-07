@@ -225,7 +225,12 @@ class SocialSearchWorker:
             return  # taken by another worker between the check and the claim: next tick
         adapter = adapter_for(platform)
         vertical = campaign.plan.vertical
-        await self.store.set_campaign_social(campaign.id, platform, "running", current_query=query.text)
+        try:
+            shown_url: str | None = adapter.search_url(query.kind, query.text)  # the status line links to it
+        except ValueError:
+            shown_url = None  # the run below fails on it and records why
+        await self.store.set_campaign_social(campaign.id, platform, "running", current_query=query.text,
+                                             current_url=shown_url)
         await self.store.start_query(query.id, profile.id)
         lease: Any = None
         blocked: Block | None = None

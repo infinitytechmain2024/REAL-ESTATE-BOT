@@ -217,24 +217,26 @@ async def test_far_listing_is_other_and_only_offered_after_the_search() -> None:
     assert cards(messenger)[1].endswith("🔎 Найдено: 2")
 
 
-async def test_exact_found_first_asks_about_similar_at_the_end_then_about_other() -> None:
+async def test_exact_found_first_asks_about_similar_during_the_search_then_about_other_at_the_end() -> None:
     campaigns, store, messenger, runner, cid, control = await setup()
     add(store, cid, "f52", 52_000)
     add(store, cid, "f62", 62_000)
     add(store, cid, "f59", 59_000)
     add(store, cid, "f95", 95_000)
     await runner.tick()
-    assert len(cards(messenger)) == 1 and messenger.asks == []  # exact found: similar waits for the end
-    await campaigns.set_state(cid, "completed", "campaign:test")
-    await runner.tick()
-    await runner.tick()
-    # The closest similar listing is the example; «other» waits for the similar answer.
+    # The question comes with the first held similar listing, while the search is still running.
+    assert len(cards(messenger)) == 1
     assert [text for _, text, _ in messenger.asks] == [
         "Есть ещё похожие варианты (например ~59 000 € при запросе ~50 000 €). Показать?"]
     await press(control, USER, messenger.asks[0][2][0][1])
     await runner.tick()
     new = cards(messenger)[1:]
-    assert ["59 000" in new[0], "62 000" in new[1]] == [True, True]  # closest first
+    assert ["59 000" in new[0], "62 000" in new[1]] == [True, True]  # closest first, still during the search
+    assert new[0].startswith("≈ Чуть дороже запроса: ~59 000 € при запросе ~50 000 €")  # each says what differs
+    assert len(messenger.asks) == 1  # «other» waits for the end of the search
+    await campaigns.set_state(cid, "completed", "campaign:test")
+    await runner.tick()
+    await runner.tick()
     assert [text for _, text, _ in messenger.asks][-1] == "Показать более далёкие варианты?"
     await press(control, USER, messenger.asks[1][2][1][1])  # «Нет»
     await runner.tick()

@@ -5,7 +5,10 @@ then writes or says the task. The bot then interviews them like a good agent ("g
 fully specified: every user message goes to the interviewer (``interviewer.py``, one AI call; the rules in
 ``rules.py`` take over when there is no key or a call fails), which fills a ``TaskSpec``
 (``bot/campaign/spec.py``) and asks exactly ONE next question: the most important missing hard field first.
-A complete task asks nothing. Each question carries «Не важно» (the asked field is left open on purpose),
+The interview has three parts (docs/INTERVIEW_TREE.md): the hard fields, then a round of questions specific to
+THIS task (floor and lift for a flat, buildable class for land, stage and raise for investors ...), then always
+one deviation question («если точных вариантов не будет, что допустимо?»); even a fully described task is asked
+the last two before the card appears, unless «Хватит, ищи» is pressed. Each question carries «Не важно» (the asked field is left open on purpose),
 «Хватит, ищи» (stop asking) and «Отмена»; after ``MAX_ROUNDS`` questions the interview ends anyway. The place
 is the one thing that cannot be skipped: a search needs somewhere to look.
 
@@ -42,7 +45,10 @@ from bot.control_plane.interviewer import Interviewer, InterviewTurn
 from bot.control_plane.models import Button, CommandEnvelope, IncomingMessage, Reply
 from bot.control_plane.rules import (
     AI_SKIP_WORDS,
+    DEVIATION_OPTIONS,
+    DEVIATION_PATH,
     SKIP_WORDS,
+    TASK_PATH,
     RuleInterviewer,
     gazetteer_place,
     geo_ru,
@@ -50,6 +56,7 @@ from bot.control_plane.rules import (
     parse_budget,
     parse_deal,
     question_for,
+    read_deviations,
 )
 
 __all__ = ["geo_ru", "parse_budget", "parse_deal"]  # re-exported: the answer parsers live in rules.py
@@ -61,7 +68,7 @@ OwnerNotice = Callable[[str], Awaitable[None]]
 # mode (the plan's vertical) -> button title from the old bot
 MODES: dict[str, str] = dict(MODE_TITLES)
 DRAFT_TTL = timedelta(hours=24)
-MAX_ROUNDS = 10  # questions per task; after that the card is shown with what is known (setting INTERVIEW_MAX_ROUNDS)
+MAX_ROUNDS = 14  # questions per task; after that the card is shown with what is known (setting INTERVIEW_MAX_ROUNDS)
 MAX_TASK_CHARS = MAX_TEXT_CHARS - 100  # room for the mode word and the answers
 MAX_DIALOGUE = 40
 MAX_HEARD_CHARS = 300
@@ -102,9 +109,10 @@ class Draft:
     asking: str | None = None  # the spec field of the question on screen
     editing: str | None = None  # the spec field being changed from «Изменить»
     forced: bool = False  # «Хватит, ищи» was pressed: no more questions for this task (except a missing place)
+    choices: list[str] = field(default_factory=list)  # the model's suggested answers on screen (buttons «task:opt:<i>»)
 
     def copy(self, **changes: Any) -> Draft:
-        return replace(self, dialogue=[dict(t) for t in self.dialogue],
+        return replace(self, dialogue=[dict(t) for t in self.dialogue], choices=list(self.choices),
                        spec=self.spec.model_copy(deep=True) if self.spec is not None else None, **changes)
 
     def goal_text(self) -> str:
@@ -171,7 +179,8 @@ class Draft:
 
     def payload(self) -> dict[str, Any]:
         return {"task": self.task, "message_id": self.message_id, "dialogue": self.dialogue, "rounds": self.rounds,
-                "asking": self.asking, "editing": self.editing, "forced": bool(self.forced)}
+                "asking": self.asking, "editing": self.editing, "forced": bool(self.forced),
+                "choices": list(self.choices)}
 
     def spec_json(self) -> str | None:
         return self.spec.model_dump_json() if self.spec is not None else None
@@ -189,7 +198,8 @@ class Draft:
         return cls(user_id, chat_id, mode, step, str(payload.get("task") or ""), int(payload.get("message_id") or 0),
                    updated_at, loaded, dialogue,
                    int(payload.get("rounds") or 0), payload.get("asking"), payload.get("editing"),
-                   bool(payload.get("forced")))
+                   bool(payload.get("forced")),
+                   [str(c) for c in payload.get("choices") or [] if isinstance(c, str)])
 
     def expired(self, now: datetime) -> bool:
         return self.updated_at is not None and now - self.updated_at > DRAFT_TTL
@@ -422,6 +432,10 @@ class TaskIntake:
             return await self._skip(draft)
         if action == "enough":
             return await self._enough(draft)
+        if action == "dev" and value in ("0", "10", "20") and draft.asking == DEVIATION_PATH:
+            return await self._interview(draft, "Только точные" if value == "0" else f"±{value} %")
+        if action == "opt" and value.isdigit() and int(value) < len(draft.choices):
+            return await self._interview(draft, draft.choices[int(value)])
         if action == "deal" and value in ("rent", "sale") and draft.asking == "deal":
             return await self._interview(draft, f"Сделка: {DEAL_TEXT[value]}")
         if action == "role" and value in ("raising", "deploying") and draft.asking == "investor.user_role":
@@ -477,10 +491,21 @@ class TaskIntake:
         mode = draft.mode or "real_estate"
         spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
         turn = await self._turn(draft, mode, spec, message, editing)
-        draft.spec = _enrich(turn.spec, mode)
+        draft.spec = _enrich(self._record_answer(draft, spec, turn.spec, message, editing), mode)
         draft.dialogue = [*draft.dialogue, {"role": "user", "text": message[:600]}][-MAX_DIALOGUE:]
         draft.editing = None
-        return await self._carry_on(draft, turn)
+        return await self._carry_on(draft, turn, editing=editing)
+
+    def _record_answer(self, draft: Draft, before: TaskSpec, after: TaskSpec, message: str, editing: bool) -> TaskSpec:
+        """Safety net: the answer to a task-specific or deviation question is kept even if the model dropped it."""
+        if editing or draft.asking not in (TASK_PATH, DEVIATION_PATH) or _norm(message) in self._skip_words():
+            return after
+        if draft.asking == DEVIATION_PATH:
+            return after if after.deviations.asked else read_deviations(after, message)
+        if len(after.context.answers) > len(before.context.answers):
+            return after
+        question = next((t["text"] for t in reversed(draft.dialogue) if t.get("role") == "assistant"), "")
+        return after.merged({"context": {"answers": [{"question": question, "answer": message}]}})
 
     async def _turn(self, draft: Draft, mode: str, spec: TaskSpec, message: str, editing: bool) -> InterviewTurn:
         """One AI call; the rules answer instead when there is no interviewer or it fails."""
@@ -498,7 +523,8 @@ class TaskIntake:
         return await self.rules.interview(mode=mode, spec=spec, dialogue=draft.dialogue, message=message,
                                           asking=draft.asking, editing=editing)
 
-    async def _carry_on(self, draft: Draft, turn: InterviewTurn | None = None, *, force: bool = False) -> Reply:
+    async def _carry_on(self, draft: Draft, turn: InterviewTurn | None = None, *, force: bool = False,
+                        editing: bool = False) -> Reply:
         """Ask the next question, or show the card when nothing is left (or the person or the round cap says stop)."""
         mode = draft.mode or "real_estate"
         spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
@@ -507,9 +533,14 @@ class TaskIntake:
         question = turn.question if turn else None
         asking = (turn.asking if turn else None) or (missing[0] if missing else None)
         options = turn.options if turn else ()
+        choices = turn.choices if turn else ()
         if question is None and missing and not capped:
             asking, question = missing[0], question_for(spec, missing[0])
             options = options_for(missing[0])
+        elif (question is None and not missing and not capped and not editing and mode == "real_estate"
+              and not spec.answered(DEVIATION_PATH)):
+            # Whatever the model said, the deviation question is always asked before the card.
+            asking, question, options, choices = DEVIATION_PATH, question_for(spec, DEVIATION_PATH), DEVIATION_OPTIONS, ()
         if capped and "place" in missing:  # the one field that cannot be waved away
             asking, question, options = "place", question_for(spec, "place"), ()
             if force:
@@ -517,15 +548,17 @@ class TaskIntake:
         elif capped:
             question = None
         if question is not None:
-            return await self._ask(draft, turn.understood_ru if turn else "", question, asking, options)
+            return await self._ask(draft, turn.understood_ru if turn else "", question, asking, options, choices)
         return await self._card(draft)
 
     async def _ask(self, draft: Draft, understood: str, question: str, asking: str | None,
-                   options: tuple[tuple[str, str], ...]) -> Reply:
+                   options: tuple[tuple[str, str], ...], choices: tuple[str, ...] = ()) -> Reply:
         draft.step, draft.asking, draft.rounds = "ask", asking, draft.rounds + 1
+        draft.choices = list(choices)
         draft.dialogue = [*draft.dialogue, {"role": "assistant", "text": question[:600]}][-MAX_DIALOGUE:]
         await self.store.save(draft)
         buttons = [Button(label, callback_data=f"task:{code}") for label, code in options]
+        buttons += [Button(text, callback_data=f"task:opt:{i}") for i, text in enumerate(choices)]
         if asking and asking != "place":
             buttons.append(Button("Не важно", callback_data="task:skip"))
         buttons += [Button("Хватит, ищи", callback_data="task:enough"), Button("Отмена", callback_data="task:cancel")]

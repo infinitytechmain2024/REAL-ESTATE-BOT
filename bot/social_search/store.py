@@ -84,7 +84,8 @@ class SocialStore(Protocol):
     async def open_campaigns(self) -> list[str]: ...
     async def campaign_social(self, campaign_id: str, platform: str) -> CampaignSocial: ...
     async def set_campaign_social(self, campaign_id: str, platform: str, state: str, *, rounds: int | None = None,
-                                  current_query: str | None = None, note: str | None = None) -> None: ...
+                                  current_query: str | None = None, note: str | None = None,
+                                  current_url: str | None = None) -> None: ...
     async def pacing(self, platform: str) -> Pacing: ...
     async def set_pacing(self, platform: str, *, next_action_at: datetime | None = None,
                          paused_until: datetime | None = None, reason: str | None = None) -> None: ...
@@ -153,14 +154,16 @@ class PostgresSocialStore:
         return CampaignSocial(row["state"], row["rounds"]) if row else CampaignSocial()
 
     async def set_campaign_social(self, campaign_id: str, platform: str, state: str, *, rounds: int | None = None,
-                                  current_query: str | None = None, note: str | None = None) -> None:
+                                  current_query: str | None = None, note: str | None = None,
+                                  current_url: str | None = None) -> None:
         await self.pool.execute(
-            """insert into campaign_social_state (campaign_id, platform, state, rounds, current_query, note)
-               values ($1::uuid, $2, $3, coalesce($4, 0), $5, $6)
+            """insert into campaign_social_state (campaign_id, platform, state, rounds, current_query, note, current_url)
+               values ($1::uuid, $2, $3, coalesce($4, 0), $5, $6, $7)
                on conflict (campaign_id, platform) do update set state = excluded.state,
                    rounds = coalesce($4, campaign_social_state.rounds), current_query = excluded.current_query,
-                   note = excluded.note, updated_at = now()""",
+                   note = excluded.note, current_url = excluded.current_url, updated_at = now()""",
             campaign_id, platform, state, rounds, current_query and current_query[:120], note and note[:300],
+            current_url and current_url[:2000],
         )
 
     async def pacing(self, platform: str) -> Pacing:
@@ -365,9 +368,10 @@ class MemorySocialStore:
         return CampaignSocial(row["state"], row["rounds"]) if row else CampaignSocial()
 
     async def set_campaign_social(self, campaign_id: str, platform: str, state: str, *, rounds: int | None = None,
-                                  current_query: str | None = None, note: str | None = None) -> None:
+                                  current_query: str | None = None, note: str | None = None,
+                                  current_url: str | None = None) -> None:
         row = self.social.setdefault((campaign_id, platform), {"rounds": 0})
-        row.update(state=state, current_query=current_query, note=note)
+        row.update(state=state, current_query=current_query, note=note, current_url=current_url)
         if rounds is not None:
             row["rounds"] = rounds
 
