@@ -4,6 +4,7 @@ recommendations, sent once; and migration 038 on PostgreSQL."""
 from __future__ import annotations
 
 import json
+import re
 from datetime import timedelta
 
 import httpx
@@ -11,15 +12,19 @@ import pytest
 
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.final_report import (
+    SYSTEM,
     FinalReporter,
     OpenRouterRecommender,
     Tally,
     card_score,
+    clean_recommendations,
     facts_for_model,
     fallback_recommendations,
     parse_recommendations,
     rank_cards,
+    real_estate_sources,
     report_text,
+    similar_note,
     tally,
 )
 from bot.campaign.relevance import Relevance, ReviewerJudge
@@ -180,7 +185,7 @@ async def test_the_best_cards_come_first_by_budget_rooms_area_and_evidence() -> 
 
 async def test_the_user_gets_one_report_with_counts_reasons_top_sites_and_advice() -> None:
     advice = Advice("Поднимите бюджет на 10 %: 2 варианта отклонены по цене.",
-                    "Idealista не читается: включите чтение через API.")
+                    "Idealista не читается: 8 отказов, включите чтение через API.")
     campaigns, store, messenger, clock, runner, _, cid = await build(advice)
     seed(store, cid)
     await finish(campaigns, store, runner, clock, cid)
@@ -214,7 +219,7 @@ async def test_the_user_gets_one_report_with_counts_reasons_top_sites_and_advice
     assert not any("Fotocasa" in line for line in broken)  # a readable site is not listed there
     # advice from the model, numbered, after everything else
     assert lines[-3:] == ["Что можно сделать:", "1. Поднимите бюджет на 10 %: 2 варианта отклонены по цене.",
-                          "2. Idealista не читается: включите чтение через API."]
+                          "2. Idealista не читается: 8 отказов, включите чтение через API."]
     # the model saw aggregated numbers only: no listing text, no links, no ids
     [facts] = advice.facts
     assert facts["counts"]["sent_exact"] == 4 and facts["rejected_by_reason"] == {"deal": 1, "place": 1, "kind": 1}
@@ -227,7 +232,7 @@ async def test_the_user_gets_one_report_with_counts_reasons_top_sites_and_advice
 
 
 async def test_the_report_is_sent_once_across_restarts_and_retried_when_telegram_fails() -> None:
-    campaigns, store, messenger, clock, runner, reporter, cid = await build(Advice("Совет один."))
+    campaigns, store, messenger, clock, runner, reporter, cid = await build(Advice("Поднимите бюджет на 10 %: 2 варианта.", "Добавьте район: 3 варианта."))
     seed(store, cid)
     await finish(campaigns, store, runner, clock, cid)
     messenger.fail = 1  # Telegram is down for the first send: the claim is given back
@@ -244,7 +249,7 @@ async def test_the_report_is_sent_once_across_restarts_and_retried_when_telegram
 
 
 async def test_owners_keep_their_summary_and_also_get_the_report() -> None:
-    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."), owner=True)
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Поднимите бюджет на 10 %: 2 варианта.", "Добавьте район: 3 варианта."), owner=True)
     seed(store, cid)
     await finish(campaigns, store, runner, clock, cid)
     await runner.step(cid)
@@ -255,32 +260,32 @@ async def test_owners_keep_their_summary_and_also_get_the_report() -> None:
 
 
 async def test_no_report_without_a_reporter_for_old_investor_failed_or_empty_cancelled_campaigns() -> None:
-    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."))
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Поднимите бюджет на 10 %: 2 варианта.", "Добавьте район: 3 варианта."))
     runner.final_report = None
     seed(store, cid)
     await finish(campaigns, store, runner, clock, cid)
     await runner.step(cid)
     assert reports_of(messenger) == [] and not store.final_reports
 
-    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."))
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Поднимите бюджет на 10 %: 2 варианта.", "Добавьте район: 3 варианта."))
     seed(store, cid)
     await finish(campaigns, store, runner, clock, cid)
     clock.at += timedelta(hours=3)  # ended before the report existed
     await runner.step(cid)
     assert reports_of(messenger) == []
 
-    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."))
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Поднимите бюджет на 10 %: 2 варианта.", "Добавьте район: 3 варианта."))
     await campaigns.set_state(cid, "failed", "test")
     clock.at = (await campaigns.get(cid)).finished_at
     await runner.step(cid)
     assert reports_of(messenger) == []
 
-    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."), vertical="investors")
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Поднимите бюджет на 10 %: 2 варианта.", "Добавьте район: 3 варианта."), vertical="investors")
     await finish(campaigns, store, runner, clock, cid)
     await runner.step(cid)
     assert reports_of(messenger) == []
 
-    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Совет."))
+    campaigns, store, messenger, clock, runner, _, cid = await build(Advice("Поднимите бюджет на 10 %: 2 варианта.", "Добавьте район: 3 варианта."))
     await finish(campaigns, store, runner, clock, cid, state="cancelled")  # cancelled at once: nothing to report
     await runner.step(cid)
     assert reports_of(messenger) == []
@@ -294,15 +299,14 @@ async def test_without_a_model_or_when_it_fails_rule_based_advice_is_used() -> N
         await runner.step(cid)
         [text] = reports_of(messenger)
         tail = text[text.index("Что можно сделать:"):]
-        assert "Habitaclia не читается: сайт не пускает ботов" in tail and "Idealista не читается" in tail
+        assert "Habitaclia не читается (отказов: 4): сайт не пускает ботов" in tail and "Idealista не читается" in tail
 
     # the rules by themselves
     facts = {"counts": {"sent_exact": 2}, "rejected_by_reason": {"budget": 5, "place": 4}, "unreadable_sites": []}
     tips = fallback_recommendations(facts)
     assert "поднимите бюджет на 10 %" in tips[0] and "соседние районы" in tips[1]
-    assert fallback_recommendations({"counts": {}, "rejected_by_reason": {}, "unreadable_sites": []}) == [
-        "Точных вариантов не нашлось: ослабьте самое жёсткое условие (бюджет, площадь или район) и "
-        "запустите поиск снова."]
+    empty = fallback_recommendations({"counts": {}, "rejected_by_reason": {}, "unreadable_sites": []})
+    assert empty[0].startswith("Точных вариантов: 0 — ослабьте самое жёсткое условие")
 
 
 async def test_an_empty_search_still_reports_what_could_not_be_read() -> None:
@@ -404,7 +408,7 @@ async def test_postgres_stores_the_matrix_the_reason_and_the_one_time_report_cla
     store = PostgresRunStore(pool, SafetyLimits())
     messenger = FakeMessenger()
     reviewer = ScriptedReviewer({"PASS": ("pass", "match"), "FAIL": ("fail", "reject"), "UNKNOWN": ("unknown", "near")})
-    advice = Advice("Расширьте район поиска.")
+    advice = Advice("Расширьте район поиска: 1 вариант вне района.", "Поднимите бюджет на 10 %: 2 варианта.")
     runner = CampaignRunner(campaigns, store, messenger, None, relevance=ReviewerJudge(reviewer),
                             final_report=FinalReporter(advice), config=RunnerConfig(relevance_fail_closed=False))
     text = "Купить участок от 2000 м² в Мадриде"
@@ -429,7 +433,7 @@ async def test_postgres_stores_the_matrix_the_reason_and_the_one_time_report_cla
         ("held", "excluded", "place", 1), ("held", "similar", "unverified", 1), ("sent", "exact", None, 1)]
     # the search had nothing left to read, so that one step also completed it and sent the report
     [report] = reports_of(messenger)
-    assert "Отправлено вам: 1" in report and "Отклонено: 1" in report and "Расширьте район поиска." in report
+    assert "Отправлено вам: 1" in report and "Отклонено: 1" in report and "Расширьте район поиска: 1 вариант вне района." in report
     assert "Похожие, не показаны: 1" in report and "не удалось подтвердить: 1" in report
     assert await pool.fetchval("select final_report_sent_at is not null from campaign_runs where campaign_id = $1::uuid",
                                cid)
@@ -440,3 +444,87 @@ async def test_postgres_stores_the_matrix_the_reason_and_the_one_time_report_cla
     assert await pool.fetchval("select final_report_sent_at from campaign_runs where campaign_id = $1::uuid", cid) is None
     assert await store.claim_final_report(cid) and not await store.claim_final_report(cid)
     assert await store.relevance_calls(cid) == 3
+
+
+# --- no advice to change the deal, the kind of property or the city; real-estate sources only; the «similar» hint ------------------
+
+
+def test_recommendations_never_ask_to_change_the_deal_type_property_type_or_city() -> None:
+    facts = {"counts": {"sent_exact": 1, "held_similar": 3}, "rejected_by_reason": {"deal": 33, "type": 12, "place": 4},
+             "task": {"deal": "sale"}, "unreadable_sites": []}
+    tips = fallback_recommendations(facts)
+    advice = [t for t in tips if "аренд" not in t]
+    assert not any(re.search(r"сделк|покупк|тип объекта|другой город", t) for t in tips)
+    assert any("33 объявлений аренды попали в выдачу" in t for t in tips)  # an explanation, not advice
+    assert any("соседние районы" in t for t in advice) and all(re.search(r"\d", t) for t in tips)
+    # the same numbers with a small deal count: nothing about the deal at all
+    assert not any("аренд" in t for t in fallback_recommendations({**facts, "rejected_by_reason": {"deal": 3}}))
+
+    model = ["Смягчите требование по типу сделки: 33 варианта отклонены по этому критерию.",
+             "Рассмотрите покупку вместо аренды: 33 варианта.", "Поищите в другом городе: 4 варианта.",
+             "Подойдёт другой тип объекта: 12 вариантов.", "Поднимите бюджет на 10 %: 5 вариантов дороже.",
+             "Расширьте поиск без числа."]
+    assert clean_recommendations(model, facts)[0] == "Поднимите бюджет на 10 %: 5 вариантов дороже."
+    cleaned = clean_recommendations(model, facts)
+    assert 2 <= len(cleaned) <= 4 and not any(
+        re.search(r"сделк|покупк|тип объекта|другом город", t) for t in cleaned if "отсеяны" not in t)
+    assert clean_recommendations(["Поднимите бюджет на 10 %: 5.", "Добавьте район: 3 варианта."], facts) == [
+        "Поднимите бюджет на 10 %: 5.", "Добавьте район: 3 варианта."]
+
+
+async def test_the_model_prompt_forbids_changing_the_deal_type_and_the_report_drops_such_advice() -> None:
+    assert "NEVER advise changing the deal type" in SYSTEM
+    advice = Advice("Смягчите требование по типу сделки: 33 варианта отклонены.", "Поднимите бюджет на 10 %: 2 дороже.",
+                    "Добавьте соседний район: 3 вне района.")
+    campaigns, store, messenger, clock, runner, _, cid = await build(advice)
+    seed(store, cid)
+    await finish(campaigns, store, runner, clock, cid)
+    await runner.step(cid)
+    [text] = reports_of(messenger)
+    tail = text[text.index("Что можно сделать:"):]
+    assert "типу сделки" not in tail and "1. Поднимите бюджет на 10 %" in tail and "2. Добавьте соседний район" in tail
+
+
+def test_only_real_estate_sources_are_shown_and_the_rest_is_one_line() -> None:
+    reports = [SiteReport("idealista.com", links=5, read=3), SiteReport("dle.rae.es", links=2, refused=2),
+               SiteReport("web2.0calc.es", links=1, refused=1), SiteReport("wumbo.net", links=1, refused=1),
+               SiteReport("rtve.es", links=3, read=3), SiteReport("citiesinsider.com", links=2, read=2),
+               SiteReport("inmoblog.es", links=2, read=2), SiteReport("habitaclia.com", links=4, refused=4)]
+    sources = [SourceCount("website", "rtve.es", 1, 0, 0, 0, 0), SourceCount("website", "inmoblog.es", 1, 2, 1, 1, 0)]
+    kept_sources, kept_reports, other = real_estate_sources(sources, reports, ())
+    assert sorted(r.host for r in kept_reports) == ["habitaclia.com", "idealista.com", "inmoblog.es"]  # a finding counts
+    assert [s.name for s in kept_sources] == ["inmoblog.es"] and other == 5
+    counts = Tally(1, 0, 0, 0, 0, 0, {})
+    from bot.campaign.final_report import unreadable_sites
+    from bot.campaign.summary import site_lines, summary_text
+
+    funnel, _ = site_lines(kept_sources, kept_reports, ())
+    text = report_text("Цель", counts, [], funnel, unreadable_sites(kept_sources, kept_reports, ()), [], other)
+    assert "dle.rae.es" not in text and "rtve.es" not in text and "wumbo" not in text
+    assert "Habitaclia" in text and "Прочие сайты из поиска: 5 (не относятся к недвижимости или без объявлений)" in text
+    # the owners' technical summary keeps the raw list
+    assert "dle.rae.es" in summary_text("Цель", sources, reports, ())
+
+
+async def test_the_final_report_lists_no_noise_sites() -> None:
+    reports = [*SITES, SiteReport("dle.rae.es", links=2, refused=2), SiteReport("rtve.es", links=3, read=3)]
+    campaigns, store, messenger, clock, runner, _, cid = await build(None, reports=reports)
+    seed(store, cid)
+    await finish(campaigns, store, runner, clock, cid)
+    await runner.step(cid)
+    [text] = reports_of(messenger)
+    assert "dle.rae.es" not in text and "rtve.es" not in text and "Прочие сайты из поиска: 2 (" in text
+
+
+def test_a_report_with_nothing_sent_says_how_to_get_the_similar_ones() -> None:
+    counts = Tally(0, 0, 3, 0, 0, 0, {})
+    asked, never = {"similar": "asked"}, {"similar": None}
+    assert similar_note(counts, asked) == "Похожие можно открыть кнопкой «Одобрить» выше"
+    assert similar_note(counts, never) == "Отправлю похожие, если подтвердите"
+    assert similar_note(counts, None) is None and similar_note(counts, {"similar": "declined"}) is None
+    assert similar_note(Tally(2, 0, 3, 0, 0, 0, {}), asked) is None and similar_note(Tally(), asked) is None
+    text = report_text("Цель", counts, [], [], [], [], 0, similar_note(counts, asked))
+    lines = text.splitlines()
+    held = lines.index("Похожие, не показаны: 3 (чуть не подошли)")
+    assert lines[held - 1] == "Отправлено вам: 0" and lines[held + 1] == "Похожие можно открыть кнопкой «Одобрить» выше"
+    assert "кнопкой" not in report_text("Цель", Tally(2, 0, 3, 0, 0, 0, {}), [], [], [], [], 0, None)

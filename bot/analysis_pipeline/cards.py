@@ -137,6 +137,8 @@ def also_on(links: Sequence[Mapping[str, Any]]) -> str | None:
     sites: list[str] = []
     for url, site in urls:
         name = _source(url) or site
+        if name == "Facebook" and site and not re.fullmatch(r"(?:[\w-]+\.)*facebook\.com", site.lower()):  # a Facebook group's name (the host is the fallback)
+            name = site
         if name and name not in sites:
             sites.append(name)
     head = "Также на: " + ", ".join(sites) if sites else "Также на:"

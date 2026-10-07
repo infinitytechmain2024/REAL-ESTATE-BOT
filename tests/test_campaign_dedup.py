@@ -12,6 +12,7 @@ import pytest
 from bot.analysis_pipeline.cards import also_on, render_card
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.dedup import Listing, listing_of, object_key, same_object
+from bot.campaign.offers import MemoryOffer
 from bot.campaign.runner import CampaignRunner, RunnerConfig
 from bot.campaign.runs import MemoryRunStore
 from tests.test_campaign_runner import FakeMessenger
@@ -241,6 +242,90 @@ async def test_a_finding_that_is_already_sent_or_held_is_never_attached() -> Non
     assert store.duplicates == {}
 
 
+# --- text fingerprint: Facebook posts without an address ---------------------------------------
+
+FB_A = "https://www.facebook.com/groups/g001/posts/111/"
+FB_B = "https://www.facebook.com/groups/g002/posts/222/"
+POST = ("Se vende piso luminoso de tres habitaciones en Ruzafa con terraza ascensor y aire acondicionado reformado "
+        "recientemente cocina equipada muy cerca del metro y del mercado libre ya mismo 😍 #valencia https://x.es/a")
+
+
+def fb(fid: str, link: str, body: str, **kw: object) -> None:
+    pl = {"price_amount": 150_000, "price_currency": "EUR", "rooms": 3, "location": "Valencia", "deal_type": "sale",
+          "original_post_link": link, "summary_ru": "Квартира"} | kw
+    store_add(fid, link, body, pl)
+
+
+STORE: list = []
+
+
+def store_add(fid: str, link: str, body: str, pl: dict) -> None:
+    STORE.append((fid, link, body, pl))
+
+
+def flush(store: MemoryRunStore, cid: str) -> None:
+    for fid, link, body, pl in STORE:
+        store.add_finding(cid, fid, f"🏠 {fid}", payload=pl, original=body, vertical="real_estate", url=link)
+    STORE.clear()
+
+
+def test_text_similarity_and_phones() -> None:
+    from bot.campaign.dedup import phones_of, text_similarity
+
+    assert text_similarity(POST, POST.upper().replace("😍", "")) == 1.0
+    assert text_similarity(POST, "otra cosa distinta que no tiene nada que ver con el piso de arriba") < 0.1
+    assert phones_of("Llama al +34 612 345 678 o 0034612345678, 199 000 € 85 m2") == frozenset({"612345678"})
+    a = listing_of({"price_amount": 150_000}, url=FB_A, body=POST)
+    b = listing_of({"price_amount": 150_000}, url=FB_B, body=POST + " Gracias")
+    assert same_object(a, b)
+    other = listing_of({"price_amount": 180_000}, url=FB_B, body=POST)
+    assert not same_object(a, other)  # a price conflict still wins
+
+
+async def test_the_same_facebook_post_in_two_groups_is_one_card() -> None:
+    store, messenger, runner, cid = await setup()
+    fb("f1", FB_A, POST)
+    fb("f2", FB_B, POST)
+    flush(store, cid)
+    await runner.step(cid)
+    assert len(messenger.findings()) == 1 and store.duplicates == {"f2": "f1"}
+    assert messenger.edits and "Также на: Group 2" in messenger.edits[-1][2]
+
+
+async def test_same_phone_and_price_with_other_text_is_one_card() -> None:
+    store, messenger, runner, cid = await setup()
+    fb("f1", FB_A, "Vendo piso en Valencia, 150.000 €. Tel 612 345 678", price_amount=150_000)
+    fb("f2", FB_B, "Urge venta apartamento centro precio 150000 euros llamar 612345678 gracias", price_amount=150_500)
+    flush(store, cid)
+    await runner.step(cid)
+    assert len(messenger.findings()) == 1 and store.duplicates == {"f2": "f1"}
+
+
+async def test_one_agency_template_with_other_price_gives_two_cards() -> None:
+    store, messenger, runner, cid = await setup()
+    template = POST + " Agencia Casa Buena telefono 612 345 678"
+    fb("f1", FB_A, template, price_amount=150_000)
+    fb("f2", FB_A.replace("111", "333"), template, price_amount=175_000)
+    flush(store, cid)
+    await runner.step(cid)
+    assert len(messenger.findings()) == 2 and store.duplicates == {}
+
+
+async def test_an_approved_similar_duplicate_is_not_sent_twice() -> None:
+    store, messenger, runner, cid = await setup()
+    fb("f1", FB_A, POST)
+    flush(store, cid)
+    await runner.step(cid)
+    assert len(messenger.findings()) == 1
+    await store.hold_finding(cid, "fs", "similar", 0.1)
+    store.add_finding(cid, "fs", "🏠 fs", payload={"price_amount": None, "price_currency": "EUR", "location": "Valencia",
+                                                  "deal_type": "sale", "original_post_link": FB_B},
+                      original=POST, vertical="real_estate", url=FB_B)
+    store.desk.offers[(cid, "similar")] = MemoryOffer(42, "approved")
+    await runner.step(cid)
+    assert len(messenger.findings()) == 1 and store.duplicates == {"fs": "f1"}
+
+
 # --- PostgreSQL (migration 036) -----------------------------------------------------------------
 
 URL = os.environ.get("SYSTEM_TEST_DATABASE_URL", "")
@@ -367,7 +452,7 @@ async def test_postgres_stores_the_card_number_and_attach_rolls_back_for_a_sent_
     sent = {s.finding.id: s for s in await store.recent_sent_findings(cid)}
     assert sent[other].number == 3 and sent[head].number == 1 and sent[other].finding.original == ""
     await pool.execute("update campaign_findings set card_number = null where finding_id = $1::uuid", other)
-    assert {s.finding.id: s.number for s in await store.recent_sent_findings(cid)}[other] == 2  # the old computation
+    assert {s.finding.id: s.number for s in await store.recent_sent_findings(cid)}[other] == 3  # the fallback counts every sent card, like the number it was sent with
     assert (await store.stream_finding(other)).original == "piso"  # the lazily fetched head has the post text
     assert await store.stream_finding(str(uuid.uuid4())) is None
 

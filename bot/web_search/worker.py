@@ -32,7 +32,7 @@ from datetime import UTC, datetime, timedelta
 from bot.campaign import geo
 from bot.campaign.architect import SearchPlanner, plan_with_model
 from bot.campaign.models import TERMINAL_STATES, Campaign
-from bot.campaign.search_plan import blocked_hosts_of
+from bot.campaign.search_plan import blocked_hosts_of, country_portals, source_hosts
 from bot.campaign.spec import TaskSpec
 from bot.campaign.store import CampaignStore
 
@@ -62,6 +62,7 @@ from .queries import (
     missing_portals,
     place_level_of,
     plan_portal_urls,
+    plan_sites,
     portal_quota,
 )
 from .render import Renderer, RenderError
@@ -69,7 +70,17 @@ from .scrape_api import Scraper
 from .searxng import Searcher, SearchError
 from .store import _REFUSALS, BUSY, HOST_BLOCKED, WebStore, funnel_totals
 from .structured import Structured, facts_block, from_jsonld, structured
-from .urls import classify_page, classify_url, fetchable, host_of, portal_listing, url_key
+from .urls import (
+    classify_page,
+    classify_url,
+    deal_conflict,
+    fetchable,
+    host_of,
+    known_portal,
+    listing_evidence,
+    portal_listing,
+    url_key,
+)
 
 log = logging.getLogger(__name__)
 MIN_POST_CHARS = 120
@@ -86,6 +97,7 @@ class WebSearchConfig:
     pages_per_query: int = 2          # SearXNG result pages walked per query (pageno 1..N)
     max_pages_per_campaign: int = 60
     max_pages_per_host: int = 12
+    max_pages_per_unknown_host: int = 5   # a host that is no known portal, until it produced a listing post
     max_links_per_index: int = 10
     pages_per_tick: int = 4
     max_pages_per_day: int = 400
@@ -107,6 +119,7 @@ class WebSearchConfig:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
                 and 1 <= self.queries_per_tick <= 10 and 1 <= self.results_per_query <= 30
                 and 1 <= self.max_pages_per_campaign <= 500 and 1 <= self.max_pages_per_host <= 100
+                and 1 <= self.max_pages_per_unknown_host <= 100
                 and 0 <= self.max_links_per_index <= 100 and 1 <= self.pages_per_query <= 5
                 and 0 <= self.query_reuse_hours <= 720 and 0 <= self.index_ttl_days <= 365 and 1 <= self.pages_per_tick <= 20
                 and 1 <= self.max_pages_per_day <= 10_000 and 1 <= self.max_queries_per_day <= 5_000
@@ -114,6 +127,22 @@ class WebSearchConfig:
                 and 60 <= self.lease_seconds <= 3600 and 1 <= self.page_runtime_seconds <= 600
                 and 0 <= self.max_renders_per_campaign <= 200 and 0 <= self.max_scrape_api_per_campaign <= 500):
             raise ValueError("unsafe web search limits")
+
+
+def campaign_deal(campaign: Campaign) -> str | None:
+    """``sale`` or ``rent`` when the campaign wants one deal, else None (no deal filter)."""
+    deal = campaign.plan.constraints.get("deal")
+    return deal if deal in ("sale", "rent") else None
+
+
+def known_hosts_of(campaign: Campaign) -> frozenset[str]:
+    """Hosts the plan or the spec names (``spec.sources`` required/extra, the plan's sites): not capped as unknown."""
+    hosts = {h for h, _ in plan_sites(campaign.plan.search_plan)}
+    sources = (campaign.spec or {}).get("sources") if isinstance(campaign.spec, dict) else None
+    if isinstance(sources, dict):
+        names = [str(x) for k in ("required", "extra") for x in (sources.get(k) or [])]
+        hosts.update(source_hosts(names, country_portals(campaign.plan.country)))
+    return frozenset(hosts)
 
 
 def query_task(campaign: Campaign) -> QueryTask:
@@ -303,6 +332,7 @@ class WebSearchWorker:
     async def _search(self, campaign: Campaign, query_count: int, pages: int) -> None:
         task = query_task(campaign)
         blocked = self.config.blocked_hosts | task.blocked_hosts
+        deal, known, real_estate = campaign_deal(campaign), known_hosts_of(campaign), campaign.plan.vertical == "real_estate"
         for query in await self.store.pending_queries(campaign.id, self.config.queries_per_tick):
             await self.store.set_progress(campaign.id, None, self._line(query_count, pages, "поиск"))
             try:
@@ -313,8 +343,17 @@ class WebSearchWorker:
                 await self.store.query_done(query.id, ok=False, results=0, new_urls=0, error=exc.code)
                 continue
             candidates: list[Candidate] = []
+            dropped = 0
             for hit in hits[: self.config.results_per_query]:
                 if not fetchable(hit.url, blocked):
+                    continue
+                host = host_of(hit.url)
+                if deal and known_portal(host, known) and deal_conflict(hit.url, deal):
+                    dropped += 1  # a rent page for a sale campaign (and vice versa)
+                    continue
+                if (real_estate and not known_portal(host, known)
+                        and not listing_evidence(hit.title, hit.snippet)):
+                    dropped += 1  # an unknown site whose hit shows no property and no figures: news, a dictionary ...
                     continue
                 if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
                     continue
@@ -322,6 +361,9 @@ class WebSearchWorker:
                     continue
                 candidates.append(Candidate(hit.url, url_key(hit.url), host_of(hit.url), 0, classify_url(hit.url),
                                             query.id, hit.title, hit.snippet))
+            if dropped:
+                log.info("web_search.serp_dropped", extra={"campaign_id": campaign.id, "query_id": query.id,
+                                                           "dropped": dropped, "hits": len(hits)})
             new = await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
             await self.store.query_done(query.id, ok=True, results=len(hits), new_urls=new)
 
@@ -330,11 +372,18 @@ class WebSearchWorker:
     async def _read_pages(self, campaign: Campaign, pages: int, pages_today: int) -> None:
         cfg = self.config
         budget = min(cfg.pages_per_tick, cfg.max_pages_per_campaign - pages, cfg.max_pages_per_day - pages_today)
+        known = known_hosts_of(campaign)
         for url in await self.store.next_urls(campaign.id, cfg.pages_per_tick * 3):
             if budget <= 0:
                 break
-            if await self.store.host_attempts(campaign.id, url.host) >= cfg.max_pages_per_host:
+            attempts = await self.store.host_attempts(campaign.id, url.host)
+            if attempts >= cfg.max_pages_per_host:
                 await self.store.mark_url(campaign.id, url.url_key, "capped", "host_cap")
+                continue
+            if (attempts >= cfg.max_pages_per_unknown_host and not known_portal(url.host, known)
+                    and not await self._host_has_listing(campaign.id, url.host)):
+                log.info("web_search.unknown_host_capped", extra={"campaign_id": campaign.id, "host": url.host})
+                await self.store.mark_url(campaign.id, url.url_key, "capped", "unknown_host_cap")
                 continue
             if not await self.fetcher.allowed(url.url):
                 if not await self._keep_search_result(campaign, url, None):
@@ -367,10 +416,16 @@ class WebSearchWorker:
                 card = search_result(url, result.error)
                 result = replace(card, layer=result.layer) if card else result
             await self.store.finish_fetch(ticket, result)
-            children = [c for c in children if fetchable(c.url, cfg.blocked_hosts | query_task(campaign).blocked_hosts)]
+            deal = campaign_deal(campaign)
+            children = [c for c in children if fetchable(c.url, cfg.blocked_hosts | query_task(campaign).blocked_hosts)
+                        and not deal_conflict(c.url, deal)]
             if children:
                 await self.store.enqueue(campaign.id, children, index_ttl_days=cfg.index_ttl_days)
             await self._track(campaign.id, url.host, None, url=url.url)
+
+    async def _host_has_listing(self, campaign_id: str, host: str) -> bool:
+        """The host has already produced at least one listing post in this campaign."""
+        return any(row[0] == host and row[3] > 0 for row in await self.store.funnel(campaign_id))
 
     async def _keep_search_result(self, campaign: Campaign, url: QueuedUrl, error: str | None) -> bool:
         """Store ``url``'s search result as its post without asking the site; False when there is none."""
@@ -433,7 +488,8 @@ class WebSearchWorker:
                     failed = PageResult(False, url.kind, page.url, parsed.title, error="captcha")
                 else:
                     result, children = self._page(url, page.url, parsed, structured(page.html, page.url),
-                                                  blocked=cfg.blocked_hosts | query_task(campaign).blocked_hosts)
+                                                  blocked=cfg.blocked_hosts | query_task(campaign).blocked_hosts,
+                                                  deal=campaign_deal(campaign))
                     if not await self._wants_render(campaign.id, result, children):
                         return result, children
                     return await self._render_empty(campaign.id, url, page.url, parsed, result, children)
@@ -530,19 +586,21 @@ class WebSearchWorker:
         return (not result.ok and result.error == "no_readable_text") or (result.kind == "index" and not children)
 
     def _page(self, url: QueuedUrl, final_url: str, parsed: ParsedPage,
-              data: Structured, blocked: frozenset[str] | None = None) -> tuple[PageResult, list[Candidate]]:
+              data: Structured, blocked: frozenset[str] | None = None,
+              deal: str | None = None) -> tuple[PageResult, list[Candidate]]:
         cfg = self.config
         blocked = cfg.blocked_hosts if blocked is None else blocked  # config + the campaign's blocked sources
         kind = classify_url(final_url) if url.kind == "unknown" else url.kind
         if url.depth == 0:
             host = host_of(final_url)
             from_json = [u for u in data.item_urls if host_of(u) == host and url_key(u) != url_key(final_url)
-                         and fetchable(u, blocked)]
+                         and fetchable(u, blocked)
+                         and not deal_conflict(u, deal)]
             if kind == "index" or (kind == "unknown" and (looks_like_index(parsed, final_url)
                                                           or len(from_json) >= MIN_INDEX_LINKS)):
                 links: list[str] = []
                 for link in [*from_json, *listing_links(parsed, final_url, limit=cfg.max_links_per_index,
-                                                        extra_blocked=blocked)]:
+                                                        extra_blocked=blocked, deal=deal)]:
                     if len(links) < cfg.max_links_per_index and url_key(link) not in {url_key(x) for x in links}:
                         links.append(link)
                 cards = index_cards(data, final_url)

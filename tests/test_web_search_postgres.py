@@ -71,7 +71,9 @@ async def pool():
 
 async def new_campaign(pool) -> str:
     campaigns = PostgresCampaignStore(pool)
-    cid = await campaigns.create(plan_campaign(GOAL), chat_id=OPERATOR, requested_by=OPERATOR, source_text=GOAL,
+    plan = plan_campaign(GOAL)
+    plan.constraints["deal"] = None  # the shared fixture index lists /comprar/ links: no deal filter here
+    cid = await campaigns.create(plan, chat_id=OPERATOR, requested_by=OPERATOR, source_text=GOAL,
                                  actor="test")
     await campaigns.set_state(cid, "running", "test")
     return cid

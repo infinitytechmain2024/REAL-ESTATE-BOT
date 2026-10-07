@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
-from .urls import absolute, classify_url, fetchable, host_of, url_key
+from .urls import absolute, classify_url, deal_conflict, fetchable, host_of, url_key
 
 _SKIP = frozenset({"script", "style", "noscript", "svg", "template", "iframe", "head", "nav", "footer", "form",
                    "select", "option", "button", "canvas", "object"})
@@ -126,8 +126,10 @@ def parse_html(html: str, url: str) -> ParsedPage:
 
 
 def listing_links(page: ParsedPage, page_url: str, *, limit: int,
-                  extra_blocked: frozenset[str] = frozenset()) -> list[str]:
-    """Links to concrete listings on the same site as ``page_url``, in page order, without repeats."""
+                  extra_blocked: frozenset[str] = frozenset(), deal: str | None = None) -> list[str]:
+    """Links to concrete listings on the same site as ``page_url``, in page order, without repeats.
+
+    ``deal`` (sale/rent): a link whose path says the opposite deal (``/alquiler-...`` for a sale) is skipped."""
     host = host_of(page_url)
     found: list[str] = []
     seen: set[str] = set()
@@ -136,6 +138,8 @@ def listing_links(page: ParsedPage, page_url: str, *, limit: int,
             break
         url = link.url
         if host_of(url) != host or not fetchable(url, extra_blocked) or classify_url(url) != "listing":
+            continue
+        if deal_conflict(url, deal):
             continue
         key = url_key(url)
         if key not in seen:
