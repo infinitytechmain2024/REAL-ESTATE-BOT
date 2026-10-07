@@ -83,11 +83,12 @@ from .runs import (
     Window,
 )
 from .status_text import (
-    CHECKING,
     LAYER_NAMES,
     LIMIT_REASONS,
     campaign_label,
+    checking_line,
     group_line,
+    is_checking_line,
     is_live_line,
     reach_line,
     site_line,
@@ -241,6 +242,8 @@ class RunnerConfig:
     analysis_grace_seconds: float = 600
     refusal_retry_seconds: float = 300
     web_status_seconds: float = 10  # the web progress line is edited at most this often
+    repost_cards: int = 5  # the status message moves below the cards after this many cards sent since it was posted
+    repost_seconds: float = 20  # ...and a phase change or those cards re-post it at most this often
     max_stream_per_step: int = 20
     # After the last window, how long the campaign waits for social network searches still to come.
     social_grace_seconds: float = 1800
@@ -322,6 +325,10 @@ class CampaignRunner:
         self._relevance_misses: dict[str, int] = {}
         # Campaigns whose chat got a card or a question below the status message: the status moves down.
         self._below_status: set[str] = set()
+        self._cards_since: dict[str, int] = {}  # campaign id -> cards sent since its status message was posted
+        self._phase: dict[str, str] = {}  # campaign id -> the user line's phase now: searching | checking | done
+        self._posted_phase: dict[str, str] = {}  # ... and the phase the posted status message was sent in
+        self._posted_at: dict[str, datetime] = {}  # campaign id -> when its status message was last posted
         self._web_edit_at: dict[str, datetime] = {}  # campaign id -> when a «Сейчас ищу» line was last shown
         # campaign id -> {stage: (what it shows, when that last changed)}: the newest change is the one on screen
         self._stage_seen: dict[str, dict[str, tuple[str, datetime]]] = {}
@@ -757,7 +764,7 @@ class CampaignRunner:
             await self._recorded(self.recorder.send_failed(campaign.id, finding.id) if self.recorder else None)
             return False
         await self.store.finding_sent(finding.id, message_id)
-        self._below_status.add(campaign.id)
+        self._cards_since[campaign.id] = self._cards_since.get(campaign.id, 0) + 1
         await self._recorded(self.recorder.sent(campaign.id, finding.id, message_id) if self.recorder else None)
         await self._queue_comments(campaign, finding)
         return True
@@ -808,7 +815,7 @@ class CampaignRunner:
                 return
             for k in claimed:
                 await self.store.person_sent(campaign.id, k, message_id)
-            self._below_status.add(campaign.id)
+            self._cards_since[campaign.id] = self._cards_since.get(campaign.id, 0) + 1
 
     async def _reach_cards(self, campaign: Campaign, location: str, fetch: int,
                            limit: int) -> list[tuple[str, list[str], str, str]]:
@@ -988,12 +995,21 @@ class CampaignRunner:
         current = await self.campaigns.get(campaign.id) or campaign
         text = await self._status_text(current, line)
         run = await self.store.get_run(current.id)
-        moved = current.id in self._below_status
+        now = self.now()
+        phase = self._phase.get(current.id, "searching")
+        posted = self._posted_phase.get(current.id)
+        # Phase change (searching -> checking -> done) and every N cards: post again at the bottom, at most once per
+        # repost_seconds (a blocked one is edited in place meanwhile and happens on a later step).
+        repost_due = current.status_message_id is not None and (
+            (posted is not None and posted != phase) or self._cards_since.get(current.id, 0) >= self.config.repost_cards)
+        posted_at = self._posted_at.get(current.id)
+        repost = repost_due and (posted_at is None or (now - posted_at).total_seconds() >= self.config.repost_seconds)
+        moved = current.id in self._below_status or repost
         if current.status_message_id is not None and run.status_text == text and not moved:
             return
         if (not moved and current.status_message_id is not None and is_live_line(text)
                 and is_live_line(run.status_text or "")
-                and (self.now() - self._web_edit_at.get(current.id, datetime.min.replace(tzinfo=UTC))).total_seconds()
+                and (now - self._web_edit_at.get(current.id, datetime.min.replace(tzinfo=UTC))).total_seconds()
                 < self.config.web_status_seconds):
             return  # the place changes every page: one edit per web_status_seconds is enough (a change waits, not lost)
         try:
@@ -1036,6 +1052,8 @@ class CampaignRunner:
         web_active = web is not None and web.active
         social = await self.store.social_activity(campaign.id) if not terminal else None
         live = None if terminal else await self._live_line(campaign, line, web, social)
+        self._phase[campaign.id] = ("done" if terminal else "checking" if live is not None and is_checking_line(live)
+                                    else "searching")
         if campaign.requested_by in self.owner_ids:
             text = f"🎯 {esc(campaign.plan.goal[:300], quote=False)}"
             if live is not None:
@@ -1061,10 +1079,11 @@ class CampaignRunner:
         return campaign_label(campaign.state)
 
     async def _live_line(self, campaign: Campaign, line: str, web: Any, social: Any) -> str | None:
-        """«🔎 Сейчас ищу …» for the place searched now, or «🔎 Проверяю найденное» while judging; None if unknown.
+        """«🔎 Сейчас ищу …» for the place searched now; once no search stage is left and judging is pending,
+        «🔎 Поиск завершён. Проверяю найденное: проверено X из Y»; None if unknown.
 
-        Stages run in parallel; each remembers what it shows and when that last changed, and the stage that changed
-        most recently is the one shown (ties: Facebook, site, network, reach, judging).
+        Search stages run in parallel; each remembers what it shows and when that last changed, and the stage that
+        changed most recently is the one shown (ties: Facebook, site, network, reach).
         """
         shown: dict[str, tuple[str, str]] = {}  # stage -> (what it shows, the line)
         progress = getattr(web, "progress", None)
@@ -1084,8 +1103,10 @@ class CampaignRunner:
         reach = await self.store.reach_activity(campaign.id)
         if reach.platform is not None and (text := reach_line(reach.platform)) is not None:
             shown["reach"] = (text, text)
-        if line == ANALYSIS and await self.store.pending_analysis(campaign.id):
-            shown["checking"] = (CHECKING, CHECKING)
+        if not shown and not getattr(web, "active", False) and line == ANALYSIS \
+                and await self.store.pending_analysis(campaign.id):
+            done, total = await self.store.analysis_progress(campaign.id)  # no search stage left: judging only
+            shown["checking"] = ("checking", checking_line(done, total))
         seen, now = self._stage_seen.setdefault(campaign.id, {}), self.now()
         for stage in [st for st in seen if st not in shown]:
             del seen[stage]  # a stage that ended: its next run counts as a change
@@ -1121,6 +1142,9 @@ class CampaignRunner:
     async def _new_status(self, campaign: Campaign, text: str) -> None:
         message_id = await self.messenger.send(campaign.chat_id, text, parse_mode="HTML")
         await self.campaigns.set_status_message(campaign.id, message_id, actor=ACTOR)
+        self._cards_since[campaign.id] = 0
+        self._posted_at[campaign.id] = self.now()
+        self._posted_phase[campaign.id] = self._phase.get(campaign.id, "searching")
 
     @staticmethod
     def _final_line(campaign: Campaign, found: int) -> str:

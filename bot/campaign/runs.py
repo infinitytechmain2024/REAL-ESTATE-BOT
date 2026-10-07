@@ -173,6 +173,9 @@ class RunStore(Protocol):
                            actor: str) -> WindowStart | None: ...
     async def cancel_window_batch(self, batch_id: str, actor: str) -> None: ...
     async def pending_analysis(self, campaign_id: str) -> int: ...
+    async def analysis_progress(self, campaign_id: str) -> tuple[int, int]:
+        """(done, total): the campaign's collected posts already analysed or rejected, and all of them."""
+        ...
     async def unstreamed_findings(self, campaign_id: str, limit: int,
                                   skip: Collection[str] = ()) -> list[StreamFinding]: ...
     async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None: ...
@@ -454,6 +457,12 @@ class PostgresRunStore:
     async def pending_analysis(self, campaign_id: str) -> int:
         return int(await self.pool.fetchval(
             f"""select count(*) {_CAMPAIGN_POSTS} and p.state = 'normalised'""", campaign_id))
+
+    async def analysis_progress(self, campaign_id: str) -> tuple[int, int]:
+        row = await self.pool.fetchrow(
+            f"""select count(*) filter (where p.state in ('analysed', 'rejected')) as done, count(*) as total
+                {_CAMPAIGN_POSTS}""", campaign_id)
+        return int(row["done"]), int(row["total"])
 
     async def unstreamed_findings(self, campaign_id: str, limit: int,
                                   skip: Collection[str] = ()) -> list[StreamFinding]:
@@ -926,6 +935,7 @@ class MemoryRunStore:
         self.live_groups: set[str] = set()   # canonical URLs with recent findings: read first
         self.unavailable: set[str] = set()
         self.normalised: dict[str, int] = {}
+        self.progress: dict[str, tuple[int, int]] = {}  # cid -> (analysed or rejected posts, all collected posts)
         self.busy = False
         self.cancelled_batches: list[str] = []
         self.collector_running = False  # a batch run / acquisition run / launch holds the profile
@@ -1065,6 +1075,9 @@ class MemoryRunStore:
 
     async def pending_analysis(self, campaign_id: str) -> int:
         return self.normalised.get(campaign_id, 0)
+
+    async def analysis_progress(self, campaign_id: str) -> tuple[int, int]:
+        return self.progress.get(campaign_id, (0, 0))
 
     async def social_activity(self, campaign_id: str) -> SocialActivity:
         return self.social.get(campaign_id, SocialActivity())

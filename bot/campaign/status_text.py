@@ -22,7 +22,8 @@ TIKTOK = "Ищу в TikTok…"
 INSTAGRAM = "Ищу в Instagram…"
 LINKEDIN = "Ищу в LinkedIn…"
 SOCIAL: dict[str, str] = {"tiktok": TIKTOK, "instagram": INSTAGRAM, "linkedin": LINKEDIN}
-CHECKING = "🔎 Проверяю найденное"
+CHECKING = "🔎 Поиск завершён. Проверяю найденное…"
+_CHECKING_HEAD = "🔎 Поиск завершён. Проверяю найденное"
 DONE = "Поиск завершён."
 NOTHING = "Пока ничего подходящего не нашёл."
 
@@ -148,6 +149,22 @@ def reach_line(platform: str | None, url: str | None = None) -> str | None:
     return f"{_NOW}на {link(page, host)}"
 
 
+def checking_line(done: int, total: int) -> str:
+    """«🔎 Поиск завершён. Проверяю найденное: проверено X из Y»; without any collected post just «…»."""
+    if total <= 0:
+        return CHECKING
+    return f"{_CHECKING_HEAD}: проверено {min(max(done, 0), total)} из {total}"
+
+
+def done_line(found: int) -> str:
+    """«✅ Готово: отправлено N» when something was sent, else the «ничего не нашёл» text."""
+    return f"✅ Готово: отправлено {found}" if found > 0 else NOTHING
+
+
+def is_checking_line(text: str) -> bool:
+    return text == CHECKING or _CHECKING.match(text) is not None
+
+
 def is_live_line(text: str) -> bool:
     """True for a «🔎 Сейчас ищу …» line, alone or inside an owner's message."""
     return any(line.startswith(LIVE_PREFIX) for line in text.split("\n"))
@@ -174,7 +191,7 @@ def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebo
     if stage == "checking":
         return CHECKING
     if stage == "finished":
-        return DONE if found > 0 else NOTHING
+        return done_line(found)
     return FACEBOOK if facebook_started else SEARCHING
 
 
@@ -200,6 +217,11 @@ _LIVE = re.compile(
     rf"|на {_LINK})$")
 
 
+_CHECKING = re.compile(rf"^{_CHECKING_HEAD}: проверено \d+ из \d+$")
+_DONE = re.compile(rf"^✅ Готово: отправлено \d+(?:\n{re.escape(LIMIT_NOTE)})?$")
+
+
 def is_user_status(text: str) -> bool:
     """True for exactly the strings a normal user may see as a status."""
-    return text in FIXED_STATUSES or _LIVE.match(text) is not None
+    return (text in FIXED_STATUSES or _LIVE.match(text) is not None or _CHECKING.match(text) is not None
+            or _DONE.match(text) is not None)

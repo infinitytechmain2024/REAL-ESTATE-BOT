@@ -28,9 +28,9 @@ from tests.test_campaign_runner import GOAL, Clock, FakeDiscovery, FakeMessenger
 from tests.test_orchestra_dispatcher import FakeStore, claimed
 
 USER, OWNER, CHAT = 7, 99, -100
-ALLOWED = {"Принято. Начинаю поиск.", "Ищу…", "Ищу в Facebook…", "🔎 Проверяю найденное",
+ALLOWED = {"Принято. Начинаю поиск.", "Ищу…", "Ищу в Facebook…", "🔎 Поиск завершён. Проверяю найденное…",
            "Поиск завершён.", "Пока ничего подходящего не нашёл.",
-           "Ищу в TikTok…", "Ищу в Instagram…", "Ищу в LinkedIn…"}
+           "Ищу в TikTok…", "Ищу в Instagram…", "Ищу в LinkedIn…", "✅ Готово: отправлено 1"}
 # the group being read, by its name, with its link embedded
 GROUP_4 = '🔎 Сейчас ищу в Facebook в группе <a href="https://www.facebook.com/groups/g004/">Group 4</a>'
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", re.I)
@@ -120,7 +120,7 @@ def test_every_stage_maps_to_an_allowed_label() -> None:
     assert user_status("facebook") == FACEBOOK
     assert user_status("web") == SEARCHING  # no site known yet: no place to name
     assert user_status("checking") == CHECKING
-    assert user_status("finished", found=3) == DONE
+    assert user_status("finished", found=3) == "✅ Готово: отправлено 3"
     assert user_status("finished", found=0) == NOTHING
     assert user_status("verification", facebook_started=True) == FACEBOOK
     assert user_status("error") == SEARCHING
@@ -150,7 +150,7 @@ async def test_a_normal_user_sees_only_allowed_statuses_through_a_whole_search()
     assert shown and all(text in ALLOWED or text == GROUP_4 for text in shown), shown
     for text in shown:
         assert_user_safe(text)
-    assert timeline(messenger) == [SEARCHING, FACEBOOK, GROUP_4, FACEBOOK, CHECKING, DONE]
+    assert timeline(messenger) == [SEARCHING, FACEBOOK, GROUP_4, FACEBOOK, CHECKING, "✅ Готово: отправлено 1"]
     sent_statuses = [t for _, mid, t in messenger.sent if mid in messenger.status_ids or "🔎" not in t]
     # One status message at a time: it moved below the card and the old one was deleted.
     assert len(sent_statuses) - len(messenger.deleted) == 1, (sent_statuses, messenger.deleted)
@@ -221,9 +221,10 @@ async def test_a_failing_status_edit_never_breaks_the_run() -> None:
     cid = await full_search(runner, campaigns, store, clock, plan, USER)
     assert (await campaigns.get(cid)).state == "completed"
     assert messenger.findings() == ["🏠 Квартира, 2 комнаты\n\n🔎 Найдено: 1 · ищу дальше"]
-    # Edits fail, but the status still moved below the card once (sent anew, the old one deleted).
-    assert [t for _, mid, t in messenger.sent if mid in messenger.status_ids or "🔎" not in t] == [SEARCHING, CHECKING]
-    assert len(messenger.deleted) == 1
+    # Edits fail, but the status still moved below at each phase change (sent anew, the old one deleted).
+    assert [t for _, mid, t in messenger.sent if mid in messenger.status_ids or "🔎" not in t] == [
+        SEARCHING, CHECKING, "✅ Готово: отправлено 1"]
+    assert len(messenger.deleted) == 2
     assert messenger.summaries() == []  # «Итог поиска» is for owners only
 
 
@@ -302,7 +303,7 @@ def test_social_lines_link_the_query_and_carry_no_technical_text() -> None:
         assert user_status("social", platform=platform) == social_line(platform)
         # Checking a finding and the end of the search win over the network label.
         assert campaign_label("running", social=platform, checking=True) == CHECKING
-        assert campaign_label("completed", social=platform, found=1) == DONE
+        assert campaign_label("completed", social=platform, found=1) == "✅ Готово: отправлено 1"
     assert user_status("social", platform="myspace") == SEARCHING
     assert campaign_label("running", social="myspace") == FACEBOOK
 
@@ -375,7 +376,7 @@ def test_site_investor_and_link_lines() -> None:
         '🔎 Сейчас ищу на <a href="https://www.reddit.com/r/a/comments/1/x">reddit.com</a>')
     assert reach_line("reddit", "https://evil.com/") == '🔎 Сейчас ищу на <a href="https://reddit.com/">reddit.com</a>'
     assert reach_line("web") is None and reach_line(None) is None
-    assert is_user_status(reach_line("x")) and is_user_status(CHECKING) and CHECKING == "🔎 Проверяю найденное"
+    assert is_user_status(reach_line("x")) and is_user_status(CHECKING) and CHECKING == "🔎 Поиск завершён. Проверяю найденное…"
 
 
 # --- the website stage's live line: only the place, with its link --------------------------------------
@@ -502,13 +503,12 @@ async def test_the_newest_change_wins_between_parallel_stages_and_judging_has_it
     store.reach[cid] = ReachActivity("linkedin", "site:linkedin.com/in inversor madrid")
     assert await runner._status_text(campaign, "") == '🔎 Сейчас ищу на <a href="https://linkedin.com/">linkedin.com</a>'
     clock.advance(5)
-    store.normalised[cid] = 3  # posts are being judged
-    assert await runner._status_text(campaign, ANALYSIS) == "🔎 Проверяю найденное"
-    clock.advance(5)
+    store.normalised[cid] = 3  # posts are being judged, but a search stage is still active: the place wins
     web.progress = WebProgress("pisos.com", "http", 3, 0, url="https://www.pisos.com/c")
     assert await runner._status_text(campaign, ANALYSIS) == pisos("c")
     store.social.pop(cid), store.reach.pop(cid)
     web.active = False
+    assert await runner._status_text(campaign, ANALYSIS) == "🔎 Поиск завершён. Проверяю найденное…"
     store.normalised[cid] = 0
     assert await runner._status_text(campaign, ANALYSIS) == SEARCHING  # nothing specific: the fixed label
 
@@ -536,3 +536,150 @@ async def test_the_telegram_messenger_sends_html_only_when_asked() -> None:
     assert all(body["parse_mode"] == "HTML" for _, body in bodies[2:])
     assert all(body["disable_web_page_preview"] is True for _, body in bodies)
     await messenger.aclose()
+
+
+# --- phases of the user line: searching -> checking -> done, re-posted at the bottom ------------------------------
+
+CHECKING_3_OF_8 = "🔎 Поиск завершён. Проверяю найденное: проверено 3 из 8"
+
+
+async def phase_show(runner: CampaignRunner, campaigns: MemoryCampaignStore, cid: str, line: str) -> None:
+    await runner._show(await campaigns.get(cid), line)
+
+
+async def phase_campaign(requested_by: int = USER, **config):
+    campaigns, store, messenger, clock, runner, plan = build()
+    if config:
+        runner.config = RunnerConfig(relevance_fail_closed=False, **config)
+    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=requested_by, source_text=GOAL,
+                                 actor=f"telegram:{requested_by}")
+    return campaigns, store, messenger, clock, runner, cid
+
+
+async def test_the_checking_line_shows_checked_of_collected_and_a_plain_one_without_posts() -> None:
+    from bot.campaign.runner import ANALYSIS
+
+    campaigns, store, messenger, clock, runner, cid = await phase_campaign()
+    store.normalised[cid] = 5
+    await phase_show(runner, campaigns, cid, ANALYSIS)  # nothing collected yet: total 0
+    assert messenger.sent[-1][2] == "🔎 Поиск завершён. Проверяю найденное…"
+    clock.advance(30)
+    store.progress[cid] = (3, 8)
+    await phase_show(runner, campaigns, cid, ANALYSIS)
+    shown = messenger.timeline[-1]
+    assert shown == CHECKING_3_OF_8 and is_user_status(shown)
+    assert (await campaigns.get(cid)).status_message_id == len(messenger.sent)  # same phase: edited, not re-posted
+    assert len(messenger.deleted) == 0
+    store.progress[cid] = (9, 8)  # never more checked than collected
+    clock.advance(30)
+    await phase_show(runner, campaigns, cid, ANALYSIS)
+    assert messenger.timeline[-1].endswith("проверено 8 из 8")
+
+
+async def test_a_phase_change_deletes_the_old_status_and_sends_the_new_one_below() -> None:
+    from bot.campaign.runner import ANALYSIS
+
+    campaigns, store, messenger, clock, runner, cid = await phase_campaign()
+    await phase_show(runner, campaigns, cid, "")
+    first = (await campaigns.get(cid)).status_message_id
+    assert messenger.sent[-1][2] == SEARCHING
+    clock.advance(25)
+    store.normalised[cid], store.progress[cid] = 5, (3, 8)
+    await phase_show(runner, campaigns, cid, ANALYSIS)  # searching -> checking
+    second = (await campaigns.get(cid)).status_message_id
+    assert second != first and messenger.deleted == [(CHAT, first)]
+    assert messenger.sent[-1] == (CHAT, second, CHECKING_3_OF_8) and messenger.edits == []
+    clock.advance(25)
+    store.normalised[cid] = 0
+    store.streamed[cid] = {"a": 1, "b": 2}
+    await campaigns.set_state(cid, "running", "campaign:runner")
+    await campaigns.set_state(cid, "completed", "campaign:runner")
+    await phase_show(runner, campaigns, cid, "Кампания завершена")  # checking -> done
+    third = (await campaigns.get(cid)).status_message_id
+    assert messenger.deleted == [(CHAT, first), (CHAT, second)] and third not in (first, second)
+    assert messenger.sent[-1][2] == "✅ Готово: отправлено 2" and is_user_status(messenger.sent[-1][2])
+    assert (await store.get_run(cid)).status_text == "✅ Готово: отправлено 2"
+
+
+async def test_the_done_line_without_findings_keeps_the_nothing_found_wording() -> None:
+    campaigns, _store, messenger, clock, runner, cid = await phase_campaign()
+    await phase_show(runner, campaigns, cid, "")
+    clock.advance(25)
+    await campaigns.set_state(cid, "running", "campaign:runner")
+    await campaigns.set_state(cid, "completed", "campaign:runner")
+    await phase_show(runner, campaigns, cid, "Кампания завершена")
+    assert messenger.sent[-1][2] == "Пока ничего подходящего не нашёл."
+
+
+async def test_every_fifth_card_reposts_the_status_below() -> None:
+    campaigns, _store, messenger, clock, runner, cid = await phase_campaign()
+    await phase_show(runner, campaigns, cid, "")
+    first = (await campaigns.get(cid)).status_message_id
+    clock.advance(25)
+    runner._cards_since[cid] = 4
+    await phase_show(runner, campaigns, cid, "")
+    assert messenger.deleted == [] and (await campaigns.get(cid)).status_message_id == first
+    runner._cards_since[cid] = 5
+    await phase_show(runner, campaigns, cid, "")  # same text, still re-posted
+    assert messenger.deleted == [(CHAT, first)] and (await campaigns.get(cid)).status_message_id != first
+    assert runner._cards_since[cid] == 0
+
+
+async def test_a_repost_happens_at_most_once_per_twenty_seconds() -> None:
+    campaigns, store, messenger, clock, runner, cid = await phase_campaign()
+    await phase_show(runner, campaigns, cid, "")
+    clock.advance(25)
+    runner._cards_since[cid] = 5
+    await phase_show(runner, campaigns, cid, "")
+    assert len(messenger.deleted) == 1
+    clock.advance(10)
+    runner._cards_since[cid] = 5
+    store.normalised[cid] = 1
+    from bot.campaign.runner import ANALYSIS
+    await phase_show(runner, campaigns, cid, ANALYSIS)  # a phase change too, but under 20 s: edited in place
+    assert len(messenger.deleted) == 1 and messenger.edits and "Проверяю найденное" in messenger.edits[-1][2]
+    clock.advance(11)
+    await phase_show(runner, campaigns, cid, ANALYSIS)  # the floor passed: the waiting re-post happens
+    assert len(messenger.deleted) == 2 and "Проверяю найденное" in messenger.sent[-1][2]
+
+
+async def test_a_failing_delete_still_sends_the_new_status() -> None:
+    from bot.campaign.runner import ANALYSIS
+
+    class NoDelete(FakeMessenger):
+        async def delete(self, chat_id: int, message_id: int) -> None:
+            raise RuntimeError("message to delete not found")
+
+    campaigns, store, _, clock, runner, plan = build(messenger=NoDelete())
+    messenger = runner.messenger
+    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=GOAL, actor=f"telegram:{USER}")
+    await phase_show(runner, campaigns, cid, "")
+    first = (await campaigns.get(cid)).status_message_id
+    clock.advance(25)
+    store.normalised[cid] = 2
+    await phase_show(runner, campaigns, cid, ANALYSIS)
+    assert (await campaigns.get(cid)).status_message_id != first
+    assert messenger.sent[-1][2] == "🔎 Поиск завершён. Проверяю найденное…"
+
+
+async def test_owners_keep_their_technical_lines_below_the_user_line_in_every_phase() -> None:
+    from bot.campaign.runner import ANALYSIS
+
+    campaigns, store, messenger, clock, runner, cid = await phase_campaign(OWNER)
+    await phase_show(runner, campaigns, cid, "")
+    clock.advance(25)
+    store.normalised[cid], store.progress[cid] = 5, (3, 8)
+    await phase_show(runner, campaigns, cid, ANALYSIS)
+    lines = messenger.sent[-1][2].split("\n")
+    assert lines[0].startswith("🎯 ") and lines[1] == CHECKING_3_OF_8 and lines[2] == ANALYSIS
+    assert messenger.deleted  # the owner's message is re-posted on the phase change as well
+
+
+async def test_html_in_the_checking_and_done_lines_stays_escaped_for_owners() -> None:
+    from bot.campaign.runner import ANALYSIS
+
+    campaigns, store, messenger, _clock, runner, cid = await phase_campaign(OWNER)
+    store.normalised[cid] = 1
+    await phase_show(runner, campaigns, cid, ANALYSIS + " <b>x</b> & y")
+    text = messenger.sent[-1][2]
+    assert "<b>" not in text and "&lt;b&gt;x&lt;/b&gt; &amp; y" in text
