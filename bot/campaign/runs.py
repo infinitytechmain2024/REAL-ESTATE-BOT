@@ -192,7 +192,6 @@ class RunStore(Protocol):
     async def open_offer(self, campaign_id: str, bucket: str) -> bool: ...
     async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None: ...
     async def drop_offer(self, campaign_id: str, bucket: str) -> None: ...
-    async def approve_offer(self, campaign_id: str, bucket: str, decided_by: int) -> bool: ...
     async def social_activity(self, campaign_id: str) -> SocialActivity: ...
     async def reach_activity(self, campaign_id: str) -> ReachActivity: ...
     # the AI relevance verdict, once per finding (migration 023, ``relevance``)
@@ -721,15 +720,6 @@ class PostgresRunStore:
             campaign_id, bucket,
         ))
 
-    async def approve_offer(self, campaign_id: str, bucket: str, decided_by: int) -> bool:
-        """The requester approved this bucket in advance (the interview's deviations): no question is ever asked.
-        Idempotent: False when the bucket already has an offer row (asked, approved or declined)."""
-        return bool(await self.pool.fetchval(
-            """insert into campaign_offers (campaign_id, bucket, state, decided_at, decided_by)
-               values ($1::uuid, $2, 'approved', now(), $3) on conflict do nothing returning 1""",
-            campaign_id, bucket, decided_by,
-        ))
-
     async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None:
         await self.pool.execute(
             "update campaign_offers set telegram_message_id = $3 where campaign_id = $1::uuid and bucket = $2",
@@ -1230,12 +1220,6 @@ class MemoryRunStore:
             return False
         campaign = getattr(self.campaigns, "campaigns", {}).get(campaign_id)
         self.desk.offers[(campaign_id, bucket)] = MemoryOffer(campaign.requested_by if campaign else 0)
-        return True
-
-    async def approve_offer(self, campaign_id: str, bucket: str, decided_by: int) -> bool:
-        if (campaign_id, bucket) in self.desk.offers:
-            return False
-        self.desk.offers[(campaign_id, bucket)] = MemoryOffer(decided_by, "approved", decided_by)
         return True
 
     async def offer_sent(self, campaign_id: str, bucket: str, message_id: int) -> None:

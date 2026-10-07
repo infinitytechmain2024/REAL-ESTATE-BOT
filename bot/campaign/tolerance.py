@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -383,6 +384,17 @@ def _fold(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def _whole_word(name: str, folded_location: str) -> bool:
+    """``name`` (4+ chars, accent/case-folded) is a whole word or phrase of the location, not a part of a longer word."""
+    def plain(text: str) -> str:
+        return "".join(ch for ch in unicodedata.normalize("NFD", _fold(text)) if not unicodedata.combining(ch))
+
+    needle = plain(name)
+    if len(needle) < 4:
+        return False
+    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", plain(folded_location)) is not None
+
+
 def _nearby_hit(location: str, request: Request) -> str | None:
     """The approved neighbouring area the listing's location names, when it does not name the requested place."""
     if not request.nearby:
@@ -392,7 +404,7 @@ def _nearby_hit(location: str, request: Request) -> str | None:
         return None  # the requested city is named: nothing to approve
     if any(_fold(d) in folded for d in request.districts):
         return None
-    return next((name for name in request.nearby if _fold(name) in folded), None)
+    return next((name for name in request.nearby if _whole_word(name, folded)), None)
 
 
 def _below_min_price(payload: dict[str, Any], request: Request) -> bool:

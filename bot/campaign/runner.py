@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -148,6 +149,15 @@ class Messenger(Protocol):
     async def delete(self, chat_id: int, message_id: int) -> None: ...
 
 
+def _fit(text: str, parse_mode: str | None) -> tuple[str, str | None]:
+    """The text Telegram accepts (4096 chars). HTML is never cut mid-tag: a too-long one is sent as plain text."""
+    if len(text) <= 4000:
+        return text, parse_mode
+    if parse_mode:
+        text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return text[:4000], None
+
+
 class TelegramMessenger:
     """Bot API calls: plain text (no HTML parsing of finding text) unless ``parse_mode`` is given."""
 
@@ -156,7 +166,8 @@ class TelegramMessenger:
         self._client = client or httpx.AsyncClient(timeout=20)
 
     async def send(self, chat_id: int, text: str, *, parse_mode: str | None = None) -> int:
-        body: dict[str, Any] = {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True}
+        text, parse_mode = _fit(text, parse_mode)
+        body: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
         if parse_mode:
             body["parse_mode"] = parse_mode
         data = await self._call("sendMessage", body)
@@ -169,7 +180,8 @@ class TelegramMessenger:
         return int(data["result"]["message_id"])
 
     async def edit(self, chat_id: int, message_id: int, text: str, *, parse_mode: str | None = None) -> None:
-        body: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text[:4000],
+        text, parse_mode = _fit(text, parse_mode)
+        body: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text,
                                 "disable_web_page_preview": True}
         if parse_mode:
             body["parse_mode"] = parse_mode
@@ -844,9 +856,8 @@ class CampaignRunner:
     async def _near_matches(self, campaign: Campaign, request: Request, active: bool) -> None:
         """Held similar/other findings: stream an approved bucket, or ask about it once (see ``offers``).
 
-        The interview's approved deviations approve ``similar`` up front (nothing to ask: the cards stream during the
-        search, each saying what differs); otherwise the question is asked as soon as the first similar one is held."""
-        await self._approve_similar(campaign)
+        Findings inside an approved deviation are already ``exact`` (they stream at once, saying what differs); every
+        other similar one stays held and the question is asked as soon as the first one is held."""
         states: dict[str, str | None] = {}
         for bucket in HELD_BUCKETS:
             state = states[bucket] = await self.store.offer_state(campaign.id, bucket)
@@ -870,22 +881,6 @@ class CampaignRunner:
             if ask:
                 await self._ask(campaign, bucket, request, held[0], exact_found=exact > 0)
                 states[bucket] = await self.store.offer_state(campaign.id, bucket)
-
-    async def _approve_similar(self, campaign: Campaign) -> None:
-        """Deviations were asked and the person allowed some (not «только точные»): approve ``similar`` once."""
-        done: set[str] = self.__dict__.setdefault("_auto_approved", set())
-        if campaign.id in done:
-            return
-        deviations = _deviations_of(campaign)
-        if not isinstance(deviations, dict) or not deviations.get("asked") or not _allows(deviations):
-            done.add(campaign.id)  # nothing to approve; the question is asked instead
-            return
-        try:
-            await self.store.approve_offer(campaign.id, "similar", campaign.requested_by or 0)
-        except Exception:  # noqa: BLE001 - retried on the next step
-            log.warning("campaign.offer_approve_failed", extra={"campaign_id": campaign.id})
-            return
-        done.add(campaign.id)
 
     async def _ask(self, campaign: Campaign, bucket: offers.OfferBucket, request: Request, closest: StreamFinding,
                    *, exact_found: bool) -> None:
@@ -1024,11 +1019,19 @@ class CampaignRunner:
             self._web_edit_at[current.id] = self.now()
         await self.store.save_run(current.id, replace(await self.store.get_run(current.id), status_text=text))
 
+    def _forget_live(self, campaign_id: str) -> None:
+        """A finished campaign shows no «Сейчас ищу» line: drop its in-memory live-status bookkeeping."""
+        self._stage_seen.pop(campaign_id, None)
+        self._group_now.pop(campaign_id, None)
+        self._web_edit_at.pop(campaign_id, None)
+
     async def _status_text(self, campaign: Campaign, line: str) -> str:
         """The status message as HTML. Owners: the goal, the «Сейчас ищу» line, then the technical lines with their
         counts. Anyone else: one short line that says only where the bot searches now (or a fixed label)."""
         esc = html.escape
         terminal = campaign.state in TERMINAL_STATES
+        if terminal:
+            self._forget_live(campaign.id)
         web = await self._web(campaign.id) if not terminal else None
         web_active = web is not None and web.active
         social = await self.store.social_activity(campaign.id) if not terminal else None
@@ -1039,14 +1042,14 @@ class CampaignRunner:
                 text += f"\n{live}"
             text += f"\n{esc(line or STOPPED, quote=False)}"
             if web_active and web.line and web.line != line:
-                text += f"\n{esc(web.line, quote=False)}"
+                text += f"\n{esc(web.line[:300], quote=False)}"
             if web_active and getattr(web, "progress", None) is not None:
                 text += esc(await self._web_detail(campaign, web.progress), quote=False)
             if social is not None:
                 if social.searching:
                     query = f" · «{social.query}»" if social.query else ""
                     text += esc(f"\nСоцсети: {social.searching}{query}", quote=False)
-                text += "".join(esc(f"\n{note}", quote=False) for note in social.notes)
+                text += "".join(esc(f"\n{note[:300]}", quote=False) for note in social.notes)
             return text
         if terminal:
             return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id),
@@ -1154,18 +1157,13 @@ def campaign_request(campaign: Campaign) -> Request:
 
 def _deviations_of(campaign: Campaign) -> dict[str, Any] | None:
     """The interview's approved deviations (``TaskSpec.deviations`` as a dict), None without a spec."""
+    if campaign.plan.vertical == "investors":
+        return None
     found = (getattr(campaign, "spec", None) or {}).get("deviations")
     return found if isinstance(found, dict) else None
 
 
 APPROVED_LINE = "≈ В пределах согласованного отступления: "
-
-
-def _allows(deviations: dict[str, Any]) -> bool:
-    """Some compromise is approved (a number above 0, a nearby area or a free-text one), not «только точные»."""
-    return (any(isinstance(deviations.get(k), int | float) and not isinstance(deviations.get(k), bool) and deviations[k] > 0
-                for k in ("budget_pct", "area_pct", "rooms_delta", "radius_km"))
-            or bool(deviations.get("nearby_areas") or deviations.get("other")))
 
 
 def approved_note(campaign: Campaign, finding: StreamFinding) -> str | None:

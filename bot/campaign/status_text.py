@@ -36,7 +36,7 @@ FIXED_STATUSES: frozenset[str] = frozenset({ACCEPTED, SEARCHING, FACEBOOK, TIKTO
 _SITE_NAME = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9.\-]{0,79}$")  # a host, no spaces
 MAX_GROUP_CHARS = 60
 MAX_LINK_TEXT_CHARS = 60
-MAX_URL_CHARS = 2000
+MAX_URL_CHARS = 500
 _NOW = "🔎 Сейчас ищу "
 LIVE_PREFIX = _NOW
 SOCIAL_NAMES = {"tiktok": "TikTok", "instagram": "Instagram", "linkedin": "LinkedIn"}

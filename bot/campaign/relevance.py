@@ -136,7 +136,7 @@ def task_data(campaign: Campaign, *, review: bool = False) -> dict[str, Any]:
     if area:
         data["min_area_m2"] = area
     deviations = {k: v for k, v in ((campaign.spec or {}).get("deviations") or {}).items()
-                  if v not in (None, "", [], False) and k != "asked"}
+                  if v not in (None, "", [], False) and k != "asked"} if plan.vertical != "investors" else {}
     if deviations:
         data["approved_deviations"] = deviations
     if review:
