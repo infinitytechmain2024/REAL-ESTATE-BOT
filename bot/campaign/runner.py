@@ -278,7 +278,15 @@ class _Head:
     """A sent exact card as a dedup candidate: its fields and its precomputed ``Listing``."""
 
     sent: SentFinding
-    listing: Listing
+    listing: Listing  # with the body's shingle set and phones, computed once when the head enters the index
+
+
+def _head_of(sent: SentFinding) -> _Head:
+    """A dedup head: the listing fields plus the post text (the stored excerpt, or the whole body of a card sent in
+    this step), fingerprinted once."""
+    finding = sent.finding
+    return _Head(sent, listing_of(finding.payload, url=finding.url, text=finding.text,
+                                  body=sent.text_excerpt or finding.original))
 
 
 @dataclass(slots=True)
@@ -580,8 +588,7 @@ class CampaignRunner:
             if not await self._send_card(campaign, finding, count, active, "exact", note=note):
                 return deferred
             if index.loaded:  # the card just sent is a head for the findings still to come in this step
-                index.heads.insert(0, _Head(SentFinding(finding, None, count),
-                                            listing_of(finding.payload, url=finding.url, text=finding.text)))
+                index.heads.insert(0, _head_of(SentFinding(finding, None, count)))
         await self._near_matches(campaign, request, active)
         await self._people(campaign)
         return deferred
@@ -598,19 +605,18 @@ class CampaignRunner:
         """
         if not finding.url:
             return False
-        mine = listing_of(finding.payload, url=finding.url, text=finding.text)
-        if mine.price is None and mine.area is None:
+        mine = listing_of(finding.payload, url=finding.url, text=finding.text, body=finding.original)
+        if mine.price is None and mine.area is None and not mine.shingles:
             return False
         index = index if index is not None else _HeadIndex()
         try:
             if not index.loaded:
                 index.loaded = True
-                index.heads = [_Head(h, listing_of(h.finding.payload, url=h.finding.url, text=h.finding.text))
-                               for h in await self.store.recent_sent_findings(campaign.id)]
+                index.heads = [_head_of(h) for h in await self.store.recent_sent_findings(campaign.id)]
             for position, head in enumerate(index.heads):
                 if head.sent.finding.id == finding.id or not same_object(mine, head.listing):
                     continue
-                link = {"url": finding.url, "site": site_of(finding.url)}
+                link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
                     link = {}  # the same post again: nothing to add
                 attached = await self.store.attach_to_cluster(finding.id, head.sent.finding.id, link)
@@ -627,6 +633,18 @@ class CampaignRunner:
             log.warning("campaign.dedup_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
         return False
 
+    async def _site_name(self, campaign: Campaign, url: str) -> str:
+        """The «Также на» name of a sighting: a Facebook post's group name when it is known, else the host."""
+        site = site_of(url)
+        if site.removeprefix("web.") == "facebook.com":
+            try:
+                name = await self.store.group_name(campaign.id, url)
+            except Exception:  # noqa: BLE001 - the host is a fine name
+                name = None
+            if name and name.strip():
+                return name.strip()[:80]
+        return site
+
     async def _edit_head(self, campaign: Campaign, head: SentFinding, attached: ClusterHead, active: bool) -> None:
         """Re-render the head card with «Также на: ...» and edit its Telegram message (best effort).
 
@@ -637,7 +655,10 @@ class CampaignRunner:
         try:
             full = await self.store.stream_finding(head.finding.id) or head.finding
             tail = f"🔎 Найдено: {head.number}" + (" · ищу дальше" if active else "")
-            card = f"{finding_card(campaign, full, cluster_links=attached.links, note=approved_note(campaign, full))}\n\n{tail}"
+            note = approved_note(campaign, full)
+            if note is None and full.payload is not None and head.bucket != "exact":  # a held card sent after approval
+                note = offers.card_line(await self._deviation(campaign, campaign_request(campaign), full))
+            card = f"{finding_card(campaign, full, cluster_links=attached.links, note=note)}\n\n{tail}"
             await self.messenger.edit(campaign.chat_id, attached.message_id, card[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - the link is stored; a lost edit only hides it from the card
             log.warning("campaign.cluster_edit_failed",
@@ -866,13 +887,20 @@ class CampaignRunner:
         Findings inside an approved deviation are already ``exact`` (they stream at once, saying what differs); every
         other similar one stays held and the question is asked as soon as the first one is held."""
         states: dict[str, str | None] = {}
+        index = _HeadIndex()  # loaded on the first approved held card only
         for bucket in HELD_BUCKETS:
             state = states[bucket] = await self.store.offer_state(campaign.id, bucket)
             if state == "approved":
                 for finding in await self.store.held_findings(campaign.id, bucket, self.config.max_stream_per_step):
                     count = await self.store.claim_held(campaign.id, finding.id)
-                    if count is not None and not await self._send_card(campaign, finding, count, active, bucket):
+                    if count is None:
+                        continue
+                    if await self._deduplicate(campaign, finding, active, index):  # the same object as a sent card
+                        continue
+                    if not await self._send_card(campaign, finding, count, active, bucket):
                         return
+                    if index.loaded:
+                        index.heads.insert(0, _head_of(SentFinding(finding, None, count, bucket=bucket)))
                 continue
             if state is not None:  # asked and waiting, or declined: never sent
                 continue
@@ -957,7 +985,9 @@ class CampaignRunner:
             portals = campaign_portals(campaign) if reports else ()
             request = campaign_request(campaign)
             title = task_title(request, campaign.plan.location_aliases.get("ru"), campaign.plan.goal)
-            text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals)
+            offers = {bucket: await self.store.offer_state(campaign.id, bucket) for bucket in ("similar", "other")}
+            text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals,
+                                                 offers=offers)
             await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
             log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})

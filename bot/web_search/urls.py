@@ -9,8 +9,10 @@ Both are what migration 021 de-duplicates on.
 from __future__ import annotations
 
 import re
+import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from bot.utils.urls import normalize_url, url_hash
 
@@ -24,6 +26,28 @@ BLOCKED_HOSTS = frozenset({
     "wikipedia.org", "wikidata.org", "google.com", "google.es", "bing.com", "duckduckgo.com", "yandex.ru",
     "yandex.com", "maps.google.com", "apple.com", "play.google.com", "whatsapp.com",
 })
+# Never listing sources: dictionaries, calculators, ministries, news/TV, transport, travel guides. Data tables.
+# A host matches itself and its subdomains; the suffixes (``.gob.es``) match any host that ends with them.
+NON_LISTING_HOSTS = frozenset({
+    # dictionaries and reference
+    "rae.es", "wordreference.com", "fandom.com", "wiktionary.org", "linguee.com", "reverso.net",
+    # calculators and maths
+    "wumbo.net", "calculator.net", "omnicalculator.com", "calculadora.es", "symbolab.com", "wolframalpha.com",
+    # government
+    "boe.es", "gob.es", "gov", "gov.ua", "gov.uk",
+    # news and TV
+    "rtve.es", "elpais.com", "lasprovincias.es", "levante-emv.com", "elmundo.es", "abc.es", "20minutos.es",
+    "europapress.es", "eldiario.es", "lavanguardia.com", "elconfidencial.com", "okdiario.com", "bbc.com",
+    "cnn.com", "pravda.com.ua", "ukrinform.ua",
+    # transport
+    "metrovalencia.es", "renfe.com", "emtvalencia.es",
+    # travel and city guides
+    "citiesinsider.com", "booking.com", "expedia.com", "lonelyplanet.com",
+})
+# Brand names that exist under many TLDs: ``web2.0calc.es``, ``tripadvisor.co.uk``, ``airbnb.com``.
+NON_LISTING_BRANDS = ("web2.0calc", "tripadvisor", "airbnb")
+# Path prefixes that are not listings on a site that otherwise is a portal.
+NON_LISTING_PATHS: dict[str, tuple[str, ...]] = {"idealista.com": ("/news/", "/en/news/", "/ca/news/")}
 _SKIP_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".zip", ".doc", ".docx", ".xls",
                     ".xlsx", ".ppt", ".pptx", ".mp4", ".mp3", ".avi", ".xml", ".json", ".rss")
 
@@ -47,8 +71,18 @@ def host_of(url: str) -> str:
 
 def is_blocked(host: str, extra: frozenset[str] = frozenset()) -> bool:
     """A host (or a subdomain of one) the web stage never fetches."""
-    blocked = BLOCKED_HOSTS | extra
-    return any(host == b or host.endswith("." + b) for b in blocked)
+    blocked = BLOCKED_HOSTS | NON_LISTING_HOSTS | extra
+    if any(host == b or host.endswith("." + b) for b in blocked):
+        return True
+    return any(re.search(rf"(?:^|\.){re.escape(brand)}\.[a-z]{{2,3}}(?:\.[a-z]{{2}})?$", host)
+               for brand in NON_LISTING_BRANDS)
+
+
+def non_listing_path(host: str, path: str) -> bool:
+    """A path on a portal that is editorial (``idealista.com/news/...``), never a listing."""
+    path = path.lower()
+    return any((host == h or host.endswith("." + h)) and path.startswith(prefixes)
+               for h, prefixes in NON_LISTING_PATHS.items())
 
 
 def fetchable(url: str, extra_blocked: frozenset[str] = frozenset()) -> bool:
@@ -63,7 +97,7 @@ def fetchable(url: str, extra_blocked: frozenset[str] = frozenset()) -> bool:
     if not host or is_blocked(host, extra_blocked):
         return False
     path = parts.path.lower()
-    if path.endswith(_SKIP_EXTENSIONS):
+    if path.endswith(_SKIP_EXTENSIONS) or non_listing_path(host, path):
         return False
     return not any(word in path for word in ("/login", "/signin", "/sign-in", "/registro", "/register", "/account",
                                              "/mi-cuenta", "/checkout", "/cart"))
@@ -234,3 +268,93 @@ def classify_page(url: str, *, has_listing_data: bool = False, text: str = "") -
     if has_listing_data or (_PRICE.search(text) and _AREA.search(text)):
         return "listing"
     return "unknown"
+
+
+# --- known hosts, the deal in a path, evidence in a search hit ---------------------------------
+
+
+def known_portal(host: str, extra: Iterable[str] = ()) -> bool:
+    """A listing portal we know by name (``PORTALS``, the country lists) or one the plan/spec names (``extra``)."""
+    names = (*PORTALS, *SPAIN_PORTALS, *SPAIN_BANK_PORTALS, *UKRAINE_PORTALS, *extra)
+    return any(host == n or host.endswith("." + n) for n in names)
+
+
+_RENT_WORDS = frozenset({"alquiler", "alquilar", "rent", "to-rent", "оренда", "аренда", "arenda"})
+_SALE_WORDS = frozenset({"venta", "comprar", "compra", "sale", "prodazha", "продаж", "продажа"})
+
+
+def path_deal(url: str) -> str | None:
+    """``rent`` or ``sale`` when the URL path says so; None when it says neither or both (words are the path's
+    segments split on «/» and «-», so ``/alquiler-venta/`` or ``/for-sale/to-rent/`` is ambiguous)."""
+    try:
+        path = unquote(urlsplit(url).path or "/").lower()
+    except ValueError:
+        return None
+    words = {w for w in re.split(r"[/\-_.]+", path) if w}
+    rent, sale = bool(words & _RENT_WORDS), bool(words & _SALE_WORDS)
+    return "rent" if rent and not sale else "sale" if sale and not rent else None
+
+
+def deal_conflict(url: str, deal: object) -> bool:
+    """True when the campaign wants ``deal`` (sale/rent) and the URL path is the opposite one."""
+    if deal not in ("sale", "rent"):
+        return False
+    found = path_deal(url)
+    return found is not None and found != deal
+
+
+# The words that make a text «about a property». Kept in step with ``queries._KIND_WORDS`` / ``_KIND_TERMS`` (a test
+# checks that every kind word and term passes) plus the kinds a campaign may name: offices, garages, plots, hotels ...
+# Latin whole words (an optional plural ending, a word boundary on both sides); Latin and Cyrillic stems match from a
+# word's start. Texts are folded first (``fold_text``: lower case, no accents, ё -> е).
+_PROPERTY_WORDS = (
+    "piso", "casa", "chalet", "atico", "duplex", "estudio", "terreno", "parcela", "solar", "finca", "inmueble",
+    "propiedad", "nave", "local", "villa", "flat", "apartment", "house", "home", "land", "plot", "condo", "bungalow",
+    "townhouse", "loft", "room", "property", "propertie", "studio", "penthouse", "garage", "office", "warehouse",
+    "oficina", "garaje", "parking", "aparcamiento", "trastero", "hotel", "masia", "edificio",
+)
+_PROPERTY_PHRASES = (r"obra\s+nueva", r"bajo\s+comercial", r"real\s+estate", r"local(?:es)?\s+comercial")
+_PROPERTY_STEMS = (
+    "vivienda", "apartament", "habitaci", "oficin", "garaj", "edifici", "adosad", "inmobiliari", "hotel", "masia",
+    "квартир", "будин", "комнат", "кімнат", "участ", "ділянк", "вилл", "нерухом", "недвижим", "гараж", "офис", "офіс",
+    "помещени", "приміщ", "земл", "жиль", "житл", "пентхаус", "таунхаус", "котедж", "студи", "склад", "апартамент",
+    "магазин", "коммерч", "сотк", "дача", "дачи",
+)
+_PROPERTY_WORD = re.compile(
+    r"(?<!\w)(?:(?:" + "|".join((*_PROPERTY_WORDS, *_PROPERTY_PHRASES)) + r")(?:e?s)?(?!\w)"
+    r"|(?:" + "|".join(_PROPERTY_STEMS) + r")|дом(?:а|у|е|ом|ов|ы)?(?!\w))")
+_SIGNAL_PRICE = re.compile(r"\d\s*(?:€|\$|£|k\s?€|грн|uah|usd|eur\b|euros?\b|евро|євро|дол)|(?:€|\$|eur\b)\s?\d", re.IGNORECASE)
+_SIGNAL_AREA = re.compile(r"\d\s*(?:m²|m2|m\^2|м²|м2|кв\.?\s*м|metros?\b|mts?\b|sq\.?\s*m)", re.IGNORECASE)
+_SIGNAL_ROOMS = re.compile(r"\d\s*[-.]?\s*(?:hab|dorm|bed|room|комн|кімн|рум|ambientes|bedrooms?)", re.IGNORECASE)
+
+
+def fold_text(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(ch for ch in text if not unicodedata.combining(ch)).replace("ё", "е")
+
+
+def has_property_word(text: str) -> bool:
+    return bool(_PROPERTY_WORD.search(fold_text(text)))
+
+
+# A deal word: an offer («en venta», «alquila», «for rent», «продам», «сдам»); wanted posts («куплю», «сниму») are not.
+_SIGNAL_DEAL = re.compile(
+    r"(?<!\w)(?:venta|vende(?:n|mos)?|vendo|alquiler(?:es)?|alquila(?:n|mos)?|alquilo|comprar|for\s+sale|for\s+rent|to\s+let"
+    r"|se\s+vende|se\s+alquila)(?!\w)|(?<!\w)(?:продаж|продам|продаю|продаетс|оренд|аренд|сдам|сдаю|сдаетс|здам|здаю)")
+# A count written in words before a room word: «tres habitaciones», «two bedrooms», «две комнаты».
+_SIGNAL_ROOM_WORDS = re.compile(
+    r"(?<!\w)(?:uno|una|dos|tres|cuatro|cinco|one|two|three|four|five|одна|одну|две|два|три|четыре|пять|дві|чотири)"
+    r"\s+(?:hab|dorm|bedroom|bed\b|комнат|кімнат)")
+
+
+def listing_evidence(title: str, snippet: str) -> bool:
+    """A search hit that looks like a listing: a property word AND one of a figure (price, area or rooms with a
+    unit), a deal word («en venta», «for rent», «продам») or a room count in words («tres habitaciones»). A bare
+    word like «precio» is not evidence, a news piece on prices has none of these; agency pages without digits
+    («Piso en Valencia - Inmobiliaria X ... tres habitaciones») pass by their deal or room words."""
+    text = f"{title} {snippet}"
+    if not has_property_word(text):
+        return False
+    folded = fold_text(text)
+    return bool(_SIGNAL_PRICE.search(folded) or _SIGNAL_AREA.search(folded) or _SIGNAL_ROOMS.search(folded)
+                or _SIGNAL_DEAL.search(folded) or _SIGNAL_ROOM_WORDS.search(folded))

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import uuid
 from collections.abc import Collection
 from dataclasses import dataclass, field, replace
@@ -120,6 +121,8 @@ class SentFinding:
     number: int = 0
     cluster_id: str | None = None
     links: tuple[dict[str, str], ...] = ()
+    text_excerpt: str = ""  # the post's first ``dedup.TEXT_LIMIT`` characters, for the text rules of ``same_object``
+    bucket: str = "exact"  # a similar/other card sent after approval is a head too
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +157,18 @@ class ReachActivity:
     query: str | None = None
 
 
+_GROUP_PATH = re.compile(r"^/groups/([A-Za-z0-9_.-]{1,100})(?:/|$)")
+
+
+def _group_key(url: str | None) -> str | None:
+    """The group key of a Facebook group post link (``/groups/<key>/posts/..``), lower-cased; else None."""
+    parts = urlsplit(url or "")
+    if (parts.hostname or "").lower().removeprefix("www.").removeprefix("m.").removeprefix("web.") != "facebook.com":
+        return None
+    found = _GROUP_PATH.match(parts.path)
+    return found.group(1).lower() if found else None
+
+
 RECOVERY_ACTOR = "campaign:runner:recovery"
 
 
@@ -184,6 +199,9 @@ class RunStore(Protocol):
     async def streamed_count(self, campaign_id: str) -> int: ...
     async def recent_sent_findings(self, campaign_id: str, limit: int = 200) -> list[SentFinding]: ...
     async def stream_finding(self, finding_id: str) -> StreamFinding | None: ...
+    async def group_name(self, campaign_id: str, url: str | None) -> str | None:
+        """The name of the Facebook group a post link belongs to (``campaign_groups``), or None."""
+        ...
     async def attach_to_cluster(self, finding_id: str, cluster_id: str, link: dict[str, str]) -> ClusterHead | None: ...
     # exact / similar / other (migration 019, ``tolerance`` and ``offers``)
     async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None,
@@ -573,10 +591,10 @@ class PostgresRunStore:
                                 campaign_id)
 
     async def recent_sent_findings(self, campaign_id: str, limit: int = 200) -> list[SentFinding]:
-        """The campaign's newest sent exact cards (cluster heads), with their listing fields and links.
+        """The campaign's newest sent listing cards (exact, and similar/other after approval: cluster heads), with their listing fields and links.
 
-        The post's own text is not fetched (it can be large and the comparison does not read it): ``original`` is
-        empty here, ``stream_finding`` loads a whole finding. ``number`` is the number stored when the card was
+        The post's own text is not fetched whole (it can be large): ``original`` is empty here and only a bounded
+        ``text_excerpt`` (first 1500 characters) comes along for the text rules; ``stream_finding`` loads a whole finding. ``number`` is the number stored when the card was
         claimed; rows from before it was stored count the sent exact cards instead.
         """
         rows = await self.pool.fetch(
@@ -585,10 +603,12 @@ class PostgresRunStore:
                        f.structured_payload::text as payload,
                        f.analysis_metadata->>'language' as language, f.confidence::float8 as confidence, f.vertical,
                        p.canonical_url as url, cf.telegram_message_id, cf.cluster_id::text as cluster_id,
-                       cf.cluster_links::text as links, coalesce(cf.card_number, cf.counted)::int as number
+                       cf.cluster_links::text as links, coalesce(cf.card_number, cf.counted)::int as number,
+                       left(coalesce(p.body_text, ''), 1500) as excerpt, cf.bucket
                   from (select cf2.*, row_number() over (order by cf2.sent_at, cf2.finding_id) as counted
                           from campaign_findings cf2
-                         where cf2.campaign_id = $1::uuid and cf2.state = 'sent' and cf2.bucket = 'exact') cf
+                         where cf2.campaign_id = $1::uuid and cf2.state = 'sent'
+                           and cf2.bucket in ('exact', 'similar', 'other')) cf
                   join findings f on f.id = cf.finding_id
                   join collected_posts p on p.id = f.post_id
                  where cf.duplicate_of is null
@@ -598,7 +618,15 @@ class PostgresRunStore:
         return [SentFinding(
             StreamFinding(r["id"], r["text"], _payload(r["payload"]), "", r["language"], r["confidence"],
                           r["vertical"], r["url"]),
-            r["telegram_message_id"], int(r["number"]), r["cluster_id"], _links(r["links"])) for r in rows]
+            r["telegram_message_id"], int(r["number"]), r["cluster_id"], _links(r["links"]),
+            r["excerpt"] or "", r["bucket"] or "exact") for r in rows]
+
+    async def group_name(self, campaign_id: str, url: str | None) -> str | None:
+        key = _group_key(url)
+        if key is None:
+            return None
+        return await self.pool.fetchval(
+            "select name from campaign_groups where campaign_id = $1::uuid and group_key = $2", campaign_id, key)
 
     async def stream_finding(self, finding_id: str) -> StreamFinding | None:
         """One finding with the post's own text (what the card is rendered from), or None."""
@@ -1168,11 +1196,17 @@ class MemoryRunStore:
     async def recent_sent_findings(self, campaign_id: str, limit: int = 200) -> list[SentFinding]:
         by_id = {f.id: f for f in self.findings.get(campaign_id, [])}
         sent = [fid for fid, m in self.streamed.get(campaign_id, {}).items()
-                if m is not None and self.buckets.get(fid, ("", None))[0] == "exact" and fid in by_id]
+                if m is not None and self.buckets.get(fid, ("", None))[0] in ("exact", "similar", "other")
+                and fid in by_id and fid not in self.duplicates]
         return [SentFinding(replace(by_id[fid], original=""), self.streamed[campaign_id][fid],
                             self.card_numbers.get(fid) or sent.index(fid) + 1,
-                            fid if fid in self.cluster_links else None, tuple(self.cluster_links.get(fid, ())))
+                            fid if fid in self.cluster_links else None, tuple(self.cluster_links.get(fid, ())),
+                            by_id[fid].original[:1500], self.buckets[fid][0])
                 for fid in reversed(sent)][:limit]
+
+    async def group_name(self, campaign_id: str, url: str | None) -> str | None:
+        key = _group_key(url)
+        return next((g.name for g in self.groups.get(campaign_id, []) if g.group_key == key and key), None)
 
     async def stream_finding(self, finding_id: str) -> StreamFinding | None:
         self.finding_reads.append(finding_id)
@@ -1182,14 +1216,18 @@ class MemoryRunStore:
         message_id = next((done[cluster_id] for done in self.streamed.values() if done.get(cluster_id) is not None), None)
         if message_id is None or cluster_id in self.duplicates:
             return None
-        if finding_id not in self.duplicates and (any(finding_id in done for done in self.streamed.values())
-                                                  or any(finding_id in held for held in self.held.values())):
-            return None  # sent or held meanwhile: no duplicate
+        if finding_id not in self.duplicates and (
+                any(done.get(finding_id) is not None for done in self.streamed.values())
+                or any(finding_id in held for held in self.held.values())):
+            return None  # sent or held meanwhile: no duplicate (a claimed, unsent finding may still be attached)
+        for done in self.streamed.values():
+            if finding_id in done and done[finding_id] is None:
+                del done[finding_id]  # the claim is given up: the finding is a duplicate, not a card
         links = self.cluster_links.setdefault(cluster_id, [])
         if link.get("url") and all(x.get("url") != link["url"] for x in links):
             links.append({"url": str(link["url"]), "site": str(link.get("site") or "")})
         self.duplicates[finding_id] = cluster_id
-        self.buckets[finding_id] = ("exact", 0.0)
+        self.buckets.setdefault(finding_id, ("exact", 0.0))
         self.findings_state[finding_id] = "delivered"
         return ClusterHead(message_id, tuple(links))
 

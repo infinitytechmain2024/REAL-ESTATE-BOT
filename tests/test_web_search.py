@@ -71,6 +71,9 @@ def listing_page(title: str) -> str:
     return LISTING_HTML.replace("Boadilla del Monte - 1.200 m²", title)
 
 
+EVIDENCE = ("Terreno en venta Madrid", "Parcela 1.200 m2 por 180.000 €")  # what a real hit shows (the SERP prefilter keeps it)
+
+
 class FakeSearcher:
     def __init__(self, results: dict[str, list[str]] | None = None, default: list[str] | None = None,
                  texts: dict[str, tuple[str, str]] | None = None) -> None:
@@ -82,7 +85,7 @@ class FakeSearcher:
         self.calls.append((query, language))
         if query in self.fail:
             raise SearchError("http_502")
-        return [SearchHit(u, *self.texts.get(u, ("", ""))) for u in self.results.get(query, self.default)]
+        return [SearchHit(u, *self.texts.get(u, EVIDENCE)) for u in self.results.get(query, self.default)]
 
 
 class FakeFetcher:
@@ -251,14 +254,14 @@ async def test_an_index_page_is_read_again_after_its_ttl_and_a_listing_never() -
     listing = "https://www.pisos.com/comprar/terreno-boadilla_del_monte-45123456789_100500/"
     fetcher = FakeFetcher({INDEX_URL: INDEX_HTML})
     results = [INDEX_URL, listing]
-    gen = ListGenerator(["q one"])
+    gen = ListGenerator(["terreno one Madrid"])
     await run_until_done(WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, gen,
                                          config=WebSearchConfig(cover_portals=False), now=lambda: clock[0]), first)
     assert fetcher.fetched.count(INDEX_URL) == 1 and fetcher.fetched.count(listing) == 1
     assert set(fetcher.countries) == {"ES"}
     clock[0] += timedelta(days=8)
     second = await campaign(campaigns)
-    w2 = WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, ListGenerator(["q two"]),
+    w2 = WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, ListGenerator(["terreno two Madrid"]),
                          config=WebSearchConfig(cover_portals=False), now=lambda: clock[0])
     await run_until_done(w2, second)
     assert fetcher.fetched.count(INDEX_URL) == 2          # the index page again
@@ -636,7 +639,7 @@ async def test_a_cancelled_campaign_stops_its_web_stage_and_a_long_one_times_out
     now = [datetime(2026, 9, 26, tzinfo=UTC)]
     other = await campaign(campaigns)
     store2 = MemoryWebStore(campaigns, now=lambda: now[0])
-    w2 = WebSearchWorker(campaigns, store2, FakeSearcher(), FakeFetcher(), ListGenerator(["a b c", "d e f"]),
+    w2 = WebSearchWorker(campaigns, store2, FakeSearcher(), FakeFetcher(), ListGenerator(["terreno b c", "parcela e f"]),
                          config=WebSearchConfig(max_minutes_per_campaign=5), now=lambda: now[0])
     await w2.tick()
     now[0] += timedelta(minutes=6)
@@ -980,3 +983,156 @@ def test_unknown_impersonation_profile_falls_back_to_chrome() -> None:
     assert checked_impersonation("netscape4") == "chrome"
     assert WebSearchSettings(_env_file=None, impersonate="nope").impersonate == "chrome"
     assert "proxy" not in repr(WebSearchSettings(_env_file=None, proxy_url="http://user:pw@x:1"))
+
+
+# --- the web stage spends its budget on listings: denylist, SERP prefilter, host cap, deal, queries ---
+
+
+async def _queued_after_search(url_hits: dict[str, tuple[str, str]], *, goal_plan=None, cid_deal: str | None = None):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    if goal_plan is not None:
+        plan = plan_campaign(goal_plan, vertical="real_estate", location="Madrid")
+        cid = await campaigns.create(plan, chat_id=1, requested_by=USER, source_text=goal_plan, actor="test")
+        await campaigns.set_state(cid, "running", "test")
+    store = MemoryWebStore(campaigns)
+    searcher = FakeSearcher(default=list(url_hits), texts=url_hits)
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
+    await w.step(cid)
+    await w.step(cid)
+    return {host_of(k) for k in store.urls.get(cid, {}) and [u.url for u in store.urls[cid].values()]}, store, cid
+
+
+def test_non_listing_hosts_are_blocked_but_portals_and_idealista_listings_are_not() -> None:
+    for url in ("https://dle.rae.es/piso", "https://www.rtve.es/noticias/x/", "https://web2.0calc.es/", "https://www.wumbo.net/x",
+                "https://numbers.fandom.com/wiki/200000", "https://www.mivau.gob.es/vivienda", "https://www.metrovalencia.es/",
+                "https://www.citiesinsider.com/valencia", "https://www.tripadvisor.es/x", "https://www.airbnb.es/s",
+                "https://www.idealista.com/news/2026/precio-vivienda", "https://www.levante-emv.com/valencia/x"):
+        assert not fetchable(url), url
+    for url in ("https://www.fotocasa.es/es/comprar/vivienda/valencia/1/183456789/d",
+                "https://www.idealista.com/inmueble/12345678/", "https://agencia-sol.es/piso-12345"):
+        assert fetchable(url), url
+
+
+def test_serp_evidence_needs_a_property_word_and_a_number_with_a_unit() -> None:
+    from bot.web_search.urls import listing_evidence
+    assert listing_evidence("Piso en venta en Valencia", "3 hab. 85 m² 180.000 €")
+    assert listing_evidence("Квартира в Валенсии", "2 комнаты, 62 м², 150 000 €")
+    assert not listing_evidence("El precio de la vivienda en Valencia", "El precio medio de la vivienda sube un 5%")
+    assert not listing_evidence("Piso - Diccionario de la lengua", "Definición de piso: suelo de un edificio")
+    assert not listing_evidence("Calculadora", "200000 / 60 = 3333 m2")
+
+
+async def test_serp_hits_without_evidence_and_on_denied_hosts_are_not_queued() -> None:
+    hits = {
+        "https://dle.rae.es/piso": ("piso", "Definición de piso 60 m2"),
+        "https://www.rtve.es/noticias/vivienda/": ("Vivienda en Valencia", "piso 3 hab 85 m² 180.000 €"),
+        "https://web2.0calc.es/": ("calculadora", "200000 € 60 m2"),
+        "https://www.fotocasa.es/es/comprar/vivienda/valencia/1/183456789/d": ("", ""),
+        "https://agencia-sol.es/venta/piso-valencia-7777777": ("Piso en venta 3 hab. 85 m² 180.000 €", ""),
+        "https://periodico-local.es/economia/precio-vivienda-valencia-9999999": ("El precio de la vivienda en Valencia",
+                                                                                "El precio medio de la vivienda sube"),
+    }
+    hosts, *_ = await _queued_after_search(hits)
+    assert hosts == {"fotocasa.es", "agencia-sol.es"}
+
+
+async def test_an_unknown_host_gets_five_pages_until_it_gives_a_listing_then_the_normal_cap() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    urls = [f"https://agencia-gris.es/inmueble/venta-{7000000 + n}" for n in range(9)]
+    fetcher = FakeFetcher(errors={u: "http_404" for u in urls})  # never a listing
+    w = worker(campaigns, store, FakeSearcher(default=urls), fetcher, ListGenerator(["terreno Boadilla Madrid"]),
+               cover_portals=False)
+    await run_until_done(w, cid)
+    assert len(fetcher.fetched) == 5
+    assert sum(r.detail == "unknown_host_cap" for r in store.urls[cid].values()) == 4
+
+    other = await campaign(campaigns)
+    good = [f"https://agencia-buena.es/inmueble/venta-{7100000 + n}" for n in range(9)]
+    fetcher2 = FakeFetcher()  # every page is a listing
+    await run_until_done(worker(campaigns, store, FakeSearcher(default=good), fetcher2,
+                                ListGenerator(["parcela Pozuelo venta"]), cover_portals=False), other)
+    assert len(fetcher2.fetched) == 9
+
+
+def test_listing_links_skip_the_opposite_deal() -> None:
+    html = ('<main><a href="/alquiler/vivienda/valencia/183456781/d">r</a><a href="/comprar/vivienda/valencia/183456782/d">s</a>'
+            '<a href="/es/alquiler/vivienda/valencia/183456783/d">r2</a></main>')
+    page = parse_html(html, "https://www.fotocasa.es/es/comprar/viviendas/valencia/l")
+    base = "https://www.fotocasa.es/es/comprar/viviendas/valencia/l"
+    sale = listing_links(page, base, limit=10, deal="sale")
+    rent = listing_links(page, base, limit=10, deal="rent")
+    assert all("alquiler" not in u for u in sale)
+    assert all("comprar" not in u for u in rent)
+    from bot.web_search.urls import deal_conflict, path_deal
+    assert path_deal("https://x.es/оренда/квартири/1") == "rent" and path_deal("https://x.ua/prodazha-kvartir/1") == "sale"
+    assert deal_conflict("https://x.es/for-rent/1", "sale") and not deal_conflict("https://x.es/for-rent/1", None)
+    assert not deal_conflict("https://x.es/piso/1", "sale")
+
+
+async def test_a_portal_hit_of_the_opposite_deal_is_not_queued() -> None:
+    sale_url = "https://www.pisos.com/comprar/piso-valencia-12345678/"
+    rent_url = "https://www.pisos.com/alquilar/piso-valencia-12345679/"
+    _, store, cid = await _queued_after_search({sale_url: EVIDENCE, rent_url: EVIDENCE})
+    assert {u.url for u in store.urls[cid].values()} == {sale_url}
+    _, store, cid = await _queued_after_search({sale_url: EVIDENCE, rent_url: EVIDENCE},
+                                               goal_plan="квартира в аренду Мадрид до 900 €")
+    assert {u.url for u in store.urls[cid].values()} == {rent_url}
+
+
+def test_a_query_without_a_property_word_is_dropped_by_localise() -> None:
+    from bot.web_search.queries import localise
+    task = madrid_task()
+    kept = localise([GeneratedQuery("200000 60 m2 Madrid", "es"), GeneratedQuery("hasta 200000 euros Madrid", "es"),
+                     GeneratedQuery("piso en venta Madrid", "es")], task)
+    assert [q.text.split(" España")[0] for q in kept] == ["piso en venta Madrid"]
+
+
+def test_property_word_covers_every_kind_word_and_the_reviewers_list() -> None:
+    from bot.web_search.queries import _KIND_TERMS, _KIND_WORDS
+    from bot.web_search.urls import has_property_word
+    words = [w for ws in _KIND_WORDS.values() for w in ws]
+    terms = [t for kind, langs in _KIND_TERMS.items() if kind != "investors" for ts in langs.values() for t in ts]
+    listed = ["oficina", "garaje", "parking", "aparcamiento", "trastero", "edificio", "hotel", "adosado", "masia",
+              "obra nueva", "inmobiliaria", "bajo comercial", "nave", "local", "solar", "parcela", "finca", "home",
+              "homes", "real estate", "property", "penthouse", "studio", "townhouse", "garage", "office", "warehouse",
+              "гараж", "офис", "офіс", "помещение", "приміщення", "земля", "участок", "ділянка", "жилье", "житло",
+              "пентхаус", "таунхаус", "котедж", "студия", "склад", "нерухомість", "недвижимость"]
+    for word in (*words, *terms, *listed):
+        assert has_property_word(f"busco {word} en Valencia"), word
+    assert not has_property_word("inversores y business angels para startups")
+    assert not has_property_word("calculadora de hipotecas casablanca")
+
+
+def test_serp_evidence_accepts_agency_hits_without_digits_and_rejects_news() -> None:
+    from bot.web_search.urls import listing_evidence
+    assert listing_evidence("Piso en Valencia - Inmobiliaria X", "Luminoso, tres habitaciones, cerca del metro")
+    assert listing_evidence("Pisos en venta | Inmobiliaria Ruzafa", "")
+    assert listing_evidence("Квартира в Валенсии", "Продам квартиру, две комнаты")
+    assert not listing_evidence("El precio de la vivienda en Valencia sube", "Los expertos opinan sobre el mercado")
+    assert not listing_evidence("Busco piso en Valencia", "куплю квартиру, сниму комнату")
+
+
+def test_path_deal_with_both_words_is_ambiguous() -> None:
+    from bot.web_search.urls import path_deal
+    assert path_deal("https://x.es/alquiler-venta/pisos/") is None
+    assert path_deal("https://x.es/for-sale/to-rent/") is None
+    assert path_deal("https://x.es/venta/pisos/") == "sale" and path_deal("https://x.es/alquiler/pisos/") == "rent"
+
+
+async def test_host_has_listing_is_asked_once_per_host_per_step() -> None:
+    from bot.web_search.worker import WebSearchWorker
+    worker = WebSearchWorker.__new__(WebSearchWorker)
+    worker._listing_hosts = {}
+    calls: list[str] = []
+
+    class Store:
+        async def funnel(self, campaign_id: str):
+            calls.append(campaign_id)
+            return [("a.es", 0, 0, 2)]
+    worker.store = Store()  # type: ignore[assignment]
+    assert await worker._host_has_listing("c", "a.es") and await worker._host_has_listing("c", "a.es")
+    assert not await worker._host_has_listing("c", "b.es")
+    assert calls == ["c", "c"]  # one query per host, not per URL

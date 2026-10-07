@@ -43,7 +43,13 @@ import httpx
 from bot.campaign import geo
 
 from .models import QUERY_LANGUAGES, GeneratedQuery
-from .urls import SPAIN_BANK_PORTALS, SPAIN_BANK_WORDS, SPAIN_PORTALS_BY_KIND, UKRAINE_PORTALS
+from .urls import (
+    SPAIN_BANK_PORTALS,
+    SPAIN_BANK_WORDS,
+    SPAIN_PORTALS_BY_KIND,
+    UKRAINE_PORTALS,
+    has_property_word,
+)
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -375,6 +381,10 @@ def localise(queries: list[GeneratedQuery], task: QueryTask) -> list[GeneratedQu
     for query in queries:
         text = clean_query(query.text)
         if text is None:
+            continue
+        if task.vertical == "real_estate" and not has_property_word(text):
+            # «200000 60 m2 Valencia» finds calculators and dictionaries: a query names the property too
+            log.info("web_search.query_dropped", extra={"reason": "no_property_word", "query": text[:120]})
             continue
         needed = latin if task.spanish and _cyrillic(query) else names
         if not geo.mentions_place(text, needed, strict=city):

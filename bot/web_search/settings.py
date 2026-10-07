@@ -52,6 +52,8 @@ class WebSearchSettings(BaseSettings):
     index_ttl_days: int = Field(default=7, ge=0, le=365, validation_alias="WEB_SEARCH_INDEX_TTL_DAYS")
     max_pages_per_campaign: int = Field(default=400, ge=1, le=500, validation_alias="WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN")
     max_pages_per_host: int = Field(default=100, ge=1, le=100, validation_alias="WEB_SEARCH_MAX_PAGES_PER_HOST")
+    # Pages per campaign for a host that is no known portal, until it produced a listing post.
+    max_pages_per_unknown_host: int = Field(default=5, ge=1, le=100, validation_alias="WEB_SEARCH_MAX_PAGES_PER_UNKNOWN_HOST")
     max_links_per_index: int = Field(default=40, ge=0, le=100, validation_alias="WEB_SEARCH_MAX_LINKS_PER_INDEX")
     max_pages_per_day: int = Field(default=3000, ge=1, le=10_000, validation_alias="WEB_SEARCH_MAX_PAGES_PER_DAY")
     max_queries_per_day: int = Field(default=300, ge=1, le=5_000, validation_alias="WEB_SEARCH_MAX_QUERIES_PER_DAY")
@@ -103,7 +105,8 @@ class WebSearchSettings(BaseSettings):
             queries_per_round=self.queries_per_round, max_queries_per_campaign=self.max_queries_per_campaign,
             results_per_query=self.results_per_query, pages_per_query=self.pages_per_query,
             query_reuse_hours=self.query_reuse_hours, index_ttl_days=self.index_ttl_days, max_pages_per_campaign=self.max_pages_per_campaign,
-            max_pages_per_host=self.max_pages_per_host, max_links_per_index=self.max_links_per_index,
+            max_pages_per_host=self.max_pages_per_host,
+            max_pages_per_unknown_host=self.max_pages_per_unknown_host, max_links_per_index=self.max_links_per_index,
             max_pages_per_day=self.max_pages_per_day, max_queries_per_day=self.max_queries_per_day,
             max_minutes_per_campaign=self.max_minutes_per_campaign, blocked_hosts=self.blocked_hosts(),
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),

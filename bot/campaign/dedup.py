@@ -19,6 +19,19 @@ The policy is deliberately conservative: two cards are better than one wrong mer
   area with the floor unknown on both): one portal does not list a flat twice;
 * the titles alone merge only with at least 6 words each, Jaccard >= 0.8 and price and area both matching.
 
+The listing body (not only the structured fields) is compared too, because Facebook posts rarely carry an address;
+the text rules run after the negative rules above (a price, area, rooms, floor, deal or currency conflict still
+wins) and work across platforms (group A vs group B, Facebook vs a portal):
+
+* text Jaccard (5-word shingles) >= 0.80, both texts at least 15 words: the same object;
+* the same phone number and the price within 2 %, plus the area known on both sides (within 3 %) or the same rooms
+  (both known) with text Jaccard >= 0.60: the same object (an agent's phone is on all his ads);
+* the small numbers of the two texts (floor, door, m2, rooms, «primera» / «tercera» ...) must be the same list, else
+  no text rule applies; two addresses without a common street never merge, by any rule;
+* text Jaccard >= 0.60, the price within 2 % and the same rooms (both known): the same object.
+
+Two ads of one portal are not merged by text (only Facebook, where one flat is posted in many groups, is).
+
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
 are both unknown. ``same_object`` is the arbiter.
@@ -41,7 +54,21 @@ AREA_TOLERANCE = 0.03
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
 
+TEXT_LIMIT = 1500  # characters of the post body that are fingerprinted (heads keep only this excerpt)
+SHINGLE_WORDS = 5
+TEXT_SAME = 0.80
+TEXT_SAME_MIN_WORDS = 15
+TEXT_PRICE_JACCARD = 0.60
+MIN_PHONE_DIGITS = 9
+
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
+_URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+_HASHTAG = re.compile(r"[#@]\w+", re.UNICODE)
+_PHONE = re.compile(r"(?<![\w.,])\+?\d{2,}(?:[ .-]\d{2,}){0,6}(?![\w])")
+_PRICE_TEXT = re.compile(
+    r"(?:(?P<a>\d{1,3}(?:[ .,\u00a0]\d{3})+|\d{4,9})\s*(?:€|eur\b|euros?\b|\$|usd\b|грн|₴)"
+    r"|(?:€|\$)\s*(?P<b>\d{1,3}(?:[ .,\u00a0]\d{3})+|\d{4,9}))", re.IGNORECASE)
+_SOCIAL_HOSTS = frozenset({"facebook.com", "web.facebook.com", "fb.com", "fb.watch", "instagram.com"})
 _STOP = frozenset({
     "calle", "carrer", "avenida", "avda", "plaza", "paseo", "camino", "barrio", "zona", "centro", "street", "road",
     "avenue", "square", "district", "de", "del", "la", "las", "los", "el", "en", "con", "para", "por", "and", "the",
@@ -67,6 +94,10 @@ class Listing:
     floor: int | None = None
     address: str = ""
     district: str = ""
+    shingles: frozenset[str] = frozenset()  # 5-word shingles of the body, computed once (``fingerprint``)
+    words: int = 0
+    phones: frozenset[str] = frozenset()
+    numbers: tuple[int, ...] = ()  # the small numbers of the body (floor, door, m2, rooms ...), sorted
 
 
 def _positive(value: object) -> float | None:
@@ -75,9 +106,17 @@ def _positive(value: object) -> float | None:
     return None
 
 
-def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: str = "") -> Listing:
-    """The comparison fields of a stored finding payload."""
+def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: str = "",
+               body: str = "") -> Listing:
+    """The comparison fields of a stored finding payload; ``body`` is the post text (``collected_posts.body_text``;
+    its first ``TEXT_LIMIT`` characters are fingerprinted). Both sides of a comparison use the post body only: the
+    card / summary ``text`` is never a stand-in (it would be another text source on one side), it only titles."""
     payload = payload or {}
+    excerpt = (body or "")[:TEXT_LIMIT]
+    shingles, words = fingerprint(excerpt)
+    price = _positive(payload.get("price_amount"))
+    if price is None:
+        price = main_price(excerpt)
     rooms = payload.get("rooms")
     place = " ".join(str(payload[k]) for k in ("location", "address", "district") if isinstance(payload.get(k), str))
     floor = payload.get("floor")
@@ -85,7 +124,7 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
     currency = payload.get("price_currency")
     deal = payload.get("deal_type")
     return Listing(
-        price=_positive(payload.get("price_amount")),
+        price=price,
         currency=currency.strip().upper() if isinstance(currency, str) and currency.strip() else None,
         area=_positive(payload.get("area_m2")),
         rooms=int(rooms) if isinstance(rooms, int | float) and not isinstance(rooms, bool) and rooms > 0 else None,
@@ -96,11 +135,96 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         floor=int(floor) if isinstance(floor, int | float) and not isinstance(floor, bool) else None,
         address=str(payload["address"]).strip() if isinstance(payload.get("address"), str) else "",
         district=str(payload["district"]).strip() if isinstance(payload.get("district"), str) else "",
+        shingles=shingles,
+        words=words,
+        phones=phones_of(excerpt),
+        numbers=numbers_of(excerpt),
     )
 
 
 def _fold(text: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", text.lower()) if not unicodedata.combining(c))
+
+
+def _clean_words(text: str) -> list[str]:
+    """Casefolded, accent-free words of a post: URLs, hashtags, emojis and punctuation gone, digits kept."""
+    text = _HASHTAG.sub(" ", _URL.sub(" ", text or ""))
+    return _WORD.findall(_fold(text.casefold()))
+
+
+def fingerprint(text: str) -> tuple[frozenset[str], int]:
+    """(5-word shingles, word count) of a listing body; a text shorter than 5 words is one shingle."""
+    words = _clean_words(text)
+    if not words:
+        return frozenset(), 0
+    if len(words) < SHINGLE_WORDS:
+        return frozenset({" ".join(words)}), len(words)
+    return frozenset(" ".join(words[i:i + SHINGLE_WORDS]) for i in range(len(words) - SHINGLE_WORDS + 1)), len(words)
+
+
+def shingle_similarity(a: frozenset[str], b: frozenset[str]) -> float:
+    """Jaccard of two shingle sets (0.0 when either is empty)."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def text_similarity(a: str, b: str) -> float:
+    """Jaccard similarity of the 5-word shingles of two listing texts."""
+    return shingle_similarity(fingerprint(a)[0], fingerprint(b)[0])
+
+
+def phones_of(text: str) -> frozenset[str]:
+    """Phone numbers in a text as normalised digits (the last 9 digits, so +34 / 0034 / none agree); >= 9 digits only."""
+    out = set()
+    for found in _PHONE.findall(_URL.sub(" ", text or "")):
+        digits = re.sub(r"\D", "", found)
+        if len(digits) >= MIN_PHONE_DIGITS and len(digits) <= 15:
+            out.add(digits[-MIN_PHONE_DIGITS:])
+    return frozenset(out)
+
+
+def main_price(text: str) -> float | None:
+    """The amount of a text written with a currency sign / code («199.000 €», «€ 199 000»), or None.
+
+    Only when the text states exactly one such amount (the same amount repeated is still one): a post with two
+    prices («1200 € + 3000 € deposit») has no single price to compare on.
+    """
+    values = set()
+    for found in _PRICE_TEXT.finditer(text or ""):
+        digits = re.sub(r"\D", "", found.group("a") or found.group("b") or "")
+        if digits and (value := _positive(float(digits))) and value >= 1000:
+            values.add(value)
+    return next(iter(values)) if len(values) == 1 else None
+
+
+_NUMBER_WORDS = {
+    "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
+    "primero": 1, "primera": 1, "primer": 1, "segundo": 2, "segunda": 2, "tercero": 3, "tercera": 3, "tercer": 3,
+    "cuarto": 4, "cuarta": 4, "quinto": 5, "quinta": 5, "sexto": 6, "sexta": 6, "septimo": 7, "septima": 7,
+    "octavo": 8, "octava": 8, "noveno": 9, "novena": 9, "decimo": 10, "decima": 10,
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6,
+    "две": 2, "два": 2, "три": 3, "четыре": 4, "пять": 5, "дві": 2, "чотири": 4,
+    "первый": 1, "второй": 2, "третий": 3, "четвертый": 4, "пятый": 5,
+    "перший": 1, "другий": 2, "третій": 3, "четвертий": 4,
+}
+_BIG_GROUPED = re.compile(r"\d{1,3}(?:[.,\u00a0 ]\d{3})+")
+_AREA_UNIT = re.compile(r"\bm\s?[2\u00b2]|\bм\s?[2\u00b2]", re.IGNORECASE)
+_SMALL_NUMBER = re.compile(r"(?<![\d])\d{1,3}(?![\d])")
+
+
+def numbers_of(text: str) -> tuple[int, ...]:
+    """The sorted small numbers (1-999) of a post, number / ordinal words included («Planta tercera» -> 3), without
+    phones, prices and URLs: the identifying details (floor, door, m2, rooms) that two ads of one flat share."""
+    text = _HASHTAG.sub(" ", _URL.sub(" ", text or ""))
+    text = _PRICE_TEXT.sub(" ", text)
+    text = _PHONE.sub(lambda m: " " if len(re.sub(r"\D", "", m.group(0))) >= MIN_PHONE_DIGITS else m.group(0), text)
+    text = _BIG_GROUPED.sub(" ", text)
+    text = _AREA_UNIT.sub(" m ", text)
+    found = [int(n) for n in _SMALL_NUMBER.findall(text) if int(n) > 0]
+    found += [_NUMBER_WORDS[w] for w in _WORD.findall(_fold(text.casefold())) if w in _NUMBER_WORDS]
+    return tuple(sorted(found))
 
 
 @lru_cache(maxsize=4096)
@@ -172,18 +296,16 @@ def same_object(a: Listing, b: Listing) -> bool:
     area = _close(a.area, b.area, AREA_TOLERANCE)
     if price is False or area is False:
         return False
+    street_a, street_b = tokens(a.address), tokens(b.address)
+    both_addressed = bool(a.address.strip() and b.address.strip())
+    if both_addressed and not (street_a & street_b):
+        return False  # a district alone does not identify a flat: the street must be shared (every rule, text included)
+    if _same_text(a, b, price, area):
+        return True
     if price is None and area is None:
         return False
     place_a, place_b = tokens(a.location), tokens(b.location)
-    street_a, street_b = tokens(a.address), tokens(b.address)
-    both_addressed = bool(a.address.strip() and b.address.strip())
-    if both_addressed:
-        # A district alone does not identify a flat: the street must be shared (and the house number, when both state one).
-        if not (street_a & street_b):
-            return False
-        shared_place = True
-    else:
-        shared_place = bool(place_a & place_b)
+    shared_place = True if both_addressed else bool(place_a & place_b)
     full = price is not None and area is not None
     host_a, host_b = _host(a.url), _host(b.url)
     if host_a and host_a == host_b and a.url != b.url:
@@ -201,6 +323,24 @@ def same_object(a: Listing, b: Listing) -> bool:
     if price is None or area is None:  # one dimension unconfirmed: the rest must agree explicitly
         return bool(a.rooms and b.rooms and shared_place)
     return True
+
+
+def _same_text(a: Listing, b: Listing, price: bool | None, area: bool | None) -> bool:
+    """The body-text rules (see the module notes); every negative rule has already passed, and the texts' own
+    identifying numbers (floor, door, m2, rooms ...) must agree too."""
+    host_a, host_b = _host(a.url), _host(b.url)
+    if host_a and host_a == host_b and a.url != b.url and host_a not in _SOCIAL_HOSTS:
+        return False  # one portal does not list a flat twice; a template ad of an agency is not a duplicate
+    if a.numbers != b.numbers:
+        return False  # «Planta primera» vs «Planta tercera», other door, other m2: a template, not one flat
+    similarity = shingle_similarity(a.shingles, b.shingles)
+    if similarity >= TEXT_SAME and a.words >= TEXT_SAME_MIN_WORDS and b.words >= TEXT_SAME_MIN_WORDS:
+        return True
+    if price is not True:
+        return False
+    if a.phones & b.phones and (area is True or (a.rooms and a.rooms == b.rooms and similarity >= TEXT_PRICE_JACCARD)):
+        return True
+    return similarity >= TEXT_PRICE_JACCARD and bool(a.rooms and a.rooms == b.rooms)
 
 
 def site_of(url: str | None) -> str:

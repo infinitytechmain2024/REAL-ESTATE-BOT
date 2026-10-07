@@ -17,13 +17,14 @@ import json
 import logging
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
 
 from bot.agents.llm import LLMError, OpenRouterJSON
+from bot.web_search.urls import PORTALS, SPAIN_BANK_PORTALS, SPAIN_PORTALS_BY_KIND, UKRAINE_PORTALS
 
 from .runs import OutcomeCount, SentFinding, SourceCount
 from .summary import Site, plural, site_lines, site_name, site_stats
@@ -51,6 +52,16 @@ REASONS: dict[str, str] = {
     "ai": "не подходит по смыслу",
 }
 _CYRILLIC = re.compile(r"[а-яёіїєґ]", re.IGNORECASE)
+# A recommendation never asks the person to change what they asked for: the deal, the kind of property, the city or country.
+_FORBIDDEN_ADVICE = re.compile(
+    r"сделк|аренд|покупк|продаж|тип\w*\s+(?:объект|недвижим|сделк)|вид\w*\s+(?:объект|недвижим)"
+    r"|друг\w+\s+(?:город|стран)|смен\w+\s+(?:город|стран)|в\s+друг\w+\s+(?:город|стран)", re.IGNORECASE)
+_DIGIT = re.compile(r"\d")
+MIN_RECOMMENDATIONS = 2
+DEAL_NOTE_MIN = 10  # rejected for the deal type: from this many the report explains where they came from
+# Sites that are real-estate sources whatever they gave: the portals the search targets (``bot.web_search.urls``).
+KNOWN_PORTALS = frozenset(PORTALS) | frozenset(SPAIN_BANK_PORTALS) | frozenset(UKRAINE_PORTALS) | frozenset(
+    host for hosts in SPAIN_PORTALS_BY_KIND.values() for host in hosts)
 
 
 # --- the numbers ---------------------------------------------------------------------------------------------------
@@ -218,6 +229,28 @@ def unreadable_line(site: Site) -> str:
     return f"{name} — сайт не пускает ботов (отказ 403 или защита), ни одна страница не открылась"
 
 
+def _known(host: str, portals: Sequence[str] = ()) -> bool:
+    return any(host == p or host.endswith("." + p) for p in (*KNOWN_PORTALS, *portals))
+
+
+def real_estate_sources(sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = ()
+                        ) -> tuple[list[SourceCount], list[object], int]:
+    """The user's view of the sites: only known portals and hosts that gave at least one listing post or finding.
+
+    Returns the sources and reports of those sites and how many other sites the search touched (dictionaries,
+    calculators, wikis ...). The owners' summary keeps the raw list.
+    """
+    stats = site_stats(sources, reports, portals)
+    keep = {host for host, s in stats.items() if _known(host, portals) or s.posts or s.sent or s.held}
+
+    def key(host: str) -> str:
+        return next((p for p in portals if host == p or host.endswith("." + p)), host)
+
+    kept_sources = [s for s in sources if s.platform != "website" or key(s.name) in keep]
+    kept_reports = [r for r in reports if key(str(getattr(r, "host", ""))) in keep]
+    return kept_sources, kept_reports, len(stats) - len(keep)
+
+
 # --- recommendations -----------------------------------------------------------------------------------------------------
 
 
@@ -239,7 +272,12 @@ def facts_for_model(task: dict[str, Any], counts: Tally, sites: Sequence[Site], 
 
 
 def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
-    """A few rule-based recommendations from the same numbers (no model, or the model failed)."""
+    """A few rule-based recommendations from the same numbers (no model, or the model failed).
+
+    Only the allowed levers: budget, area, rooms, neighbouring districts, more sources / API, timing. Each cites its
+    number. Rejections for the deal type, the kind of property or the country never become advice (the person cannot
+    change those); a large deal-type count becomes one explanation instead.
+    """
     counts, by_reason = facts.get("counts", {}), facts.get("rejected_by_reason", {})
     sent = counts.get("sent_exact", 0) + counts.get("sent_after_approval", 0)
     tips: list[str] = []
@@ -247,24 +285,57 @@ def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
         tips.append(f"Часть вариантов отклонена из-за цены ({by_reason['budget']}): поднимите бюджет на 10 %, "
                     "и их станет больше.")
     if by_reason.get("place", 0) >= 3:
-        tips.append("Много вариантов из другого района или города: добавьте соседние районы или пригороды в запрос.")
-    for host in facts.get("unreadable_sites", [])[:2]:
-        tips.append(f"{site_name(host)} не читается: сайт не пускает ботов. Включите чтение через API, "
-                    "чтобы получать его объявления целиком.")
-    if counts.get("held_similar", 0) + counts.get("held_other", 0) and sent < 5:
-        tips.append("Есть похожие варианты, которые ждут вашего решения: откройте их, если точных мало.")
+        tips.append(f"{by_reason['place']} вариантов оказались вне нужного района: добавьте соседние районы или "
+                    "пригороды в запрос.")
+    if by_reason.get("rooms", 0) >= 2 and sent < 10:
+        tips.append(f"{by_reason['rooms']} вариантов отклонены из-за числа комнат: допустите на одну комнату меньше.")
+    if by_reason.get("area", 0) >= 2 and sent < 10:
+        tips.append(f"{by_reason['area']} вариантов отклонены из-за площади: уменьшите минимальную площадь на 10 %.")
+    unreadable = facts.get("unreadable_sites", [])
+    refused = {s.get("site"): s.get("refused", 0) for s in facts.get("sites", []) if isinstance(s, dict)}
+    for host in unreadable[:2]:
+        tips.append(f"{site_name(host)} не читается (отказов: {refused.get(host) or 1}): сайт не пускает ботов. "
+                    "Включите чтение через API или прокси, чтобы получать его объявления целиком.")
+    held = counts.get("held_similar", 0) + counts.get("held_other", 0)
+    if held and sent < 5:
+        tips.append(f"Есть похожие варианты ({held}), которые ждут вашего решения: откройте их, если точных мало.")
     if sent == 0 and not tips:
-        tips.append("Точных вариантов не нашлось: ослабьте самое жёсткое условие (бюджет, площадь или район) и "
+        tips.append("Точных вариантов: 0 — ослабьте самое жёсткое условие (бюджет, площадь или район) и "
                     "запустите поиск снова.")
+    if sent < 3 and len(tips) < MIN_RECOMMENDATIONS:
+        tips.append("Новые объявления появляются каждый день: повторите поиск через 2-3 дня.")
+    deal, wrong = (facts.get("task") or {}).get("deal"), by_reason.get("deal", 0)
+    if wrong >= DEAL_NOTE_MIN and deal in ("sale", "rent"):
+        other = "аренды" if deal == "sale" else "продажи"
+        tips = tips[:MAX_RECOMMENDATIONS - 1]
+        tips.append(f"{wrong} объявлений {other} попали в выдачу сайтов — они отсеяны автоматически и не мешают "
+                    "результату.")
     return tips[:MAX_RECOMMENDATIONS]
+
+
+def clean_recommendations(items: Sequence[str], facts: dict[str, Any]) -> list[str]:
+    """The model's recommendations without those that ask to change the deal, the kind of property or the city, and
+    without those that cite no number; topped up from the rules to at least two when fewer are left."""
+    kept = [t for t in items if not _FORBIDDEN_ADVICE.search(t) and _DIGIT.search(t)][:MAX_RECOMMENDATIONS]
+    if len(kept) < MIN_RECOMMENDATIONS:
+        have = {t.casefold() for t in kept}
+        for tip in fallback_recommendations(facts):
+            if tip.casefold() not in have and len(kept) < MIN_RECOMMENDATIONS:
+                kept.append(tip)
+    return kept
 
 
 SYSTEM = """You advise a person who has just received the results of an automated real-estate search.
 You get only aggregated numbers as JSON (the task's own criteria, how many variants were sent, held and rejected and
 why, what each site gave, which sites could not be read). Write 2 to 4 short, concrete recommendations in Russian for
-the next search, each tied to a number you were given, for example: raise the budget by 10 % when many were rejected
-for price; add a neighbouring district when many were rejected for place; a site that could not be read needs the
-API reading switched on (name the site); relax the one criterion that rejected the most.
+the next search, each citing a number you were given (write the number in the sentence), for example: raise the budget
+by 10 % when many were rejected for price; relax the area or the rooms when many were rejected for them; add a
+neighbouring district when many were rejected for place; a site that could not be read needs the API or a proxy
+switched on (name the site); search again in a few days when little was found.
+Allowed levers only: budget, area, rooms, neighbouring districts, more sources, proxy or the Idealista API, timing.
+NEVER advise changing the deal type (buy / rent), the kind of property, or the city or country: the person cannot
+change those, so do not mention rejections for them in the advice at all; never use the words deal, rent, purchase,
+property type, another city.
 Rules: use only the given numbers; never invent listings, prices, districts or sites that are not in the input;
 no greetings, no apologies; one sentence each, at most 220 characters; do not mention models, prompts or JSON.
 Answer with exactly one JSON object {"recommendations": ["...", "..."]}. No markdown."""
@@ -342,7 +413,7 @@ def task_facts(request: Request) -> dict[str, Any]:
 
 
 def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequence[str], unreadable: Sequence[Site],
-                recommendations: Sequence[str]) -> str:
+                recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None) -> str:
     """The Russian report (see the module notes), fitted to one Telegram message."""
     head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
     if counts.total == 0:
@@ -353,6 +424,8 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
         if counts.held:
             extra = f", не удалось подтвердить: {counts.held_unverified}" if counts.held_unverified else ""
             summary.append(f"Похожие, не показаны: {counts.held} (чуть не подошли{extra})")
+            if similar_note and counts.sent == 0:
+                summary.append(similar_note)
         if counts.rejected:
             summary.append(f"Отклонено: {counts.rejected}")
         if counts.duplicates:
@@ -372,11 +445,25 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
         best = ([f"Лучшие варианты ({shown_top}):"] + [card_line(i, r.card) for i, r in enumerate(top[:shown_top], 1)]
                 if shown_top else [])
         by_site = ["По источникам:"] + [f"• {line}" for line in funnel[:shown_funnel]] if shown_funnel else []
+        if by_site and other_sites:
+            by_site.append(f"Прочие сайты из поиска: {other_sites} (не относятся к недвижимости или без объявлений)")
         parts = [part for part in (summary, reasons, best, broken, by_site, advice) if part]
         text = head + "\n\n".join("\n".join(part) for part in parts)
         if len(text) <= MAX_REPORT_CHARS:
             return text
     return text[:MAX_REPORT_CHARS].rstrip()
+
+
+def similar_note(counts: Tally, offers: Mapping[str, str | None] | None) -> str | None:
+    """One line under «Отправлено вам: 0» + «Похожие, не показаны»: where the held variants can be had."""
+    if offers is None or counts.sent or not counts.held:
+        return None
+    states = [offers.get("similar") if counts.held_similar else None, offers.get("other") if counts.held_other else None]
+    if "asked" in states:
+        return "Похожие можно открыть кнопкой «Одобрить» выше"
+    if any(st == "declined" for st in states):
+        return None
+    return "Отправлю похожие, если подтвердите"
 
 
 class FinalReporter:
@@ -392,21 +479,25 @@ class FinalReporter:
 
     async def build(self, goal: str, request: Request, outcomes: Sequence[OutcomeCount], sent: Sequence[SentFinding],
                     sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = (),
-                    tolerance_pct: float | None = None) -> str:
+                    tolerance_pct: float | None = None, offers: Mapping[str, str | None] | None = None) -> str:
+        """``offers``: the state of each bucket's question (``offer_state``: None, asked, approved, declined); with it
+        a report that sent nothing but holds similar variants says how to get them."""
         counts = tally(outcomes)
+        sources, reports, other_sites = real_estate_sources(sources, reports, portals)
         stats = site_stats(sources, reports, portals)
         unreadable = unreadable_sites(sources, reports, portals)
         funnel, _nothing = site_lines(sources, reports, portals)
         facts = facts_for_model(task_facts(request), counts, sorted(
             stats.values(), key=lambda s: (-s.sent, -s.links, s.host)), unreadable, tolerance_pct)
-        return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, await self._advice(facts, counts))
+        return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, await self._advice(facts, counts),
+                           other_sites, similar_note(counts, offers))
 
     async def _advice(self, facts: dict[str, Any], counts: Tally) -> list[str]:
         if self.recommender is not None and counts.total + len(facts["unreadable_sites"]) > 0:
             try:
-                advice = await self.recommender.recommend(facts)
+                advice = clean_recommendations(await self.recommender.recommend(facts), facts)
                 if advice:
-                    return advice[:MAX_RECOMMENDATIONS]
+                    return advice
             except (LLMError, ValueError, httpx.HTTPError) as exc:
                 log.warning("campaign.final_report_advice_failed %s", getattr(exc, "code", type(exc).__name__))
             except Exception:  # noqa: BLE001 - the report never waits on the model
