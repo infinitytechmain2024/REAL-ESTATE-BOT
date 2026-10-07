@@ -215,7 +215,7 @@ async def test_madrid_plots_end_to_end_and_the_area_question() -> None:
     assert {f: b for f, (b, _) in store.buckets.items()} == {
         "p2500": "exact", "p1900": "exact", "p1600": "similar", "p1400": "excluded", "catalog": "excluded",
         "wanted": "excluded"}
-    assert len(messenger.findings()) == 2 and messenger.asks == []  # exact ones found: no question yet
+    assert len(messenger.findings()) == 2 and len(messenger.asks) == 1  # the similar one is asked at once, during the search
     assert len(judge.calls) == 3  # excluded ones never go to the model
 
 

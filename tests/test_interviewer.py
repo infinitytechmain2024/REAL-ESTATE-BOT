@@ -170,18 +170,42 @@ def test_the_planner_takes_its_constraints_from_the_spec_not_from_the_text() -> 
 # --- the intake with a scripted model --------------------------------------------------------------
 
 
+def ask_with(question: str, asking: str, spec: dict[str, Any], options: list[str], understood: str = "") -> dict[str, Any]:
+    return {**ask(question, asking, spec, understood), "options": options}
+
+
+FLOOR_Q = "Какой этаж и нужен ли лифт? Например: «не ниже 3 этажа, лифт обязателен», «любой»."
+DEVIATION_Q = "Если точных вариантов не будет, что допустимо? Например: бюджет до +10 % (до 1320 €), соседние районы."
+DEVIATION_OPTIONS = ["бюджет до +10 % (до 1320 €)", "соседние районы: Чамартин", "нет, только точные"]
+
+
 @pytest.mark.asyncio
-async def test_a_task_that_says_everything_asks_nothing_and_shows_the_card() -> None:
-    fake = FakeInterviewer(finish(EVERYTHING, "Квартира в аренду в Мадриде, до 1200 €, от 2 комнат"))
+async def test_a_task_that_says_everything_is_still_asked_task_questions_and_the_deviation_before_the_card() -> None:
+    fake = FakeInterviewer(
+        ask(FLOOR_Q, "context.answers", EVERYTHING, "Квартира в аренду в Мадриде, до 1200 €, от 2 комнат"),
+        ask_with(DEVIATION_Q, "deviations", {"context": {"answers": [{"question": FLOOR_Q, "answer": "не ниже 3 этажа"}]}},
+                 DEVIATION_OPTIONS, "Не ниже 3 этажа"),
+        finish({"deviations": {"budget_pct": 10, "nearby_areas": ["Чамартин"], "asked": True}}, "Допустимо: бюджет +10 %"),
+    )
     control, sink = (await _mode(fake))
-    card = await say(control, USER, "снять квартиру от двух комнат в Мадриде рядом с метро, лифт обязательно, до 1200 евро")
-    assert len(fake.calls) == 1 and card.keyboard == TASK_KEYBOARD and not card.buttons
+    first = await say(control, USER, "снять квартиру от двух комнат в Мадриде рядом с метро, лифт обязательно, до 1200 евро")
+    assert first.text.endswith(FLOOR_Q) and first.keyboard == DRAFT_KEYBOARD and "Проверьте" not in first.text
+    assert fake.calls[0]["dialogue"] == [] and fake.calls[0]["asking"] is None and fake.calls[0]["editing"] is False
+    second = await say(control, USER, "не ниже 3 этажа")
+    assert second.text.endswith(DEVIATION_Q) and fake.calls[1]["asking"] == "context.answers"
+    # The model's options are inline buttons (up to 4) next to the usual ones; free text stays possible.
+    assert callbacks(second) == ["task:opt:0", "task:opt:1", "task:opt:2", "task:skip", "task:enough", "task:cancel"]
+    assert [b.text for b in second.buttons[:3]] == DEVIATION_OPTIONS
+    card = await press(control, USER, "task:opt:0")
+    assert fake.calls[2]["message"] == DEVIATION_OPTIONS[0] and fake.calls[2]["asking"] == "deviations"
+    assert card.keyboard == TASK_KEYBOARD and not card.buttons
     assert card.text.startswith("Проверьте задачу:\nРежим: 🏡 Участки и объекты\nГород: Мадрид\n")
     for line in ("Сделка: аренда", "Тип: квартира", "Бюджет: до 1200 €", "Комнаты: от 2", "Обязательно: лифт",
-                 "Пожелания: рядом с метро (очень важно)"):
+                 "Пожелания: рядом с метро (очень важно)",
+                 "Допустимые отступления: бюджет ±10 %; соседние районы: Чамартин",
+                 "• Какой этаж и нужен ли лифт? — не ниже 3 этажа"):
         assert line in card.text, line
-    assert "?" not in card.text.replace("Всё верно?", "")
-    assert fake.calls[0]["dialogue"] == [] and fake.calls[0]["asking"] is None and fake.calls[0]["editing"] is False
+    assert "?" not in card.text.replace("Всё верно?", "").replace("Какой этаж и нужен ли лифт?", "")
     assert sink.envelopes == []
     # Launch: the requirements travel with the queued command and land on the campaign.
     await press(control, USER, "task:launch")
@@ -189,6 +213,8 @@ async def test_a_task_that_says_everything_asks_nothing_and_shows_the_card() -> 
     assert envelope.arguments.startswith("mode=real_estate city=Madrid spec=")
     spec = TaskSpec.model_validate(parse_campaign_spec(envelope.arguments))
     assert spec.rooms.min == 2 and spec.must_have == ["лифт"] and spec.place.names["ru"] == "Мадрид"
+    assert spec.deviations.budget_pct == 10 and spec.deviations.nearby_areas == ["Чамартин"] and spec.deviations.asked
+    assert [(a.question, a.answer) for a in spec.context.answers] == [(FLOOR_Q, "не ниже 3 этажа")]
     assert parse_campaign_goal(envelope.arguments)[:3] == (
         "аренда до 1200 € Тип: квартира. Задача: снять квартиру от двух комнат в Мадриде рядом с метро, "
         "лифт обязательно, до 1200 евро Главное: лифт. Дополнительно: рядом с метро.", "real_estate", "Madrid")
@@ -211,19 +237,23 @@ async def test_only_a_city_is_followed_by_questions_in_order_until_done() -> Non
         ask("Что ищете? Например: квартира, дом, участок.", "property_type", {"deal": "rent"}, "Аренда"),
         ask("Какой бюджет? Например: до 1200 €, 800–1000 €.", "budget.max", {"property_type": "apartment"}, "Квартира"),
         ask("Сколько комнат? Например: студия, 2, 2–3.", "rooms.min", {"budget": {"max": 1200}}, "До 1200 €"),
-        finish({"rooms": {"min": 2}}, "От 2 комнат"),
+        finish({"rooms": {"min": 2}}, "От 2 комнат"),  # done, but the deviation question is still asked
+        finish({"deviations": {"asked": True}}),
     )
     control, _ = await _mode(fake)
-    replies = [await say(control, USER, text) for text in ("Мадрид", "аренда", "квартира", "до 1200", "две")]
+    replies = [await say(control, USER, text) for text in ("Мадрид", "аренда", "квартира", "до 1200", "две", "только точные")]
     assert [r.text.split("\n\n")[-1] for r in replies[:4]] == [
         "Аренда или покупка? Например: аренда, покупка.", "Что ищете? Например: квартира, дом, участок.",
         "Какой бюджет? Например: до 1200 €, 800–1000 €.", "Сколько комнат? Например: студия, 2, 2–3."]
     assert replies[0].text.startswith("Понял: Мадрид\n\n") and replies[3].text.startswith("Понял: До 1200 €\n\n")
     assert all(callbacks(r)[-3:] == ["task:skip", "task:enough", "task:cancel"] for r in replies[:4])
-    assert replies[4].text.startswith("Проверьте задачу:") and replies[4].keyboard == TASK_KEYBOARD
-    assert "Комнаты: от 2" in replies[4].text and "Бюджет: до 1200 €" in replies[4].text
+    assert "Если точных вариантов не найду" in replies[4].text and callbacks(replies[4])[:3] == [
+        "task:dev:10", "task:dev:20", "task:dev:0"]  # the code never lets the card appear before the deviation question
+    assert replies[5].text.startswith("Проверьте задачу:") and replies[5].keyboard == TASK_KEYBOARD
+    assert "Комнаты: от 2" in replies[5].text and "Бюджет: до 1200 €" in replies[5].text
+    assert "Допустимые отступления: нет, только точные" not in replies[5].text  # the model set asked without a value
     # The model saw what it asked: the asked field, the growing spec and the dialogue (user and assistant turns).
-    assert [c["asking"] for c in fake.calls] == [None, "deal", "property_type", "budget.max", "rooms.min"]
+    assert [c["asking"] for c in fake.calls] == [None, "deal", "property_type", "budget.max", "rooms.min", "deviations"]
     assert fake.calls[2]["spec"].deal == "rent" and fake.calls[2]["spec"].place.name == "Madrid"
     assert [t["role"] for t in fake.calls[4]["dialogue"]] == ["user", "assistant"] * 4
     assert fake.calls[4]["dialogue"][-1] == {"role": "assistant", "text": "Сколько комнат? Например: студия, 2, 2–3."}
@@ -246,6 +276,8 @@ async def test_not_important_moves_the_asked_field_to_unspecified_and_the_interv
     call = fake.calls[1]
     assert call["message"] == "Не важно" and call["asking"] == "budget.max"
     assert call["spec"].unspecified == ["budget.max"]  # marked by the bot, not by the model
+    deviation = await press(control, USER, "task:skip")  # the model says done: the deviation question comes first
+    assert "Если точных вариантов не найду" in deviation.text
     card = await press(control, USER, "task:skip")
     assert "Бюджет: не важно" in card.text and "Комнаты: не важно" in card.text
     # A typed «не важно» does the same as the button; the place has no such button and cannot be skipped.
@@ -337,10 +369,10 @@ async def test_the_round_cap_forces_the_card() -> None:
     draft = await store.get(USER)
     assert draft is not None and (draft.rounds, draft.step) == (3, "summary")
     assert len(always.calls) == 4
-    # The default is ten.
+    # The default is fourteen.
     settings = ControlPlaneSettings(telegram_token="t", database_url="postgresql://x")
-    assert settings.interview_max_rounds == 10
-    assert ControlPlane(settings, _store(), None, _Sink()).intake.max_rounds == 10
+    assert settings.interview_max_rounds == 14
+    assert ControlPlane(settings, _store(), None, _Sink()).intake.max_rounds == 14
 
 
 def _store():  # type: ignore[no-untyped-def]
@@ -371,7 +403,8 @@ async def test_a_model_failure_hands_the_turn_to_the_ordered_rules(caplog: pytes
     assert rooms.text.startswith("Понял: Малага\n\nСколько комнат")
     # The model is tried on every message: when it is back, it interviews again.
     fake.turns = [finish({"rooms": {"min": 1}})]
-    assert (await say(control, USER, "студия")).text.startswith("Проверьте задачу:")
+    assert "Если точных вариантов" in (await say(control, USER, "студия")).text
+    assert (await say(control, USER, "только точные")).text.startswith("Проверьте задачу:")
 
 
 @pytest.mark.asyncio
@@ -383,9 +416,14 @@ async def test_the_rules_ask_the_same_ordered_fields_one_at_a_time() -> None:
              ("до 2000 €", "Сколько комнат нужно?"), ("3", "Район или вся Валенсия?"), ("Руссафа", "Что обязательно должно быть?")]
     for answer, next_question in steps:
         assert next_question in (await say(control, USER, answer)).text, answer
-    card = await say(control, USER, "бассейн, гараж")
+    assert "На какой срок?" in (await say(control, USER, "бассейн, гараж")).text  # one generic question for a rent
+    deviation = await say(control, USER, "на год")
+    assert "Если точных вариантов не найду" in deviation.text
+    assert callbacks(deviation)[:3] == ["task:dev:10", "task:dev:20", "task:dev:0"]
+    assert [b.text for b in deviation.buttons[:3]] == ["±10 %", "±20 %", "Только точные"]
+    card = await say(control, USER, "±20 %")
     assert card.text.startswith("Проверьте задачу:")
-    for line in ("Город: Валенсия", "Районы: Руссафа", "Тип: дом", "Бюджет: до 2000 €", "Комнаты: от 3",
+    for line in ("Допустимые отступления: бюджет ±20 %; площадь −20 %", "Город: Валенсия", "Районы: Руссафа", "Тип: дом", "Бюджет: до 2000 €", "Комнаты: от 3",
                  "Обязательно: бассейн, гараж"):
         assert line in card.text, line
 
@@ -395,8 +433,10 @@ async def test_the_rules_ask_the_same_ordered_fields_one_at_a_time() -> None:
     for answer, next_question in (("нужны контакты", "В каком городе"), ("Малага", "Кого ищете?"),
                                   ("фонды", "размер вложения"), ("500 тыс - 2 млн €", "Вы ищете деньги")):
         assert next_question in (await say(control, USER, answer)).text, answer
-    card = await say(control, USER, "хочу вкладывать")
+    assert "Какие проекты и стадии" in (await say(control, USER, "хочу вкладывать")).text
+    card = await say(control, USER, "стартапы на ранней стадии")
     assert "Тикет: от 500000 до 2000000 €" in card.text and "Ваша роль: вкладываю деньги" in card.text
+    assert "• Какие проекты и стадии вам интересны?" in card.text and "Допустимые отступления" not in card.text
     # The rules never invent: nothing understood -> the same question again, with a hint.
     control, _, _ = plane()
     await press(control, USER, "mode:real_estate")
@@ -566,7 +606,7 @@ def test_settings_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
     settings = ControlPlaneSettings.from_env()
     assert (settings.interview_model, settings.interview_timeout_seconds, settings.interview_max_rounds) == (
-        "anthropic/claude-sonnet-4.5", 30.0, 10)
+        "anthropic/claude-sonnet-4.5", 30.0, 14)
     monkeypatch.setenv("OPENROUTER_INTERVIEW_MODEL", "anthropic/claude-opus-4.5")
     monkeypatch.setenv("INTERVIEW_MAX_ROUNDS", "6")
     settings = ControlPlaneSettings.from_env()
@@ -657,3 +697,103 @@ async def test_a_corrupted_spec_row_loads_as_a_fresh_draft(caplog: pytest.LogCap
                            spec={"place": {"radius_km": "very far", "name": "Madrid"}, "budget": {"max": [1]}, "wishes": [{"weight": {}}], "must_have": 5, "deal": "rent", "rooms": 3, "sources": "x"})
     assert draft.step == "idle" and draft.spec is None and draft.task == "" and draft.mode == "real_estate"
     assert "draft_spec_corrupt" in caplog.text
+
+
+# --- the three parts: hard fields, a task-specific round, the deviation question --------------------------------------
+
+
+def test_the_prompt_describes_the_three_parts_and_the_examples_per_kind() -> None:
+    from bot.control_plane.interviewer import PROMPT_VERSION
+
+    assert PROMPT_VERSION == "interview-v2"
+    for words in ("THREE PARTS", "TASK-SPECIFIC ROUND", "ONE DEVIATION QUESTION", "Если точных вариантов не будет, что допустимо?",
+                  "buildable classification", "stage of the project", "equity or debt", "language of the listings",
+                  "spec.deviations", "context.answers", "бюджет до +10 % (до 220 000 €)", "нет, только точные"):
+        assert words in SYSTEM or words.replace("бюджет до +10 % (до 220 000 €)", "бюджет до +10 %") in SYSTEM, words
+
+
+def test_deviations_and_context_are_parsed_into_the_spec_and_context_is_appended() -> None:
+    base = TaskSpec(mode="real_estate").merged({"place": MADRID, "context": {"answers": [{"question": "Q1?", "answer": "A1"}]}})
+    turn = parse_turn(json.dumps({
+        "spec": {"deviations": {"budget_pct": "10 %", "area_pct": 15, "nearby_areas": ["Eixample", "Quatre Carreres"],
+                                "other": ["без лифта ок до 2 этажа"], "asked": True},
+                 "context": {"answers": [{"question": "Q2?", "answer": "A2"}]}},
+        "question": None, "done": True}), base)
+    dev = turn.spec.deviations
+    assert (dev.budget_pct, dev.area_pct, dev.nearby_areas, dev.other, dev.asked) == (
+        10, 15, ["Eixample", "Quatre Carreres"], ["без лифта ок до 2 этажа"], True)
+    assert [(a.question, a.answer) for a in turn.spec.context.answers] == [("Q1?", "A1"), ("Q2?", "A2")]  # appended
+    assert turn.spec.summary_ru().count("Допустимые отступления: бюджет ±10 %; площадь −15 %; соседние районы: Eixample") == 1
+    # «Только точные» is asked-with-zeros; a later message never un-asks the question.
+    strict = turn.spec.merged({"deviations": {"budget_pct": 0, "area_pct": 0, "asked": False}})
+    assert strict.deviations.asked and strict.deviations.budget_pct == 0
+    # Out-of-range numbers are dropped; the context is bounded (20 pairs, 400 characters each).
+    junk = TaskSpec().merged({"deviations": {"budget_pct": 400, "rooms_delta": 99}})
+    assert junk.deviations.budget_pct is None and junk.deviations.rooms_delta is None and not junk.deviations.asked
+    many = TaskSpec().merged({"context": {"answers": [{"question": f"Q{n}", "answer": "я" * 900} for n in range(30)]}})
+    assert len(many.context.answers) == 20 and len(many.context.answers[0].answer) == 400
+    # The model's suggested answers: at most four.
+    options = parse_turn(json.dumps({"spec": {}, "question": "Вопрос?", "done": False,
+                                     "options": ["a1", "a2", "a3", "a4", "a5"]}), base)
+    assert options.choices == ("a1", "a2", "a3", "a4")
+
+
+@pytest.mark.asyncio
+async def test_enough_skips_the_task_round_and_the_deviation_question() -> None:
+    fake = FakeInterviewer(ask(FLOOR_Q, "context.answers", EVERYTHING))
+    control, _ = await _mode(fake)
+    first = await say(control, USER, "снять квартиру от двух комнат в Мадриде до 1200 евро")
+    assert "task:enough" in callbacks(first)
+    card = await press(control, USER, "task:enough")  # «Хватит, ищи»: the card at once, nothing more is asked
+    assert card.text.startswith("Проверьте задачу:") and "Допустимые отступления" not in card.text
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_investors_get_investor_questions_and_their_answers_travel_with_the_spec() -> None:
+    stage_q = "На какой стадии проект и какую сумму нужно привлечь? Например: идея, 300 тыс. €."
+    split_q = "Доля или долг, и что получит инвестор? Например: 20 % компании, заём под 8 %."
+    investors = {"place": MADRID, "investor": {"who": ["private", "fund"], "ticket": {"min": 100000, "max": 500000},
+                                              "user_role": "raising", "asset_class": ["real_estate"]}}
+    fake = FakeInterviewer(
+        ask(stage_q, "context.answers", investors, "Ищете инвесторов в Мадриде"),
+        ask(split_q, "context.answers", {}, "Идея, 300 тыс. €"),  # the model forgot the pair: the code keeps it verbatim
+        ask_with("Если подходящих инвесторов не найдётся, что допустимо? Например: соседние страны, другой тикет.",
+                 "deviations", {}, ["тикет вдвое меньше", "нет, только точные"]),
+        finish({"deviations": {"other": ["тикет вдвое меньше"], "asked": True}}),
+    )
+    control, sink = await _mode(fake, "investors")
+    first = await say(control, USER, "ищу инвесторов для апарт-отеля в Мадриде, 100-500 тыс")
+    assert first.text.endswith(stage_q) and "Проверьте" not in first.text
+    assert (await say(control, USER, "идея, нужно 300 тыс. €")).text.endswith(split_q)
+    assert "Если подходящих инвесторов" in (await say(control, USER, "20 % компании")).text
+    card = await press(control, USER, "task:opt:0")
+    assert card.text.startswith("Проверьте задачу:") and "Допустимые отступления: тикет вдвое меньше" in card.text
+    assert f"• {stage_q.split(' Например')[0]} — идея, нужно 300 тыс. €" in card.text
+    await press(control, USER, "task:launch")
+    spec = TaskSpec.model_validate(parse_campaign_spec(sink.envelopes[0].arguments))
+    assert [a.answer for a in spec.context.answers] == ["идея, нужно 300 тыс. €", "20 % компании"]
+    assert spec.context.answers[0].question == stage_q
+
+
+@pytest.mark.asyncio
+async def test_the_rules_fallback_asks_the_deviation_question_and_reads_the_buttons() -> None:
+    control, _, _ = plane()
+    await press(control, USER, "mode:real_estate")
+    await say(control, USER, "купить квартиру в Валенсии до 200000 €, от 2 комнат")
+    await press(control, USER, "task:skip")  # districts
+    await press(control, USER, "task:skip")  # must-haves
+    generic = await say(control, USER, "ммм")  # a generic question for a flat purchase, answered loosely
+    generic = await press(control, USER, "task:skip") if "Этаж" in generic.text else generic
+    assert "Если точных вариантов не найду" in generic.text and "бюджет +10 % (до 220 000 €)" in generic.text
+    assert [b.text for b in generic.buttons[:3]] == ["±10 %", "±20 %", "Только точные"]
+    card = await press(control, USER, "task:dev:10")
+    assert "Допустимые отступления: бюджет ±10 %; площадь −10 %" in card.text
+    # «Только точные» sets zeros: the card says so and nothing is approved.
+    control, _, _ = plane()
+    await press(control, USER, "mode:real_estate")
+    await say(control, USER, "снять квартиру в Мадриде до 1200 € от 2 комнат")
+    for _ in range(3):
+        await press(control, USER, "task:skip")
+    strict = await press(control, USER, "task:dev:0")
+    assert "Допустимые отступления: нет, только точные" in strict.text

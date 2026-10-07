@@ -12,7 +12,7 @@ import pytest
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.runner import ANALYSIS, CampaignRunner
 from bot.campaign.runs import MemoryRunStore
-from bot.campaign.status_text import FACEBOOK, WEB, is_user_status
+from bot.campaign.status_text import FACEBOOK, SEARCHING, is_user_status
 from bot.web_search.extract import listing_links, looks_like_index, parse_html, post_text
 from bot.web_search.fetcher import FetchedPage, FetchError, PageFetcher
 from bot.web_search.models import GeneratedQuery, WebStatus
@@ -814,16 +814,16 @@ async def test_status_shows_the_site_to_users_and_the_technical_line_to_owners()
     runner = CampaignRunner(campaigns, MemoryRunStore(campaigns), messenger, owner_ids={OWNER}, web=web)
     await runner.tick()
     by_chat = {chat: text for chat, _, text in messenger.sent}
-    assert by_chat[USER] == "Ищу на сайте fotocasa.es…" and is_user_status(by_chat[USER])
+    assert by_chat[USER] == '🔎 Сейчас ищу на сайте <a href="https://fotocasa.es/">fotocasa.es</a>'
+    assert is_user_status(by_chat[USER])
     assert by_chat[OWNER].endswith("сайты: страниц 3/60 · сайт fotocasa.es")
-    assert "fotocasa" not in by_chat[USER].replace("fotocasa.es", "")
     # the web stage keeps the campaign open: no groups, but no completion while it searches
     assert (await campaigns.get(user_campaign)).state == "running"
     assert (await campaigns.get(owner_campaign)).state == "running"
 
     web.status = WebStatus(True, None, "сайты: составляю запросы")
     await runner.tick()
-    assert any(chat == USER and text == WEB for chat, _, text in messenger.edits)
+    assert any(chat == USER and text == SEARCHING for chat, _, text in messenger.edits)
 
     web.status = WebStatus(False, None, "сайты: готово")
     await runner.tick()
@@ -837,8 +837,8 @@ async def test_facebook_reading_wins_the_label_and_no_web_stage_changes_nothing(
     runner = CampaignRunner(campaigns, MemoryRunStore(campaigns), FakeMessenger(), web=FakeWeb(WebStatus(True, "pisos.com")))
     c = await campaigns.get(cid)
     assert await runner._status_text(c, "Сейчас: Facebook · Pisos Madrid · ищу дальше") == (
-        "Ищу в группе Facebook «Pisos Madrid»…")
-    assert await runner._status_text(c, ANALYSIS) == "Ищу на сайте pisos.com…"
+        "🔎 Сейчас ищу в Facebook в группе Pisos Madrid")
+    assert await runner._status_text(c, ANALYSIS) == '🔎 Сейчас ищу на сайте <a href="https://pisos.com/">pisos.com</a>'
     plain = CampaignRunner(campaigns, MemoryRunStore(campaigns), FakeMessenger())
     assert await plain._status_text(c, ANALYSIS) == FACEBOOK
 

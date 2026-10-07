@@ -280,6 +280,8 @@ async def test_the_deal_is_asked_for_real_estate_only_and_every_field_can_be_ski
     assert (await press(control, USER, "task:skip")).text.startswith("Сколько комнат")  # «Не важно» for the budget
     assert "Район или вся Малага?" in (await press(control, USER, "task:skip")).text
     assert (await press(control, USER, "task:skip")).text.startswith("Что обязательно должно быть?")
+    assert (await press(control, USER, "task:skip")).text.startswith("Этаж, лифт, состояние важны?")  # the task round
+    assert (await press(control, USER, "task:skip")).text.startswith("Если точных вариантов не найду")  # the deviations
     card = await press(control, USER, "task:skip")
     assert "Сделка: покупка" in card.text and "Бюджет: не важно" in card.text and "Комнаты: не важно" in card.text
     assert "Эта кнопка устарела" in (await press(control, USER, "task:deal:rent")).text
@@ -295,7 +297,9 @@ async def test_the_deal_is_asked_for_real_estate_only_and_every_field_can_be_ski
     assert ticket.text.startswith("Понял: Киев") and "размер вложения" in ticket.text
     role = await say(control, USER, "от 100 тыс до 1 млн €")
     assert "ищете деньги" in role.text and callbacks(role)[:2] == ["task:role:raising", "task:role:deploying"]
-    card = await press(control, USER, "task:role:raising")
+    stage = await press(control, USER, "task:role:raising")  # the task round: one generic investor question
+    assert stage.text.endswith("Например: идея, 300 тыс. €; запущен, 1,5 млн €.") and "Проверьте" not in stage.text
+    card = await say(control, USER, "идея, нужно 300 тыс. €")
     assert "Тикет: от 100000 до 1000000 €" in card.text and "Ваша роль: привлекаю деньги" in card.text
 
 
@@ -310,8 +314,12 @@ async def test_one_question_at_a_time_in_a_fixed_order() -> None:
     assert "Сколько комнат" in (await say(control, USER, "до 700")).text
     assert "Район или вся Севилья?" in (await say(control, USER, "2")).text
     assert "Что обязательно" in (await say(control, USER, "центр")).text
-    card = await say(control, USER, "лифт")
+    assert "На какой срок?" in (await say(control, USER, "лифт")).text  # one generic question for a rent
+    assert "Если точных вариантов не найду" in (await say(control, USER, "на год")).text
+    card = await say(control, USER, "±10 %")
     assert card.text.startswith("Проверьте задачу")
+    for line in ("Допустимые отступления: бюджет ±10 %; площадь −10 %", "• На какой срок? — на год"):
+        assert line in card.text, line
     for line in ("Город: Севилья", "Районы: центр", "Сделка: аренда", "Тип: квартира", "Бюджет: до 700 €", "Комнаты: от 2",
                  "Обязательно: лифт"):
         assert line in card.text, line

@@ -90,6 +90,21 @@ def similar_question(deviation: Deviation | None = None, *, exact_found: bool) -
     return f"По вашим критериям пока ничего не нашёл, но есть {lead}{f' ({hint})' if hint else ''}. Показать?"
 
 
+def card_line(deviation: Deviation) -> str | None:
+    """The first line of a similar card sent after approval: what differs from the request (user-facing)."""
+    if deviation.kind == "price" and deviation.example and deviation.requested:
+        return f"≈ Чуть дороже запроса: {deviation.example} при запросе {deviation.requested}"
+    if deviation.kind == "area" and deviation.example and deviation.requested:
+        return f"≈ Меньше запрошенной площади: {deviation.example} при запросе {deviation.requested}"
+    if deviation.kind == "area_unknown":
+        return "≈ Не подтверждено: площадь не указана"
+    if deviation.kind == "unverified":
+        return "≈ Не подтверждено: не удалось проверить автоматически"
+    if deviation.phrase:
+        return f"≈ Отличается: {deviation.phrase}"
+    return None
+
+
 OTHER_QUESTION = "Показать более далёкие варианты?"
 
 

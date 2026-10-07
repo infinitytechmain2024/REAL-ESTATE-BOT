@@ -22,6 +22,11 @@ SKIP_WORDS = frozenset({"пропустить", "пропуск", "нет", "н�
 # question («Есть ли парковка?» - «нет») and go to the model.
 AI_SKIP_WORDS = frozenset({"не важно", "неважно", "без разницы", "всё равно", "все равно", "any"})
 SOFT_ORDER = ("place.districts", "must_have")  # real estate: optional, asked once after the hard fields
+# After the hard (and soft) fields: one generic task question, then the deviation question (real estate).
+TASK_PATH, DEVIATION_PATH = "context.answers", "deviations"
+DEVIATION_OPTIONS: tuple[tuple[str, str], ...] = (("±10 %", "dev:10"), ("±20 %", "dev:20"), ("Только точные", "dev:0"))
+_STRICT = re.compile(r"(только\s+точн|точные|точных|не\s*нужн|никаких|строго|exact)", re.IGNORECASE)
+_PERCENT = re.compile(r"(\d{1,2}(?:[.,]\d+)?)\s*(?:%|проц)")
 
 SLOT_QUESTIONS = {
     "place": "В каком городе искать?",
@@ -160,7 +165,54 @@ def _split(text: str) -> list[str]:
     return [p.strip(" .") for p in re.split(r"[,;\n]| и ", text) if p.strip(" .")]
 
 
+def generic_question(spec: TaskSpec) -> str:
+    """One generic question per kind of task, for the no-AI fallback."""
+    if spec.mode == "investors":
+        if spec.investor.user_role == "deploying":
+            return "Какие проекты и стадии вам интересны? Например: стартапы на ранней стадии, готовый бизнес, девелопмент."
+        return "На какой стадии проект и какая сумма нужна? Например: идея, 300 тыс. €; запущен, 1,5 млн €."
+    if spec.property_type == "land":
+        return "Под какое строительство? Например: дом для себя, апарт-отель, пока только в инвестиции."
+    if spec.deal == "rent":
+        return "На какой срок? Например: на год, от 6 месяцев, на лето."
+    return "Этаж, лифт, состояние важны? Например: «не ниже 3 этажа, лифт обязателен», «после ремонта», «не важно»."
+
+
+def deviation_question(spec: TaskSpec) -> str:
+    """«Если точных вариантов не будет, что допустимо?» with options built from the spec."""
+    options: list[str] = []
+    if spec.budget.max:
+        sign = {"EUR": "€", "USD": "$", "GBP": "£", "UAH": "₴", "RUB": "₽"}.get(spec.budget.currency or "EUR", spec.budget.currency)
+        options.append(f"бюджет +10 % (до {round(spec.budget.max * 1.1):,} {sign})".replace(",", " "))
+    options.append("соседние районы")
+    if spec.area_m2.min:
+        options.append(f"площадь от {round(spec.area_m2.min * 0.9)} м²")
+    return ("Если точных вариантов не найду, что допустимо? Например: " + ", ".join(options)
+            + ". Или нажмите «Только точные». Можно ответить своими словами.")
+
+
+def read_deviations(spec: TaskSpec, text: str) -> TaskSpec:
+    """The answer to the deviation question: «±10 %», «Только точные» or free text (kept as a compromise)."""
+    spec = spec.model_copy(deep=True)
+    answer = text.strip()
+    pct = _PERCENT.search(answer)
+    update: dict[str, Any]
+    if _norm(answer) in SKIP_WORDS or (_STRICT.search(answer) and not pct):
+        update = {"budget_pct": 0, "area_pct": 0, "asked": True} if _norm(answer) not in AI_SKIP_WORDS else {"asked": True}
+    elif pct:
+        value = float(pct.group(1).replace(",", "."))
+        update = {"budget_pct": value, "area_pct": value, "asked": True}
+    else:
+        update = {"other": [*spec.deviations.other, answer[:120]], "asked": True}
+    spec.deviations = spec.deviations.__class__.model_validate({**spec.deviations.model_dump(), **update})
+    return spec
+
+
 def question_for(spec: TaskSpec, path: str) -> str:
+    if path == TASK_PATH:
+        return generic_question(spec)
+    if path == DEVIATION_PATH:
+        return deviation_question(spec)
     template = SLOT_QUESTIONS.get(path, "Что указать?")
     city = spec.place.names.get("ru") or spec.place_name() or "город"
     return template.format(city=city) + SLOT_HINTS.get(path, "")
@@ -171,6 +223,8 @@ def options_for(path: str) -> tuple[tuple[str, str], ...]:
         return (("Аренда", "deal:rent"), ("Покупка", "deal:sale"))
     if path == "investor.user_role":
         return (("Ищу деньги", "role:raising"), ("Хочу вкладывать", "role:deploying"))
+    if path == DEVIATION_PATH:
+        return DEVIATION_OPTIONS
     return ()
 
 
@@ -178,8 +232,14 @@ def next_path(spec: TaskSpec, mode: str, *, soft: bool = True) -> str | None:
     """The next field to ask about: a missing hard one, then the optional ones (real estate), else None."""
     if missing := spec.missing_hard(mode):
         return missing[0]
-    if soft and mode == "real_estate":
-        return next((p for p in SOFT_ORDER if not spec.answered(p)), None)
+    if not soft:
+        return None
+    if mode == "real_estate" and (found := next((p for p in SOFT_ORDER if not spec.answered(p)), None)):
+        return found
+    if not spec.answered(TASK_PATH):
+        return TASK_PATH
+    if mode == "real_estate" and not spec.answered(DEVIATION_PATH):
+        return DEVIATION_PATH
     return None
 
 
@@ -196,7 +256,7 @@ class RuleInterviewer:
         text = message.strip()
         if editing and ":" in text:
             text = text.split(":", 1)[1].strip()
-        many = self._read(after, mode, text, asking, editing)
+        many = self._read(after, mode, text, asking, editing, dialogue)
         changed = after.model_dump() != before.model_dump()
         path = next_path(after, mode, soft=not editing)
         understood = _describe(before, after) if changed else ""
@@ -207,13 +267,27 @@ class RuleInterviewer:
             return InterviewTurn(after, f"Указано несколько городов ({names}). Одна задача — один город. Какой выбрать?",
                                  False, understood, path)
         question = question_for(after, path)
-        if asking and not changed and not editing and text and path == asking:
+        if asking and not changed and path not in (TASK_PATH, DEVIATION_PATH) and not editing and text and path == asking:
             question = NOT_UNDERSTOOD.get(path, "Не понял ответ. ") + question
         return InterviewTurn(after, question, False, understood, path, options_for(path))
 
-    def _read(self, spec: TaskSpec, mode: str, text: str, asking: str | None, editing: bool) -> list[str]:
+    @staticmethod
+    def _read_task_answer(spec: TaskSpec, text: str, asking: str, dialogue: list[dict[str, str]]) -> list[str]:
+        """The answer to the generic task question (kept verbatim) or to the deviation question."""
+        if asking == DEVIATION_PATH:
+            spec.deviations = read_deviations(spec, text).deviations
+        elif text and _norm(text) not in SKIP_WORDS:
+            question = next((t["text"] for t in reversed(dialogue) if t.get("role") == "assistant"), "")
+            spec.context = spec.context.__class__.model_validate(
+                {"answers": [*(a.model_dump() for a in spec.context.answers), {"question": question, "answer": text}]})
+        return []
+
+    def _read(self, spec: TaskSpec, mode: str, text: str, asking: str | None, editing: bool,
+              dialogue: list[dict[str, str]] | None = None) -> list[str]:
         """Fill ``spec`` from ``text``; returns the cities named when there are several."""
         many: list[str] = []
+        if asking in (TASK_PATH, DEVIATION_PATH) and not editing:
+            return self._read_task_answer(spec, text, asking, dialogue or [])
         places = [geo_ru(p) for p in find_places(text)]
         if len(find_places(text)) == 1:
             self._set_place(spec, gazetteer_place(find_places(text)[0]))

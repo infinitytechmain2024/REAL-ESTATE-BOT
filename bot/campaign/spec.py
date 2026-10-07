@@ -60,6 +60,8 @@ CURRENCY_SIGNS = {"EUR": "€", "USD": "$", "GBP": "£", "UAH": "₴", "RUB": "�
 MAX_TEXT = 200
 MAX_ITEMS = 12
 MAX_NOTES = 1000
+MAX_QA = 20
+MAX_QA_CHARS = 400
 # Field paths the interviewer asks about, in asking order, per mode (see ``TaskSpec.missing_hard``).
 REAL_ESTATE_ORDER = ("place", "deal", "property_type", "budget.max", "rooms.min")
 INVESTORS_ORDER = ("place", "investor.who", "investor.ticket", "investor.user_role")
@@ -72,6 +74,9 @@ UNSPECIFIABLE_PATHS = frozenset({
     "must_have", "exclude", "wishes", "sources.required", "sources.extra", "sources.blocked",
     "investor.who", "investor.ticket", "investor.ticket.min", "investor.ticket.max", "investor.user_role",
     "investor.geography", "investor.asset_class", "investor.languages", "investor.yield_min",
+    # the deviation question and the task-specific round (see ``Deviations`` / ``Context``)
+    "deviations", "deviations.budget_pct", "deviations.area_pct", "deviations.rooms_delta",
+    "deviations.nearby_areas", "deviations.radius_km", "deviations.other", "context.answers",
 })
 ASKABLE_PATHS = UNSPECIFIABLE_PATHS | {"place"}
 
@@ -283,6 +288,116 @@ class Investor(_Model):
         return None if isinstance(value, bool) or value == "" else value
 
 
+class Deviations(_Model):
+    """Compromises the person approved in advance ("если точных вариантов не будет, что допустимо?").
+
+    A finding that differs from the request only within these is sent as a normal card marked with what differs
+    (no «Одобрить?» question). ``asked``: the deviation question was put to the person (answered or waived).
+    """
+
+    budget_pct: float | None = None  # allowed % over the maximum (under the minimum); 0 = only exact
+    area_pct: float | None = None  # allowed % below the minimum area (above the maximum)
+    rooms_delta: int | None = None  # how many rooms fewer than the minimum are fine
+    radius_km: float | None = None
+    nearby_areas: list[str] = Field(default_factory=list)  # neighbouring districts or towns accepted as the place
+    other: list[str] = Field(default_factory=list)  # free-text compromises: «без лифта ок до 2 этажа»
+    asked: bool = False
+
+    @field_validator("budget_pct", "area_pct", mode="before")
+    @classmethod
+    def _pct(cls, value: Any) -> float | None:
+        number = _loose_number(value)
+        return number if number is not None and 0 <= number <= 50 else None
+
+    @field_validator("radius_km", mode="before")
+    @classmethod
+    def _radius(cls, value: Any) -> float | None:
+        number = _loose_number(value)
+        return number if number is not None and 0 < number <= 1000 else None
+
+    @field_validator("rooms_delta", mode="before")
+    @classmethod
+    def _delta(cls, value: Any) -> int | None:
+        number = _loose_number(value)
+        return int(number) if number is not None and 0 <= number <= 5 else None
+
+    @field_validator("nearby_areas", mode="before")
+    @classmethod
+    def _areas(cls, value: Any) -> list[str]:
+        return _clean_list(value, 80)
+
+    @field_validator("other", mode="before")
+    @classmethod
+    def _other(cls, value: Any) -> list[str]:
+        return _clean_list(value, 120, 8)
+
+    @field_validator("asked", mode="before")
+    @classmethod
+    def _asked(cls, value: Any) -> bool:
+        return value if isinstance(value, bool) else False
+
+    @model_validator(mode="after")
+    def _implied(self) -> Deviations:
+        """Any approved compromise (even «0 %», only exact) means the question was answered."""
+        if self.has_values():
+            self.asked = True
+        return self
+
+    def has_values(self) -> bool:
+        return (any(v is not None for v in (self.budget_pct, self.area_pct, self.rooms_delta, self.radius_km))
+                or bool(self.nearby_areas or self.other))
+
+    def allows(self) -> bool:
+        """Some compromise beyond the exact request is approved (not «только точные»)."""
+        return any(v for v in (self.budget_pct, self.area_pct, self.rooms_delta, self.radius_km)) or bool(
+            self.nearby_areas or self.other)
+
+    def line_ru(self) -> str:
+        parts: list[str] = []
+        if self.budget_pct:
+            parts.append(f"бюджет ±{_num(self.budget_pct)} %")
+        if self.area_pct:
+            parts.append(f"площадь −{_num(self.area_pct)} %")
+        if self.rooms_delta:
+            parts.append(f"комнат на {self.rooms_delta} меньше")
+        if self.nearby_areas:
+            parts.append("соседние районы: " + ", ".join(self.nearby_areas))
+        if self.radius_km:
+            parts.append(f"радиус {_num(self.radius_km)} км")
+        parts += self.other
+        return "; ".join(parts)
+
+
+class QA(_Model):
+    question: str = ""
+    answer: str = ""
+
+    @field_validator("question", "answer", mode="before")
+    @classmethod
+    def _text(cls, value: Any) -> str:
+        return _clean(value, MAX_QA_CHARS) or ""
+
+
+class Context(_Model):
+    """Every task-specific question and the person's answer, verbatim (bounded), for the planner and the reviewer."""
+
+    answers: list[QA] = Field(default_factory=list)
+
+    @field_validator("answers", mode="before")
+    @classmethod
+    def _answers(cls, value: Any) -> list[Any]:
+        items = [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+        return [QA.model_validate(v) for v in items if _clean(v.get("question")) and _clean(v.get("answer"))][-MAX_QA:]
+
+
+def _loose_number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str):
+        value = parse_number(value)
+    return float(value) if isinstance(value, int | float) and value == value else None
+
+
 class Sources(_Model):
     required: list[str] = Field(default_factory=list)  # sites or groups that must be searched
     extra: list[str] = Field(default_factory=list)  # nice to search as well
@@ -325,6 +440,8 @@ class TaskSpec(_Model):
     investor: Investor = Field(default_factory=Investor)
     sources: Sources = Field(default_factory=Sources)
     delivery: Delivery = Field(default_factory=Delivery)
+    deviations: Deviations = Field(default_factory=Deviations)
+    context: Context = Field(default_factory=Context)
     notes: str = ""
     # field paths the person said do not matter ('budget.max', 'rooms.min', 'investor.ticket' ...)
     unspecified: list[str] = Field(default_factory=list)
@@ -423,6 +540,10 @@ class TaskSpec(_Model):
                 return bool(self.wishes)
             case "sources.required" | "sources":
                 return bool(self.sources.required or self.sources.extra)
+            case "deviations":
+                return self.deviations.asked
+            case "context.answers":
+                return bool(self.context.answers)
         return False
 
     def answered(self, path: str) -> bool:
@@ -456,13 +577,18 @@ class TaskSpec(_Model):
             for key, value in partial.items():
                 if key in ("mode", "unspecified") or key not in base:
                     continue
+                if key == "context":
+                    value = _append_answers(base[key], value)
                 trial = {**base, key: _overlay(base[key], value)}
                 try:
                     checked = TaskSpec.model_validate(trial).model_dump()[key]
                 except ValidationError:
                     continue
                 # A value that validates to nothing (junk, a negative number) never wipes a field that is set.
-                base = {**base, key: _keep_set(base[key], checked)}
+                kept = _keep_set(base[key], checked)
+                if key == "deviations" and base[key].get("asked"):
+                    kept["asked"] = True  # a question once asked stays asked
+                base = {**base, key: kept}
         spec = TaskSpec.model_validate(base)
         extra = partial.get("unspecified") if isinstance(partial, dict) else None
         unspecified = known_paths([*self.unspecified, *_clean_list(extra, 40, 30)])
@@ -509,6 +635,12 @@ class TaskSpec(_Model):
             sources.append("не использовать " + ", ".join(self.sources.blocked))
         if sources:
             lines.append("Источники: " + "; ".join(sources))
+        if self.deviations.asked:
+            lines.append("Допустимые отступления: " + (
+                self.deviations.line_ru() or ("нет, только точные" if self.deviations.has_values() else "не заданы")))
+        if self.context.answers:
+            lines.append("Уточнения:")
+            lines += [f"• {_short(qa.question)} — {qa.answer}" for qa in self.context.answers[:6]]
         if self.delivery.max_results or self.delivery.show_similar:
             parts = [f"до {self.delivery.max_results} вариантов"] if self.delivery.max_results else []
             if self.delivery.show_similar:
@@ -544,6 +676,23 @@ class TaskSpec(_Model):
 
     def _gap(self, path: str) -> str:
         return "не важно" if self.is_unspecified(path) else "не указан"
+
+
+def _short(question: str) -> str:
+    """The question without its examples, for a card line: «Этаж и лифт важны?» -> «Этаж и лифт важны?»."""
+    head = question.split("Например")[0].strip()
+    return head if len(head) <= 80 else head[:79].rstrip() + "…"
+
+
+def _append_answers(current: Any, new: Any) -> Any:
+    """The model returns only the NEW question/answer pairs; they are appended (a repeated question is replaced)."""
+    if not isinstance(new, dict) or not isinstance(new.get("answers"), list):
+        return {}
+    have = [a for a in (current or {}).get("answers", []) if isinstance(a, dict)]
+    added = [a for a in new["answers"] if isinstance(a, dict) and _clean(a.get("question")) and _clean(a.get("answer"))]
+    asked = {(_clean(a["question"]) or "").casefold() for a in added}
+    kept = [a for a in have if (a.get("question") or "").casefold() not in asked]
+    return {"answers": [*kept, *added][-MAX_QA:]}
 
 
 def _overlay(current: Any, new: Any) -> Any:

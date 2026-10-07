@@ -162,14 +162,15 @@ class WebSearchWorker:
         if note is not None:
             note(campaign_id, progress)
 
-    async def _track(self, campaign_id: str, host: str | None, layer: str | None, *, finished: bool = False) -> None:
+    async def _track(self, campaign_id: str, host: str | None, layer: str | None, *, finished: bool = False,
+                     url: str | None = None) -> None:
         """Refresh the progress numbers from the store; a failure only leaves them as they were."""
         try:
             read, found, done, total = funnel_totals(await self.store.funnel(campaign_id))
             names = {"http": "http", "render": "browser"}
             refusals = tuple((names[k], n) for k, n in (await self.store.host_refusals(host) if host else {}).items()
                              if n and k in names)
-            self._publish(campaign_id, WebProgress(host, layer, read, found, done, total, refusals, finished))
+            self._publish(campaign_id, WebProgress(host, layer, read, found, done, total, refusals, finished, url))
         except Exception:  # noqa: BLE001 - progress is cosmetic
             log.warning("web_search.progress_failed", extra={"campaign_id": campaign_id})
 
@@ -360,7 +361,7 @@ class WebSearchWorker:
             budget -= 1
             pages += 1
             await self.store.set_progress(campaign.id, url.host, self._line(None, pages, f"сайт {url.host}"))
-            await self._track(campaign.id, url.host, "http")
+            await self._track(campaign.id, url.host, "http", url=url.url)
             result, children = await self._read(campaign, url, layers)
             if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
                 card = search_result(url, result.error)
@@ -369,7 +370,7 @@ class WebSearchWorker:
             children = [c for c in children if fetchable(c.url, cfg.blocked_hosts | query_task(campaign).blocked_hosts)]
             if children:
                 await self.store.enqueue(campaign.id, children, index_ttl_days=cfg.index_ttl_days)
-            await self._track(campaign.id, url.host, None)
+            await self._track(campaign.id, url.host, None, url=url.url)
 
     async def _keep_search_result(self, campaign: Campaign, url: QueuedUrl, error: str | None) -> bool:
         """Store ``url``'s search result as its post without asking the site; False when there is none."""

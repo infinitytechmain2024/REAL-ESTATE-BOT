@@ -14,7 +14,7 @@ class AnalysisSettings(BaseSettings):
         default=60, ge=5, le=120, validation_alias="OPENROUTER_ANALYSIS_TIMEOUT_SECONDS"
     )
     # --serve: seconds between cycles; a claim older than claim_seconds is taken over.
-    poll_seconds: PositiveInt = Field(default=60, ge=10, le=3600, validation_alias="ANALYSIS_POLL_SECONDS")
+    poll_seconds: PositiveInt = Field(default=15, ge=5, le=3600, validation_alias="ANALYSIS_POLL_SECONDS")
     claim_seconds: PositiveInt = Field(default=300, ge=60, le=3600, validation_alias="ANALYSIS_CLAIM_SECONDS")
     # Comma-separated source platforms this worker leaves alone. Set it to ``website`` when the reduction worker runs
     # in live mode (AGENT_REDUCTION_MODE=live, AGENT_REDUCTION_SOURCES=website): that one then owns the website

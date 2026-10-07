@@ -53,17 +53,23 @@ class FakeMessenger:
         self.fail = 0
         self.deleted: list[tuple[int, int]] = []
         self.timeline: list[str] = []  # status texts in the order they were shown (sent or edited)
+        self.status_ids: set[int] = set()  # message ids sent with parse_mode HTML (the status messages)
+        self.modes: list[str | None] = []  # the parse_mode of every send and edit, in order
 
-    async def send(self, chat_id: int, text: str) -> int:
+    async def send(self, chat_id: int, text: str, *, parse_mode: str | None = None) -> int:
+        self.modes.append(parse_mode)
         if self.fail:
             self.fail -= 1
             raise httpx.ConnectError("telegram unreachable")
         self.sent.append((chat_id, len(self.sent) + 1, text))
-        if "🔎" not in text and not text.startswith(SUMMARY):  # cards, the summary and status messages
+        if parse_mode == "HTML":  # only the status message is HTML; its «🔎 Сейчас ищу» line is not a card
+            self.status_ids.add(len(self.sent))
+        if (parse_mode == "HTML" or "🔎" not in text) and not text.startswith(SUMMARY):  # cards, summary, statuses
             self.timeline.append(text)
         return len(self.sent)
 
-    async def edit(self, chat_id: int, message_id: int, text: str) -> None:
+    async def edit(self, chat_id: int, message_id: int, text: str, *, parse_mode: str | None = None) -> None:
+        self.modes.append(parse_mode)
         if self.gone:
             self.gone = False
             raise MessageGone("message to edit not found")
@@ -74,7 +80,7 @@ class FakeMessenger:
         self.deleted.append((chat_id, message_id))
 
     def findings(self) -> list[str]:
-        return [t for _, _, t in self.sent if "🔎" in t]
+        return [t for _, mid, t in self.sent if "🔎" in t and mid not in self.status_ids]
 
     def summaries(self) -> list[str]:
         return [t for _, _, t in self.sent if t.startswith(SUMMARY)]
@@ -498,23 +504,24 @@ async def test_startup_frees_a_profile_left_in_use_by_a_crashed_discovery_and_re
     assert discovery.calls == [cid] and (await campaigns.get(cid)).state == "running"
 
 
-async def test_the_status_moves_below_each_new_card_and_the_old_one_is_deleted() -> None:
-    campaigns, store, messenger, _, _, runner, plan = make()
+async def test_the_status_moves_below_the_cards_after_every_fifth_one_and_the_old_one_is_deleted() -> None:
+    campaigns, store, messenger, _, _, runner, plan = make(repost_seconds=0)
     cid = await create(campaigns, plan)
     await runner.tick()
     first_status = (await campaigns.get(cid)).status_message_id
     await runner.tick()
     assert messenger.deleted == []  # no card: the status stays and is only edited
 
-    store.add_finding(cid, "f1", "🏠 first")
+    for n in range(4):
+        store.add_finding(cid, f"f{n}", f"🏠 card {n}")
     await runner.tick()
-    after_first = (await campaigns.get(cid)).status_message_id
-    kinds = ["card" if "🔎" in t else "status" if t.startswith("🎯") else "other" for _, _, t in messenger.sent]
-    assert kinds[-2:] == ["card", "status"]  # the status is the last message in the chat
-    assert messenger.deleted == [(CHAT, first_status)] and after_first != first_status
+    assert messenger.deleted == [] and (await campaigns.get(cid)).status_message_id == first_status  # 4 cards: edit
 
-    store.add_finding(cid, "f2", "🏠 second")
+    store.add_finding(cid, "f4", "🏠 card 4")
     await runner.tick()
-    assert messenger.deleted[-1] == (CHAT, after_first)
-    assert [t for _, _, t in messenger.sent][-1].startswith("🎯")
+    after_fifth = (await campaigns.get(cid)).status_message_id
+    kinds = ["card" if "🔎" in t and mid not in messenger.status_ids else "status" if t.startswith("🎯") else "other"
+            for _, mid, t in messenger.sent]
+    assert kinds[-2:] == ["card", "status"]  # the status is the last message in the chat
+    assert messenger.deleted == [(CHAT, first_status)] and after_fifth != first_status
     assert (await campaigns.get(cid)).status_message_id == messenger.sent[-1][1]

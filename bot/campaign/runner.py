@@ -44,7 +44,9 @@ while another campaign has an open window or is discovering.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -81,14 +83,16 @@ from .runs import (
     Window,
 )
 from .status_text import (
-    FACEBOOK,
     LAYER_NAMES,
     LIMIT_REASONS,
     campaign_label,
-    group_status,
-    user_status,
-    web_done_status,
-    web_progress_status,
+    checking_line,
+    group_line,
+    is_checking_line,
+    is_live_line,
+    reach_line,
+    site_line,
+    social_line,
 )
 from .status_text import (
     SEARCHING as USER_SEARCHING,
@@ -136,23 +140,38 @@ class TelegramError(RuntimeError):
 
 
 class Messenger(Protocol):
-    async def send(self, chat_id: int, text: str) -> int: ...
-    async def edit(self, chat_id: int, message_id: int, text: str) -> None: ...
+    """``parse_mode`` ("HTML") only for the status message, whose links are HTML; every other message is plain text."""
+
+    async def send(self, chat_id: int, text: str, *, parse_mode: str | None = None) -> int: ...
+    async def edit(self, chat_id: int, message_id: int, text: str, *, parse_mode: str | None = None) -> None: ...
     async def send_buttons(self, chat_id: int, text: str, buttons: Sequence[tuple[str, str]]) -> int:
         """A message with one row of inline callback buttons: (label, callback data)."""
         ...
     async def delete(self, chat_id: int, message_id: int) -> None: ...
 
 
+def _fit(text: str, parse_mode: str | None) -> tuple[str, str | None]:
+    """The text Telegram accepts (4096 chars). HTML is never cut mid-tag: a too-long one is sent as plain text."""
+    if len(text) <= 4000:
+        return text, parse_mode
+    if parse_mode:
+        text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return text[:4000], None
+
+
 class TelegramMessenger:
-    """Plain-text Bot API calls (no HTML parsing of finding text)."""
+    """Bot API calls: plain text (no HTML parsing of finding text) unless ``parse_mode`` is given."""
 
     def __init__(self, token: str, *, client: httpx.AsyncClient | None = None) -> None:
         self._base = f"https://api.telegram.org/bot{token}"
         self._client = client or httpx.AsyncClient(timeout=20)
 
-    async def send(self, chat_id: int, text: str) -> int:
-        data = await self._call("sendMessage", {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True})
+    async def send(self, chat_id: int, text: str, *, parse_mode: str | None = None) -> int:
+        text, parse_mode = _fit(text, parse_mode)
+        body: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if parse_mode:
+            body["parse_mode"] = parse_mode
+        data = await self._call("sendMessage", body)
         return int(data["result"]["message_id"])
 
     async def send_buttons(self, chat_id: int, text: str, buttons: Sequence[tuple[str, str]]) -> int:
@@ -161,10 +180,14 @@ class TelegramMessenger:
                                                 "reply_markup": markup})
         return int(data["result"]["message_id"])
 
-    async def edit(self, chat_id: int, message_id: int, text: str) -> None:
+    async def edit(self, chat_id: int, message_id: int, text: str, *, parse_mode: str | None = None) -> None:
+        text, parse_mode = _fit(text, parse_mode)
+        body: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text,
+                                "disable_web_page_preview": True}
+        if parse_mode:
+            body["parse_mode"] = parse_mode
         try:
-            await self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text[:4000],
-                                                 "disable_web_page_preview": True})
+            await self._call("editMessageText", body)
         except TelegramError as exc:
             detail = exc.description.lower()
             if "message is not modified" in detail:
@@ -219,6 +242,8 @@ class RunnerConfig:
     analysis_grace_seconds: float = 600
     refusal_retry_seconds: float = 300
     web_status_seconds: float = 10  # the web progress line is edited at most this often
+    repost_cards: int = 5  # the status message moves below the cards after this many cards sent since it was posted
+    repost_seconds: float = 20  # ...and a phase change or those cards re-post it at most this often
     max_stream_per_step: int = 20
     # After the last window, how long the campaign waits for social network searches still to come.
     social_grace_seconds: float = 1800
@@ -300,7 +325,14 @@ class CampaignRunner:
         self._relevance_misses: dict[str, int] = {}
         # Campaigns whose chat got a card or a question below the status message: the status moves down.
         self._below_status: set[str] = set()
-        self._web_edit_at: dict[str, datetime] = {}  # campaign id -> when the web progress line was last shown
+        self._cards_since: dict[str, int] = {}  # campaign id -> cards sent since its status message was posted
+        self._phase: dict[str, str] = {}  # campaign id -> the user line's phase now: searching | checking | done
+        self._posted_phase: dict[str, str] = {}  # ... and the phase the posted status message was sent in
+        self._posted_at: dict[str, datetime] = {}  # campaign id -> when its status message was last posted
+        self._web_edit_at: dict[str, datetime] = {}  # campaign id -> when a «Сейчас ищу» line was last shown
+        # campaign id -> {stage: (what it shows, when that last changed)}: the newest change is the one on screen
+        self._stage_seen: dict[str, dict[str, tuple[str, datetime]]] = {}
+        self._group_now: dict[str, tuple[str, str | None]] = {}  # campaign id -> (name, link) of the group read now
         self._metrics_at: dict[str, datetime] = {}  # campaign id -> when its metrics were last recomputed
         self._metrics_final: set[str] = set()  # ended campaigns whose metrics were recomputed by this process
 
@@ -420,6 +452,7 @@ class CampaignRunner:
             if await self.store.profile_state() == "human_verification_required":
                 return VERIFY
             if window.batch_state == "running" and window.current_group:
+                self._group_now[campaign.id] = (window.current_group, window.current_group_url)
                 return f"Сейчас: Facebook · {window.current_group} · ищу дальше"
             return f"Сейчас: Facebook · окно {window.window_no} ждёт запуска"
         await self.store.close_window(campaign.id, window, ACTOR)
@@ -543,7 +576,8 @@ class CampaignRunner:
             count = await self.store.claim_finding(campaign.id, finding.id)
             if count is None:
                 continue
-            if not await self._send_card(campaign, finding, count, active, "exact"):
+            note = f"{APPROVED_LINE}{match.note}" if match.why == "approved_deviation" and match.note else None
+            if not await self._send_card(campaign, finding, count, active, "exact", note=note):
                 return deferred
             if index.loaded:  # the card just sent is a head for the findings still to come in this step
                 index.heads.insert(0, _Head(SentFinding(finding, None, count),
@@ -603,7 +637,7 @@ class CampaignRunner:
         try:
             full = await self.store.stream_finding(head.finding.id) or head.finding
             tail = f"🔎 Найдено: {head.number}" + (" · ищу дальше" if active else "")
-            card = f"{finding_card(campaign, full, cluster_links=attached.links)}\n\n{tail}"
+            card = f"{finding_card(campaign, full, cluster_links=attached.links, note=approved_note(campaign, full))}\n\n{tail}"
             await self.messenger.edit(campaign.chat_id, attached.message_id, card[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - the link is stored; a lost edit only hides it from the card
             log.warning("campaign.cluster_edit_failed",
@@ -703,9 +737,15 @@ class CampaignRunner:
         stored = await self.store.relevance(campaign.id, closest.id)
         return offers.Deviation("other", phrase=stored.deviation if stored is not None else None, land=land)
 
-    async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool, bucket: str) -> bool:
+    async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool, bucket: str, *,
+                         note: str | None = None) -> bool:
         tail = f"🔎 Найдено: {count} · ищу дальше" if active else f"🔎 Найдено: {count}"
-        card = f"{finding_card(campaign, finding)}\n\n{tail}"
+        if note is None and bucket != "exact":  # a held card sent after approval says what differs from the request
+            try:
+                note = offers.card_line(await self._deviation(campaign, campaign_request(campaign), finding))
+            except Exception:  # noqa: BLE001 - the note is a courtesy; the card goes out without it
+                note = None
+        card = f"{finding_card(campaign, finding, note=note)}\n\n{tail}"
         if self.recorder is not None:
             # Stored first (outbox): if the store is down nothing is sent, the finding comes back next tick.
             try:
@@ -724,7 +764,7 @@ class CampaignRunner:
             await self._recorded(self.recorder.send_failed(campaign.id, finding.id) if self.recorder else None)
             return False
         await self.store.finding_sent(finding.id, message_id)
-        self._below_status.add(campaign.id)
+        self._cards_since[campaign.id] = self._cards_since.get(campaign.id, 0) + 1
         await self._recorded(self.recorder.sent(campaign.id, finding.id, message_id) if self.recorder else None)
         await self._queue_comments(campaign, finding)
         return True
@@ -775,7 +815,7 @@ class CampaignRunner:
                 return
             for k in claimed:
                 await self.store.person_sent(campaign.id, k, message_id)
-            self._below_status.add(campaign.id)
+            self._cards_since[campaign.id] = self._cards_since.get(campaign.id, 0) + 1
 
     async def _reach_cards(self, campaign: Campaign, location: str, fetch: int,
                            limit: int) -> list[tuple[str, list[str], str, str]]:
@@ -821,7 +861,10 @@ class CampaignRunner:
             log.warning("campaign.finding_record_failed")
 
     async def _near_matches(self, campaign: Campaign, request: Request, active: bool) -> None:
-        """Held similar/other findings: stream an approved bucket, or ask about it once (see ``offers``)."""
+        """Held similar/other findings: stream an approved bucket, or ask about it once (see ``offers``).
+
+        Findings inside an approved deviation are already ``exact`` (they stream at once, saying what differs); every
+        other similar one stays held and the question is asked as soon as the first one is held."""
         states: dict[str, str | None] = {}
         for bucket in HELD_BUCKETS:
             state = states[bucket] = await self.store.offer_state(campaign.id, bucket)
@@ -838,7 +881,7 @@ class CampaignRunner:
                 continue
             exact = await self.store.exact_count(campaign.id)
             if bucket == "similar":
-                ask = not active or exact == 0
+                ask = True  # as soon as the first similar finding is held, not only at the end
             else:  # farther ones: after the search, once the similar question is out of the way
                 ask = not active and states["similar"] != "asked" and not (
                     states["similar"] is None and await self.store.held_findings(campaign.id, "similar", 1))
@@ -952,14 +995,23 @@ class CampaignRunner:
         current = await self.campaigns.get(campaign.id) or campaign
         text = await self._status_text(current, line)
         run = await self.store.get_run(current.id)
-        moved = current.id in self._below_status
+        now = self.now()
+        phase = self._phase.get(current.id, "searching")
+        posted = self._posted_phase.get(current.id)
+        # Phase change (searching -> checking -> done) and every N cards: post again at the bottom, at most once per
+        # repost_seconds (a blocked one is edited in place meanwhile and happens on a later step).
+        repost_due = current.status_message_id is not None and (
+            (posted is not None and posted != phase) or self._cards_since.get(current.id, 0) >= self.config.repost_cards)
+        posted_at = self._posted_at.get(current.id)
+        repost = repost_due and (posted_at is None or (now - posted_at).total_seconds() >= self.config.repost_seconds)
+        moved = current.id in self._below_status or repost
         if current.status_message_id is not None and run.status_text == text and not moved:
             return
-        if (not moved and current.status_message_id is not None and text.startswith("Сейчас: сайты")
-                and (run.status_text or "").startswith("Сейчас: сайты")
-                and (self.now() - self._web_edit_at.get(current.id, datetime.min.replace(tzinfo=UTC))).total_seconds()
+        if (not moved and current.status_message_id is not None and is_live_line(text)
+                and is_live_line(run.status_text or "")
+                and (now - self._web_edit_at.get(current.id, datetime.min.replace(tzinfo=UTC))).total_seconds()
                 < self.config.web_status_seconds):
-            return  # the counters move every page: one edit per web_status_seconds is enough
+            return  # the place changes every page: one edit per web_status_seconds is enough (a change waits, not lost)
         try:
             if current.status_message_id is None:
                 await self._new_status(current, text)
@@ -972,55 +1024,100 @@ class CampaignRunner:
                     log.warning("campaign.status_delete_failed", extra={"campaign_id": current.id})
             else:
                 try:
-                    await self.messenger.edit(current.chat_id, current.status_message_id, text)
+                    await self.messenger.edit(current.chat_id, current.status_message_id, text, parse_mode="HTML")
                 except MessageGone:
                     await self._new_status(current, text)
         except Exception:  # noqa: BLE001 - status is cosmetic; the next tick retries
             log.warning("campaign.status_update_failed", extra={"campaign_id": current.id})
             return
         self._below_status.discard(current.id)
-        if text.startswith("Сейчас: сайты"):
+        if is_live_line(text):
             self._web_edit_at[current.id] = self.now()
         await self.store.save_run(current.id, replace(await self.store.get_run(current.id), status_text=text))
 
+    def _forget_live(self, campaign_id: str) -> None:
+        """A finished campaign shows no «Сейчас ищу» line: drop its in-memory live-status bookkeeping."""
+        self._stage_seen.pop(campaign_id, None)
+        self._group_now.pop(campaign_id, None)
+        self._web_edit_at.pop(campaign_id, None)
+
     async def _status_text(self, campaign: Campaign, line: str) -> str:
-        """Owners get the technical line; anyone else one short label, never ids, windows or counts."""
+        """The status message as HTML. Owners: the goal, the «Сейчас ищу» line, then the technical lines with their
+        counts. Anyone else: one short line that says only where the bot searches now (or a fixed label)."""
+        esc = html.escape
         terminal = campaign.state in TERMINAL_STATES
+        if terminal:
+            self._forget_live(campaign.id)
         web = await self._web(campaign.id) if not terminal else None
         web_active = web is not None and web.active
         social = await self.store.social_activity(campaign.id) if not terminal else None
+        live = None if terminal else await self._live_line(campaign, line, web, social)
+        self._phase[campaign.id] = ("done" if terminal else "checking" if live is not None and is_checking_line(live)
+                                    else "searching")
         if campaign.requested_by in self.owner_ids:
-            text = f"🎯 {campaign.plan.goal}\n{line or STOPPED}"
+            text = f"🎯 {esc(campaign.plan.goal[:300], quote=False)}"
+            if live is not None:
+                text += f"\n{live}"
+            text += f"\n{esc(line or STOPPED, quote=False)}"
             if web_active and web.line and web.line != line:
-                text += f"\n{web.line}"
+                text += f"\n{esc(web.line[:300], quote=False)}"
             if web_active and getattr(web, "progress", None) is not None:
-                text += await self._web_detail(campaign, web.progress)
+                text += esc(await self._web_detail(campaign, web.progress), quote=False)
             if social is not None:
                 if social.searching:
                     query = f" · «{social.query}»" if social.query else ""
-                    text += f"\nСоцсети: {social.searching}{query}"
-                text += "".join(f"\n{note}" for note in social.notes)
+                    text += esc(f"\nСоцсети: {social.searching}{query}", quote=False)
+                text += "".join(esc(f"\n{note[:300]}", quote=False) for note in social.notes)
             return text
         if terminal:
             return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id),
                                   reason=campaign.stop_reason)
-        if line.startswith("Сейчас: Facebook · ") and line.endswith(" · ищу дальше"):
-            # The group being read right now, by its name (like «Ищу на сайте fotocasa.es…» for sites).
-            return group_status(line.removeprefix("Сейчас: Facebook · ").removesuffix(" · ищу дальше"))
-        progress = getattr(web, "progress", None)
+        if live is not None:
+            return live
         if web_active:
-            if progress is not None:
-                return web_progress_status(web.host or progress.host, progress.layer, progress.read, progress.found,
-                                           progress.portals_done, progress.portals_total)
-            return user_status("site", site=web.host) if web.host else user_status("web")
-        checking = line == ANALYSIS and bool(await self.store.pending_analysis(campaign.id))
-        # A network search is shown while Facebook itself is idle (between windows, waiting, at the end).
-        facebook_busy = line == SEARCHING or line.startswith("Сейчас: Facebook")
-        searching = social.searching if social is not None and not facebook_busy else None
-        label = campaign_label(campaign.state, checking=checking, social=searching)
-        if progress is not None and progress.finished and label in (USER_SEARCHING, FACEBOOK) and searching is None:
-            return web_done_status(progress.read, progress.found)  # the web stage ended: its totals stay on screen
-        return label
+            return USER_SEARCHING  # the site stage plans its searches: no place to show yet
+        return campaign_label(campaign.state)
+
+    async def _live_line(self, campaign: Campaign, line: str, web: Any, social: Any) -> str | None:
+        """«🔎 Сейчас ищу …» for the place searched now; once no search stage is left and judging is pending,
+        «🔎 Поиск завершён. Проверяю найденное: проверено X из Y»; None if unknown.
+
+        Search stages run in parallel; each remembers what it shows and when that last changed, and the stage that
+        changed most recently is the one shown (ties: Facebook, site, network, reach).
+        """
+        shown: dict[str, tuple[str, str]] = {}  # stage -> (what it shows, the line)
+        progress = getattr(web, "progress", None)
+        if web is not None and web.active:
+            text = site_line(web.host or getattr(progress, "host", None), getattr(progress, "url", None))
+            if text is not None:
+                shown["web"] = (text, text)
+        if line.startswith("Сейчас: Facebook · ") and line.endswith(" · ищу дальше"):
+            name, url = self._group_now.get(campaign.id) or (
+                line.removeprefix("Сейчас: Facebook · ").removesuffix(" · ищу дальше"), None)
+            text = group_line(name, url)
+            shown["facebook"] = (text, text)
+        if social is not None and social.searching:
+            text = social_line(social.searching, social.query, social.url)
+            if text is not None:
+                shown["social"] = (text, text)
+        reach = await self.store.reach_activity(campaign.id)
+        if reach.platform is not None and (text := reach_line(reach.platform)) is not None:
+            shown["reach"] = (text, text)
+        if not shown and not getattr(web, "active", False) and line == ANALYSIS \
+                and await self.store.pending_analysis(campaign.id):
+            done, total = await self.store.analysis_progress(campaign.id)  # no search stage left: judging only
+            shown["checking"] = ("checking", checking_line(done, total))
+        seen, now = self._stage_seen.setdefault(campaign.id, {}), self.now()
+        for stage in [st for st in seen if st not in shown]:
+            del seen[stage]  # a stage that ended: its next run counts as a change
+        for stage, (key, _) in shown.items():
+            if stage not in seen or seen[stage][0] != key:
+                seen[stage] = (key, now)
+        if not shown:
+            return None
+        order = ["facebook", "web", "social", "reach", "checking"]
+        best = max(shown, key=lambda stage: (seen[stage][1], -order.index(stage)))
+        return shown[best][1]
 
     async def _web_detail(self, campaign: Campaign, progress: Any) -> str:
         """Owners only: the current host's refusals per layer and the cards sent so far."""
@@ -1043,8 +1140,11 @@ class CampaignRunner:
             return None
 
     async def _new_status(self, campaign: Campaign, text: str) -> None:
-        message_id = await self.messenger.send(campaign.chat_id, text)
+        message_id = await self.messenger.send(campaign.chat_id, text, parse_mode="HTML")
         await self.campaigns.set_status_message(campaign.id, message_id, actor=ACTOR)
+        self._cards_since[campaign.id] = 0
+        self._posted_at[campaign.id] = self.now()
+        self._posted_phase[campaign.id] = self._phase.get(campaign.id, "searching")
 
     @staticmethod
     def _final_line(campaign: Campaign, found: int) -> str:
@@ -1075,12 +1175,37 @@ def campaign_portals(campaign: Campaign) -> tuple[str, ...]:
 def campaign_request(campaign: Campaign) -> Request:
     """What the campaign asked for, for ``tolerance.classify``."""
     return request_for(campaign.plan.constraints, location=campaign.plan.location, vertical=campaign.plan.vertical,
-                       text=f"{campaign.source_text} {campaign.plan.goal}", country=campaign.plan.country)
+                       text=f"{campaign.source_text} {campaign.plan.goal}", country=campaign.plan.country,
+                       deviations=_deviations_of(campaign))
+
+
+def _deviations_of(campaign: Campaign) -> dict[str, Any] | None:
+    """The interview's approved deviations (``TaskSpec.deviations`` as a dict), None without a spec."""
+    if campaign.plan.vertical == "investors":
+        return None
+    found = (getattr(campaign, "spec", None) or {}).get("deviations")
+    return found if isinstance(found, dict) else None
+
+
+APPROVED_LINE = "≈ В пределах согласованного отступления: "
+
+
+def approved_note(campaign: Campaign, finding: StreamFinding) -> str | None:
+    """«≈ В пределах согласованного отступления: бюджет +7 %» when the finding is exact only by an approved deviation."""
+    if finding.payload is None:
+        return None
+    match = classify(finding.payload, campaign_request(campaign), vertical=finding.vertical)
+    return f"{APPROVED_LINE}{match.note}" if match.why == "approved_deviation" and match.note else None
 
 
 def finding_card(campaign: Campaign, finding: StreamFinding, *,
-                 cluster_links: Sequence[dict[str, str]] = ()) -> str:
-    """The Russian card for one finding, its fields ordered by the campaign's task."""
+                 cluster_links: Sequence[dict[str, str]] = (), note: str | None = None) -> str:
+    """The Russian card for one finding, its fields ordered by the campaign's task.
+
+    ``note``: a line put first (what differs from the request: an approved deviation, a held similar variant)."""
+    if note:
+        body = finding_card(campaign, finding, cluster_links=cluster_links)
+        return f"{note}\n\n{body}"[:MAX_MESSAGE_CHARS]
     if finding.payload is None:
         extra = also_on(cluster_links)
         return (f"{finding.text}\n\n{extra}" if extra else finding.text)[:MAX_MESSAGE_CHARS]

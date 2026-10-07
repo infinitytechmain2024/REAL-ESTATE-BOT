@@ -26,6 +26,16 @@ turn «до 1200 €» and a bare «1200 €» into it; the currency is the plan
 * A price in another currency cannot be compared, so it is other. A listing
   that does not name a currency is taken to be in the requested one.
 
+Approved deviations
+-------------------
+The interview asks what is acceptable if no exact variant exists (``TaskSpec.deviations``). When the person
+approved them, ``request_for`` carries them in the ``Request``: ``budget_pct`` replaces the fixed 10 % exact band
+(``0`` = only exact), ``area_pct`` the area tolerance, ``rooms_delta`` allows fewer rooms, ``nearby_areas`` count
+as the requested place. A listing that is outside the strict request but inside them is ``exact`` with
+``why="approved_deviation"`` and a Russian ``note`` («бюджет +7 %», «район Patraix (соседний)»): its card is sent
+at once and says what differs. Beyond the approved band the usual similar/other buckets apply (similar up to
+``max(SIMILAR_CEILING, band + 15 %)``).
+
 Other constraints
 -----------------
 * Deal type: when both the request and the listing name one (rent/sale) and
@@ -63,6 +73,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -80,7 +91,7 @@ Bucket = Literal["exact", "similar", "other", "excluded"]
 _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
 Why = Literal["price", "area", "area_max", "rooms", "location", "deal", "kind", "type", "foreign", "currency", "ai",
-              "unverified", "area_unknown"]
+              "unverified", "area_unknown", "approved_deviation"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -107,6 +118,12 @@ class Request:
     max_area: float | None = None  # the plan's max_area constraint, square metres
     min_price: float | None = None  # the plan's min_price constraint
     property_type: str | None = None  # apartment | house | land | commercial (room/other/any: not compared)
+    # approved deviations (``TaskSpec.deviations``); None / empty: the defaults above apply
+    budget_pct: float | None = None
+    area_pct: float | None = None
+    rooms_delta: int | None = None
+    nearby: tuple[str, ...] = ()  # neighbouring districts / towns accepted as the place
+    districts: tuple[str, ...] = ()  # the districts that were asked for
 
     @property
     def country_code(self) -> str | None:
@@ -121,6 +138,8 @@ class Match:
     why: str | None = None  # the main deviation (``Why``) when not exact
     area: float | None = None  # the listing's area when it is the deviation
     note: str | None = None  # owner-facing Russian reason (e.g. «Не проверено ИИ: ...»), when not from the rules
+    # ``approved_deviation``: the reviewer criteria the approved deviation covers (``budget``, ``area``, ``rooms``, ``place``)
+    covers: tuple[str, ...] = ()
 
 
 def worse(a: Match, b: Match) -> Match:
@@ -200,13 +219,21 @@ def foreign(payload: dict[str, Any], request: Request) -> Match | None:
     return None
 
 
-def area_match(area: float, minimum: float) -> Match:
-    """From 90 % of the minimum area exact, from 75 % similar, below that excluded."""
+def area_match(area: float, minimum: float, pct: float | None = None) -> Match:
+    """From 90 % of the minimum area exact, from 75 % similar, below that excluded.
+
+    ``pct`` (approved ``area_pct``) replaces the 10 %; a smaller area inside it is ``approved_deviation``."""
     ratio = area / minimum
     distance = max(0.0, 1 - ratio)
-    if ratio >= 1 - AREA_TOLERANCE - 1e-9:
+    tolerance = AREA_TOLERANCE if pct is None else pct / 100
+    floor = min(AREA_SIMILAR_FLOOR, 1 - tolerance - 0.15)
+    if ratio >= 1 - tolerance - 1e-9:
+        if pct is not None and ratio < 1 - 1e-9 and pct > 0:
+            return Match("exact", distance, "approved_deviation", area,
+                         f"площадь {area_text(area)} при запросе от {round(minimum):,} м²".replace(",", " "),
+                         ("area",))
         return Match("exact", distance)
-    if ratio >= AREA_SIMILAR_FLOOR - 1e-9:
+    if ratio >= floor - 1e-9:
         return Match("similar", distance, "area", area)
     return Match("excluded", distance, "area", area)
 
@@ -221,12 +248,24 @@ def _positive(value: Any) -> float | None:
     return None
 
 
+def _pct(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 50:
+        return None
+    return float(value)
+
+
+def _names(value: Any) -> tuple[str, ...]:
+    return tuple(str(v).strip() for v in value if isinstance(v, str) and v.strip()) if isinstance(value, list) else ()
+
+
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
-                text: str | None = None, country: str | None = None) -> Request:
+                text: str | None = None, country: str | None = None,
+                deviations: dict[str, Any] | None = None) -> Request:
     """The bucketing request of a campaign plan (``plan.constraints``, ``plan.location``, ``plan.country``;
-    ``text``: the task)."""
+    ``text``: the task; ``deviations``: ``TaskSpec.deviations`` as a dict, the compromises the person approved)."""
     if vertical == "investors":
         return Request(location=location, country=country)
+    dev = deviations if isinstance(deviations, dict) else {}
     amount = constraints.get("max_price")
     deal = constraints.get("deal")
     rooms = constraints.get("rooms")
@@ -243,6 +282,12 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         property_type=_TYPE_GROUP.get(str(constraints.get("property_type") or "")),
         rooms=rooms if isinstance(rooms, int) and not isinstance(rooms, bool) and rooms > 0 else None,
         country=country,
+        budget_pct=_pct(dev.get("budget_pct")),
+        area_pct=_pct(dev.get("area_pct")),
+        rooms_delta=dev["rooms_delta"] if isinstance(dev.get("rooms_delta"), int)
+        and not isinstance(dev.get("rooms_delta"), bool) and dev["rooms_delta"] > 0 else None,
+        nearby=_names(dev.get("nearby_areas")),
+        districts=tuple(d.strip() for d in str(constraints.get("districts") or "").split(",") if d.strip()),
     )
 
 
@@ -278,32 +323,88 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
     if elsewhere is not None:
         return elsewhere
     result = Match("exact")
+    notes: list[str] = []
+    covers: list[str] = []
+
+    def accept(match: Match) -> Match:
+        """An approved deviation inside the strict request's tolerance is exact, with its note collected."""
+        if match.why == "approved_deviation" and match.bucket == "exact":
+            if match.note:
+                notes.append(match.note)
+            covers.extend(match.covers)
+            return Match("exact", match.distance)
+        return match
+
     area = payload.get("area_m2")
     if request.min_area and isinstance(area, int | float) and not isinstance(area, bool) and math.isfinite(area) and area > 0:
-        result = area_match(float(area), request.min_area)
+        result = accept(area_match(float(area), request.min_area, request.area_pct))
         if result.bucket == "excluded":
             return result
     elif request.min_area:
         result = Match("similar", 0.0, "area_unknown")  # unknown area against a minimum: unverified
-    if request.max_area and _positive(area) and float(area) > request.max_area * (1 + AREA_TOLERANCE) + 1e-9:
-        result = worse(result, Match("other", math.inf, "area_max", float(area)))
+    if request.max_area and _positive(area):
+        ceiling = 1 + (AREA_TOLERANCE if request.area_pct is None else request.area_pct / 100)
+        if float(area) > request.max_area * ceiling + 1e-9:
+            result = worse(result, Match("other", math.inf, "area_max", float(area)))
+        elif request.area_pct and float(area) > request.max_area + 1e-9:
+            notes.append(f"площадь {area_text(float(area))} при запросе до {round(request.max_area):,} м²".replace(",", " "))
+            covers.append("area")
     listed = payload.get("rooms")
     if (request.rooms and isinstance(listed, int | float) and not isinstance(listed, bool)
             and 0 < listed < request.rooms):
-        result = worse(result, Match("other", math.inf, "rooms"))
+        if request.rooms_delta and listed >= request.rooms - request.rooms_delta:
+            notes.append(f"комнат: {int(listed)} при запросе от {request.rooms}")
+            covers.append("rooms")
+        else:
+            result = worse(result, Match("other", math.inf, "rooms"))
     if _below_min_price(payload, request):
         result = worse(result, Match("other", math.inf, "price"))
     if request.location and isinstance(payload.get("location"), str):
+        near = _nearby_hit(payload["location"], request)
         places = find_places(payload["location"])
-        if places and request.location not in places:
+        if near is not None:
+            notes.append(f"район {near} (соседний)")
+            covers.append("place")
+        elif places and request.location not in places:
             return worse(result, Match("other", math.inf, "location"))
-    if request.amount is None:
-        return result
-    price = price_of(payload)
-    currency = currency_code(payload.get("price_currency")) or request.currency
-    if price is None or currency != request.currency:
-        return worse(result, Match("other", math.inf, "price"))
-    return worse(result, budget_match(price, request.amount, is_max=request.is_max))
+    if request.amount is not None:
+        price = price_of(payload)
+        currency = currency_code(payload.get("price_currency")) or request.currency
+        if price is None or currency != request.currency:
+            return worse(result, Match("other", math.inf, "price"))
+        result = worse(result, accept(budget_match(price, request.amount, is_max=request.is_max,
+                                                   pct=request.budget_pct)))
+    if result.bucket == "exact" and notes:
+        return Match("exact", result.distance, "approved_deviation", note="; ".join(notes),
+                     covers=tuple(dict.fromkeys(covers)))
+    return result
+
+
+def _fold(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _whole_word(name: str, folded_location: str) -> bool:
+    """``name`` (4+ chars, accent/case-folded) is a whole word or phrase of the location, not a part of a longer word."""
+    def plain(text: str) -> str:
+        return "".join(ch for ch in unicodedata.normalize("NFD", _fold(text)) if not unicodedata.combining(ch))
+
+    needle = plain(name)
+    if len(needle) < 4:
+        return False
+    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", plain(folded_location)) is not None
+
+
+def _nearby_hit(location: str, request: Request) -> str | None:
+    """The approved neighbouring area the listing's location names, when it does not name the requested place."""
+    if not request.nearby:
+        return None
+    folded = _fold(location)
+    if request.location and request.location in find_places(location):
+        return None  # the requested city is named: nothing to approve
+    if any(_fold(d) in folded for d in request.districts):
+        return None
+    return next((name for name in request.nearby if _whole_word(name, folded)), None)
 
 
 def _below_min_price(payload: dict[str, Any], request: Request) -> bool:
@@ -313,15 +414,24 @@ def _below_min_price(payload: dict[str, Any], request: Request) -> bool:
                 and price < request.min_price * (1 - BUDGET_TOLERANCE) - 1e-9)
 
 
-def budget_match(price: float, amount: int, *, is_max: bool = True) -> Match:
-    """The budget rule alone: ±``BUDGET_TOLERANCE`` exact, up to ``SIMILAR_CEILING`` similar."""
+def budget_match(price: float, amount: int, *, is_max: bool = True, pct: float | None = None) -> Match:
+    """The budget rule alone: ±``BUDGET_TOLERANCE`` exact, up to ``SIMILAR_CEILING`` similar.
+
+    ``pct`` (the approved ``budget_pct``) replaces the 10 % band; a price beyond the amount but inside it is
+    ``approved_deviation`` with a note; ``0`` means only exact."""
     offset = (price - amount) / amount
     distance = abs(offset)
     if is_max and offset <= 0:
         return Match("exact", 0.0)
-    if distance <= BUDGET_TOLERANCE + 1e-9:
+    band = BUDGET_TOLERANCE if pct is None else pct / 100
+    ceiling = SIMILAR_CEILING if pct is None else max(SIMILAR_CEILING, band + 0.15)
+    if distance <= band + 1e-9:
+        if pct is not None and pct > 0:
+            sign = "+" if offset > 0 else "−"
+            return Match("exact", distance, "approved_deviation", note=f"бюджет {sign}{max(1, round(distance * 100))} %",
+                         covers=("budget",))
         return Match("exact", distance)
-    if distance <= SIMILAR_CEILING + 1e-9:
+    if distance <= ceiling + 1e-9:
         return Match("similar", distance, "price")
     return Match("other", distance, "price")
 
