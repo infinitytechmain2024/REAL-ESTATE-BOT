@@ -22,6 +22,7 @@ from .models import (
     Counts,
     FetchTicket,
     GeneratedQuery,
+    HostVerification,
     PageResult,
     PendingQuery,
     QueuedUrl,
@@ -49,6 +50,14 @@ TERMINAL = ("completed", "cancelled", "failed")
 # listing) on the HTTP layer, "render_blocked" (the browser got such a page) on the render layer.
 _REFUSALS = ("http_401", "http_403", "http_429", "http_503", "captcha", "render_blocked")
 LAYERS = ("http", "render")
+# Human verification (bot/web_search/verification.py): the shared browser profile, the job type, and the note
+# on a URL that was dropped because nobody passed the site's check.
+RENDER_PROFILE = "web-search-render"
+JOB_TYPE = "web_challenge"
+VERIFICATION_EXPIRED = "verification_expired"
+VERIFIED_HOURS = 24      # a passed check is relied on this long; after it the site is read as usual (a new challenge = a new job)
+# What the verification flow's classifier turns into the job's challenge kind (``verification.service._announce``).
+_JOB_NOTES = {"captcha": "captcha", "interstitial": "security check", "access_denied": "unusual activity"}
 
 # begin_fetch refusals (the URL's campaign row gets this state; 'busy' leaves it queued)
 DUPLICATE, SOURCE_UNAVAILABLE, HOST_BLOCKED, BUSY = "duplicate", "source_unavailable", "host_blocked", "busy"
@@ -75,7 +84,7 @@ class WebStore(Protocol):
                          error: str | None = None) -> None: ...
     async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
                       index_ttl_days: int = INDEX_TTL_DAYS) -> int: ...
-    async def next_urls(self, campaign_id: str, limit: int) -> list[QueuedUrl]: ...
+    async def next_urls(self, campaign_id: str, limit: int, skip_hosts: frozenset[str] = frozenset()) -> list[QueuedUrl]: ...
     async def host_attempts(self, campaign_id: str, host: str) -> int: ...
     async def mark_rendered(self, campaign_id: str, url_key: str) -> None: ...
     async def renders_used(self, campaign_id: str) -> int: ...
@@ -94,6 +103,17 @@ class WebStore(Protocol):
     async def funnel(self, campaign_id: str) -> list[tuple[str, int, int, int]]: ...
     async def host_refusals(self, host: str) -> dict[str, int]: ...
     def note_progress(self, campaign_id: str, progress: WebProgress) -> None: ...
+    # human verification (WEB_SEARCH_HUMAN_VERIFICATION)
+    async def render_profile(self) -> tuple[str, str]: ...
+    async def host_verification(self, host: str, campaign_id: str) -> HostVerification: ...
+    async def open_verification(self, host: str, kind: str, url: str) -> str: ...
+    async def verification_waiting(self, campaign_id: str) -> list[str]: ...
+    async def idle_verification_jobs(self) -> list[str]: ...
+    async def verification_busy(self) -> bool: ...
+    async def verified_pages(self, host: str, since: datetime) -> int: ...
+    async def queued_in(self, campaign_id: str, hosts: list[str]) -> int: ...
+    async def skip_host(self, campaign_id: str, host: str, detail: str) -> int: ...
+    async def defer_fetch(self, ticket: FetchTicket) -> None: ...
 
 
 def funnel_totals(rows: list[tuple[str, int, int, int]]) -> tuple[int, int, int, int]:
@@ -117,9 +137,10 @@ def _site_queries(rows: list[tuple[str, int]]) -> dict[str, tuple[int, int]]:
     return out
 
 
-def _reports(queries: dict[str, tuple[int, int]], urls: dict[str, list[int]]) -> list[SiteReport]:
+def _reports(queries: dict[str, tuple[int, int]], urls: dict[str, list[int]],
+             unverified: frozenset[str] = frozenset()) -> list[SiteReport]:
     hosts = sorted(set(queries) | set(urls))
-    return [SiteReport(h, *queries.get(h, (0, 0)), *urls.get(h, [0, 0, 0, 0])) for h in hosts]
+    return [SiteReport(h, *queries.get(h, (0, 0)), *urls.get(h, [0, 0, 0, 0]), h in unverified) for h in hosts]
 
 
 def _url_bucket(state: str, detail: str | None) -> int | None:
@@ -128,7 +149,7 @@ def _url_bucket(state: str, detail: str | None) -> int | None:
         return 2
     if state == "fetched":
         return 1
-    if state in ("failed", "robots") or (state == "skipped" and detail == HOST_BLOCKED):
+    if state in ("failed", "robots") or (state == "skipped" and detail in (HOST_BLOCKED, VERIFICATION_EXPIRED)):
         return 3
     return None
 
@@ -148,8 +169,11 @@ class _Duplicate(Exception):
 
 
 class PostgresWebStore:
-    def __init__(self, pool: asyncpg.Pool[asyncpg.Record]) -> None:
+    def __init__(self, pool: asyncpg.Pool[asyncpg.Record], *, job_hours: int = 24,
+                 human_verification: bool = True) -> None:
         self.pool = pool
+        self.job_hours = job_hours  # VERIFICATION_JOB_HOURS: how long an open web_challenge job lives
+        self.human_verification = human_verification  # WEB_SEARCH_HUMAN_VERIFICATION: no jobs to report when off
         self.live: dict[str, WebProgress] = {}  # the worker's in-memory progress, shown by ``web_status``
 
     def note_progress(self, campaign_id: str, progress: WebProgress) -> None:
@@ -342,14 +366,17 @@ class PostgresWebStore:
                 queued += state == "queued"
         return queued
 
-    async def next_urls(self, campaign_id: str, limit: int) -> list[QueuedUrl]:
-        """Queued URLs, one site after another (round-robin), search results before index links."""
+    async def next_urls(self, campaign_id: str, limit: int, skip_hosts: frozenset[str] = frozenset()) -> list[QueuedUrl]:
+        """Queued URLs, one site after another (round-robin), search results before index links.
+
+        ``skip_hosts``: sites that wait for a person's check; their URLs stay queued and are not returned."""
         rows = await self.pool.fetch(
             """select url, url_key, host, depth, kind, search_title, search_snippet from (
                    select *, row_number() over (partition by host order by depth, created_at, url_key) as turn
-                     from web_campaign_urls where campaign_id = $1::uuid and state = 'queued') q
+                     from web_campaign_urls where campaign_id = $1::uuid and state = 'queued'
+                      and not (host = any($3::text[]))) q
                 order by turn, depth, created_at, url_key limit $2""",
-            campaign_id, limit)
+            campaign_id, limit, sorted(skip_hosts))
         return [QueuedUrl(r["url"], r["url_key"], r["host"], r["depth"], r["kind"], r["search_title"] or "",
                           r["search_snippet"] or "") for r in rows]
 
@@ -499,13 +526,16 @@ class PostgresWebStore:
             """select host, state, detail, count(*) as n from web_campaign_urls
                 where campaign_id = $1::uuid group by host, state, detail""", campaign_id)
         counts: dict[str, list[int]] = {}
+        unverified: set[str] = set()
         for r in urls:
             row = counts.setdefault(r["host"], [0, 0, 0, 0])
             row[0] += r["n"]
             bucket = _url_bucket(r["state"], r["detail"])
             if bucket is not None:
                 row[bucket] += r["n"]
-        return _reports(_site_queries([(r["query_text"], r["results"]) for r in queries]), counts)
+            if r["detail"] == VERIFICATION_EXPIRED:
+                unverified.add(r["host"])
+        return _reports(_site_queries([(r["query_text"], r["results"]) for r in queries]), counts, frozenset(unverified))
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         row = await self.pool.fetchrow(
@@ -518,8 +548,128 @@ class PostgresWebStore:
         if row["state"] is None:  # not picked up yet
             return WebStatus(row["campaign_state"] not in TERMINAL, None, "сайты: ждёт запуска")
         active = row["state"] == "searching" and not row["stale"]
+        waiting = tuple(await self.verification_waiting(campaign_id)) if active and self.human_verification else ()
         return WebStatus(active, row["current_host"] if active else None, row["progress"] or "",
-                         self.live.get(campaign_id))
+                         self.live.get(campaign_id), waiting)
+
+    # -- human verification (bot/web_search/verification.py; jobs are handled by bot/verification) --
+
+    async def render_profile(self) -> tuple[str, str]:
+        """The browser profile of the render layer as a ``browser_profiles`` row (platform ``website``): the
+        verification flow's live browser and watchdog open the profile that is named by this row's id."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await _set_actor(conn)
+            await conn.execute(
+                """insert into browser_profiles (profile_name, platform, storage_locator, state)
+                   values ($1, 'website', 'volume:browser_profiles', 'ready') on conflict (profile_name) do nothing""",
+                RENDER_PROFILE)
+            row = await conn.fetchrow(
+                "select id::text, profile_name from browser_profiles where profile_name = $1 and deleted_at is null",
+                RENDER_PROFILE)
+        if row is None:
+            raise RuntimeError(f"browser profile {RENDER_PROFILE} is deleted")
+        return row["id"], row["profile_name"]
+
+    async def host_verification(self, host: str, campaign_id: str) -> HostVerification:
+        """The site's latest verification job: open (skip it), verified (read it through the browser), unsolved (it
+        ended without a pass after this campaign's web stage started), else none."""
+        row = await self.pool.fetchrow(
+            """select j.id::text as id, j.state, j.requested_at, j.recovered_at, w.started_at
+                 from verification_jobs j join web_hosts h on h.source_id = j.source_id
+                 left join web_search_runs w on w.campaign_id = $2::uuid
+                where h.host = $1 and j.job_type = $3 order by j.requested_at desc limit 1""",
+            host, campaign_id, JOB_TYPE)
+        if row is None:
+            return HostVerification()
+        if row["state"] in ("requested", "active"):
+            return HostVerification("open", row["id"])
+        if row["state"] == "verified":
+            solved = row["recovered_at"] or row["requested_at"]
+            fresh = solved > datetime.now(UTC) - timedelta(hours=VERIFIED_HOURS)
+            return HostVerification("verified" if fresh else "none", row["id"], solved)
+        if row["started_at"] is not None and row["requested_at"] >= row["started_at"]:
+            return HostVerification("unsolved", row["id"])
+        return HostVerification()
+
+    async def open_verification(self, host: str, kind: str, url: str) -> str:
+        """One open verification job per site (a second challenge of the same site finds the first)."""
+        profile_id, _ = await self.render_profile()
+        async with self.pool.acquire() as conn, conn.transaction():
+            await _set_actor(conn)
+            source = await conn.fetchval("select source_id::text from web_hosts where host = $1", host)
+            if source is None:
+                raise RuntimeError(f"site {host} has no source yet")
+            job = await conn.fetchval(
+                """insert into verification_jobs (source_id, job_type, state, requested_by, resolution_note,
+                                                  browser_profile_id, challenge_kind, target_url, expires_at)
+                   values ($1::uuid, $2, 'requested', $3, $4, $5::uuid, null, $6, now() + make_interval(hours => $7::int))
+                   on conflict (source_id, job_type) where state in ('requested', 'active') do nothing
+                   returning id::text""",
+                source, JOB_TYPE, ACTOR, f"{_JOB_NOTES.get(kind, 'security check')} on {host}"[:500], profile_id, url[:2048],
+                self.job_hours)
+            if job is None:
+                job = await conn.fetchval(
+                    """select id::text from verification_jobs
+                        where source_id = $1::uuid and job_type = $2 and state in ('requested', 'active')""",
+                    source, JOB_TYPE)
+        return str(job)
+
+    async def verification_waiting(self, campaign_id: str) -> list[str]:
+        """Sites with an open verification job that still have URLs of this campaign in the queue."""
+        rows = await self.pool.fetch(
+            """select distinct h.host from verification_jobs j join web_hosts h on h.source_id = j.source_id
+                where j.job_type = $2 and j.state in ('requested', 'active')
+                  and exists (select 1 from web_campaign_urls u
+                               where u.campaign_id = $1::uuid and u.host = h.host and u.state = 'queued')
+                order by h.host""", campaign_id, JOB_TYPE)
+        return [r["host"] for r in rows]
+
+    async def idle_verification_jobs(self) -> list[str]:
+        """Open web verification jobs of sites that no running web stage has queued URLs for any more."""
+        rows = await self.pool.fetch(
+            """select j.id::text as id from verification_jobs j join web_hosts h on h.source_id = j.source_id
+                where j.job_type = $1 and j.state in ('requested', 'active')
+                  and not exists (select 1 from web_campaign_urls u join web_search_runs w on w.campaign_id = u.campaign_id
+                                   where u.host = h.host and u.state = 'queued' and w.state = 'searching')
+                order by j.requested_at""", JOB_TYPE)
+        return [r["id"] for r in rows]
+
+    async def verification_busy(self) -> bool:
+        """A person holds a web verification job (the live browser may have the render profile)."""
+        return bool(await self.pool.fetchval(
+            "select exists (select 1 from verification_jobs where job_type = $1 and state = 'active')", JOB_TYPE))
+
+    async def verified_pages(self, host: str, since: datetime) -> int:
+        """Pages of the site read through the browser since ``since`` (any campaign): the budget of one passed check."""
+        return int(await self.pool.fetchval(
+            """select count(*) from web_campaign_urls
+                where host = $1 and layer = 'render' and state in ('fetched', 'failed') and finished_at >= $2""",
+            host, since))
+
+    async def queued_in(self, campaign_id: str, hosts: list[str]) -> int:
+        return int(await self.pool.fetchval(
+            "select count(*) from web_campaign_urls where campaign_id = $1::uuid and state = 'queued' and host = any($2::text[])",
+            campaign_id, hosts))
+
+    async def skip_host(self, campaign_id: str, host: str, detail: str) -> int:
+        """Drop the site's queued URLs of this campaign (``skipped``, ``detail``): nobody passed its check."""
+        status = await self.pool.execute(
+            """update web_campaign_urls set state = 'skipped', detail = $3, finished_at = now()
+                where campaign_id = $1::uuid and host = $2 and state = 'queued'""", campaign_id, host, detail[:80])
+        return int(status.rsplit(" ", 1)[-1])
+
+    async def defer_fetch(self, ticket: FetchTicket) -> None:
+        """Give a claimed URL back unread: the run is cancelled, the global claim dropped, the URL stays queued and
+        uses no page, host or render budget (the site asked for a person's check)."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await _set_actor(conn)
+            await conn.execute(
+                """update acquisition_runs set state = 'cancelled', finished_at = now(), stop_reason = 'challenge_deferred'
+                    where id = $1::uuid and state = 'running'""", ticket.run_id)
+            await conn.execute("delete from web_seen_urls where url_key = $1 and state = 'fetching'", ticket.url.url_key)
+            await conn.execute(
+                "update web_campaign_urls set rendered = false where campaign_id = $1::uuid and url_key = $2 and state = 'queued'",
+                ticket.campaign_id, ticket.url.url_key)
 
 
 def _detail(result: PageResult) -> str | None:
@@ -682,6 +832,7 @@ class _MemUrl:
     rendered: bool = False
     scraped: bool = False
     layer: str | None = None  # the fetch layer that read it (campaign_metrics)
+    finished_at: datetime | None = None
 
 
 @dataclass
@@ -714,7 +865,11 @@ class MemoryWebStore:
     paused_hosts: set[str] = field(default_factory=set)
     busy_hosts: set[str] = field(default_factory=set)
     finished_fetches: list[str] = field(default_factory=list)  # url_keys, in order
+    deferred_fetches: list[str] = field(default_factory=list)  # url_keys given back unread (a site's check was pending)
     live: dict[str, WebProgress] = field(default_factory=dict)
+    verification_jobs: list[dict[str, object]] = field(default_factory=list)  # the web_challenge jobs, oldest first
+    job_hours: int = 24
+    human_verification: bool = True
     _order: int = 0
 
     def note_progress(self, campaign_id: str, progress: WebProgress) -> None:
@@ -853,8 +1008,9 @@ class MemoryWebStore:
             queued += state == "queued"
         return queued
 
-    async def next_urls(self, campaign_id: str, limit: int) -> list[QueuedUrl]:
-        queued = sorted((u for u in self.urls.get(campaign_id, {}).values() if u.state == "queued"),
+    async def next_urls(self, campaign_id: str, limit: int, skip_hosts: frozenset[str] = frozenset()) -> list[QueuedUrl]:
+        queued = sorted((u for u in self.urls.get(campaign_id, {}).values()
+                         if u.state == "queued" and u.host not in skip_hosts),
                         key=lambda u: (u.depth, u.order))
         turns: dict[str, int] = {}
         ranked = []
@@ -962,6 +1118,7 @@ class MemoryWebStore:
         row.state, row.kind = ("fetched" if result.ok else "failed"), result.kind
         row.detail = _detail(result)
         row.layer = result.layer
+        row.finished_at = self.now()
         self.finished_fetches.append(ticket.url.url_key)
         if result.layer == "none" or (result.via == "search" and result.error is None):  # the site was never asked
             return post_id
@@ -974,13 +1131,16 @@ class MemoryWebStore:
     async def site_report(self, campaign_id: str) -> list[SiteReport]:
         queries = [(q.text, q.results) for q in self.queries.get(campaign_id, []) if q.state == "searched"]
         counts: dict[str, list[int]] = {}
+        unverified: set[str] = set()
         for u in self.urls.get(campaign_id, {}).values():
             row = counts.setdefault(u.host, [0, 0, 0, 0])
             row[0] += 1
             bucket = _url_bucket(u.state, u.detail)
             if bucket is not None:
                 row[bucket] += 1
-        return _reports(_site_queries(queries), counts)
+            if u.detail == VERIFICATION_EXPIRED:
+                unverified.add(u.host)
+        return _reports(_site_queries(queries), counts, frozenset(unverified))
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         state = self._campaign_state(campaign_id)
@@ -988,4 +1148,82 @@ class MemoryWebStore:
         if run is None:
             return WebStatus(state not in TERMINAL, None, "сайты: ждёт запуска") if state else None
         active = run.state == "searching"
-        return WebStatus(active, run.host if active else None, run.progress or "", self.live.get(campaign_id))
+        waiting = tuple(await self.verification_waiting(campaign_id)) if active and self.human_verification else ()
+        return WebStatus(active, run.host if active else None, run.progress or "", self.live.get(campaign_id), waiting)
+
+    # -- human verification: the jobs the verification service would hold, as plain dicts (tests drive their state) --
+
+    async def render_profile(self) -> tuple[str, str]:
+        return "00000000-0000-0000-0000-00000000beef", RENDER_PROFILE
+
+    def _jobs_of(self, host: str) -> list[dict[str, object]]:
+        return [j for j in self.verification_jobs if j["host"] == host]
+
+    async def host_verification(self, host: str, campaign_id: str) -> HostVerification:
+        jobs = self._jobs_of(host)
+        if not jobs:
+            return HostVerification()
+        job = jobs[-1]
+        state = str(job["state"])
+        if state in ("requested", "active"):
+            return HostVerification("open", str(job["id"]))
+        if state == "verified":
+            solved = job["recovered_at"]
+            assert isinstance(solved, datetime)
+            fresh = solved > self.now() - timedelta(hours=VERIFIED_HOURS)
+            return HostVerification("verified" if fresh else "none", str(job["id"]), solved)
+        started = self.started.get(campaign_id)
+        requested = job["requested_at"]
+        assert isinstance(requested, datetime)
+        return HostVerification("unsolved", str(job["id"])) if started is not None and requested >= started else HostVerification()
+
+    async def open_verification(self, host: str, kind: str, url: str) -> str:
+        for job in self._jobs_of(host):
+            if job["state"] in ("requested", "active"):
+                return str(job["id"])
+        job = {"id": str(uuid.uuid4()), "host": host, "kind": kind, "url": url, "state": "requested",
+               "requested_at": self.now(), "recovered_at": None,
+               "expires_at": self.now() + timedelta(hours=self.job_hours)}
+        self.verification_jobs.append(job)
+        return str(job["id"])
+
+    def set_job_state(self, host: str, state: str) -> None:
+        """Test helper: what the verification service does to the site's latest job (active, verified, expired ...)."""
+        job = self._jobs_of(host)[-1]
+        job["state"] = state
+        if state == "verified":
+            job["recovered_at"] = self.now()
+
+    async def verification_waiting(self, campaign_id: str) -> list[str]:
+        queued = {u.host for u in self.urls.get(campaign_id, {}).values() if u.state == "queued"}
+        return sorted({str(j["host"]) for j in self.verification_jobs if j["state"] in ("requested", "active")} & queued)
+
+    async def idle_verification_jobs(self) -> list[str]:
+        live = {c for c, run in self.runs.items() if run.state == "searching"}
+        queued = {u.host for c in live for u in self.urls.get(c, {}).values() if u.state == "queued"}
+        return [str(j["id"]) for j in self.verification_jobs
+                if j["state"] in ("requested", "active") and j["host"] not in queued]
+
+    async def verification_busy(self) -> bool:
+        return any(j["state"] == "active" for j in self.verification_jobs)
+
+    async def verified_pages(self, host: str, since: datetime) -> int:
+        return sum(1 for rows in self.urls.values() for u in rows.values()
+                   if u.host == host and u.layer == "render" and u.state in ("fetched", "failed")
+                   and u.finished_at is not None and u.finished_at >= since)
+
+    async def queued_in(self, campaign_id: str, hosts: list[str]) -> int:
+        return sum(1 for u in self.urls.get(campaign_id, {}).values() if u.state == "queued" and u.host in hosts)
+
+    async def skip_host(self, campaign_id: str, host: str, detail: str) -> int:
+        rows = [u for u in self.urls.get(campaign_id, {}).values() if u.host == host and u.state == "queued"]
+        for u in rows:
+            u.state, u.detail = "skipped", detail
+        return len(rows)
+
+    async def defer_fetch(self, ticket: FetchTicket) -> None:
+        self.seen.pop(ticket.url.url_key, None)
+        row = self.urls.get(ticket.campaign_id, {}).get(ticket.url.url_key)
+        if row is not None and row.state == "queued":
+            row.rendered = False
+        self.deferred_fetches.append(ticket.url.url_key)

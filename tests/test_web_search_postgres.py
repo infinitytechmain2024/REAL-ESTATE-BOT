@@ -393,3 +393,171 @@ async def test_migration_034_carries_an_earlier_block_over_to_both_layers(pool) 
     await pool.execute(sql)  # idempotent: applying it again after the data exists
     row = await pool.fetchrow("select http_blocked_until, render_blocked_until, blocked_until from web_hosts where host = 'old.example'")
     assert row["http_blocked_until"] == row["render_blocked_until"] == row["blocked_until"]
+
+
+# --- human verification of a website (migration 041) --------------------------------------------------------------
+
+
+class ChallengeRenderer:
+    """The browser: every page of idealista.com is a challenge page (raised as the real renderer does)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.passed = False  # a person passed the check: the page is a listing now
+
+    async def render(self, url: str):
+        from bot.web_search.render import ChallengeDetected, RenderedPage
+
+        self.calls.append(url)
+        if self.passed:
+            return RenderedPage(url, "Piso en alquiler en Sol, Madrid", rent_page("Piso en alquiler en Sol, Madrid"))
+        raise ChallengeDetected("captcha", url, "idealista.com")
+
+
+async def test_a_challenge_opens_one_verification_job_the_flow_hands_to_a_person_and_the_site_is_read_after(pool) -> None:
+    from bot.verification.models import Recovery
+    from bot.verification.service import FlowConfig, VerificationService
+    from bot.verification.store import PostgresVerificationStore
+    from tests.test_live_view import TOKEN, init_data
+    from tests.test_verification_flow import OWNER, FakeLive, FakeNotifier, FakeWatchdog, token_of
+
+    cid = await new_campaign(pool)
+    store = PostgresWebStore(pool)
+    renderer = ChallengeRenderer()
+    fetcher = FakeFetcher(errors={LISTING: "http_403"})
+    worker = WebSearchWorker(PostgresCampaignStore(pool), store, FakeSearcher(default=[LISTING]), fetcher,
+                             ListGenerator(["piso alquiler Madrid"]), renderer=renderer,
+                             config=WebSearchConfig(cover_portals=False, human_verification=True))
+    for _ in range(6):
+        await worker.tick()
+
+    # exactly one job: the site's source, the render profile (a browser_profiles row), the challenged page
+    [job] = await pool.fetch(
+        """select j.id::text, j.state, j.job_type, j.target_url, j.requested_by, s.canonical_url, s.platform,
+                  p.profile_name, p.platform as profile_platform
+             from verification_jobs j join monitoring_sources s on s.id = j.source_id
+             join browser_profiles p on p.id = j.browser_profile_id""")
+    assert (job["state"], job["job_type"], job["target_url"], job["canonical_url"], job["platform"]) == (
+        "requested", "web_challenge", LISTING, "https://idealista.com/", "website")
+    assert (job["profile_name"], job["profile_platform"]) == ("web-search-render", "website")
+    assert len(renderer.calls) == 1  # the site was asked once
+    assert await store.open_verification("idealista.com", "captcha", LISTING) == job["id"]  # deduped
+    assert await pool.fetchval("select count(*) from verification_jobs") == 1
+    # the URL went back to the queue unread: no run left running, no claim, no refusal, no budget
+    assert await pool.fetchval("select state from web_campaign_urls where url = $1", LISTING) == "queued"
+    assert await pool.fetchval("select count(*) from acquisition_runs where state = 'running'") == 0
+    assert await pool.fetchval("select count(*) from web_seen_urls") == 0
+    assert dict(await pool.fetchrow("select http_refusals, render_refusals from web_hosts where host = 'idealista.com'")) == {
+        "http_refusals": 0, "render_refusals": 0}
+    assert await store.renders_used(cid) == 0
+    assert await store.verification_waiting(cid) == ["idealista.com"]
+    assert (await store.web_status(cid)).verification == ("idealista.com",)
+    assert (await store.host_verification("idealista.com", cid)).state == "open"
+    assert (await worker.store.get_run(cid)).state == "searching"  # the stage waits
+
+    # the existing verification service announces it, a person claims it, the watchdog confirms a clean page
+    verification = PostgresVerificationStore(URL)
+    await verification.connect()
+    try:
+        notifier, live = FakeNotifier(), FakeLive()
+        service = VerificationService(verification, live, FakeWatchdog(Recovery(True)), notifier,
+                                      FlowConfig(public_url="https://1-2-3-4.sslip.io",
+                                                 operator_ids=frozenset({OWNER, OPERATOR}), owner_id=OWNER,
+                                                 bot_token=TOKEN))
+        await service.tick()
+        [_, text, button] = next(m for m in notifier.sent if m[0] == OPERATOR)
+        assert "Сайт idealista.com просит пройти проверку" in text and "«Готово»" in text
+        announced = await verification.get_job(job["id"])
+        assert announced.challenge_kind == "captcha" and not announced.sensitive and announced.platform == "website"
+        session = (await service.open(token_of(button[1]), init_data(OPERATOR))).session
+        await service.claim(session)
+        await service.view(session)
+        assert live.started == [f"{announced.profile_id}@{LISTING}"]
+        assert await service.solve(session) is True
+        assert (await store.host_verification("idealista.com", cid)).state == "verified"
+        assert (await verification.get_job(job["id"])).resumed_at is not None
+    finally:
+        await verification.close()
+
+    # the site is read through the browser profile now (no plain HTTP), and the stage finishes
+    renderer.passed = True
+    fetched = list(fetcher.fetched)
+    for _ in range(8):
+        await worker.tick()
+        if (await worker.store.get_run(cid)).state != "searching":
+            break
+    assert (await worker.store.get_run(cid)).state == "done"
+    assert fetcher.fetched == fetched and renderer.calls[-1] == LISTING
+    assert await pool.fetchval("select layer from web_campaign_urls where url = $1", LISTING) == "render"
+    assert await pool.fetchval("select count(*) from collected_posts where canonical_url = $1", LISTING) == 1
+
+
+async def test_an_unsolved_web_job_expires_and_the_site_is_reported(pool) -> None:
+    cid = await new_campaign(pool)
+    store = PostgresWebStore(pool)
+    worker = WebSearchWorker(PostgresCampaignStore(pool), store, FakeSearcher(default=[LISTING]),
+                             FakeFetcher(errors={LISTING: "http_403"}), ListGenerator(["piso alquiler Madrid"]),
+                             renderer=ChallengeRenderer(), config=WebSearchConfig(cover_portals=False, human_verification=True))
+    for _ in range(6):
+        await worker.tick()
+    await pool.execute("update verification_jobs set state = 'expired', resolved_at = now() where job_type = 'web_challenge'")
+    assert (await store.host_verification("idealista.com", cid)).state == "unsolved"
+    for _ in range(6):
+        await worker.tick()
+    assert (await worker.store.get_run(cid)).state == "done"
+    assert await pool.fetchval("select detail from web_campaign_urls where url = $1", LISTING) == "verification_expired"
+    [report] = [r for r in await store.site_report(cid) if r.host == "idealista.com"]
+    assert report.unverified and report.refused == 1
+
+
+async def test_an_open_web_job_expires_by_itself_and_goes_when_no_campaign_waits_for_the_site(pool) -> None:
+    from bot.verification.store import PostgresVerificationStore
+
+    cid = await new_campaign(pool)
+    store = PostgresWebStore(pool, job_hours=5, human_verification=True)
+    verification = PostgresVerificationStore(URL)
+    await verification.connect()
+    try:
+        worker = WebSearchWorker(PostgresCampaignStore(pool), store, FakeSearcher(default=[LISTING]),
+                                 FakeFetcher(errors={LISTING: "http_403"}), ListGenerator(["piso alquiler Madrid"]),
+                                 renderer=ChallengeRenderer(), cancel_job=verification.cancel,
+                                 config=WebSearchConfig(cover_portals=False, human_verification=True))
+        for _ in range(6):
+            await worker.tick()
+        # not announced yet, still it carries an expiry: the job's lifetime from VERIFICATION_JOB_HOURS
+        hours = await pool.fetchval(
+            "select extract(epoch from expires_at - requested_at) / 3600 from verification_jobs where job_type = 'web_challenge'")
+        assert round(float(hours)) == 5
+        assert await store.idle_verification_jobs() == []  # the campaign still has the site's URL queued
+        campaign = await PostgresCampaignStore(pool).get(cid)
+        await worker._done(campaign, "time_cap")  # the stage ends: nobody waits for the check any more
+        assert await pool.fetchval("select state from verification_jobs where job_type = 'web_challenge'") == "cancelled"
+    finally:
+        await verification.close()
+
+
+async def test_the_web_status_skips_the_verification_query_when_it_is_off(pool) -> None:
+    cid = await new_campaign(pool)
+    on, off = PostgresWebStore(pool), PostgresWebStore(pool, human_verification=False)
+    worker = WebSearchWorker(PostgresCampaignStore(pool), on, FakeSearcher(default=[LISTING]),
+                             FakeFetcher(errors={LISTING: "http_403"}), ListGenerator(["piso alquiler Madrid"]),
+                             renderer=ChallengeRenderer(), config=WebSearchConfig(cover_portals=False, human_verification=True))
+    for _ in range(6):
+        await worker.tick()
+    assert (await on.web_status(cid)).verification == ("idealista.com",)
+    assert (await off.web_status(cid)).verification == ()
+
+
+async def test_the_render_profile_is_never_a_collector_profile(pool) -> None:
+    from bot.orchestra.store import ready_profile
+
+    store = PostgresWebStore(pool)
+    await store.render_profile()
+    async with pool.acquire() as conn:
+        with pytest.raises(ValueError):
+            await ready_profile(conn, "website")
+        await conn.execute(
+            """insert into browser_profiles (profile_name, platform, storage_locator, state)
+               values ('website-main', 'website', 'volume:browser_profiles', 'ready')""")
+        own = await conn.fetchval("select id::text from browser_profiles where profile_name = 'website-main'")
+        assert await ready_profile(conn, "website") == own

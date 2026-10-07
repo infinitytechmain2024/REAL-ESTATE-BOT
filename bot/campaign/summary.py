@@ -38,6 +38,7 @@ class Site:
     posts: int = 0
     sent: int = 0
     held: int = 0
+    unverified: bool = False   # the site asked for a person's check and nobody passed it
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -65,19 +66,20 @@ def _portal_of(host: str, portals: Sequence[str]) -> str | None:
 
 def _sites(sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str]) -> dict[str, Site]:
     """Both stores' numbers per site; a portal's subdomains (inmuebles.sareb.es) count as the portal."""
-    merged: dict[str, dict[str, int]] = {}
+    merged: dict[str, dict[str, int]] = {}  # the numbers per site (``unverified`` is a 0/1 flag)
     for report in reports:
         host = str(getattr(report, "host", ""))
         row = merged.setdefault(_portal_of(host, portals) or host, {})
         for name in ("links", "read", "from_search", "refused", "queries", "results"):
             row[name] = row.get(name, 0) + int(getattr(report, name, 0) or 0)
+        row["unverified"] = row.get("unverified", 0) or int(bool(getattr(report, "unverified", False)))
     for source in sources:
         if source.platform != "website":
             continue
         row = merged.setdefault(_portal_of(source.name, portals) or source.name, {})
         for name, value in (("posts", source.posts), ("sent", source.sent), ("held", source.held)):
             row[name] = row.get(name, 0) + value
-    return {host: Site(host, **row) for host, row in merged.items()}
+    return {host: Site(host, **{**row, "unverified": bool(row.get("unverified"))}) for host, row in merged.items()}
 
 
 def site_stats(sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = ()) -> dict[str, Site]:
@@ -87,6 +89,10 @@ def site_stats(sources: Sequence[SourceCount], reports: Sequence[object], portal
 
 
 def _site_line(site: Site) -> str:
+    if site.unverified:  # human verification: the site asked for a person's check and nobody passed it
+        done = f" · прочитано {site.read + site.from_search}" if site.read or site.from_search else ""
+        cards = f" {_cards(site.sent, site.held)}" if site.sent or site.held else ""
+        return f"{site_name(site.host)} — проверку никто не прошёл{done}{cards}"
     parts = [plural(site.links, "ссылка", "ссылки", "ссылок") + " в поиске"] if site.links else []
     if site.read:
         parts.append(f"прочитано {site.read}")

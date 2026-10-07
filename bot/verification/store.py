@@ -44,7 +44,7 @@ _JOB_SELECT = """
 select j.id::text as id, j.state, j.job_type, j.source_id::text as source_id, s.canonical_url, s.platform,
        j.resolution_note, coalesce(j.browser_profile_id, r.browser_profile_id)::text as profile_id,
        p.profile_name, p.state as profile_state, i.batch_id::text as batch_id, j.challenge_kind, j.sensitive,
-       j.claimed_by, j.notified_at, j.solved_at, j.recovered_at, j.resumed_at, j.expires_at
+       j.claimed_by, j.notified_at, j.solved_at, j.recovered_at, j.resumed_at, j.expires_at, j.target_url
   from public.verification_jobs j
   join public.monitoring_sources s on s.id = j.source_id
   left join public.acquisition_runs r on r.id = j.acquisition_run_id
@@ -61,6 +61,7 @@ def _job(row: Any) -> Job:
         batch_id=row["batch_id"], challenge_kind=row["challenge_kind"], sensitive=row["sensitive"],
         claimed_by=row["claimed_by"], notified_at=row["notified_at"], solved_at=row["solved_at"],
         recovered_at=row["recovered_at"], resumed_at=row["resumed_at"], expires_at=row["expires_at"],
+        target_url=row["target_url"],
     )
 
 

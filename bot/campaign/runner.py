@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
@@ -1093,6 +1094,9 @@ class CampaignRunner:
                 text += f"\n{esc(web.line[:300], quote=False)}"
             if web_active and getattr(web, "progress", None) is not None:
                 text += esc(await self._web_detail(campaign, web.progress), quote=False)
+            if web_active:  # a site asked for a person's check (human verification): owners see why it waits
+                for host in getattr(web, "verification", None) or ():
+                    text += esc(f"\nСайт {host} просит проверку — жду, пока её пройдут", quote=False)
             if social is not None:
                 if social.searching:
                     query = f" · «{social.query}»" if social.query else ""
@@ -1360,17 +1364,29 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
                                          timeout_seconds=settings.query_timeout_seconds)
     else:
         log.warning("campaign.web_search_template_queries", extra={"hint": "set OPENROUTER_API_KEY"})
+    from bot.verification.settings import _bounded
+    from bot.verification.store import PostgresVerificationStore
+
+    job_hours = _bounded(os.environ, "VERIFICATION_JOB_HOURS", 24, 1, 168)  # as the verification service reads it
+    web_store = PostgresWebStore(pool, job_hours=job_hours, human_verification=config.human_verification)
+    verification = PostgresVerificationStore("")  # shares the runner's pool; closed with it
+    verification.pool = pool
     renderer = None
     if settings.render_enabled and runner_settings.browser_token:
         from bot.facebook_collector.browser import BrowserSessionClient
         from bot.web_search.render import BrowserRenderer
 
+        # With human verification the render profile is a browser_profiles row (so the verification flow's live
+        # browser and watchdog open the same profile and its cookies) and a challenge page is reported, not read.
         renderer = BrowserRenderer(BrowserSessionClient(runner_settings.browser_url, runner_settings.browser_token),
-                                   timeout_seconds=settings.render_timeout_seconds)
+                                   timeout_seconds=settings.render_timeout_seconds,
+                                   profile_source=web_store.render_profile if config.human_verification else None,
+                                   detect_challenges=config.human_verification)
     scraper = settings.scraper()
     planner = runner_settings.search_planner()
-    worker = WebSearchWorker(campaigns, PostgresWebStore(pool), searcher, fetcher, FallbackQueryGenerator(model),
-                             renderer=renderer, scraper=scraper, planner=planner, config=config)
+    worker = WebSearchWorker(campaigns, web_store, searcher, fetcher, FallbackQueryGenerator(model),
+                             renderer=renderer, scraper=scraper, planner=planner, config=config,
+                             cancel_job=verification.cancel)
     closers = ([searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
                + ([scraper.aclose] if scraper else []) + ([planner.aclose] if planner else []))
     return worker, settings.poll_seconds, closers

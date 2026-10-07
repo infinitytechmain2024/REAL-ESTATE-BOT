@@ -293,6 +293,7 @@ class FacebookBatchPlan:
 async def ready_profile(conn: asyncpg.Connection[asyncpg.Record], platform: str) -> str:
     profile = await conn.fetchval(
         """select id from browser_profiles where platform=$1 and state='ready' and deleted_at is null
+              and profile_name <> 'web-search-render'
              order by created_at limit 1""", platform
     )
     if profile is None:
