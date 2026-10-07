@@ -222,6 +222,8 @@ def unreadable_sites(sources: Sequence[SourceCount], reports: Sequence[object], 
 
 def unreadable_line(site: Site) -> str:
     name = site_name(site.host)
+    if site.unverified:  # human verification: the site asked for a person's check and nobody passed it
+        return f"{name} — проверку никто не прошёл"
     if site.from_search:
         return (f"{name} — сайт не пускает ботов (отказ 403 или защита), страницы не открылись; "
                 f"{plural(site.from_search, 'объявление', 'объявления', 'объявлений')} взято из описания в поиске, "
@@ -241,7 +243,7 @@ def real_estate_sources(sources: Sequence[SourceCount], reports: Sequence[object
     calculators, wikis ...). The owners' summary keeps the raw list.
     """
     stats = site_stats(sources, reports, portals)
-    keep = {host for host, s in stats.items() if _known(host, portals) or s.posts or s.sent or s.held}
+    keep = {host for host, s in stats.items() if _known(host, portals) or s.posts or s.sent or s.held or s.unverified}
 
     def key(host: str) -> str:
         return next((p for p in portals if host == p or host.endswith("." + p)), host)
@@ -265,7 +267,7 @@ def facts_for_model(task: dict[str, Any], counts: Tally, sites: Sequence[Site], 
                    "rejected_total": counts.rejected},
         "rejected_by_reason": counts.excluded,
         "sites": [{"site": s.host, "links": s.links, "pages_read": s.read, "from_search_snippet": s.from_search,
-                   "refused": s.refused, "cards_sent": s.sent, "cards_held": s.held} for s in sites[:12]],
+                   "refused": s.refused, "unverified": s.unverified, "cards_sent": s.sent, "cards_held": s.held} for s in sites[:12]],
         "unreadable_sites": [s.host for s in unreadable],
         "tolerance_pct": tolerance_pct if tolerance_pct else round(BUDGET_TOLERANCE * 100),  # the spec's, else the default
     }
@@ -293,7 +295,8 @@ def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
         tips.append(f"{by_reason['area']} вариантов отклонены из-за площади: уменьшите минимальную площадь на 10 %.")
     unreadable = facts.get("unreadable_sites", [])
     refused = {s.get("site"): s.get("refused", 0) for s in facts.get("sites", []) if isinstance(s, dict)}
-    for host in unreadable[:2]:
+    unverified = {s.get("site") for s in facts.get("sites", []) if isinstance(s, dict) and s.get("unverified")}
+    for host in [h for h in unreadable if h not in unverified][:2]:
         tips.append(f"{site_name(host)} не читается (отказов: {refused.get(host) or 1}): сайт не пускает ботов. "
                     "Включите чтение через API или прокси, чтобы получать его объявления целиком.")
     held = counts.get("held_similar", 0) + counts.get("held_other", 0)

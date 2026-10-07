@@ -50,6 +50,7 @@ from .models import (
     INDEX_RESULT_NOTE,
     SEARCH_RESULT_NOTE,
     Candidate,
+    FetchTicket,
     PageResult,
     QueuedUrl,
     WebProgress,
@@ -65,10 +66,10 @@ from .queries import (
     plan_sites,
     portal_quota,
 )
-from .render import Renderer, RenderError
+from .render import ChallengeDetected, Renderer, RenderError
 from .scrape_api import Scraper
 from .searxng import Searcher, SearchError
-from .store import _REFUSALS, BUSY, HOST_BLOCKED, WebStore, funnel_totals
+from .store import _REFUSALS, BUSY, HOST_BLOCKED, VERIFICATION_EXPIRED, WebStore, funnel_totals
 from .structured import Structured, facts_block, from_jsonld, structured
 from .urls import (
     classify_page,
@@ -114,6 +115,12 @@ class WebSearchConfig:
     render_index_on_refusal: bool = True    # a refused depth-0 index page may use the browser (never the scrape API)
     blocked_hosts: frozenset[str] = frozenset()
     cover_portals: bool = True  # every known portal of the country gets its own site: query
+    # A CAPTCHA / anti-bot page in the browser becomes a verification job for a person (bot/verification); the site
+    # is skipped meanwhile and, once a person passed the check, read through the same browser profile (see
+    # bot/web_search/verification.py). Off: such a page is a render refusal, as before.
+    human_verification: bool = False
+    verified_host_interval_seconds: float = 8    # gap between two reads of one verified site
+    pages_per_verification: int = 40             # pages read through the browser after one passed check
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -125,7 +132,8 @@ class WebSearchConfig:
                 and 1 <= self.max_pages_per_day <= 10_000 and 1 <= self.max_queries_per_day <= 5_000
                 and 1 <= self.max_rounds <= 50 and 5 <= self.max_minutes_per_campaign <= 7 * 24 * 60
                 and 60 <= self.lease_seconds <= 3600 and 1 <= self.page_runtime_seconds <= 600
-                and 0 <= self.max_renders_per_campaign <= 200 and 0 <= self.max_scrape_api_per_campaign <= 500):
+                and 0 <= self.max_renders_per_campaign <= 200 and 0 <= self.max_scrape_api_per_campaign <= 500
+                and 0 <= self.verified_host_interval_seconds <= 300 and 1 <= self.pages_per_verification <= 200):
             raise ValueError("unsafe web search limits")
 
 
@@ -177,6 +185,7 @@ class WebSearchWorker:
         self.token = str(uuid.uuid4())
         self._progress: dict[str, WebProgress] = {}  # campaign id -> live numbers (also shown through the store)
         self._listing_hosts: dict[tuple[str, str], bool] = {}  # (campaign, host) -> has a listing, reset every step
+        self._verified_at: dict[str, datetime] = {}  # site -> when it was last read through the verified browser
 
     def progress(self, campaign_id: str) -> WebProgress:
         """The live progress of the campaign's web stage: current host and layer, pages read, listings found,
@@ -258,7 +267,10 @@ class WebSearchWorker:
             return
         counts = await self.store.counts(cid)
         usage = await self.store.usage()
-        if counts.queued_urls:
+        # Sites that wait for a person's check keep their URLs queued; the stage goes on with everything else.
+        waiting = await self.store.verification_waiting(cid) if self._human() else []
+        queued = counts.queued_urls - (await self.store.queued_in(cid, waiting) if waiting else 0)
+        if queued > 0:
             if counts.pages >= cfg.max_pages_per_campaign:
                 await self._done(campaign, "page_cap")
                 return
@@ -278,9 +290,10 @@ class WebSearchWorker:
             return
         run = await self.store.get_run(cid)
         if counts.queries >= cfg.max_queries_per_campaign or (run is not None and run.rounds >= cfg.max_rounds):
-            await self._done(campaign, "queries_done")
+            if not waiting:  # a site's check is still pending: the stage waits for it (or for its expiry)
+                await self._done(campaign, "queries_done")
             return
-        if not await self._new_round(campaign, counts.queries):
+        if not await self._new_round(campaign, counts.queries) and not waiting:
             await self._done(campaign, "queries_exhausted")
 
     # -- queries --
@@ -375,9 +388,14 @@ class WebSearchWorker:
         cfg = self.config
         budget = min(cfg.pages_per_tick, cfg.max_pages_per_campaign - pages, cfg.max_pages_per_day - pages_today)
         known = known_hosts_of(campaign)
-        for url in await self.store.next_urls(campaign.id, cfg.pages_per_tick * 3):
+        human = self._human()
+        waiting = frozenset(await self.store.verification_waiting(campaign.id)) if human else frozenset()
+        busy = human and await self.store.verification_busy()   # a person has the browser open on its profile
+        for url in await self.store.next_urls(campaign.id, cfg.pages_per_tick * 3, waiting):
             if budget <= 0:
                 break
+            if url.host in waiting:  # a challenge met earlier in this very tick
+                continue
             attempts = await self.store.host_attempts(campaign.id, url.host)
             if attempts >= cfg.max_pages_per_host:
                 await self.store.mark_url(campaign.id, url.url_key, "capped", "host_cap")
@@ -394,7 +412,16 @@ class WebSearchWorker:
             # Which layers can read this URL right now, decided before a ticket is claimed: a URL no layer can
             # take is not claimed, so it never spends the page budget or the host cap on a ``layer="none"`` result.
             layers = await self.store.layer_state(url.host)
+            gate = await self._gate(campaign.id, url, layers, busy) if human else None
+            if gate == "wait":
+                continue  # the site's check is pending (or a verified read is not due yet): the URL stays queued
+            if gate == "unsolved":
+                continue  # nobody passed the site's check: its URLs were dropped (counted in the report)
+            if busy:
+                layers = {**layers, "render": False}  # the browser profile is in a person's hands
             render_ok, scrape_ok = await self._fallbacks(campaign.id, url, layers)
+            if gate == "verified":
+                render_ok, scrape_ok = True, False
             if not (layers.get("http", True) or render_ok or scrape_ok):
                 await self.store.mark_url(campaign.id, url.url_key, "skipped", HOST_BLOCKED)
                 await self._keep_search_result(campaign, url, None)
@@ -412,8 +439,21 @@ class WebSearchWorker:
             budget -= 1
             pages += 1
             await self.store.set_progress(campaign.id, url.host, self._line(None, pages, f"сайт {url.host}"))
-            await self._track(campaign.id, url.host, "http", url=url.url)
-            result, children = await self._read(campaign, url, layers)
+            await self._track(campaign.id, url.host, "browser" if gate == "verified" else "http", url=url.url)
+            try:
+                if gate == "verified":
+                    result, children = await self._read_verified(campaign.id, url)
+                else:
+                    result, children = await self._read(campaign, url, layers)
+            except _Challenge as challenge:
+                # The site asked for a person's check: one job per site, the URL goes back to the queue unread and
+                # uses no page, host or render budget; the site is skipped until the job is solved or expires.
+                await self._defer(campaign, ticket, url, challenge.found)
+                waiting = waiting | {url.host}
+                budget += 1
+                pages -= 1
+                await self._track(campaign.id, url.host, None, url=url.url)
+                continue
             if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
                 card = search_result(url, result.error)
                 result = replace(card, layer=result.layer) if card else result
@@ -510,6 +550,10 @@ class WebSearchWorker:
         await self.store.mark_rendered(campaign_id, url.url_key)
         try:
             rendered = await asyncio.wait_for(self.renderer.render(page_url), timeout=cfg.page_runtime_seconds)
+        except ChallengeDetected as exc:
+            if self._human():
+                raise _Challenge(exc) from exc
+            return result, children  # human verification is off: the page stays as the plain fetch read it
         except (RenderError, TimeoutError) as exc:
             log.info("web_search.render_skipped %s", getattr(exc, "code", "timeout"), extra={"campaign_id": campaign_id})
             return result, children
@@ -530,8 +574,9 @@ class WebSearchWorker:
         may_render, may_scrape = self._may_fall_back(url)
         if (may_render and self._render_layer() and render_open and self.renderer is not None
                 and await self.store.renders_used(cid) < cfg.max_renders_per_campaign):
-            await self._leave(url, current)
-            current, children = await self._render_refused(cid, url)
+            http_result = current
+            current, children = await self._render_refused(cid, url)   # may raise _Challenge: nothing is counted then
+            await self._leave(url, http_result)
             if current.ok:
                 return current, children
         if may_scrape and self.scraper is not None and await self.store.scrapes_used(cid) < cfg.max_scrape_api_per_campaign:
@@ -546,12 +591,21 @@ class WebSearchWorker:
         if result.layer in ("http", "render") and (result.error or "") in REFUSALS:
             await self.store.layer_refused(url.host, result.layer)
 
-    async def _render_refused(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
+    async def _render_refused(self, campaign_id: str, url: QueuedUrl, *,
+                              count: bool = True) -> tuple[PageResult, list[Candidate]]:
+        """Read ``url`` in the browser. ``count`` False: a verified site's page, which is not on the campaign's
+        render budget (it has its own, ``pages_per_verification``)."""
         cfg = self.config
         self._set_layer(campaign_id, "browser")
-        await self.store.mark_rendered(campaign_id, url.url_key)
+        if count:
+            await self.store.mark_rendered(campaign_id, url.url_key)
         try:
             rendered = await asyncio.wait_for(self.renderer.render(url.url), timeout=cfg.page_runtime_seconds)
+        except ChallengeDetected as exc:
+            if self._human():
+                raise _Challenge(exc) from exc
+            log.info("web_search.render_refused", extra={"campaign_id": campaign_id, "host": url.host})
+            return PageResult(False, url.kind, url.url, error="render_blocked", layer="render"), []
         except (RenderError, TimeoutError) as exc:
             code = getattr(exc, "code", "timeout")
             log.info("web_search.render_failed %s", code, extra={"campaign_id": campaign_id, "host": url.host})
@@ -622,9 +676,52 @@ class WebSearchWorker:
             return PageResult(False, "unknown", final_url, parsed.title, error="not_a_listing"), []
         return PageResult(True, "listing", final_url, parsed.title, text), []
 
+    # -- human verification --
+
+    def _human(self) -> bool:
+        """WEB_SEARCH_HUMAN_VERIFICATION is on and there is a browser to read verified sites with."""
+        return self.config.human_verification and self.renderer is not None
+
+    async def _gate(self, campaign_id: str, url: QueuedUrl, layers: dict[str, bool], busy: bool) -> str | None:
+        """What the site's verification state means for ``url``: ``wait`` (a check is pending, or a verified read is
+        not due yet or the browser is in a person's hands: the URL stays queued), ``unsolved`` (nobody passed the
+        check during this campaign: the site's queued URLs are dropped), ``verified`` (read it through the browser
+        profile a person passed the check in), or None (read it as usual)."""
+        cfg = self.config
+        host = await self.store.host_verification(url.host, campaign_id)
+        if host.state == "open":
+            return "wait"
+        if host.state == "unsolved":
+            await self.store.skip_host(campaign_id, url.host, VERIFICATION_EXPIRED)
+            log.info("web_search.host_unverified", extra={"campaign_id": campaign_id, "host": url.host})
+            return "unsolved"
+        if host.state != "verified" or host.solved_at is None or not layers.get("render", True):
+            return None
+        if await self.store.verified_pages(url.host, host.solved_at) >= cfg.pages_per_verification:
+            return None  # this check's pages are used up: the site is read as usual (a new challenge is a new job)
+        last = self._verified_at.get(url.host)
+        if busy or (last is not None and (self.now() - last).total_seconds() < cfg.verified_host_interval_seconds):
+            return "wait"
+        return "verified"
+
+    async def _read_verified(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
+        """A site a person passed the check of: its page through the browser profile (no plain HTTP, no scrape API)."""
+        self._verified_at[url.host] = self.now()
+        return await self._render_refused(campaign_id, url, count=False)
+
+    async def _defer(self, campaign: Campaign, ticket: FetchTicket, url: QueuedUrl, found: ChallengeDetected) -> None:
+        await self.store.defer_fetch(ticket)
+        job_id = await self.store.open_verification(found.host or url.host, found.kind, found.url or url.url)
+        self._verified_at.pop(url.host, None)
+        log.info("web_search.challenge", extra={"campaign_id": campaign.id, "host": url.host, "kind": found.kind,
+                                                "job_id": job_id})
+
     # -- bookkeeping --
 
     async def _done(self, campaign: Campaign, reason: str) -> None:
+        if self._human():  # the stage ends while a site's check is pending: nobody passed it for this campaign
+            for host in await self.store.verification_waiting(campaign.id):
+                await self.store.skip_host(campaign.id, host, VERIFICATION_EXPIRED)
         counts = await self.store.counts(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(counts.queries, counts.pages, f"готово ({reason})"))
         await self.store.finish(campaign.id, "done", reason)
@@ -641,6 +738,14 @@ class WebSearchWorker:
             parts.append(f"страниц {pages}/{self.config.max_pages_per_campaign} ·")
         parts.append(doing)
         return " ".join(parts)
+
+
+class _Challenge(Exception):
+    """A browser read met a CAPTCHA / anti-bot page and human verification is on (``found`` says which)."""
+
+    def __init__(self, found: ChallengeDetected) -> None:
+        super().__init__(found.kind)
+        self.found = found
 
 
 BLOCK_MARKERS = ("captcha", "datadome", "are you a robot", "access denied")

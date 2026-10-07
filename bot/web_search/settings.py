@@ -77,6 +77,13 @@ class WebSearchSettings(BaseSettings):
     render_on_refusal: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_ON_REFUSAL")
     # A refused depth-0 index (search/list) page may use the browser; the scrape API is never used for index pages.
     render_index_on_refusal: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_INDEX_ON_REFUSAL")
+    # Human verification: a CAPTCHA / anti-bot page met in the browser becomes a verification job (Telegram button,
+    # live browser, a person passes the check by hand and presses «Готово»); the site is skipped meanwhile and then
+    # read through the same browser profile. Nothing is solved or worked around automatically. Off by default:
+    # a site's terms may forbid automated access, enable it only on the owner's decision.
+    human_verification: bool = Field(default=False, validation_alias="WEB_SEARCH_HUMAN_VERIFICATION")
+    verified_host_interval_seconds: float = Field(default=8, ge=0, le=300, validation_alias="WEB_SEARCH_VERIFIED_HOST_INTERVAL_SECONDS")
+    pages_per_verification: int = Field(default=40, ge=1, le=200, validation_alias="WEB_SEARCH_PAGES_PER_VERIFICATION")
     # Optional last layer for pages both HTTP and the browser were refused: GET {url}?url=<page> with
     # "Authorization: Bearer <key>" (a Zyte / ScraperAPI / Bright Data style unlocker). Empty: off. Never logged.
     scrape_api_url: str = Field(default="", validation_alias="WEB_SEARCH_SCRAPE_API_URL")
@@ -113,6 +120,9 @@ class WebSearchSettings(BaseSettings):
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
             cover_portals=self.cover_portals, render_on_refusal=self.render_on_refusal,
             render_index_on_refusal=self.render_index_on_refusal,
+            human_verification=self.human_verification and self.render_enabled,
+            verified_host_interval_seconds=self.verified_host_interval_seconds,
+            pages_per_verification=self.pages_per_verification,
             max_scrape_api_per_campaign=self.max_scrape_api_per_campaign if self.scrape_api_url else 0,
         )
 

@@ -163,24 +163,44 @@ class VerificationService:
         assert job.profile_id is not None
         recipients = [job.claimed_by] if job.claimed_by else sorted(self.config.operator_ids)
         what = KIND_TEXT.get(job.challenge_kind or "unknown", "a challenge")
-        text = (
-            f"{'Reminder: ' if reminder else ''}{job.platform.capitalize()} showed {what} on profile {job.profile_name} "
-            f"while reading {job.source_url}. Collection on that profile is stopped.\n\n"
-            f"Open the verification page from the button below. It works for you only, once, and expires in "
-            f"{self.config.token_minutes} minutes; the job expires {self._expiry_text(job)}."
-        )
+        website = job.platform == "website"
+        text = (self._website_text(job, reminder) if website else
+                self._facebook_text(job, what, reminder))
         for user_id in recipients:
             secret, sha = new_secret()
             await self.store.issue_token(job.id, user_id, job.profile_id, sha, self.config.token_minutes * 60)
             await self.store.add_event(job.id, "token_issued", "verification", {"user_id": user_id, "reminder": reminder})
             link = self._link(secret)
-            browser = (f"\n\nOr copy this link into Safari or another browser; you will confirm it here in Telegram "
+            browser = (self._website_browser_text(link) if website else
+                       f"\n\nOr copy this link into Safari or another browser; you will confirm it here in Telegram "
                        f"before it opens. Do not forward it.\n{link}")
             try:
-                await self.notifier.send(user_id, text + browser, ("Open verification page", link))
+                await self.notifier.send(user_id, text + browser,
+                                         ("Открыть проверку" if website else "Open verification page", link))
                 await self.store.add_event(job.id, "notified", "verification", {"user_id": user_id, "reminder": reminder})
             except Exception as exc:  # noqa: BLE001 - one unreachable operator must not stop the others
                 log.warning("verification.notify_failed", extra={"user_id": user_id, "error": type(exc).__name__})
+
+    def _facebook_text(self, job: Job, what: str, reminder: bool) -> str:
+        return (
+            f"{'Reminder: ' if reminder else ''}{job.platform.capitalize()} showed {what} on profile {job.profile_name} "
+            f"while reading {job.source_url}. Collection on that profile is stopped.\n\n"
+            f"Open the verification page from the button below. It works for you only, once, and expires in "
+            f"{self.config.token_minutes} minutes; the job expires {self._expiry_text(job)}."
+        )
+
+    def _website_text(self, job: Job, reminder: bool) -> str:
+        return (
+            f"{'Напоминание. ' if reminder else ''}Сайт {job.host} просит пройти проверку. Откройте браузер, "
+            f"пройдите её и нажмите «Готово».\n\n"
+            f"Кнопка работает только для вас, один раз и {self.config.token_minutes} мин.; "
+            f"задача истекает {self._expiry_text(job)}. Пока её не пройдут, сайт в поиске пропускается."
+        )
+
+    @staticmethod
+    def _website_browser_text(link: str) -> str:
+        return ("\n\nИли скопируйте ссылку в Safari или другой браузер: сначала вы подтвердите её здесь, в Telegram, "
+                f"и только потом она откроется. Не пересылайте её.\n{link}")
 
     async def _stop_sensitive(self, job: Job, kind: str, actor: str) -> None:
         await self._close_window(job)
@@ -207,8 +227,11 @@ class VerificationService:
     async def _expired(self, job: Job) -> None:
         await self._close_window(job)
         await self.store.add_event(job.id, "expire", "verification:expiry", {})
+        text = (f"Проверку сайта {job.host} никто не прошёл: сайт не читается в этом поиске."
+                if job.platform == "website" else
+                f"Verification job {job.id} for profile {job.profile_name} expired unsolved; its run stays stopped.")
         with suppress(Exception):
-            await self.notifier.send(self.config.owner_id, f"Verification job {job.id} for profile {job.profile_name} expired unsolved; its run stays stopped.")
+            await self.notifier.send(self.config.owner_id, text)
 
     def _link(self, secret: str) -> str:
         return f"{self.config.public_url}/verify/v/{secret}"
@@ -361,7 +384,7 @@ class VerificationService:
                 self._live_passwords.pop(job.id, None)
             if job.id not in self._live_passwords:
                 try:
-                    self._live_passwords[job.id] = await self.live.start(job.profile_id or "", job.profile_name or "", job.platform, job.source_url, self.config.live_minutes)
+                    self._live_passwords[job.id] = await self.live.start(job.profile_id or "", job.profile_name or "", job.platform, job.page_url, self.config.live_minutes)
                 except BrowserUnavailable as exc:
                     raise ActionRefused(f"Cannot open the browser: {exc}.") from exc
             await self.store.add_event(job.id, "view", self._actor(session), {})
@@ -385,10 +408,20 @@ class VerificationService:
             await self._close_window(job)
             await self.store.mark_solved(job.id, actor)
             await self.store.add_event(job.id, "solve", actor, {})
-            return await self._watch(job, actor)
+            cleared = await self._watch(job, actor)
+            if cleared and job.platform == "website":
+                await self._continue_website(job, actor, session.user_id)
+            return cleared
+
+    async def _continue_website(self, job: Job, actor: str, user_id: int) -> None:
+        """A website job has no run to requeue: the web stage sees the verified job and reads the site again."""
+        await self.store.resume(job.id, actor, user_id)
+        await self.store.add_event(job.id, "resume", actor, {"website": job.host})
+        with suppress(Exception):
+            await self.notifier.send(user_id, f"Проверка сайта {job.host} пройдена. Продолжаю читать его, не спеша.")
 
     async def _watch(self, job: Job, actor: str) -> bool:
-        recovery = await self.watchdog.check(job.profile_id or "", job.profile_name or "", job.platform, job.source_url)
+        recovery = await self.watchdog.check(job.profile_id or "", job.profile_name or "", job.platform, job.page_url)
         if recovery.clear:
             await self.store.confirm_recovery(job.id, actor)
             await self.store.add_event(job.id, "recovery_confirmed", "verification:watchdog", {})
@@ -407,7 +440,7 @@ class VerificationService:
                 raise ActionRefused("Only the operator who solved this job can resume it.")
             actor = self._actor(session)
             # The watchdog looks again right before the run continues.
-            recovery = await self.watchdog.check(job.profile_id or "", job.profile_name or "", job.platform, job.source_url)
+            recovery = await self.watchdog.check(job.profile_id or "", job.profile_name or "", job.platform, job.page_url)
             if not recovery.clear:
                 await self.store.add_event(job.id, "recovery_failed", "verification:watchdog", {"kind": recovery.kind, "reason": recovery.reason, "at": "resume"})
                 raise ActionRefused("The browser shows a challenge again; the run was not resumed.")

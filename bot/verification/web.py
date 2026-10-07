@@ -189,6 +189,8 @@ if (tg && tg.initData) {{
             allowed = ()
         labels = {"claim": "Claim", "view": "Open live browser", "solve": "Solved", "resume": "Resume the run",
                   "cancel": "Cancel", "fail": "Failed"}
+        if job.platform == "website":
+            labels["solve"] = "Готово"
         csrf = html.escape(session.csrf_token)  # type: ignore[attr-defined]
         buttons = "".join(
             f"<form method='post' action='{PREFIX}/jobs/{job.id}/{action}'><input type='hidden' name='csrf' value='{csrf}'>"
@@ -211,7 +213,7 @@ if (tg && tg.initData) {{
             + (f"<p class='msg'>{html.escape(message)}</p>" if message else "")
             + f"<dl><dt>State</dt><dd>{html.escape(job.state)}{' (resumed)' if job.resumed_at else ''}</dd>"
             f"<dt>Challenge</dt><dd>{html.escape(job.challenge_kind or 'unknown')}</dd>"
-            f"<dt>Page</dt><dd>{html.escape(job.source_url)}</dd>"
+            f"<dt>Page</dt><dd>{html.escape(job.page_url)}</dd>"
             f"<dt>Claimed by</dt><dd>{job.claimed_by or 'nobody'}</dd></dl>"
             + buttons + live
             + f"<h2>Audit</h2><table>{rows}</table>"

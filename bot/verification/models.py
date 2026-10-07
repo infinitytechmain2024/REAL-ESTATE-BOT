@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import urlsplit
 
 OPEN_STATES = frozenset({"requested", "active"})
 
@@ -29,10 +30,22 @@ class Job:
     recovered_at: datetime | None = None
     resumed_at: datetime | None = None
     expires_at: datetime | None = None
+    # The page to open in the live browser and reload in the watchdog (web_challenge jobs); None: the source URL.
+    target_url: str | None = None
 
     @property
     def is_open(self) -> bool:
         return self.state in OPEN_STATES
+
+    @property
+    def page_url(self) -> str:
+        """What a person and the watchdog open: the challenged page when known, else the source's own URL."""
+        return self.target_url or self.source_url
+
+    @property
+    def host(self) -> str:
+        """The website of the source (platform ``website``)."""
+        return urlsplit(self.source_url).hostname or self.source_url
 
 
 @dataclass(frozen=True, slots=True)

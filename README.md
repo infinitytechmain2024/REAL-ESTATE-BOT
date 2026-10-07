@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`039_campaign_metrics.sql` in order. It records SHA-256 checksums in
+`041_web_verification.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -49,6 +49,7 @@ and keeps the web stage's browser-render count in the database.
 `037_reach_enrichment.sql` adds the investor reach enrichment to `reach_contacts` (`enriched_at`, `contacts`, `profile_text`, `score`).
 `038_finding_review.sql` stores the reviewer's criteria matrix per finding (`review`), the reason a finding was held or excluded (`why`) and marks the user's final report as sent once (`final_report_sent_at`).
 `039_campaign_metrics.sql` adds `campaign_metrics` (per-campaign totals for `/campaign report`), the stored card number (`campaign_findings.card_number`), the fetch layer per page (`web_campaign_urls.layer`) and the reason a finding was excluded unsent (`agent_findings.reason`).
+`041_web_verification.sql` adds the `web_challenge` verification job type and `verification_jobs.target_url`: the web search hands a CAPTCHA / anti-bot page of a site to a person through the existing verification flow (`WEB_SEARCH_HUMAN_VERIFICATION`, off by default; see [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md)).
 
 The whole pipeline (interviewer, campaigns, web search, analysis, reviewer, final
 report) is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). See the

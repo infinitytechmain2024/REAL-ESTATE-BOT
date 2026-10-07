@@ -642,4 +642,7 @@ _WEBSITE_JS = """() => ({
     .filter(item => /^https?:/.test(item.url)),
   jsonld: Array.from(document.querySelectorAll('script[type="application/ld+json"]')).slice(0, 20)
     .map(node => (node.textContent || '').slice(0, 200000)),
+  // iframe and script sources: only to recognise a CAPTCHA / anti-bot page (never to act on it)
+  frames: Array.from(document.querySelectorAll('iframe[src], script[src]')).slice(0, 80)
+    .map(node => (node.src || '').slice(0, 300)).filter(Boolean),
 })"""

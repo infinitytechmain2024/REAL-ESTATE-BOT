@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 UrlKind = Literal["listing", "index", "unknown"]
@@ -47,6 +48,8 @@ class WebStatus:
     host: str | None = None
     line: str = ""
     progress: WebProgress | None = None
+    # Sites that asked for a person's check and wait for it (owners' status: «Сайт <host> просит проверку»).
+    verification: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +68,7 @@ class SiteReport:
     read: int = 0
     from_search: int = 0
     refused: int = 0
+    unverified: bool = False   # the site asked for a person's check and nobody passed it («проверку никто не прошёл»)
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,3 +167,17 @@ class PageResult:
     # the layer that produced this result or its error: "http", "render" (browser), "scrape" (unlocker API),
     # "none" (the site was never asked). A refusal counts against that layer's block of the host only.
     layer: Literal["http", "render", "scrape", "none"] = "http"
+
+
+@dataclass(frozen=True, slots=True)
+class HostVerification:
+    """Where a site stands in the human verification of the web stage (``store.host_verification``).
+
+    ``open``: a job waits for a person (the site is skipped); ``verified``: a person passed the check at
+    ``solved_at`` (the site is read through the checked browser profile); ``unsolved``: the job expired, was
+    cancelled or failed during this campaign (the site is unreadable for it); ``none``: nothing special.
+    """
+
+    state: Literal["none", "open", "verified", "unsolved"] = "none"
+    job_id: str | None = None
+    solved_at: datetime | None = None
