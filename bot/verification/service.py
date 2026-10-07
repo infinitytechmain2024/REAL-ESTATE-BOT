@@ -27,7 +27,7 @@ from bot.telegram_webapp import verify_init_data
 
 from .browser import BrowserUnavailable, LiveBrowser, RecoveryChecker
 from .classify import SENSITIVE_KINDS, classify
-from .models import Job, Launch, PageSession
+from .models import WEB_JOB_TYPE, Job, Launch, PageSession
 from .store import VerificationStore
 from .telegram import Notifier
 from .tokens import digest, looks_like_secret, new_secret
@@ -163,7 +163,7 @@ class VerificationService:
         assert job.profile_id is not None
         recipients = [job.claimed_by] if job.claimed_by else sorted(self.config.operator_ids)
         what = KIND_TEXT.get(job.challenge_kind or "unknown", "a challenge")
-        website = job.platform == "website"
+        website = job.job_type == WEB_JOB_TYPE
         text = (self._website_text(job, reminder) if website else
                 self._facebook_text(job, what, reminder))
         for user_id in recipients:
@@ -228,7 +228,7 @@ class VerificationService:
         await self._close_window(job)
         await self.store.add_event(job.id, "expire", "verification:expiry", {})
         text = (f"Проверку сайта {job.host} никто не прошёл: сайт не читается в этом поиске."
-                if job.platform == "website" else
+                if job.job_type == WEB_JOB_TYPE else
                 f"Verification job {job.id} for profile {job.profile_name} expired unsolved; its run stays stopped.")
         with suppress(Exception):
             await self.notifier.send(self.config.owner_id, text)
@@ -409,7 +409,7 @@ class VerificationService:
             await self.store.mark_solved(job.id, actor)
             await self.store.add_event(job.id, "solve", actor, {})
             cleared = await self._watch(job, actor)
-            if cleared and job.platform == "website":
+            if cleared and job.job_type == WEB_JOB_TYPE:
                 await self._continue_website(job, actor, session.user_id)
             return cleared
 
@@ -421,7 +421,7 @@ class VerificationService:
             await self.notifier.send(user_id, f"Проверка сайта {job.host} пройдена. Продолжаю читать его, не спеша.")
 
     async def _watch(self, job: Job, actor: str) -> bool:
-        recovery = await self.watchdog.check(job.profile_id or "", job.profile_name or "", job.platform, job.page_url)
+        recovery = await self.watchdog.check(job.profile_id or "", job.profile_name or "", job.platform, job.page_url, job.job_type)
         if recovery.clear:
             await self.store.confirm_recovery(job.id, actor)
             await self.store.add_event(job.id, "recovery_confirmed", "verification:watchdog", {})
@@ -440,7 +440,7 @@ class VerificationService:
                 raise ActionRefused("Only the operator who solved this job can resume it.")
             actor = self._actor(session)
             # The watchdog looks again right before the run continues.
-            recovery = await self.watchdog.check(job.profile_id or "", job.profile_name or "", job.platform, job.page_url)
+            recovery = await self.watchdog.check(job.profile_id or "", job.profile_name or "", job.platform, job.page_url, job.job_type)
             if not recovery.clear:
                 await self.store.add_event(job.id, "recovery_failed", "verification:watchdog", {"kind": recovery.kind, "reason": recovery.reason, "at": "resume"})
                 raise ActionRefused("The browser shows a challenge again; the run was not resumed.")

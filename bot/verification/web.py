@@ -29,6 +29,7 @@ from aiohttp import ClientError, ClientSession, ClientWSTimeout, WSMsgType, web
 
 from bot.telegram_webapp import TELEGRAM_WEB_APP_JS
 
+from .models import WEB_JOB_TYPE
 from .service import BROWSER_REQUEST_SECONDS, AccessDenied, ActionRefused, VerificationService
 
 log = logging.getLogger(__name__)
@@ -189,7 +190,7 @@ if (tg && tg.initData) {{
             allowed = ()
         labels = {"claim": "Claim", "view": "Open live browser", "solve": "Solved", "resume": "Resume the run",
                   "cancel": "Cancel", "fail": "Failed"}
-        if job.platform == "website":
+        if job.job_type == WEB_JOB_TYPE:
             labels["solve"] = "Готово"
         csrf = html.escape(session.csrf_token)  # type: ignore[attr-defined]
         buttons = "".join(

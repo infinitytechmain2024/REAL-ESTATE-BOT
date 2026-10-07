@@ -47,7 +47,7 @@ class FakeWatchdog:
         self.results = list(results) or [Recovery(True)]
         self.calls = 0
 
-    async def check(self, profile_id: str, profile_name: str, platform: str, url: str) -> Recovery:
+    async def check(self, profile_id: str, profile_name: str, platform: str, url: str, job_type: str = "") -> Recovery:
         self.calls += 1
         return self.results.pop(0) if len(self.results) > 1 else self.results[0]
 

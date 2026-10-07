@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
@@ -1363,7 +1364,13 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
                                          timeout_seconds=settings.query_timeout_seconds)
     else:
         log.warning("campaign.web_search_template_queries", extra={"hint": "set OPENROUTER_API_KEY"})
-    web_store = PostgresWebStore(pool)
+    from bot.verification.settings import _bounded
+    from bot.verification.store import PostgresVerificationStore
+
+    job_hours = _bounded(os.environ, "VERIFICATION_JOB_HOURS", 24, 1, 168)  # as the verification service reads it
+    web_store = PostgresWebStore(pool, job_hours=job_hours, human_verification=config.human_verification)
+    verification = PostgresVerificationStore("")  # shares the runner's pool; closed with it
+    verification.pool = pool
     renderer = None
     if settings.render_enabled and runner_settings.browser_token:
         from bot.facebook_collector.browser import BrowserSessionClient
@@ -1378,7 +1385,8 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
     scraper = settings.scraper()
     planner = runner_settings.search_planner()
     worker = WebSearchWorker(campaigns, web_store, searcher, fetcher, FallbackQueryGenerator(model),
-                             renderer=renderer, scraper=scraper, planner=planner, config=config)
+                             renderer=renderer, scraper=scraper, planner=planner, config=config,
+                             cancel_job=verification.cancel)
     closers = ([searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
                + ([scraper.aclose] if scraper else []) + ([planner.aclose] if planner else []))
     return worker, settings.poll_seconds, closers

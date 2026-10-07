@@ -17,7 +17,7 @@ from bot.facebook_collector.browser import BrowserSessionClient
 from bot.facebook_collector.challenges import detect_challenge
 
 from .classify import classify_snapshot, classify_website
-from .models import Recovery
+from .models import WEB_JOB_TYPE, Recovery
 
 log = logging.getLogger(__name__)
 RECOVERY_NAVIGATION_MS = 45_000
@@ -34,7 +34,7 @@ class LiveBrowser(Protocol):
 
 
 class RecoveryChecker(Protocol):
-    async def check(self, profile_id: str, profile_name: str, platform: str, url: str) -> Recovery: ...
+    async def check(self, profile_id: str, profile_name: str, platform: str, url: str, job_type: str = "") -> Recovery: ...
 
 
 class BrowserLiveClient:
@@ -74,7 +74,7 @@ class RecoveryWatchdog:
     def __init__(self, client: BrowserSessionClient) -> None:
         self.client = client
 
-    async def check(self, profile_id: str, profile_name: str, platform: str, url: str) -> Recovery:
+    async def check(self, profile_id: str, profile_name: str, platform: str, url: str, job_type: str = "") -> Recovery:
         try:
             lease = await self.client.acquire(profile_id, profile_name, "ready", platform=platform)
         except aiohttp.ClientError as exc:
@@ -88,7 +88,7 @@ class RecoveryWatchdog:
                 await self.client.release(lease, "READY")
             except aiohttp.ClientError:
                 log.warning("verification.recovery_release_failed", extra={"profile_id": profile_id})
-        return judge_website(snapshot) if platform == "website" else judge(snapshot)
+        return judge_website(snapshot) if job_type == WEB_JOB_TYPE else judge(snapshot)
 
 
 def judge(snapshot: dict[str, Any]) -> Recovery:

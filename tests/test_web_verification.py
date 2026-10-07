@@ -375,3 +375,55 @@ def test_the_setting_is_off_by_default_and_has_gentle_defaults(monkeypatch: pyte
 
 def test_a_queued_url_type_has_no_verification_fields() -> None:
     assert not hasattr(QueuedUrl("https://a.es/x", url_key("https://a.es/x"), "a.es", 0, "unknown"), "verification")
+
+
+# --- review fixes ------------------------------------------------------------------------------------------------------------
+
+
+async def test_an_open_job_carries_an_expiry_from_the_configured_hours() -> None:
+    store = MemoryWebStore(now=Clock(), job_hours=6)
+    await store.open_verification("idealista.com", "captcha", IDEALISTA[0])
+    [job] = store.verification_jobs
+    assert job["expires_at"] == job["requested_at"] + timedelta(hours=6)
+
+
+async def test_the_status_lists_no_waiting_sites_when_human_verification_is_off() -> None:
+    worker, store, cid, _ = await make(IDEALISTA[:2], fetcher=refused(*IDEALISTA), renderer=SiteRenderer({"idealista.com"}))
+    await ticks(worker, 6)
+    assert (await store.web_status(cid)).verification == ("idealista.com",)
+    store.human_verification = False
+    assert (await store.web_status(cid)).verification == ()
+
+
+async def test_a_finished_stage_cancels_the_jobs_of_sites_no_running_campaign_waits_for() -> None:
+    cancelled: list[tuple[str, str]] = []
+
+    async def cancel(job_id: str, actor: str) -> bool:
+        cancelled.append((job_id, actor))
+        return True
+
+    fetcher, renderer = refused(*IDEALISTA), SiteRenderer({"idealista.com"})
+    worker, store, cid, _ = await make(IDEALISTA[:2], fetcher=fetcher, renderer=renderer)
+    worker.cancel_job = cancel
+    await ticks(worker, 6)
+    [job] = store.verification_jobs
+    assert cancelled == []  # the campaign still has the site queued
+    await worker._done(await worker.campaigns.get(cid), "time_cap")
+    assert cancelled == [(job["id"], "web_search")]
+
+
+async def test_a_website_job_of_another_type_is_not_a_web_challenge() -> None:
+    store, notifier = MemoryVerificationStore(), FakeNotifier()
+    service = VerificationService(store, FakeLive(), FakeWatchdog(), notifier,
+                                  FlowConfig(public_url=PUBLIC, operator_ids=frozenset({OWNER, OPERATOR}),
+                                             owner_id=OWNER, bot_token=TOKEN))
+    job = store.add_job(web_job(job_type="manual_source_review", target_url=None))
+    await service.tick()
+    [_, text, _button] = next(m for m in notifier.sent if m[0] == OPERATOR)
+    assert "Сайт" not in text  # the ordinary wording, not the website one
+    button = next(m for m in notifier.sent if m[0] == OPERATOR)[2]
+    session = (await service.open(token_of(button[1]), init_data(OPERATOR))).session
+    await service.claim(session)
+    await service.view(session)
+    assert await service.solve(session) is True
+    assert store.jobs[job.id].state == "verified" and store.jobs[job.id].resumed_at is None  # not resumed on its own

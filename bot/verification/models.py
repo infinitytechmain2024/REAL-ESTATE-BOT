@@ -7,6 +7,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 OPEN_STATES = frozenset({"requested", "active"})
+WEB_JOB_TYPE = "web_challenge"  # a public website's CAPTCHA / anti-bot page (bot/web_search)
 
 
 @dataclass(frozen=True, slots=True)

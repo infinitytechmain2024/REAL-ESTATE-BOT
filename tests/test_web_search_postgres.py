@@ -508,3 +508,56 @@ async def test_an_unsolved_web_job_expires_and_the_site_is_reported(pool) -> Non
     assert await pool.fetchval("select detail from web_campaign_urls where url = $1", LISTING) == "verification_expired"
     [report] = [r for r in await store.site_report(cid) if r.host == "idealista.com"]
     assert report.unverified and report.refused == 1
+
+
+async def test_an_open_web_job_expires_by_itself_and_goes_when_no_campaign_waits_for_the_site(pool) -> None:
+    from bot.verification.store import PostgresVerificationStore
+
+    cid = await new_campaign(pool)
+    store = PostgresWebStore(pool, job_hours=5, human_verification=True)
+    verification = PostgresVerificationStore(URL)
+    await verification.connect()
+    try:
+        worker = WebSearchWorker(PostgresCampaignStore(pool), store, FakeSearcher(default=[LISTING]),
+                                 FakeFetcher(errors={LISTING: "http_403"}), ListGenerator(["piso alquiler Madrid"]),
+                                 renderer=ChallengeRenderer(), cancel_job=verification.cancel,
+                                 config=WebSearchConfig(cover_portals=False, human_verification=True))
+        for _ in range(6):
+            await worker.tick()
+        # not announced yet, still it carries an expiry: the job's lifetime from VERIFICATION_JOB_HOURS
+        hours = await pool.fetchval(
+            "select extract(epoch from expires_at - requested_at) / 3600 from verification_jobs where job_type = 'web_challenge'")
+        assert round(float(hours)) == 5
+        assert await store.idle_verification_jobs() == []  # the campaign still has the site's URL queued
+        campaign = await PostgresCampaignStore(pool).get(cid)
+        await worker._done(campaign, "time_cap")  # the stage ends: nobody waits for the check any more
+        assert await pool.fetchval("select state from verification_jobs where job_type = 'web_challenge'") == "cancelled"
+    finally:
+        await verification.close()
+
+
+async def test_the_web_status_skips_the_verification_query_when_it_is_off(pool) -> None:
+    cid = await new_campaign(pool)
+    on, off = PostgresWebStore(pool), PostgresWebStore(pool, human_verification=False)
+    worker = WebSearchWorker(PostgresCampaignStore(pool), on, FakeSearcher(default=[LISTING]),
+                             FakeFetcher(errors={LISTING: "http_403"}), ListGenerator(["piso alquiler Madrid"]),
+                             renderer=ChallengeRenderer(), config=WebSearchConfig(cover_portals=False, human_verification=True))
+    for _ in range(6):
+        await worker.tick()
+    assert (await on.web_status(cid)).verification == ("idealista.com",)
+    assert (await off.web_status(cid)).verification == ()
+
+
+async def test_the_render_profile_is_never_a_collector_profile(pool) -> None:
+    from bot.orchestra.store import ready_profile
+
+    store = PostgresWebStore(pool)
+    await store.render_profile()
+    async with pool.acquire() as conn:
+        with pytest.raises(ValueError):
+            await ready_profile(conn, "website")
+        await conn.execute(
+            """insert into browser_profiles (profile_name, platform, storage_locator, state)
+               values ('website-main', 'website', 'volume:browser_profiles', 'ready')""")
+        own = await conn.fetchval("select id::text from browser_profiles where profile_name = 'website-main'")
+        assert await ready_profile(conn, "website") == own

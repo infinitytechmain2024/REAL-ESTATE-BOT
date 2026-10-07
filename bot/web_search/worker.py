@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -176,11 +176,13 @@ class WebSearchWorker:
         planner: SearchPlanner | None = None,
         config: WebSearchConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        cancel_job: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         self.campaigns, self.store, self.searcher, self.fetcher, self.generator = (
             campaigns, store, searcher, fetcher, generator)
         self.config, self.now = config or WebSearchConfig(), now
         self.renderer, self.scraper = renderer, scraper
+        self.cancel_job = cancel_job  # the verification store's ``cancel(job_id, actor)``
         self.planner = planner  # writes the campaign's search plan once, before its first round
         self.token = str(uuid.uuid4())
         self._progress: dict[str, WebProgress] = {}  # campaign id -> live numbers (also shown through the store)
@@ -249,6 +251,7 @@ class WebSearchWorker:
         if campaign.state in TERMINAL_STATES:
             if run is not None and run.state == "searching":
                 await self.store.finish(campaign_id, "stopped", f"campaign_{campaign.state}")
+                await self._release_idle_jobs()
             return
         if run is None:
             run = await self.store.start_run(campaign_id)
@@ -725,9 +728,22 @@ class WebSearchWorker:
         counts = await self.store.counts(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(counts.queries, counts.pages, f"готово ({reason})"))
         await self.store.finish(campaign.id, "done", reason)
+        await self._release_idle_jobs()
         await self._track(campaign.id, None, None, finished=True)
         log.info("web_search.done", extra={"campaign_id": campaign.id, "reason": reason, "queries": counts.queries,
                                            "pages": counts.pages})
+
+    async def _release_idle_jobs(self) -> None:
+        """Cancel the open verification jobs of sites that no running campaign has queued URLs for: nobody is
+        waiting for the check any more."""
+        if not self._human() or self.cancel_job is None:
+            return
+        try:
+            for job_id in await self.store.idle_verification_jobs():
+                if await self.cancel_job(job_id, "web_search"):
+                    log.info("web_search.verification_cancelled", extra={"job_id": job_id})
+        except Exception:  # noqa: BLE001 - housekeeping must not fail the campaign's finish
+            log.warning("web_search.verification_cancel_failed")
 
     def _line(self, queries: int | None, pages: int | None, doing: str) -> str:
         """The owners' technical line, e.g. «сайты: запросов 12/40 · страниц 7/60 · сайт fotocasa.es»."""
