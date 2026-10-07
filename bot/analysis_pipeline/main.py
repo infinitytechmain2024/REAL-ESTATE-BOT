@@ -58,9 +58,14 @@ async def analyse_batch(store, pipeline: AnalysisPipeline, *, batch_size: int, c
         )
         found: list[tuple[str, str, str]] = []
         try:
+            hint = await store.task_hint(e.post_id) if hasattr(store, "task_hint") else None
+        except Exception as exc:  # noqa: BLE001 - the hint only helps; a failed lookup must not stall the batch
+            log.warning("analysis.task_hint_failed %s %s", e.post_id, type(exc).__name__)
+            hint = None
+        try:
             for vertical in verticals:
                 try:
-                    result = await pipeline.process(e, vertical)
+                    result = await (pipeline.process(e, vertical, task_hint=hint) if hint else pipeline.process(e, vertical))
                 except ValueError:
                     # The model answered outside the schema: not a finding, and not retried.
                     log.warning("analysis.invalid_model_response", extra={"post_id": e.post_id, "vertical": vertical})
@@ -85,7 +90,7 @@ async def run_once(store=None, pipeline: AnalysisPipeline | None = None, send: S
     s = settings or AnalysisSettings()
     own_store = store is None
     if own_store:
-        store = PostgresAnalysisStore(s.database_url)
+        store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms)
         await store.connect()
     try:
         p = pipeline or AnalysisPipeline(
@@ -114,7 +119,7 @@ async def serve() -> None:
         log.warning("analysis.disabled", extra={"hint": "set OPENROUTER_API_KEY"})
         while True:
             await asyncio.sleep(3600)
-    store = PostgresAnalysisStore(s.database_url)
+    store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms)
     await store.connect()
     pipeline = AnalysisPipeline(OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds))
     log.info("analysis.started", extra={"poll_seconds": s.poll_seconds, "digests": bool(s.telegram_chat_id)})

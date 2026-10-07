@@ -17,13 +17,21 @@ docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -
 ## 1. Как устроена цепочка
 
 ```
-Telegram (текст или голос) -> подтверждение "confirm <token>" -> Orchestra (PostgreSQL)
-   |- /run facebook-groups -> пакет + заявка на запуск -> facebook-runner -> посты
-   |- /run website         -> запуск scrapling  -> scrapling-worker   -> пост
-   '- /run instagram|tiktok|facebook -> запуск agent_ridge -> agent-reach-worker -> пост
-посты (normalised) -> analysis-worker (фильтры -> OpenRouter) -> находки -> дайджест в Telegram
+Telegram (текст или голос)
+  |- пользователь: интервьюер (TaskSpec) -> карточка ТЗ -> «Запустить» -> /campaign в очередь Orchestra
+  |- оператор: /campaign, /run ... -> "confirm <token>" -> Orchestra (PostgreSQL)
+Orchestra -> plan_campaign -> campaign-runner:
+   |- Facebook: окна по 20 групп -> пакет + заявка на запуск -> facebook-runner -> посты
+   |- сайты: SearchPlan -> SearXNG / Google CSE -> слои http -> браузер -> API -> посты (JSON-LD)
+   |- соцсети и охват инвесторов -> посты и контакты
+   '- /run website -> scrapling-worker; /run instagram|tiktok|facebook -> agent-reach-worker
+посты (normalised) -> analysis-worker (фильтры -> Sonnet, analysis-v6, цитаты) -> находки
+находка -> правила ±10 % -> рецензент (матрица критериев) -> дедуп объектов -> карточка в чат
+конец кампании -> итоговый отчёт пользователю + сводка владельцам
 проверка Facebook/Instagram -> verification job -> Mini App: Claim/Solved/Resume -> повторный запуск
 ```
+
+Подробная схема и таблицы сервисов, моделей и миграций: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Каждый шаг пишет состояние в PostgreSQL. Повторная доставка любого шага
 ничего не дублирует: у Telegram-сообщения, команды, пакета, заявки на запуск,
@@ -44,6 +52,8 @@ Telegram (текст или голос) -> подтверждение "confirm <
 | Зависший воркер Agent Reach держал профиль | профиль оставался `in_use` | dispatcher через `ORCHESTRA_STALE_BATCH_SECONDS` закрывает запуск и освобождает профиль |
 
 ## 3. Автоматические тесты
+
+### 3.1 Сквозные сценарии
 
 `tests/test_system_integration.py` на настоящем PostgreSQL со всеми
 миграциями. Подменены только Facebook (браузер и чтение групп), OpenRouter
@@ -70,12 +80,34 @@ SYSTEM_TEST_DATABASE_URL=postgresql://localhost/monitoring_test python -m pytest
 В CI это отдельная задача `integration` с сервисом PostgreSQL. Она гоняет
 этот файл и остальные тесты на базе: верификацию, Orchestra и доступ.
 
+### 3.2 Остальные тесты по областям
+
+Все файлы лежат в `tests/`; `make test` гонит их без PostgreSQL (тесты с
+`_postgres` в имени и `test_system_integration.py` пропускаются без
+`SYSTEM_TEST_DATABASE_URL`). Тесты прежнего бота лежат в `legacy/tests/` и pytest
+их не собирает.
+
+| Область | Файлы | Что проверяют |
+|---|---|---|
+| Интервью и задача | `test_interviewer.py`, `test_intake_dialogue.py`, `test_user_intake.py`, `test_task_understanding.py`, `test_task_details.py`, `test_task_draft_steps_postgres.py` | `TaskSpec`, один вопрос за раз, «Не важно» и «Хватит, ищи», карточка ТЗ и правка одного поля, голос, миграции 031 и 035 |
+| Планирование | `test_campaign_architect.py`, `test_search_plan.py` | место где угодно, `plan_campaign`, `SearchPlan`: проверка хостов и запросов, потребление веб-этапом |
+| Веб-этап | `test_web_search.py`, `test_web_search_queries.py`, `test_web_search_postgres.py`, `test_web_layers.py`, `test_web_structured.py`, `test_search_backends.py` | запросы раундами, дедупликация адресов, бюджет и комнаты в запросах, слои HTTP, браузер, scrape API и блокировки по слоям, JSON-LD, бэкенды SearXNG / Google CSE / SerpAPI |
+| Кампании и Facebook | `test_campaign_runner.py`, `test_campaign_discovery.py`, `test_campaign_discovery_postgres.py`, `test_campaign_postgres.py`, `test_group_selection_postgres.py`, `test_facebook_batch_collector.py`, `test_facebook_runner.py` | окна, статус, паузы, отмена, выбор живых групп, коллектор |
+| Проверка находок | `test_campaign_relevance.py`, `test_near_match.py`, `test_reviewer.py`, `test_campaign_dedup.py`, `test_finding_cards.py`, `test_final_report.py`, `test_campaign_summary.py` | правила ±10 %, точные / похожие / другие, рецензент и матрица критериев, «Также на» и миграция 036, карточки, итоговый отчёт и сводка |
+| Инвесторы | `test_investor_reach.py`, `test_investor_people.py`, `test_comment_leads.py`, `test_comment_leads_postgres.py` | охват по площадкам, обогащение, скоринг, группы, лиды из комментариев |
+| Соцсети | `test_social_search.py`, `test_social_search_postgres.py`, `test_social_login.py` | адаптеры, лимиты, дедуп, вход |
+| Анализ и агенты | `test_analysis_pipeline.py`, `test_agent_recorder.py`, `test_agent_reduction.py` | `analysis-v6`, Recorder, теневая сводка Claude + Jev |
+| Доступ и Telegram | `test_telegram_control_plane.py`, `test_operator_access.py`, `test_auto_mode.py`, `test_user_status.py`, `test_visibility_gate.py`, `test_control_menu.py`, `test_control_plane_status.py`, `test_voice_commands.py`, `test_openrouter_transcription.py` | роли, авто-режим, видимость статусов, меню, голос |
+| Orchestra и воркеры | `test_orchestra_dispatcher.py`, `test_orchestra_postgres.py`, `test_orchestration_schema.py`, `test_scrapling_connector.py`, `test_agent_reach_controlled.py` | диспетчер, квоты и автоматы, схема состояний, разовые читатели |
+| Браузер и проверки | `test_browser_session.py`, `test_browser_interactive.py`, `test_browser_live_view.py`, `test_live_view.py`, `test_verification_flow.py`, `test_verification_postgres.py`, `test_verification_web.py` | аренда профиля, живое окно, Mini App, проверка Facebook |
+| Развёртывание | `test_project_foundation.py`, `test_deployment.py`, `test_image_imports.py`, `test_fix_env.py` | миграции по порядку, форма compose, состав образов, правка `.env` |
+
 ## 4. Чек-лист запуска на VPS
 
 1. **Код и миграции**
    ```sh
    git pull --ff-only
-   ./scripts/apply_migrations.sh      # последняя строка: Applying: 013_analysis_claims.sql
+   ./scripts/apply_migrations.sh      # последняя строка: Applying: 039_campaign_metrics.sql
    ```
 2. **`.env`** (секреты не пересылать в чат):
    - `TELEGRAM_OPERATOR_IDS`: ваш ID и ID остальных владельцев.

@@ -5,6 +5,11 @@ reached from anywhere over Tailscale. Not a rented VPS. This document is the run
 the developer; the operator who actually uses the bot never sees any of it — they tap one
 button in Telegram.
 
+> **Note (stage 6.1):** this runbook describes the retired standalone bot (one container with
+> Chrome, noVNC and a Tailscale gate); `bot/main.py` and its code moved to `legacy/`. The live
+> deployment is the Compose stack: see "Деплой на VPS" in `README.md` and `docs/ARCHITECTURE.md`.
+> The sections below stay for reference only and do not describe what is deployed.
+
 `PLAN.md` §3 Stage 6 is the task list this implements.
 
 ---
@@ -214,7 +219,7 @@ entrypoint stops binding CDP, x11vnc and websockify to loopback.
 
 ## 10. What this replaces
 
-`render.yaml` and the README's Render section remain for the search-only deployment, which
+`legacy/render.yaml` (the retired standalone bot, see `legacy/README.md`) was the search-only deployment, which
 has no browser and no Facebook. They are not the path for the full product: Render cannot
 host a long-lived headed Chrome with a persistent profile, and its IPs are the datacenter
 addresses §1 is about avoiding.
@@ -230,7 +235,6 @@ decision that belongs in `COMPLIANCE.md` §4, not a side effect of a setting.
 
 ```bash
 brew install llama.cpp   # macOS; Linux: github.com/ggml-org/llama.cpp
-make llm
 ```
 
 It prints the four lines to paste into `.env` and then serves on
@@ -259,7 +263,7 @@ And the KV cache is what makes a large window expensive: for an 8B model a 128k
 window costs roughly 19 GB on top of the weights. `--cache-type-k q8_0` cuts
 that several-fold, and Ollama does not expose the knob.
 
-`make llm` sets both, which is all it is for.
+Start the server with both settings (a larger `--ctx-size` and `--cache-type-k q8_0`).
 
 ### Why 32k is enough
 

@@ -132,10 +132,67 @@ SPAIN_PORTALS = ("idealista.com", "fotocasa.es", "yaencontre.com", "pisos.com", 
                  "milanuncios.com", "indomio.es", "tucasa.com", "kyero.com", "thinkspain.com", "terrenos.es",
                  "solvia.es", "alisedainmobiliaria.com", "servihabitat.com", "sareb.es", "altamirainmuebles.com",
                  "haya.es", "hogaria.net", "spainhouses.net", "green-acres.es")
-SPAIN_LAND_FIRST = ("terrenos.es", "sareb.es")  # for land, searched right after Idealista and Fotocasa
+# What a Spanish campaign searches by property kind (``QueryTask.portals``); ``SPAIN_PORTALS`` stays the union.
+SPAIN_PORTALS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "apartment": ("idealista.com", "fotocasa.es", "habitaclia.com", "pisos.com", "yaencontre.com", "kyero.com",
+                  "thinkspain.com", "milanuncios.com", "indomio.es", "tucasa.com", "spainhouses.net"),
+    "land": ("idealista.com", "fotocasa.es", "terrenos.es", "sareb.es", "milanuncios.com", "pisos.com", "kyero.com"),
+    "commercial": ("idealista.com", "fotocasa.es", "pisos.com", "milanuncios.com", "habitaclia.com"),
+    "room": ("idealista.com", "fotocasa.es", "milanuncios.com", "habitaclia.com", "pisos.com"),
+}
+SPAIN_PORTALS_BY_KIND["house"] = SPAIN_PORTALS_BY_KIND["apartment"]
+# Bank/Sareb portfolios: searched only when the task asks for a bargain (``SPAIN_BANK_WORDS``).
+SPAIN_BANK_PORTALS = ("solvia.es", "servihabitat.com", "alisedainmobiliaria.com", "sareb.es",
+                      "altamirainmuebles.com", "haya.es", "hogaria.net", "green-acres.es")
+SPAIN_BANK_WORDS = ("banco", "bank", "embargo", "sareb", "дешев", "cheap", "барат", "barato", "oportunidad")
 UKRAINE_PORTALS = ("dom.ria.com", "lun.ua", "olx.ua", "rieltor.ua")
-_GENERIC_LISTING = re.compile(r"(?:^|[/_-])(?:id)?\d{6,}(?:[/_.-]|$)|/(?:inmueble|anuncio|ficha|property|listing|detalle|obyavlenie)[/-][^/]*\d{4,}",
-                              re.IGNORECASE)
+_LISTING_WORD = re.compile(
+    r"(?<![a-z])(?:inmueble|anuncio|ficha|property|listing|detalle|obyavlenie|piso|casa|apartamento|chalet|terreno"
+    r"|parcela|vivienda|venta|alquiler|rent|sale)(?![a-z])", re.IGNORECASE)
+_DIGITS = re.compile(r"(?<!\d)\d{5,}(?!\d)")
+_DATE_DIR = re.compile(r"/(?:19|20)\d\d/(?:0?[1-9]|1[0-2])/")          # /2024/05/ before the id: a news/blog path
+_DATE_ID = re.compile(r"(?:19|20)\d\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])")  # 20240512
+_PRICE = re.compile(r"\d\s*(?:€|k\s?€|eur\b|euros?\b)|(?:€|eur\b)\s?\d", re.IGNORECASE)
+_AREA = re.compile(r"\d\s*(?:m²|m2|m\^2|metros?\b|mts?\b)", re.IGNORECASE)
+
+
+_POSTAL = re.compile(r"[0-5]\d{4}")                                   # a Spanish postal code: not an ad id by itself
+_ID_MARK = re.compile(r"(?:ref-?|id-?|-id)[a-z]{0,3}$", re.IGNORECASE)  # "ref-", "ref", "id-", "-id" right before a number
+_REF_ID = re.compile(r"(?<![a-z])(?:ref|id)-?[a-z]{0,3}\d{4,}(?!\d)", re.IGNORECASE)
+_WORD_ID = re.compile(r"-(\d{4,})\.?(?:html?)?$", re.IGNORECASE)      # "piso-centro-4567" (end of a segment)
+
+
+def _segment_listing(path: str) -> bool:
+    """A 4+ digit id after ``ref``/``id`` or at the end of a segment that carries a listing word."""
+    if _REF_ID.search(path):
+        return True
+    for segment in path.split("/"):
+        found = _WORD_ID.search(segment)
+        if found and _LISTING_WORD.search(segment[:found.start()]) and not re.fullmatch(r"(?:19|20)\d\d", found.group(1)):
+            return True
+    return False
+
+
+def _generic_listing(path: str) -> bool:
+    """An unknown site's concrete ad: a listing word and a 5+ digit id, or a 6+ digit id that is not a news date.
+
+    A bare 5-digit postal code (``/venta/pisos-valencia-46001/``) is no id unless ``.htm(l)`` follows or
+    ``ref-``/``id-`` precedes it."""
+    has_word = bool(_LISTING_WORD.search(path))
+    if _segment_listing(path):
+        return True
+    for match in _DIGITS.finditer(path):
+        number = match.group(0)
+        if (len(number) == 8 and _DATE_ID.fullmatch(number)) or _DATE_DIR.search(path[:match.start()]):
+            continue
+        before, after = path[:match.start()], path[match.end():match.end() + 1]
+        if (len(number) == 5 and _POSTAL.fullmatch(number) and not _ID_MARK.search(before)
+                and not path[match.end():].lower().startswith((".htm", ".html"))):
+            continue
+        bounded = (not before or before[-1] in "/_-" or before[-2:].lower() == "id") and (not after or after in "/_.-")
+        if has_word or (len(number) >= 6 and bounded):
+            return True
+    return False
 
 
 def portal_of(host: str) -> Portal | None:
@@ -159,4 +216,21 @@ def classify_url(url: str) -> UrlKind:
         if portal.index is not None and portal.index.search(path):
             return "index"
         return "unknown"
-    return "listing" if _GENERIC_LISTING.search(path) else "unknown"
+    return "listing" if _generic_listing(path) else "unknown"
+
+
+def portal_listing(url: str) -> bool:
+    """True only for a concrete ad of a known portal (by its URL regex), never by the generic rule."""
+    portal = portal_of(host_of(url))
+    return portal is not None and bool(portal.listing.search(urlsplit(url).path or "/"))
+
+
+def classify_page(url: str, *, has_listing_data: bool = False, text: str = "") -> UrlKind:
+    """The kind of a page that was read: ``classify_url`` first; an unknown page becomes ``listing`` only
+    when it carries listing JSON-LD (``has_listing_data``) or its text shows both a price and an area."""
+    kind = classify_url(url)
+    if kind != "unknown":
+        return kind
+    if has_listing_data or (_PRICE.search(text) and _AREA.search(text)):
+        return "listing"
+    return "unknown"

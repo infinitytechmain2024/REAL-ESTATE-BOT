@@ -18,6 +18,7 @@ from bot.campaign.tolerance import (
     Request,
     budget_match,
     classify,
+    min_area_of,
     money,
     request_for,
 )
@@ -111,7 +112,7 @@ async def setup(requested_by: int = USER):
     store = MemoryRunStore(campaigns)
     messenger = ButtonMessenger()
     runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER},
-                            config=RunnerConfig(window_cooldown_seconds=0))
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0))
     cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=requested_by, source_text=GOAL,
                                  actor=f"telegram:{requested_by}")
     await campaigns.set_state(cid, "running", "campaign:test")
@@ -291,7 +292,8 @@ async def test_no_budget_means_everything_is_exact() -> None:
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
     messenger = ButtonMessenger()
-    runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER})
+    runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER},
+                            config=RunnerConfig(relevance_fail_closed=False))
     cid = await campaigns.create(plan_campaign("Купить квартиру в Мадриде"), chat_id=CHAT, requested_by=USER,
                                  source_text="x", actor="telegram:42")
     add(store, cid, "a", 900_000)
@@ -381,7 +383,8 @@ async def test_postgres_holds_similar_until_approved_and_answers_once(pool) -> N
     campaigns = PostgresCampaignStore(pool)
     store = PostgresRunStore(pool, SafetyLimits())
     messenger = ButtonMessenger()
-    runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER})
+    runner = CampaignRunner(campaigns, store, messenger, None, owner_ids={OWNER},
+                            config=RunnerConfig(relevance_fail_closed=False))
     cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
                                  actor="telegram:42")
     await campaigns.set_state(cid, "running", "campaign:test")
@@ -425,6 +428,26 @@ async def test_postgres_holds_similar_until_approved_and_answers_once(pool) -> N
     assert await store.claim_finding(cid, ids["f90"]) is None
 
 
+@needs_db
+async def test_postgres_persists_the_hold_reason_and_skips_listed_findings(pool) -> None:
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+
+    campaigns = PostgresCampaignStore(pool)
+    store = PostgresRunStore(pool, SafetyLimits())
+    cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
+                                 actor="telegram:42")
+    ids = await _seed_findings(pool, cid, {"a": 52_000, "b": 53_000, "c": 54_000})
+    assert [f.id for f in await store.unstreamed_findings(cid, 5, skip=[ids["a"]])] == [ids["b"], ids["c"]]
+    note = "Не проверено ИИ: лимит проверок исчерпан"
+    assert await store.hold_finding(cid, ids["a"], "similar", 0.0, note)
+    assert await store.hold_finding(cid, ids["b"], "similar", 0.0)
+    assert not await store.hold_finding(cid, ids["a"], "similar", 0.0, "other")
+    held = {f.id: f.hold_reason for f in await store.held_findings(cid, "similar", 5)}
+    assert held == {ids["a"]: note, ids["b"]: None}
+
+
 async def test_a_rental_for_a_purchase_is_never_offered_or_sent() -> None:
     campaigns, store, messenger, runner, cid, control = await setup()
     add(store, cid, "rent", 900, deal="rent")
@@ -439,3 +462,79 @@ async def test_a_rental_for_a_purchase_is_never_offered_or_sent() -> None:
         await runner.tick()
     assert len(cards(messenger)) == 1 and "90 000" in cards(messenger)[0]
     assert not any("rent" in card for card in cards(messenger))
+
+
+def test_unknown_price_with_a_budget_is_other() -> None:
+    assert classify(listing(None), MADRID_50K).bucket == "other"
+
+
+def test_unknown_area_against_a_minimum_is_similar_and_known_area_is_unchanged() -> None:
+    request = Request(amount=None, deal="sale", location="Madrid", min_area=2000)
+    assert classify({**listing(None), "area_m2": None}, request).bucket == "similar"
+    assert classify(listing(None), request).bucket == "similar"
+    assert classify({**listing(None), "area_m2": 2500}, request).bucket == "exact"
+    assert classify(listing(None), Request(deal="sale", location="Madrid")).bucket == "exact"
+
+
+def test_rooms_lower_than_requested_is_other_unknown_or_more_is_unchanged() -> None:
+    request = Request(deal="sale", location="Madrid", rooms=3)
+    assert classify({**listing(None), "rooms": 2}, request).bucket == "other"
+    assert classify({**listing(None), "rooms": 3}, request).bucket == "exact"
+    assert classify({**listing(None), "rooms": 4}, request).bucket == "exact"
+    assert classify({**listing(None), "rooms": None}, request).bucket == "exact"
+
+
+def test_request_honours_plan_min_area_max_area_min_price_and_type() -> None:
+    constraints = {"deal": "sale", "max_price": 100_000, "min_area": 500, "max_area": 1000, "min_price": 50_000,
+                   "property_type": "land"}
+    request = request_for(constraints, location="Madrid", text="купить участок от 2000 м²")
+    assert request.min_area == 500 and request.max_area == 1000 and request.min_price == 50_000
+    assert request.property_type == "land"
+    assert request_for({}, text="участок от 2000 м²").min_area == 2000
+
+
+def test_max_area_min_price_and_type_mismatch() -> None:
+    request = Request(amount=100_000, deal="sale", location="Madrid", max_area=1000, min_price=50_000,
+                      property_type="apartment")
+    base = {**listing(80_000), "area_m2": 1000}
+    assert classify(base, request).bucket == "exact"
+    assert classify({**base, "area_m2": 1100}, request).bucket == "exact"  # within +10 %
+    assert classify({**base, "area_m2": 1200}, request).bucket == "other"
+    assert classify({**base, "price_amount": 46_000}, request).bucket == "exact"  # within -10 %
+    assert classify({**base, "price_amount": 40_000}, request).bucket == "other"
+    assert classify({**base, "property_type": "house"}, request).bucket == "excluded"
+    assert classify({**base, "property_type": "studio"}, request).bucket == "exact"
+    assert classify({**base, "property_type": "room"}, request).bucket == "exact"  # lenient
+    assert classify({k: v for k, v in base.items() if k != "property_type"}, request).bucket == "exact"
+    land = Request(location="Madrid", property_type="land")
+    assert classify({**listing(None), "property_type": "commercial"}, land).bucket == "excluded"
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("Terreno en Madrid de al menos 2000 m²", 2000),
+    ("piso mínimo 80 m2", 80),
+    ("casa desde 150 m²", 150),
+    ("local a partir de 60 m²", 60),
+    ("apartment at least 70 sqm", 70),
+    ("flat min 45 m2", 45),
+    ("квартира від 50 м²", 50),
+    ("квартира від 50 кв.м", 50),
+    ("участок не менее 300 м²", 300),
+    ("квартира минимум 40 м²", 40),
+])
+def test_min_area_phrases(text: str, expected: float) -> None:
+    assert min_area_of(text) == expected
+
+
+def test_ukrainian_budget_currency() -> None:
+    for text in ("квартира в Києві до 20000 грн", "квартира в Києві до 20 000 ₴", "квартира в Києві до 20000 UAH"):
+        plan = plan_campaign(text)
+        assert plan.constraints["max_price"] == 20000 and plan.constraints["currency"] == "UAH", text
+        request = request_for(plan.constraints, location=plan.location, country=plan.country)
+        assert request.currency == "UAH"
+        assert classify({"price_amount": 18000, "price_currency": "UAH"}, request).bucket == "exact"
+        assert classify({"price_amount": 18000, "price_currency": "EUR"}, request).bucket in ("other", "excluded")
+    assert "currency" not in plan_campaign("piso en Madrid hasta 1200 €").constraints
+    assert request_for({}, country="UA").currency == "UAH"
+    assert request_for({"currency": "USD"}, country="UA").currency == "USD"
+    assert request_for({}).currency == "EUR"

@@ -7,8 +7,9 @@ Browser Session Manager Agent Reach uses: a dedicated ``website`` profile with
 no login and no cookies of any account, one page per lease, public hosts only
 (checked by the manager), a hard timeout.
 
-It never retries a page the site refused (403/429, robots.txt): a refusal is
-respected, not worked around.
+A page the site refused over plain HTTP (403/429) is also rendered here, unless
+WEB_SEARCH_RENDER_ON_REFUSAL / WEB_SEARCH_RENDER_INDEX_ON_REFUSAL are off; a
+robots.txt disallow is still respected, never worked around.
 """
 
 from __future__ import annotations

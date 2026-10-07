@@ -31,6 +31,14 @@ class AnalysisResult(BaseModel):
     listing_kind: Literal["offer", "catalog", "wanted", "other"] | None = None
     country: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
     area_m2: float | None = Field(default=None, gt=0, le=100_000_000)
+    # analysis-v6: verbatim quotes behind the numbers, and the facts the tolerance rules and cards use.
+    evidence: dict[str, str | None] = Field(default_factory=dict)
+    district: str | None = Field(default=None, max_length=120)
+    address: str | None = Field(default=None, max_length=200)
+    floor: int | None = Field(default=None, ge=-5, le=200)
+    features: list[str] = Field(default_factory=list, max_length=20)
+    condition: Literal["new", "good", "needs_renovation"] | None = None
+    listing_date: str | None = Field(default=None, max_length=40)
 
 
 class Evidence(BaseModel):

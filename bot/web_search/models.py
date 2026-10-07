@@ -9,7 +9,28 @@ UrlKind = Literal["listing", "index", "unknown"]
 RunState = Literal["searching", "done", "stopped"]
 QUERY_LANGUAGES = ("es", "en", "ru", "uk")
 # The last line of a post built from a search result (``worker.search_result``); the relevance check reads it.
+INDEX_RESULT_NOTE = "Данные со страницы результатов {host}"  # last line of a post built from an index page's JSON-LD
 SEARCH_RESULT_NOTE = "(Страница сайта не прочитана: это заголовок и описание объявления из результатов поиска.)"
+
+
+@dataclass(frozen=True, slots=True)
+class WebProgress:
+    """The web stage's live numbers for one campaign (in memory, kept by the worker; see ``WebSearchWorker.progress``).
+
+    ``layer``: ``http`` | ``browser`` | ``api`` (the one reading ``host`` now); ``read``: pages read from the sites;
+    ``found``: pages that are listings (a search-result card counts); ``portals_done``/``portals_total``: sites with
+    nothing left to read / sites known so far; ``refusals``: the current host's consecutive refusals per layer
+    (owners only); ``finished``: the stage has ended.
+    """
+
+    host: str | None = None
+    layer: str | None = None
+    read: int = 0
+    found: int = 0
+    portals_done: int = 0
+    portals_total: int = 0
+    refusals: tuple[tuple[str, int], ...] = ()
+    finished: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +45,7 @@ class WebStatus:
     active: bool
     host: str | None = None
     line: str = ""
+    progress: WebProgress | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +138,7 @@ class FetchTicket:
     url: QueuedUrl
     source_id: str
     run_id: str
+    render_layer: bool = False   # the browser layer is enabled for this fetch (host blocks count both layers)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +147,8 @@ class PageResult:
 
     ``via`` "search": the site could not be read (``error`` says why, None when it was never
     contacted: robots.txt, a blocked site) and the post is the search engine's title and snippet.
+    ``via`` "index": the same, but the post was built from the listing data (JSON-LD ``ItemList``) of the
+    index page the link was found on.
     """
 
     ok: bool
@@ -133,4 +158,7 @@ class PageResult:
     text: str = ""
     error: str | None = None
     query: str | None = None
-    via: Literal["page", "search"] = "page"
+    via: Literal["page", "search", "index"] = "page"
+    # the layer that produced this result or its error: "http", "render" (browser), "scrape" (unlocker API),
+    # "none" (the site was never asked). A refusal counts against that layer's block of the host only.
+    layer: Literal["http", "render", "scrape", "none"] = "http"

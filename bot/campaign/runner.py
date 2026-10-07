@@ -47,23 +47,52 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import httpx
 
 from bot.agents.recorder import PostgresRecorder, Recorder, record_of
-from bot.analysis_pipeline.cards import CardTask, render_card
+from bot.analysis_pipeline.cards import CardTask, also_on, render_card
 
-from . import offers
+from . import offers, people
+from .dedup import Listing, listing_of, same_object, site_of
+from .final_report import FinalReporter, task_title
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
-from .reach import contact_card
-from .relevance import Relevance, RelevanceJudge, finding_data, task_data
-from .runs import TERMINAL_BATCH_STATES, RunState, RunStore, StreamFinding, Window
-from .status_text import LIMIT_REASONS, campaign_label, group_status, user_status
+from .reach import contact_card, contact_extras
+from .relevance import (
+    Relevance,
+    RelevanceJudge,
+    finding_data,
+    reason_category,
+    review_match,
+    task_data,
+)
+from .runs import (
+    TERMINAL_BATCH_STATES,
+    ClusterHead,
+    RunState,
+    RunStore,
+    SentFinding,
+    StreamFinding,
+    Window,
+)
+from .status_text import (
+    FACEBOOK,
+    LAYER_NAMES,
+    LIMIT_REASONS,
+    campaign_label,
+    group_status,
+    user_status,
+    web_done_status,
+    web_progress_status,
+)
+from .status_text import (
+    SEARCHING as USER_SEARCHING,
+)
 from .store import CampaignStore
 from .summary import summary_text
 from .tolerance import (
@@ -79,6 +108,7 @@ from .tolerance import (
 
 log = logging.getLogger(__name__)
 RELEVANCE_PAUSE_SECONDS = 60
+MAX_TRACKED_MISSES = 5000
 
 ACTOR = "campaign:runner"
 SEARCHING = "Сейчас: поиск групп Facebook"
@@ -179,16 +209,25 @@ class WebProgress(Protocol):
     async def web_status(self, campaign_id: str) -> Any: ...
 
 
+UNVERIFIED_CAP = "Не проверено ИИ: лимит проверок исчерпан"
+UNVERIFIED_FAILED = "Не проверено ИИ: сбой проверки"
+
+
 @dataclass(frozen=True)
 class RunnerConfig:
     window_cooldown_seconds: float = 120
     analysis_grace_seconds: float = 600
     refusal_retry_seconds: float = 300
+    web_status_seconds: float = 10  # the web progress line is edited at most this often
     max_stream_per_step: int = 20
     # After the last window, how long the campaign waits for social network searches still to come.
     social_grace_seconds: float = 1800
     # AI relevance checks per campaign (``relevance``); past the cap the deterministic rules decide alone.
-    max_relevance_calls: int = 200
+    max_relevance_calls: int = 2000
+    # No AI verdict (cap reached, paused after an error, no judge, failed call): an exact finding becomes similar.
+    relevance_fail_closed: bool = True
+    # A failed AI call (not a pause) is retried on a later step; after this many misses for one finding it is held.
+    relevance_retry_limit: int = 5
     # Which campaigns queue their sent Facebook posts for a comment read (``leads``): all | investors | off,
     # at most ``comment_max_posts`` per campaign. Off unless a comment worker runs beside the runner (``main``).
     comment_leads: str = "off"
@@ -197,14 +236,33 @@ class RunnerConfig:
     # seen in the last ``lead_days``.
     max_people: int = 60
     lead_days: int = 90
+    # The campaign's metrics row (``campaign_metrics``) is recomputed at most this often while it runs.
+    metrics_seconds: float = 30
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
                 or self.social_grace_seconds < 0 or not 1 <= self.max_stream_per_step <= 100
-                or not 0 <= self.max_relevance_calls <= 10_000 or self.comment_leads not in COMMENT_MODES
+                or not 0 <= self.max_relevance_calls <= 10_000 or not 1 <= self.relevance_retry_limit <= 100 or self.comment_leads not in COMMENT_MODES
                 or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500
-                or not 1 <= self.lead_days <= 3650):
+                or not 1 <= self.lead_days <= 3650 or self.metrics_seconds < 0):
             raise ValueError("unsafe campaign runner settings")
+
+
+@dataclass(slots=True)
+class _Head:
+    """A sent exact card as a dedup candidate: its fields and its precomputed ``Listing``."""
+
+    sent: SentFinding
+    listing: Listing
+
+
+@dataclass(slots=True)
+class _HeadIndex:
+    """The campaign's cluster heads, fetched once per ``_stream`` (on the first exact finding) and kept up to date
+    with the cards sent during the step."""
+
+    loaded: bool = False
+    heads: list[_Head] = field(default_factory=list)
 
 
 class CampaignRunner:
@@ -221,6 +279,7 @@ class CampaignRunner:
         web: WebProgress | None = None,
         relevance: RelevanceJudge | None = None,
         recorder: Recorder | None = None,
+        final_report: FinalReporter | None = None,
     ) -> None:
         """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
         status; everyone else sees only the user-safe labels of ``status_text``. ``web``: the
@@ -232,12 +291,18 @@ class CampaignRunner:
         self.owner_ids = frozenset(owner_ids)
         self.web = web
         self.relevance = relevance
+        self.final_report = final_report  # the user's «Отчёт по поиску» (None: not sent)
         self.recorder = recorder
         # After a failed relevance call the model is left alone for a minute: one slow or broken
         # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
         self._relevance_paused_until: datetime | None = None
+        # Finding id -> failed AI calls so far (in memory, bounded); ids here are skipped while the judge is paused.
+        self._relevance_misses: dict[str, int] = {}
         # Campaigns whose chat got a card or a question below the status message: the status moves down.
         self._below_status: set[str] = set()
+        self._web_edit_at: dict[str, datetime] = {}  # campaign id -> when the web progress line was last shown
+        self._metrics_at: dict[str, datetime] = {}  # campaign id -> when its metrics were last recomputed
+        self._metrics_final: set[str] = set()  # ended campaigns whose metrics were recomputed by this process
 
     async def tick(self) -> int:
         """Advance every open (or just finished) campaign by one step; returns how many were seen."""
@@ -292,10 +357,15 @@ class CampaignRunner:
                 log.exception("campaign.runner.failed", extra={"campaign_id": campaign_id})
                 await self.campaigns.set_state(campaign_id, "failed", ACTOR, reason=f"runner_error:{type(exc).__name__}"[:500])
             campaign = await self.campaigns.get(campaign_id) or campaign
+            if campaign.state not in TERMINAL_STATES:
+                await self._metrics(campaign)
         if campaign.state in TERMINAL_STATES:
             await self._close(campaign)
-            await self._stream(campaign)
+            # Final: a finding whose AI check is still missing is held as unverified, never lost.
+            await self._stream(campaign, final=True)
+            await self._metrics(campaign, final=True)
             await self._summary(campaign)
+            await self._final_report(campaign)
             line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
         await self._show(campaign, line)
 
@@ -412,7 +482,9 @@ class CampaignRunner:
             return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
-        await self._stream(campaign)
+        final = waited >= self.config.analysis_grace_seconds
+        if await self._stream(campaign, final=final, skip_misses=False) and not final:
+            return ANALYSIS  # findings still wait for the AI check: do not complete (and lose them) yet
         await self.campaigns.set_state(campaign.id, "completed", ACTOR, reason=reason)
         return ANALYSIS
 
@@ -439,64 +511,179 @@ class CampaignRunner:
 
     # -- Telegram --
 
-    async def _stream(self, campaign: Campaign) -> None:
-        """Send each new exact finding once, oldest first; hold the rest and ask about them once."""
+    async def _stream(self, campaign: Campaign, *, final: bool = False, skip_misses: bool = True) -> int:
+        """Send each new exact finding once, oldest first; hold the rest and ask about them once.
+
+        Returns how many findings wait for a later step (the AI check missed transiently); ``final``
+        (the campaign is ending) treats such a miss as permanent. ``skip_misses=False`` (the drain) does not
+        skip remembered misses, so they are counted as deferred instead of being hidden from the completion check.
+        """
         active = campaign.state not in TERMINAL_STATES
         request = campaign_request(campaign)
-        for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step):
-            match = await self._judge(campaign, request, finding)
+        deferred = 0
+        paused = self._relevance_paused_until is not None and self.now() < self._relevance_paused_until
+        skip = set(self._relevance_misses) if paused and not final and skip_misses else set()
+        index = _HeadIndex()  # the dedup candidates: one query per step, not one per finding
+        for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step, skip=skip):
+            match = await self._judge(campaign, request, finding, final=final)
+            if match is None:  # transient miss: neither held nor streamed, retried on a later step
+                deferred += 1
+                continue
             if match.bucket != "exact":
-                if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance):
+                reason = match.note if match.why == "unverified" else None
+                if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance, reason,
+                                                 why=reason_category(match.why)):
+                    if reason:
+                        log.info("campaign.finding_unverified %s", reason,
+                                 extra={"campaign_id": campaign.id, "finding_id": finding.id})
                     await self._record(campaign, finding, match.bucket)
+                continue
+            if await self._deduplicate(campaign, finding, active, index):
                 continue
             count = await self.store.claim_finding(campaign.id, finding.id)
             if count is None:
                 continue
             if not await self._send_card(campaign, finding, count, active, "exact"):
-                return
+                return deferred
+            if index.loaded:  # the card just sent is a head for the findings still to come in this step
+                index.heads.insert(0, _Head(SentFinding(finding, None, count),
+                                            listing_of(finding.payload, url=finding.url, text=finding.text)))
         await self._near_matches(campaign, request, active)
         await self._people(campaign)
+        return deferred
 
-    async def _judge(self, campaign: Campaign, request: Request, finding: StreamFinding) -> Match:
+    async def _deduplicate(self, campaign: Campaign, finding: StreamFinding, active: bool,
+                           index: _HeadIndex | None = None) -> bool:
+        """The same object as an exact card already sent: store the finding as its duplicate and add its link.
+
+        No second card is sent; the head card is edited to show «Также на: ...». Conservative (``dedup.same_object``):
+        when in doubt the finding is sent as its own card. A finding without a link is never merged.
+        The heads come from ``index`` (fetched once per step, see ``_stream``). The duplicate is recorded as excluded
+        (``duplicate_of:<head>``) and, in the store, delivered like a sent finding.
+        Returns True when the finding was attached (nothing is left to send).
+        """
+        if not finding.url:
+            return False
+        mine = listing_of(finding.payload, url=finding.url, text=finding.text)
+        if mine.price is None and mine.area is None:
+            return False
+        index = index if index is not None else _HeadIndex()
+        try:
+            if not index.loaded:
+                index.loaded = True
+                index.heads = [_Head(h, listing_of(h.finding.payload, url=h.finding.url, text=h.finding.text))
+                               for h in await self.store.recent_sent_findings(campaign.id)]
+            for position, head in enumerate(index.heads):
+                if head.sent.finding.id == finding.id or not same_object(mine, head.listing):
+                    continue
+                link = {"url": finding.url, "site": site_of(finding.url)}
+                if finding.url == head.sent.finding.url:
+                    link = {}  # the same post again: nothing to add
+                attached = await self.store.attach_to_cluster(finding.id, head.sent.finding.id, link)
+                if attached is None:
+                    continue
+                log.info("campaign.finding_deduplicated", extra={
+                    "campaign_id": campaign.id, "finding_id": finding.id, "head_finding_id": head.sent.finding.id})
+                await self._record(campaign, finding, "excluded", reason=f"duplicate_of:{head.sent.finding.id}")
+                if len(attached.links) > len(head.sent.links):
+                    index.heads[position] = replace(head, sent=replace(head.sent, links=attached.links))
+                    await self._edit_head(campaign, head.sent, attached, active)
+                return True
+        except Exception:  # noqa: BLE001 - dedup is an optimisation: on any failure send the card as usual
+            log.warning("campaign.dedup_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
+        return False
+
+    async def _edit_head(self, campaign: Campaign, head: SentFinding, attached: ClusterHead, active: bool) -> None:
+        """Re-render the head card with «Также на: ...» and edit its Telegram message (best effort).
+
+        The card keeps the number it was sent with (stored when it was claimed). The head's post text is loaded only
+        here, for the render (the dedup candidates are fetched without it)."""
+        if attached.message_id is None:
+            return
+        try:
+            full = await self.store.stream_finding(head.finding.id) or head.finding
+            tail = f"🔎 Найдено: {head.number}" + (" · ищу дальше" if active else "")
+            card = f"{finding_card(campaign, full, cluster_links=attached.links)}\n\n{tail}"
+            await self.messenger.edit(campaign.chat_id, attached.message_id, card[:MAX_MESSAGE_CHARS])
+        except Exception:  # noqa: BLE001 - the link is stored; a lost edit only hides it from the card
+            log.warning("campaign.cluster_edit_failed",
+                        extra={"campaign_id": campaign.id, "finding_id": head.finding.id})
+
+    async def _judge(self, campaign: Campaign, request: Request, finding: StreamFinding, *,
+                     final: bool = False) -> Match | None:
         """The finding's bucket: the deterministic rules, then the AI verdict (stored once) on top.
 
         reject -> excluded; near -> at least similar; match -> the rules' bucket. Anything the
-        rules exclude is never sent to the model.
+        rules exclude is never sent to the model. ``None``: the AI check missed for a transient reason
+        (judge paused, one call failed): the finding is retried on a later step, up to ``relevance_retry_limit``.
         """
         match = classify(finding.payload, request, vertical=finding.vertical)
         if match.bucket == "excluded":
             log.info("campaign.finding_excluded", extra={"campaign_id": campaign.id, "finding_id": finding.id,
                                                          "why": match.why})
             return match
-        verdict = await self._relevance(campaign, finding)
-        if verdict is None or verdict.verdict is None or verdict.verdict == "match":
+        verdict, note, transient = await self._relevance(campaign, finding)
+        if verdict is not None and verdict.verdict is not None:
+            self._relevance_misses.pop(finding.id, None)
+        if verdict is None or verdict.verdict is None:
+            if (self.config.relevance_fail_closed and match.bucket == "exact" and finding.vertical != "investors"
+                    and campaign.plan.vertical != "investors"):
+                if transient and not final:
+                    self._miss(finding.id, 0)  # remembered, so a paused judge does not block the batch
+                    return None
+                self._relevance_misses.pop(finding.id, None)
+                return Match("similar", match.distance, "unverified", note=note or UNVERIFIED_FAILED)
+            return match
+        if verdict.review:  # the reviewer's criteria matrix decides (see ``relevance.review_match``)
+            return review_match(match, verdict.review)
+        if verdict.verdict == "match":
             return match
         if verdict.verdict == "reject":
             return Match("excluded", float("inf"), "ai")
         return match if match.bucket != "exact" else Match("similar", match.distance, "ai")
 
-    async def _relevance(self, campaign: Campaign, finding: StreamFinding) -> Relevance | None:
-        """The stored verdict, or one new AI call (within the cap); None: the rules decide alone."""
+    def _miss(self, finding_id: str, add: int) -> int:
+        """Failed AI calls of one finding so far (``add`` more); the table is bounded."""
+        if finding_id not in self._relevance_misses and len(self._relevance_misses) >= MAX_TRACKED_MISSES:
+            del self._relevance_misses[next(iter(self._relevance_misses))]
+        count = self._relevance_misses[finding_id] = self._relevance_misses.get(finding_id, 0) + add
+        return count
+
+    async def _relevance(self, campaign: Campaign,
+                         finding: StreamFinding) -> tuple[Relevance | None, str | None, bool]:
+        """The stored verdict, or one new AI call (within the cap); the owner-facing note and whether a miss is transient.
+
+        No verdict: the rules decide alone, and an exact finding is held as unverified (``_judge``) --
+        at once for a permanent cause (no judge, cap reached, stored null verdict), after a later retry
+        for a transient one (judge paused, a failed call that stored nothing).
+        """
         stored = await self.store.relevance(campaign.id, finding.id)
-        if stored is not None or self.relevance is None:
-            return stored
+        if stored is not None:
+            return stored, (UNVERIFIED_FAILED if stored.verdict is None else None), False
+        if self.relevance is None:
+            return None, UNVERIFIED_FAILED, False
         if self._relevance_paused_until is not None and self.now() < self._relevance_paused_until:
-            return None
+            return None, UNVERIFIED_FAILED, True
         if await self.store.relevance_calls(campaign.id) >= self.config.max_relevance_calls:
-            return None
+            return None, UNVERIFIED_CAP, False
         try:
-            verdict = await self.relevance.judge(task_data(campaign), finding_data(finding.payload, fallback_text=finding.text,
-                                                                                 original=finding.original))
-        except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules
+            review = bool(getattr(self.relevance, "reviews", False))  # the reviewer also gets the hard criteria
+            verdict = await self.relevance.judge(
+                task_data(campaign, review=review),
+                finding_data(finding.payload, fallback_text=finding.text, original=finding.original, review=review,
+                             vertical=finding.vertical))
+        except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules (or closed, see ``_judge``)
             self._relevance_paused_until = self.now() + timedelta(seconds=RELEVANCE_PAUSE_SECONDS)
             code = getattr(exc, "code", type(exc).__name__)
             log.warning("campaign.relevance_failed %s", code, extra={"campaign_id": campaign.id, "finding_id": finding.id})
+            if self.config.relevance_fail_closed and self._miss(finding.id, 1) < self.config.relevance_retry_limit:
+                return None, UNVERIFIED_FAILED, True  # nothing stored: the finding is judged again later
             verdict = Relevance(None, f"error:{code}"[:300], None, getattr(self.relevance, "model", None))
         await self.store.save_relevance(campaign.id, finding.id, verdict)
         # The reason is for owners (logs); users never see it.
         log.info("campaign.relevance %s: %s", verdict.verdict, verdict.reason,
                  extra={"campaign_id": campaign.id, "finding_id": finding.id})
-        return verdict
+        return verdict, (UNVERIFIED_FAILED if verdict.verdict is None else None), False
 
     async def _deviation(self, campaign: Campaign, request: Request, closest: StreamFinding) -> offers.Deviation:
         """What the closest held listing has outside the criteria: price, area, or the AI's phrase."""
@@ -509,6 +696,10 @@ class CampaignRunner:
         if match.why == "area" and match.area is not None and request.min_area:
             requested = f"от {round(request.min_area):,} м²".replace(",", " ")
             return offers.Deviation("area", area_text(match.area), requested, land=land)
+        if match.why == "area_unknown":
+            return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
+        if self.config.relevance_fail_closed and closest.hold_reason:  # held unverified (stored note: owners only)
+            return offers.Deviation("unverified", land=land)
         stored = await self.store.relevance(campaign.id, closest.id)
         return offers.Deviation("other", phrase=stored.deviation if stored is not None else None, land=land)
 
@@ -564,27 +755,59 @@ class CampaignRunner:
             (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
                                         now=self.now()))
             for p in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit)]
+        keyed: list[tuple[str, list[str], str | None, str]] = [(key, [key], None, card) for key, card in cards]
         if len(cards) < limit:
-            cards += [(c.delivery_key, contact_card(c)) for c in await self.store.stored_contacts(
-                campaign.id, location, self.config.lead_days, limit - len(cards))]
-        for key, card in cards:
+            keyed += await self._reach_cards(campaign, location, room - len(cards), limit - len(cards))
+        headers: set[tuple[str, str]] = self.__dict__.setdefault("_reach_headers", set())
+        for key, keys, group, card in keyed:
             if not await self.store.claim_person(campaign.id, key):
                 continue
+            claimed = [key, *[k for k in keys if k != key and await self.store.claim_person(campaign.id, k)]]
             try:
+                if group and (campaign.id, group) not in headers:  # one header line per group, before its first card
+                    await self.messenger.send(campaign.chat_id, people.GROUP_HEADERS[group])
+                    headers.add((campaign.id, group))
                 message_id = await self.messenger.send(campaign.chat_id, card[:MAX_MESSAGE_CHARS])
             except Exception:  # noqa: BLE001 - Telegram down: retry next tick
                 log.warning("campaign.person_send_failed", extra={"campaign_id": campaign.id})
-                await self.store.release_person(campaign.id, key)
+                for k in claimed:
+                    await self.store.release_person(campaign.id, k)
                 return
-            await self.store.person_sent(campaign.id, key, message_id)
+            for k in claimed:
+                await self.store.person_sent(campaign.id, k, message_id)
             self._below_status.add(campaign.id)
 
-    async def _record(self, campaign: Campaign, finding: StreamFinding, bucket: str) -> None:
-        """Store a held (similar/other) or excluded finding; never blocks the stream."""
+    async def _reach_cards(self, campaign: Campaign, location: str, fetch: int,
+                           limit: int) -> list[tuple[str, list[str], str, str]]:
+        """Stored reach contacts of the city as cards: scored against the spec, one per person (the same person on
+        several platforms is merged), ordered investors/funds, developers, agents/networks, then by score.
+
+        Returns ``(delivery key, every merged key, group id, text)``.
+        """
+        stored = await self.store.stored_contacts(campaign.id, location, self.config.lead_days, max(fetch, limit))
+        pool = getattr(self.store, "pool", None)
+        if stored and pool is not None:  # the enrichment columns (migration 037)
+            try:
+                extras = await contact_extras(pool, [c.url_key for c in stored])
+            except Exception:  # noqa: BLE001 - cards without enrichment are still cards
+                log.warning("campaign.reach_extras_failed", extra={"campaign_id": campaign.id})
+                extras = {}
+            stored = [replace(c, **extras[c.url_key]) if c.url_key in extras else c for c in stored]
+        investor = people.investor_of(campaign.spec)
+        places = [location, *campaign.plan.location_aliases.values(), *(investor or {}).get("geography", [])]
+        ready = people.build_cards(stored, investor, places=places, now=self.now())[:limit]
+        return [(card.keys[0], list(card.keys), card.group,
+                 contact_card(card.contact, score=card.score, reasons=card.reasons, also=card.links))
+                for card in ready]
+
+    async def _record(self, campaign: Campaign, finding: StreamFinding, bucket: str, *,
+                      reason: str | None = None) -> None:
+        """Store a held (similar/other) or excluded finding (``reason``: e.g. ``duplicate_of:<head>``); never blocks the stream."""
         if self.recorder is None:
             return
         record = record_of(campaign.id, finding.id, state="excluded" if bucket == "excluded" else "held",
-                           bucket=bucket, payload=finding.payload, text=finding.original or finding.text)
+                           bucket=bucket, payload=finding.payload, text=finding.original or finding.text,
+                           reason=reason)
         await self._recorded(self.recorder.excluded(record) if bucket == "excluded" else self.recorder.held(record))
 
     @staticmethod
@@ -667,6 +890,62 @@ class CampaignRunner:
         self._below_status.add(campaign.id)  # the status message moves below the summary
         log.info("campaign.summary_sent", extra={"campaign_id": campaign.id})
 
+    async def _final_report(self, campaign: Campaign) -> None:
+        """«Отчёт по поиску» for the person who asked (``final_report``): once, when the campaign completes or is cancelled.
+
+        Same guards as the summary: only for a campaign that ended within ``SUMMARY_WINDOW`` (older ones get none),
+        claimed in the database before it is built (a restart never repeats it), given back when the store or
+        Telegram failed. Investor-only searches have no property cards to report; a cancelled search that found and
+        rejected nothing is not reported.
+        """
+        if (self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None
+                or campaign.plan.vertical == "investors"):
+            return
+        if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_final_report(campaign.id):
+            return
+        try:
+            outcomes = await self.store.outcome_counts(campaign.id)
+            if campaign.state == "cancelled" and not outcomes:
+                return
+            sent = await self.store.recent_sent_findings(campaign.id, 500)
+            sources = await self.store.source_counts(campaign.id)
+            site_report = getattr(self.web, "site_report", None)
+            reports = await site_report(campaign.id) if site_report is not None else []
+            portals = campaign_portals(campaign) if reports else ()
+            request = campaign_request(campaign)
+            title = task_title(request, campaign.plan.location_aliases.get("ru"), campaign.plan.goal)
+            text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals)
+            await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
+        except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
+            log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})
+            await self.store.release_final_report(campaign.id)
+            return
+        self._below_status.add(campaign.id)  # the status message moves below the report
+        log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
+
+    async def _metrics(self, campaign: Campaign, *, final: bool = False) -> None:
+        """Recompute the campaign's ``campaign_metrics`` row: at most every ``metrics_seconds`` while it runs, and
+        once (per process) after it ended. Bookkeeping: a failure is logged and never stops the step."""
+        refresh = getattr(self.campaigns, "refresh_metrics", None)
+        if refresh is None:
+            return
+        now = self.now()
+        if final:
+            if campaign.id in self._metrics_final:
+                return
+        else:
+            last = self._metrics_at.get(campaign.id)
+            if last is not None and (now - last).total_seconds() < self.config.metrics_seconds:
+                return
+        try:
+            await refresh(campaign.id)
+        except Exception:  # noqa: BLE001
+            log.warning("campaign.metrics_failed", extra={"campaign_id": campaign.id})
+            return
+        self._metrics_at[campaign.id] = now
+        if final:
+            self._metrics_final.add(campaign.id)
+
     async def _show(self, campaign: Campaign, line: str) -> None:
         """Keep one status message per campaign, always the last one in the chat: it is edited when its
         text changes, and moved (sent again below, the old one deleted) after new cards or questions."""
@@ -676,6 +955,11 @@ class CampaignRunner:
         moved = current.id in self._below_status
         if current.status_message_id is not None and run.status_text == text and not moved:
             return
+        if (not moved and current.status_message_id is not None and text.startswith("Сейчас: сайты")
+                and (run.status_text or "").startswith("Сейчас: сайты")
+                and (self.now() - self._web_edit_at.get(current.id, datetime.min.replace(tzinfo=UTC))).total_seconds()
+                < self.config.web_status_seconds):
+            return  # the counters move every page: one edit per web_status_seconds is enough
         try:
             if current.status_message_id is None:
                 await self._new_status(current, text)
@@ -695,6 +979,8 @@ class CampaignRunner:
             log.warning("campaign.status_update_failed", extra={"campaign_id": current.id})
             return
         self._below_status.discard(current.id)
+        if text.startswith("Сейчас: сайты"):
+            self._web_edit_at[current.id] = self.now()
         await self.store.save_run(current.id, replace(await self.store.get_run(current.id), status_text=text))
 
     async def _status_text(self, campaign: Campaign, line: str) -> str:
@@ -707,6 +993,8 @@ class CampaignRunner:
             text = f"🎯 {campaign.plan.goal}\n{line or STOPPED}"
             if web_active and web.line and web.line != line:
                 text += f"\n{web.line}"
+            if web_active and getattr(web, "progress", None) is not None:
+                text += await self._web_detail(campaign, web.progress)
             if social is not None:
                 if social.searching:
                     query = f" · «{social.query}»" if social.query else ""
@@ -719,13 +1007,30 @@ class CampaignRunner:
         if line.startswith("Сейчас: Facebook · ") and line.endswith(" · ищу дальше"):
             # The group being read right now, by its name (like «Ищу на сайте fotocasa.es…» for sites).
             return group_status(line.removeprefix("Сейчас: Facebook · ").removesuffix(" · ищу дальше"))
+        progress = getattr(web, "progress", None)
         if web_active:
+            if progress is not None:
+                return web_progress_status(web.host or progress.host, progress.layer, progress.read, progress.found,
+                                           progress.portals_done, progress.portals_total)
             return user_status("site", site=web.host) if web.host else user_status("web")
         checking = line == ANALYSIS and bool(await self.store.pending_analysis(campaign.id))
         # A network search is shown while Facebook itself is idle (between windows, waiting, at the end).
         facebook_busy = line == SEARCHING or line.startswith("Сейчас: Facebook")
         searching = social.searching if social is not None and not facebook_busy else None
-        return campaign_label(campaign.state, checking=checking, social=searching)
+        label = campaign_label(campaign.state, checking=checking, social=searching)
+        if progress is not None and progress.finished and label in (USER_SEARCHING, FACEBOOK) and searching is None:
+            return web_done_status(progress.read, progress.found)  # the web stage ended: its totals stay on screen
+        return label
+
+    async def _web_detail(self, campaign: Campaign, progress: Any) -> str:
+        """Owners only: the current host's refusals per layer and the cards sent so far."""
+        parts = []
+        if progress.refusals and progress.host:
+            parts.append(f"{progress.host}: отказы " + ", ".join(f"{LAYER_NAMES.get(layer, layer)} {n}" for layer, n in progress.refusals))
+        sent = await self.store.streamed_count(campaign.id)
+        if sent:
+            parts.append(f"карточек отправлено {sent}")
+        return f"\nСайты: {' · '.join(parts)}" if parts else ""
 
     async def _web(self, campaign_id: str) -> Any:
         """The web stage's status, or None (no web stage, or it could not be read: never blocks the runner)."""
@@ -773,10 +1078,12 @@ def campaign_request(campaign: Campaign) -> Request:
                        text=f"{campaign.source_text} {campaign.plan.goal}", country=campaign.plan.country)
 
 
-def finding_card(campaign: Campaign, finding: StreamFinding) -> str:
+def finding_card(campaign: Campaign, finding: StreamFinding, *,
+                 cluster_links: Sequence[dict[str, str]] = ()) -> str:
     """The Russian card for one finding, its fields ordered by the campaign's task."""
     if finding.payload is None:
-        return finding.text[:MAX_MESSAGE_CHARS]
+        extra = also_on(cluster_links)
+        return (f"{finding.text}\n\n{extra}" if extra else finding.text)[:MAX_MESSAGE_CHARS]
     constraints = campaign.plan.constraints
     deal, max_price, rooms = constraints.get("deal"), constraints.get("max_price"), constraints.get("rooms")
     task = CardTask(
@@ -786,7 +1093,8 @@ def finding_card(campaign: Campaign, finding: StreamFinding) -> str:
         rooms=rooms if isinstance(rooms, int) else None,
     )
     return render_card(finding.payload, original=finding.original, task=task, vertical=finding.vertical,
-                       language=finding.language, confidence=finding.confidence, limit=MAX_MESSAGE_CHARS)
+                       language=finding.language, confidence=finding.confidence, limit=MAX_MESSAGE_CHARS,
+                       cluster_links=cluster_links)
 
 
 # --- service ------------------------------------------------------------------------------
@@ -815,23 +1123,20 @@ async def main() -> None:
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
     web = await _web_stage(campaigns, pool, settings)
-    judge = None
-    if settings.openrouter_api_key and settings.relevance_max_calls > 0:
-        from .relevance import OpenRouterRelevanceJudge
-
-        judge = OpenRouterRelevanceJudge(api_key=settings.openrouter_api_key, model=settings.relevance_model,
-                                         timeout_seconds=settings.relevance_timeout_seconds)
-    else:
+    judge = settings.relevance_judge()
+    if judge is None:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
+    final_reporter = settings.final_reporter()
     comments, lead_judge = _comment_worker(settings, pool)
-    reach, reach_closers = _reach_worker(settings, pool)
+    reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None)
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
     store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
-                            web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool))
+                            web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool),
+                            final_report=final_reporter)
     social, generator = _social_worker(settings, pool, campaigns)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
@@ -864,6 +1169,8 @@ async def main() -> None:
             await close()
         if judge is not None:
             await judge.aclose()
+        if final_reporter is not None:
+            await final_reporter.aclose()
         await messenger.aclose()
         await pool.close()
 
@@ -886,11 +1193,12 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
         log.warning("campaign.web_search_disabled")
         return None
     config = settings.config()
-    searcher = SearxngClient(settings.searxng_url, timeout_seconds=settings.searxng_timeout_seconds,
-                             max_results=config.results_per_query)
+    searcher = settings.searcher(SearxngClient(settings.searxng_url, timeout_seconds=settings.searxng_timeout_seconds,
+                                               max_results=config.results_per_query, pages=config.pages_per_query))
     fetcher = PageFetcher(user_agent=settings.user_agent, request_timeout_seconds=settings.request_timeout_seconds,
                           max_content_bytes=settings.max_content_bytes, host_interval_seconds=settings.host_interval_seconds,
-                          proxy_url=settings.proxy_url or None)
+                          proxy_url=settings.proxy_url or None, impersonate=settings.impersonate,
+                          browser_user_agent=settings.browser_user_agent or None)
     model = None
     if settings.openrouter_api_key:
         model = OpenRouterQueryGenerator(api_key=settings.openrouter_api_key, model=settings.query_model,
@@ -904,9 +1212,12 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
 
         renderer = BrowserRenderer(BrowserSessionClient(runner_settings.browser_url, runner_settings.browser_token),
                                    timeout_seconds=settings.render_timeout_seconds)
+    scraper = settings.scraper()
+    planner = runner_settings.search_planner()
     worker = WebSearchWorker(campaigns, PostgresWebStore(pool), searcher, fetcher, FallbackQueryGenerator(model),
-                             renderer=renderer, config=config)
-    closers = [searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
+                             renderer=renderer, scraper=scraper, planner=planner, config=config)
+    closers = ([searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
+               + ([scraper.aclose] if scraper else []) + ([planner.aclose] if planner else []))
     return worker, settings.poll_seconds, closers
 
 
@@ -935,8 +1246,12 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
     return worker, generator
 
 
-def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
-    """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false."""
+def _reach_worker(settings: Any, pool: Any, fetcher: Any = None) -> tuple[Any, list[Any]]:
+    """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false.
+
+    ``fetcher``: the web stage's PageFetcher, which opens the public page of a relevant result for its contacts
+    (None when the web stage is off: no enrichment).
+    """
     if not settings.reach_enabled:
         return None, []
     from bot.web_search.searxng import SearxngClient
@@ -952,7 +1267,7 @@ def _reach_worker(settings: Any, pool: Any) -> tuple[Any, list[Any]]:
                                      timeout_seconds=settings.leads_timeout_seconds)
     else:
         log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
-    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config())
+    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), fetcher=fetcher)
     return worker, [searcher.aclose] + ([judge.aclose] if judge else [])
 
 

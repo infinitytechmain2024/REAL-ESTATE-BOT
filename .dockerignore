@@ -10,9 +10,5 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# The vendored snapshot ships its sources, but not its development tooling.
-searxng/client/
-searxng/docs/
-searxng/tests/
-searxng/node_modules/
-searxng/.git/
+# The retired standalone bot is never part of an image.
+legacy/

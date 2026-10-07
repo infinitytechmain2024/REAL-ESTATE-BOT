@@ -46,7 +46,7 @@ REPLIES: dict[str, str] = {
 class Deviation:
     """What the closest held listing has outside the criteria, for the «Одобрить» question.
 
-    ``kind``: price | area | other. ``example`` / ``requested``: «~60 000 €» / «~50 000 €» (price),
+    ``kind``: price | area | area_unknown | unverified | other. ``example`` / ``requested``: «~60 000 €» / «~50 000 €» (price),
     «~1 600 м²» / «от 2 000 м²» (area). ``phrase``: a short Russian phrase that completes
     «есть варианты …» («дальше от метро»), from the relevance check.
     """
@@ -66,6 +66,15 @@ def similar_question(deviation: Deviation | None = None, *, exact_found: bool) -
     """
     lead, hint = "похожие варианты", None
     what = "участки" if deviation is not None and deviation.land else "варианты"
+    if deviation is not None and deviation.kind == "unverified":  # neutral: the owner-only note stays in logs
+        lead = "варианты, которые не удалось проверить автоматически"
+        if exact_found:
+            return "Есть ещё варианты, которые не удалось проверить автоматически. Показать?"
+        return f"По вашим критериям пока ничего не нашёл, но есть {lead}. Показать?"
+    if deviation is not None and deviation.kind == "area_unknown":
+        if exact_found:
+            return "Есть ещё похожие варианты (площадь не указана). Показать?"
+        return f"По вашим критериям пока ничего не нашёл, но есть {what}, где площадь не указана. Показать?"
     if deviation is not None and deviation.kind == "price" and deviation.example and deviation.requested:
         lead, hint = f"{what} чуть дороже", f"например {deviation.example} при запросе {deviation.requested}"
     elif deviation is not None and deviation.kind == "area" and deviation.example and deviation.requested:

@@ -31,7 +31,15 @@ from bot.web_search.queries import (
 )
 from bot.web_search.searxng import SearchError, SearchHit, SearxngClient
 from bot.web_search.store import MemoryWebStore
-from bot.web_search.urls import SPAIN_PORTALS, classify_url, fetchable, host_of, url_key
+from bot.web_search.urls import (
+    SPAIN_PORTALS,
+    SPAIN_PORTALS_BY_KIND,
+    classify_page,
+    classify_url,
+    fetchable,
+    host_of,
+    url_key,
+)
 from bot.web_search.worker import WebSearchConfig, WebSearchWorker, query_task
 from tests.test_campaign_runner import FakeMessenger
 
@@ -83,12 +91,14 @@ class FakeFetcher:
         self.pages = pages or {}
         self.disallow, self.errors = set(disallow), errors or {}
         self.fetched: list[str] = []
+        self.countries: list[str | None] = []
 
     async def allowed(self, url: str) -> bool:
         return url not in self.disallow
 
-    async def fetch(self, url: str) -> FetchedPage:
+    async def fetch(self, url: str, *, country: str | None = None) -> FetchedPage:
         self.fetched.append(url)
+        self.countries.append(country)
         if url in self.errors:
             raise FetchError(self.errors[url])
         return FetchedPage(url, self.pages.get(url, listing_page(url)))
@@ -162,11 +172,11 @@ async def test_template_generator_rounds_never_repeat_and_cover_languages_and_po
                      dict(plan.constraints), tuple(plan.languages))
     generator, used = TemplateQueryGenerator(), []
     for _ in range(3):
-        round_ = await generator.generate(task, used=used, count=12)
-        assert len(round_) == 12
+        round_ = await generator.generate(task, used=used, count=6)
+        assert len(round_) == 6
         used += [q.text for q in round_]
-    assert len({query_key(q) for q in used}) == len(used) == 36
-    assert {"es", "en", "ru", "uk"} <= {q.language for q in await generator.generate(task, used=[], count=12)}
+    assert len({query_key(q) for q in used}) == len(used) == 18
+    assert {"es", "en", "ru", "uk"} <= {q.language for q in await generator.generate(task, used=[], count=9)}
     assert any(q.startswith("site:idealista.com") for q in used) and any("terreno" in q for q in used)
     assert any("участок" in q for q in used) and any("ділянка" in q for q in used)
 
@@ -188,7 +198,7 @@ async def test_worker_generates_rounds_passing_used_queries_up_to_the_cap() -> N
     await run_until_done(w, cid)
     assert [count for _, count in generator.calls] == [12, 12, 12, 4]
     assert [len(used) for used, _ in generator.calls] == [0, 12, 24, 36]
-    assert generator.calls[1][0] == queries[:12]  # the model is shown every query already used
+    assert generator.calls[1][0] == [f"{q} España" for q in queries[:12]]  # the model is shown every query already used
     assert len(store.queries[cid]) == 40 and len({q.key for q in store.queries[cid]}) == 40
     assert len(searcher.calls) == 40 and len(set(searcher.calls)) == 40
     assert store.runs[cid].stop_reason == "queries_done"
@@ -201,7 +211,7 @@ async def test_a_round_without_new_queries_ends_the_stage() -> None:
     generator = ListGenerator(["terreno Boadilla Madrid", "terrenos boadilla madrid"])
     w = worker(campaigns, store, FakeSearcher(), FakeFetcher(), generator, cover_portals=False)
     await run_until_done(w, cid)
-    assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Madrid"]
+    assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Madrid España"]
     assert store.runs[cid].stop_reason == "queries_exhausted"
 
 
@@ -211,12 +221,49 @@ async def test_a_query_another_campaign_searched_recently_is_not_searched_again(
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher()
     w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]),
+               cover_portals=False, query_reuse_hours=72)
+    await run_until_done(w, first)
+    second = await campaign(campaigns)
+    await run_until_done(w, second)
+    assert searcher.calls == [("terreno Boadilla Madrid España", "es-ES")]  # a Spanish campaign searches Spain
+    assert [q.state for q in store.queries[second]] == ["skipped"]
+
+
+async def test_by_default_another_campaign_may_repeat_a_query() -> None:
+    campaigns = MemoryCampaignStore()
+    first = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    searcher = FakeSearcher()
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]),
                cover_portals=False)
     await run_until_done(w, first)
     second = await campaign(campaigns)
     await run_until_done(w, second)
-    assert searcher.calls == [("terreno Boadilla Madrid", "es-ES")]  # a Spanish campaign searches Spain
-    assert [q.state for q in store.queries[second]] == ["skipped"]
+    assert len(searcher.calls) == 2
+    assert [q.state for q in store.queries[second]] == ["searched"]
+
+
+async def test_an_index_page_is_read_again_after_its_ttl_and_a_listing_never() -> None:
+    campaigns = MemoryCampaignStore()
+    first = await campaign(campaigns)
+    clock = [datetime(2026, 1, 1, tzinfo=UTC)]
+    store = MemoryWebStore(campaigns, now=lambda: clock[0])
+    listing = "https://www.pisos.com/comprar/terreno-boadilla_del_monte-45123456789_100500/"
+    fetcher = FakeFetcher({INDEX_URL: INDEX_HTML})
+    results = [INDEX_URL, listing]
+    gen = ListGenerator(["q one"])
+    await run_until_done(WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, gen,
+                                         config=WebSearchConfig(cover_portals=False), now=lambda: clock[0]), first)
+    assert fetcher.fetched.count(INDEX_URL) == 1 and fetcher.fetched.count(listing) == 1
+    assert set(fetcher.countries) == {"ES"}
+    clock[0] += timedelta(days=8)
+    second = await campaign(campaigns)
+    w2 = WebSearchWorker(campaigns, store, FakeSearcher(default=results), fetcher, ListGenerator(["q two"]),
+                         config=WebSearchConfig(cover_portals=False), now=lambda: clock[0])
+    await run_until_done(w2, second)
+    assert fetcher.fetched.count(INDEX_URL) == 2          # the index page again
+    assert fetcher.fetched.count(listing) == 1            # the listing never
+    assert store.urls[second][url_key(listing)].state == "duplicate"
 
 
 def madrid_task(**extra) -> QueryTask:
@@ -235,10 +282,10 @@ def test_idealista_and_fotocasa_come_first_among_the_spanish_portals() -> None:
 def test_for_land_terrenos_and_sareb_come_right_after_fotocasa() -> None:
     portals = madrid_task().portals()  # «участок»: land
     assert portals[:4] == ("idealista.com", "fotocasa.es", "terrenos.es", "sareb.es")
-    assert sorted(portals) == sorted(SPAIN_PORTALS)
+    assert portals == SPAIN_PORTALS_BY_KIND["land"] and set(portals) <= set(SPAIN_PORTALS)
     flat = QueryTask(goal="квартира", task_text="квартира 2 комнаты, аренда", location="Madrid",
                      location_aliases={"es": "Madrid"}, vertical="real_estate")
-    assert flat.portals() == SPAIN_PORTALS
+    assert flat.portals() == SPAIN_PORTALS_BY_KIND["apartment"]
 
 
 def test_a_portal_the_model_already_searched_counts_as_searched() -> None:
@@ -253,12 +300,12 @@ def test_cover_portals_keeps_the_models_portal_query_and_builds_the_skipped_one(
              GeneratedQuery("building plot for sale near Madrid", "en")]
     out = cover_portals(model, task, [], 4)
     assert out[0] == GeneratedQuery("site:idealista.com solar urbanizable Comunidad de Madrid", "es")
-    assert out[1].text == "site:fotocasa.es terreno en venta 1000 m2 Madrid"  # what the task asks, on that site
+    assert out[1].text == "site:fotocasa.es terreno en venta 1000 m2 Madrid España"  # what the task asks, on that site
     assert [q.text for q in out[2:]] == ["parcela en venta cerca metro Madrid", "building plot for sale near Madrid"]
 
 
-def test_portal_quota_is_half_a_round_but_never_less_than_two() -> None:
-    assert [portal_quota(n) for n in (1, 2, 3, 4, 12)] == [1, 2, 2, 2, 6]
+def test_portal_quota_is_a_third_of_a_round_but_never_less_than_two() -> None:
+    assert [portal_quota(n) for n in (1, 2, 3, 4, 12)] == [1, 2, 2, 2, 4]
 
 
 async def test_every_spanish_portal_is_searched_even_when_the_model_names_none() -> None:
@@ -276,8 +323,8 @@ async def test_every_spanish_portal_is_searched_even_when_the_model_names_none()
     texts = [q.text for q in store.queries[cid]]
     assert [t.split()[0] for t in texts[:4]] == ["site:idealista.com", "site:fotocasa.es", "site:terrenos.es",
                                                  "site:sareb.es"]
-    assert all(any(t.startswith(f"site:{p} ") for t in texts) for p in SPAIN_PORTALS)
-    assert sum(t.startswith("terreno ") for t in texts[:12]) == 6  # the model keeps half of every round
+    assert all(any(t.startswith(f"site:{p} ") for t in texts) for p in madrid_task().portals())
+    assert sum(t.startswith("terreno ") for t in texts[:12]) == 8  # the model keeps two thirds of every round
 
 
 def test_parse_queries_accepts_drift() -> None:
@@ -348,6 +395,22 @@ def test_url_identity_site_and_portal_classification() -> None:
     assert fetchable("https://www.fotocasa.es/es/comprar/terreno/x/183456789/d")
 
 
+def test_generic_rule_needs_a_listing_word_and_id_or_a_long_id_that_is_not_a_date() -> None:
+    news = "https://diario-ejemplo.es/2024/05/123456-noticia"
+    assert classify_url(news) == "unknown"
+    assert classify_url("https://diario-ejemplo.es/noticias/20240512-cierre-del-mercado") == "unknown"
+    assert classify_url("https://agencia-ejemplo.es/inmueble/12345678/") == "listing"
+    assert classify_url("https://agencia-ejemplo.es/piso-en-venta-12345") == "listing"
+    assert classify_url("https://agencia-ejemplo.es/ref/id1234567/") == "listing"
+    assert classify_url("https://agencia-ejemplo.es/blog/post-1234") == "unknown"
+    text = "Piso de 85 m² en Madrid por 250.000 €"
+    assert classify_page(news) == "unknown"
+    assert classify_page(news, text=text) == "listing"
+    assert classify_page(news, text="Piso de 85 m² en Madrid") == "unknown"
+    assert classify_page(news, has_listing_data=True) == "listing"
+    assert classify_page("https://www.idealista.com/venta-terrenos/madrid/", text=text) == "index"
+
+
 def test_index_page_yields_concrete_listing_links_on_the_same_site() -> None:
     page = parse_html(INDEX_HTML, INDEX_URL)
     links = listing_links(page, INDEX_URL, limit=10)
@@ -390,8 +453,8 @@ async def test_the_same_url_from_two_queries_is_fetched_once() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     listing = "https://www.idealista.com/inmueble/98765432/"
-    searcher = FakeSearcher({"terreno Boadilla Madrid": [listing],
-                             "parcela Pozuelo venta": [listing + "?utm_source=bing", "http://idealista.com/inmueble/98765432"]})
+    searcher = FakeSearcher({"terreno Boadilla Madrid España": [listing],
+                             "parcela Pozuelo venta Madrid España": [listing + "?utm_source=bing", "http://idealista.com/inmueble/98765432"]})
     fetcher = FakeFetcher()
     w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]))
     await run_until_done(w, cid)
@@ -550,7 +613,7 @@ async def test_a_failed_search_is_recorded_and_the_stage_goes_on() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher(default=["https://www.idealista.com/inmueble/12121212/"])
-    searcher.fail.add("terreno Boadilla Madrid")
+    searcher.fail.add("terreno Boadilla Madrid España")
     fetcher = FakeFetcher()
     await run_until_done(worker(campaigns, store, searcher, fetcher,
                                 ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]),
@@ -681,6 +744,56 @@ async def test_searxng_client_reads_json_results() -> None:
         await broken.search("x")
 
 
+def paged_client(pages_payload: dict[int, list[str]], *, pages: int, max_results: int = 30,
+                 seen: list[int] | None = None) -> SearxngClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        pageno = int(request.url.params["pageno"])
+        if seen is not None:
+            seen.append(pageno)
+        return httpx.Response(200, json={"results": [{"url": u} for u in pages_payload.get(pageno, [])]})
+
+    return SearxngClient("http://searxng:8080", max_results=max_results, pages=pages,
+                         client=httpx.AsyncClient(base_url="http://searxng:8080", transport=httpx.MockTransport(handler)))
+
+
+async def test_searxng_client_walks_pages_in_order_and_merges_them() -> None:
+    seen: list[int] = []
+    client = paged_client({1: ["https://a.es/1", "https://a.es/2"], 2: ["https://a.es/3"], 3: ["https://a.es/4"]},
+                          pages=2, seen=seen)
+    assert [h.url for h in await client.search("x")] == ["https://a.es/1", "https://a.es/2", "https://a.es/3"]
+    assert seen == [1, 2]
+    assert len(await client.search("x", pages=3)) == 4  # a per-call override
+
+
+async def test_searxng_client_stops_when_a_page_brings_nothing_new() -> None:
+    seen: list[int] = []
+    client = paged_client({1: ["https://a.es/1"], 2: ["https://a.es/1"], 3: ["https://a.es/9"]}, pages=5, seen=seen)
+    assert [h.url for h in await client.search("x")] == ["https://a.es/1"]
+    assert seen == [1, 2]
+    empty: list[int] = []
+    assert await paged_client({}, pages=5, seen=empty).search("x") == [] and empty == [1]
+
+
+async def test_searxng_client_dedupes_by_url_key_and_caps_results() -> None:
+    client = paged_client({1: ["https://www.idealista.com/inmueble/1/?utm_source=bing", "https://pisos.com/a"],
+                           2: ["https://idealista.com/inmueble/1/", "https://pisos.com/b", "https://pisos.com/c"]},
+                          pages=2, max_results=3)
+    hits = await client.search("x")
+    assert [h.url for h in hits] == ["https://www.idealista.com/inmueble/1/?utm_source=bing", "https://pisos.com/a",
+                                     "https://pisos.com/b"]
+
+
+async def test_searxng_client_keeps_page_one_when_a_later_page_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["pageno"] == "1":
+            return httpx.Response(200, json={"results": [{"url": "https://a.es/1"}]})
+        return httpx.Response(429)
+
+    client = SearxngClient("http://searxng:8080", pages=2, client=httpx.AsyncClient(
+        base_url="http://searxng:8080", transport=httpx.MockTransport(handler)))
+    assert [h.url for h in await client.search("x")] == ["https://a.es/1"]
+
+
 # --- the campaign runner's status -------------------------------------------------------------
 
 
@@ -735,3 +848,135 @@ async def test_facebook_reading_wins_the_label_and_no_web_stage_changes_nothing(
 
     broken = CampaignRunner(campaigns, MemoryRunStore(campaigns), FakeMessenger(), web=Broken())
     assert await broken._status_text(c, ANALYSIS) == FACEBOOK
+
+
+async def test_a_hit_with_another_places_markers_is_not_queued_for_a_spanish_campaign() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    good, bad = "https://www.example.com/inmueble/11112222/", "https://www.example.com/inmueble/33334444/"
+    searcher = FakeSearcher(default=[good, bad], texts={bad: ("Casa en Valencia, Carabobo", "Bs. 40.000")})
+    fetcher = FakeFetcher()
+    w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
+    await run_until_done(w, cid)
+    assert fetcher.fetched == [good]
+
+
+class FakeTransport:
+    """Scripted Transport: ``routes`` maps url -> (status, headers, body) or an exception to raise."""
+
+    profile = "chrome"
+
+    def __init__(self, routes: dict) -> None:
+        self.routes, self.calls = routes, []
+
+    def open(self, url: str, *, headers: dict, proxy: str | None):
+        from contextlib import asynccontextmanager
+
+        from bot.web_search.fetcher import TransportResponse
+
+        @asynccontextmanager
+        async def ctx():
+            self.calls.append((url, dict(headers), proxy))
+            route = self.routes[url]
+            if isinstance(route, dict):  # per-proxy behaviour
+                route = route[proxy]
+            if isinstance(route, Exception):
+                raise route
+            status, hdrs, body = route
+
+            async def chunks():
+                yield body
+            yield TransportResponse(status, {"content-type": "text/html", **hdrs}, chunks())
+        return ctx()
+
+
+async def test_fetcher_follows_redirects_by_hand_and_sends_browser_headers() -> None:
+    t = FakeTransport({
+        "https://a.es/robots.txt": (404, {}, b""),
+        "https://a.es/x": (302, {"location": "/y"}, b""),
+        "https://a.es/y": (200, {}, b"<html>ok</html>"),
+    })
+    f = PageFetcher(user_agent="TestBot/1", resolver=public, sleep=Sleeps(), transport=t)
+    page = await f.fetch("https://a.es/x", country="UA")
+    assert page.url == "https://a.es/y" and "ok" in page.html
+    headers = t.calls[0][1]
+    assert "Chrome/124" in headers["User-Agent"] and "TestBot" not in headers["User-Agent"]
+    assert headers["Accept-Language"].startswith("uk-UA,uk")
+    assert headers["Sec-Fetch-Mode"] == "navigate" and headers["Upgrade-Insecure-Requests"] == "1"
+    assert await f.allowed("https://a.es/y")  # robots.txt fetched, matched against the declared UA
+    robots_headers = next(h for u, h, _ in t.calls if u.endswith("/robots.txt"))
+    assert "Sec-Fetch-Mode" not in robots_headers
+
+
+async def test_fetcher_limits_redirects_and_keeps_error_codes() -> None:
+    loop = {f"https://a.es/{i}": (301, {"location": f"/{i + 1}"}, b"") for i in range(10)}
+    f = PageFetcher(user_agent="TestBot/1", resolver=public, sleep=Sleeps(), transport=FakeTransport(loop))
+    with pytest.raises(FetchError, match="too_many_redirects"):
+        await f.fetch("https://a.es/0")
+    assert len(f._transport.calls) == 5
+    f = PageFetcher(user_agent="TestBot/1", resolver=public, sleep=Sleeps(),
+                    transport=FakeTransport({"https://a.es/z": (403, {}, b"")}))
+    with pytest.raises(FetchError, match="http_403"):
+        await f.fetch("https://a.es/z")
+
+
+async def test_fetcher_revalidates_every_redirect_hop() -> None:
+    async def resolver(host: str) -> list[str]:
+        return ["10.0.0.1"] if host == "intranet.es" else ["93.184.216.34"]
+
+    t = FakeTransport({"https://a.es/x": (302, {"location": "https://intranet.es/"}, b"")})
+    f = PageFetcher(user_agent="TestBot/1", resolver=resolver, sleep=Sleeps(), transport=t)
+    with pytest.raises(FetchError, match="private_target_forbidden"):
+        await f.fetch("https://a.es/x")
+
+
+async def test_proxy_is_sticky_per_host_and_falls_back_on_connect_error() -> None:
+    from bot.web_search.fetcher import ConnectFailed, pick_proxies
+
+    proxies = ["http://p0:1", "http://p1:1", "http://p2:1"]
+    assert pick_proxies("a.es", proxies) == pick_proxies("a.es", proxies)
+    assert sorted(pick_proxies("a.es", proxies)) == sorted(proxies)
+    assert pick_proxies("a.es", []) == []
+    first = pick_proxies("a.es", proxies)[0]
+    ok = (200, {}, b"<html>ok</html>")
+    t = FakeTransport({"https://a.es/x": {p: (ConnectFailed("network_error:ConnectError") if p == first else ok)
+                                         for p in proxies}})
+    f = PageFetcher(user_agent="TestBot/1", resolver=public, sleep=Sleeps(), transport=t,
+                    proxy_url=",".join(proxies))
+    await f.fetch("https://a.es/x")
+    used = [p for _, _, p in t.calls if p]
+    assert used[0] == first and used[1] == pick_proxies("a.es", proxies)[1]
+
+
+async def test_impersonate_off_uses_httpx_with_declared_agent() -> None:
+    from bot.web_search.fetcher import CurlTransport, HttpxTransport
+
+    f = PageFetcher(user_agent="TestBot/1", impersonate="off")
+    assert isinstance(f._transport, HttpxTransport) and f.profile is None
+    assert f.request_headers()["User-Agent"] == "TestBot/1"
+    await f.aclose()
+    g = PageFetcher(user_agent="TestBot/1", impersonate="chrome124")
+    assert isinstance(g._transport, CurlTransport) and g._transport.profile == "chrome124"
+
+
+def test_generic_rule_ignores_a_bare_postal_code_and_accepts_ref_and_word_ids() -> None:
+    site = "https://agencia-ejemplo.es"
+    for path in ("/venta/pisos-valencia-46001/", "/alquiler/madrid/28001"):
+        assert classify_url(site + path) == "unknown"
+    for path in ("/inmueble/piso-centro-4567", "/casa/ref-1234", "/inmueble/ref-AB1234", "/venta/piso-46001.html"):
+        assert classify_url(site + path) == "listing"
+    # portal regressions
+    assert classify_url("https://www.idealista.com/inmueble/12345678/") == "listing"
+    assert classify_url("https://www.idealista.com/venta-terrenos/madrid-provincia/") == "index"
+    assert classify_url("https://agencia-ejemplo.es/inmueble/venta-parcela-8812345") == "listing"
+
+
+def test_unknown_impersonation_profile_falls_back_to_chrome() -> None:
+    from bot.web_search.fetcher import checked_impersonation
+    from bot.web_search.settings import WebSearchSettings
+
+    assert checked_impersonation("chrome124") == "chrome124" and checked_impersonation("OFF") == "off"
+    assert checked_impersonation("netscape4") == "chrome"
+    assert WebSearchSettings(_env_file=None, impersonate="nope").impersonate == "chrome"
+    assert "proxy" not in repr(WebSearchSettings(_env_file=None, proxy_url="http://user:pw@x:1"))

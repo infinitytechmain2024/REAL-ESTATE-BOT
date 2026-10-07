@@ -349,7 +349,7 @@ async def _runner(mode: str = "all", *, goal: str = GOAL, **config):
     messenger = FakeMessenger()
     clock = Clock()
     runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids={7},
-                            config=RunnerConfig(comment_leads=mode, **config))
+                            config=RunnerConfig(relevance_fail_closed=False, comment_leads=mode, **config))
     cid = await campaigns.create(plan_campaign(goal), chat_id=CHAT, requested_by=8, source_text=goal, actor="telegram:8")
     await campaigns.set_state(cid, "running", "campaign:test")
     return campaigns, store, messenger, clock, runner, cid

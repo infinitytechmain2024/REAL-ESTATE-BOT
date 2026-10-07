@@ -41,7 +41,7 @@ async def test_objects_feed_the_store_and_only_an_investor_search_sends_the_peop
 
     # 1. A property search sends its objects; each Facebook post is queued for one comment read.
     messenger = ButtonMessenger()
-    runner = CampaignRunner(campaigns, store, messenger, None, config=RunnerConfig(comment_leads="all"))
+    runner = CampaignRunner(campaigns, store, messenger, None, config=RunnerConfig(relevance_fail_closed=False, comment_leads="all"))
     cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL, actor="t")
     await campaigns.set_state(cid, "running", "campaign:test")
     ids = await _seed_findings(pool, cid, {"a": 45_000, "b": 48_000})

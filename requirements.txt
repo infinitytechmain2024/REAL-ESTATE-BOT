@@ -1,6 +1,7 @@
 # ---------------------------------------------------------------------------
-# Bot runtime. SearXNG has its own pinned dependency set in
-# searxng/requirements.txt; both are installed into the same image.
+# Live campaign stack. Dependencies only the retired standalone bot used
+# (trafilatura, supabase, openai, anthropic, tenacity, structlog, python-dotenv)
+# are listed in legacy/requirements-legacy.txt.
 # ---------------------------------------------------------------------------
 
 aiogram==3.23.0
@@ -12,10 +13,6 @@ pydantic-settings==2.13.1
 # socks: WEB_SEARCH_PROXY_URL may be a socks5:// proxy (bot/web_search/fetcher.py).
 httpx[http2,socks]==0.28.1
 
-# HTML -> clean text extraction for the pages we fetch from search results.
-# trafilatura brings its own lxml-based fallbacks; SearXNG already pins lxml.
-trafilatura==2.0.0
-
 # Adaptive HTTP fallback for listing sites whose markup or TLS fingerprint changes.
 # Deliberately without its `fetchers` extra: that extra pins playwright==1.59.0,
 # which cannot be installed beside the 1.63.0 the Facebook reader needs, and it
@@ -25,22 +22,8 @@ trafilatura==2.0.0
 scrapling==0.4.8
 curl-cffi>=0.15.0
 
-# Supabase (PostgREST) client.
-supabase==2.31.0
-
-# LLM providers. OpenAI-compatible endpoints (OpenRouter, Groq, Together,
-# Fireworks, NVIDIA NIM, ...) are driven through the openai SDK; Anthropic has
-# its own.
-openai==2.11.0
-anthropic==0.75.0
-
-tenacity==9.1.2
-
-# Facebook group reading (bot/services/facebook/). Not used by the rest of
-# the bot; kept optional -- run `playwright install chromium` after this.
+# Browser automation (bot/browser_session, bot/facebook_collector).
 playwright==1.63.0
-structlog==26.1.0
-python-dotenv==1.2.1
 
 # Open Telegram control plane: durable Telegram-update idempotency. Voice
 # notes are transcribed by OpenRouter over httpx (above); no local model.

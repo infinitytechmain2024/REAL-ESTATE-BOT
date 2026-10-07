@@ -11,11 +11,12 @@ Nothing here starts a collector.
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import (
     LANGUAGES,
@@ -26,8 +27,13 @@ from .models import (
     Language,
     Vertical,
 )
+from .spec import TaskSpec
+
+if TYPE_CHECKING:
+    from .search_plan import SearchPlan
 
 MAX_TEXT_CHARS = 2000
+log = logging.getLogger(__name__)
 
 
 class InvalidGoal(ValueError):
@@ -151,7 +157,10 @@ _SALE_STEMS = ("продаж", "продам", "купить", "купл", "по
 
 _WORD = re.compile(r"\w+")
 _NUM = r"(\d{1,3}(?:[ .,]\d{3})+|\d+(?:[.,]\d+)?)"
-_CUR = r"(?:€|eur\b|euros?\b|евро\b|євро\b)"
+_CUR = r"(?:€|₴|\$|eur\b|euros?\b|евро\b|євро\b|грн\b|гривн\w*|uah\b|usd\b|долл\w*|дол\b)"
+_CUR_SYMBOLS = r"[€₴$]"
+_CUR_CODES = (("UAH", ("₴", "грн", "гривн", "uah")), ("USD", ("$", "usd", "долл", "дол")),
+              ("EUR", ("€", "eur", "евро", "євро")))
 _GROUPS = re.compile(r"(\d{1,4})\s*(?:групп\w*|груп\w*|groups?\b|grupos?\b)")
 _ROOMS = re.compile(
     r"(\d{1,2})\s*-?\s*(?:х\s*)?(?:комнат\w*|комн\b|кімнат\w*|спал\w*|habitacion\w*|hab\b|"
@@ -159,9 +168,9 @@ _ROOMS = re.compile(
 )
 _PRICE_KEYWORD = re.compile(
     r"(?<!\w)(?:до|не дороже|не дорожче|максимум|under|below|up to|max(?:imum)?|less than|hasta|"
-    r"maximo|menos de|no mas de|<=|≤|<)\s*€?\s*" + _NUM + r"\s*(k|к|тыс\w*|тис\w*)?\s*(" + _CUR + r")?"
+    r"maximo|menos de|no mas de|<=|≤|<)\s*" + _CUR_SYMBOLS + r"?\s*" + _NUM + r"\s*(k|к|тыс\w*|тис\w*)?\s*(" + _CUR + r")?"
 )
-_PRICE_BARE = re.compile(r"(?:€\s*" + _NUM + r"|" + _NUM + r"\s*(k|к|тыс\w*|тис\w*)?\s*" + _CUR + r")")
+_PRICE_BARE = re.compile(r"(?:" + _CUR_SYMBOLS + r"\s*" + _NUM + r"|" + _NUM + r"\s*(k|к|тыс\w*|тис\w*)?\s*" + _CUR + r")")
 
 _TEMPLATES: dict[str, dict[Language, tuple[tuple[str, str], ...]]] = {
     "real_estate": {
@@ -191,7 +200,7 @@ EXPLICIT_VERTICALS = ("real_estate", "investors")
 
 
 def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str | None = None,
-                  place: Mapping[str, Any] | None = None) -> CampaignPlan:
+                  place: Mapping[str, Any] | None = None, spec: TaskSpec | None = None) -> CampaignPlan:
     """Turn a user goal in ES/EN/RU/UK into a bounded plan, or raise ``InvalidGoal``.
 
     ``vertical`` (real_estate|investors), ``place`` (names per language,
@@ -199,6 +208,10 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
     and ``location`` (any place name) are choices a person already made;
     they override what the text says, so "no vertical" and "several cities"
     cannot fire.
+
+    ``spec`` (the interviewer's ``TaskSpec``) is what the person confirmed: when given, the constraints (deal,
+    price range, rooms, area, property type, districts) are taken from it instead of being read from the text,
+    and a place not passed otherwise comes from it. The text still feeds the query seeds' vertical detection.
     """
     if not isinstance(text, str) or not text.strip():
         raise InvalidGoal("Пустая задача. Напишите, что искать и где, например: «квартиры в аренду в Мадриде».")
@@ -206,6 +219,8 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
         raise InvalidGoal(f"Слишком длинная задача (больше {MAX_TEXT_CHARS} символов). Сократите её.")
     normalized = _norm(text)
     words = _WORD.findall(normalized)
+    if spec is not None and place is None and location is None and spec.place_name():
+        place = _spec_place(spec)
     if place is not None:
         where = world_place(place, locative={"ru": place.get("ru_in"), "uk": place.get("uk_in")},
                             country=place.get("country"))
@@ -221,9 +236,14 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
     rest = normalized
     max_groups, rest = _extract_groups(rest)
     rooms, rest = _extract_rooms(rest)
-    max_price = _extract_price(rest)
+    max_price, currency = _extract_price_currency(rest)
     deal = _detect_deal(words) if vertical != "investors" else None
     constraints: dict[str, str | int | None] = {"deal": deal, "max_price": max_price, "rooms": rooms}
+    if max_price and currency and currency != "EUR":
+        constraints["currency"] = currency
+    if spec is not None:
+        constraints = _spec_constraints(spec, vertical)
+        deal, max_price, rooms = constraints.get("deal"), constraints.get("max_price"), constraints.get("rooms")  # type: ignore[assignment]
 
     limits = CampaignLimits(max_groups=max_groups) if max_groups is not None else CampaignLimits()
     return CampaignPlan(
@@ -237,6 +257,59 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
         constraints=constraints,
         limits=limits,
     )
+
+
+class SearchPlanner(Protocol):
+    async def plan(self, spec: TaskSpec, plan: CampaignPlan, *, source_text: str = "") -> SearchPlan | None: ...
+
+
+async def plan_with_model(plan: CampaignPlan, spec: TaskSpec, planner: SearchPlanner, *,
+                          source_text: str = "") -> CampaignPlan:
+    """``plan`` with the model's ``SearchPlan`` stored in ``search_plan``; unchanged when the planner fails."""
+    if plan.search_plan is not None:
+        return plan
+    try:
+        found = await planner.plan(spec, plan, source_text=source_text)
+    except Exception as exc:  # noqa: BLE001 - the plan is an improvement, never a requirement
+        log.warning("campaign.search_plan_failed %s", type(exc).__name__)
+        return plan
+    return plan if found is None else plan.model_copy(update={"search_plan": found.to_dict()})
+
+
+def _spec_place(spec: TaskSpec) -> dict[str, str]:
+    """The spec's place as the ``place=`` mapping of ``world_place`` (names per language, locatives, country)."""
+    names = {k: v for k, v in spec.place.names.items() if v}
+    place: dict[str, str] = {"en": spec.place_name() or "", **names}
+    if spec.place.country:
+        place["country"] = spec.place.country
+    return place
+
+
+def _whole(value: float | None) -> int | None:
+    return round(value) if value is not None and value >= 1 else None
+
+
+def _spec_constraints(spec: TaskSpec, vertical: str) -> dict[str, str | int | None]:
+    """The plan's constraints from what the person confirmed (rent/sale only for real estate)."""
+    constraints: dict[str, str | int | None] = {"deal": None, "max_price": None, "rooms": None}
+    if vertical == "investors":
+        return constraints
+    constraints["deal"] = spec.deal if spec.deal in ("rent", "sale") else None
+    constraints["max_price"] = _whole(spec.budget.max)
+    if spec.budget.currency:
+        constraints["currency"] = spec.budget.currency
+    constraints["rooms"] = _whole(spec.rooms.min)  # «up to 3 rooms» is no minimum: rooms stays None
+    if (low := _whole(spec.budget.min)) is not None:
+        constraints["min_price"] = low
+    if (low := _whole(spec.area_m2.min)) is not None:
+        constraints["min_area"] = low
+    if (high := _whole(spec.area_m2.max)) is not None:
+        constraints["max_area"] = high
+    if spec.property_type not in (None, "any"):
+        constraints["property_type"] = spec.property_type
+    if spec.place.districts:
+        constraints["districts"] = ", ".join(spec.place.districts)[:200]
+    return constraints
 
 
 def _has(words: list[str], exact: frozenset[str], stems: tuple[str, ...]) -> bool:
@@ -316,17 +389,27 @@ def _to_number(raw: str, thousands: str | None) -> int | None:
     return number if 0 < number <= 100_000_000 else None
 
 
-def _extract_price(text: str) -> int | None:
+def _currency_of(fragment: str) -> str | None:
+    lowered = fragment.casefold()
+    return next((code for code, marks in _CUR_CODES if any(mark in lowered for mark in marks)), None)
+
+
+def _extract_price_currency(text: str) -> tuple[int | None, str | None]:
+    """The budget and its currency code (None when the text names no currency)."""
     for match in _PRICE_KEYWORD.finditer(text):
         number = _to_number(match.group(1), match.group(2))
         # "до 3" without a currency is not a price; real budgets are >= 100.
         if number is not None and (match.group(3) or number >= 100):
-            return number
+            return number, _currency_of(match.group(0))
     match = _PRICE_BARE.search(text)
     if match:
         raw = match.group(1) or match.group(2)
-        return _to_number(raw, match.group(3))
-    return None
+        return _to_number(raw, match.group(3)), _currency_of(match.group(0))
+    return None, None
+
+
+def _extract_price(text: str) -> int | None:
+    return _extract_price_currency(text)[0]
 
 
 def _seeds(place: _Place, vertical: Vertical, deal: str | None, lang: Language) -> list[str]:

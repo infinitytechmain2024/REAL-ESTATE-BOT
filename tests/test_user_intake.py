@@ -7,13 +7,9 @@ import pytest
 from bot.campaign import InvalidGoal, MemoryCampaignStore, plan_campaign
 from bot.control_plane.access import AccessDesk, MemoryAccessStore
 from bot.control_plane.intake import (
-    MAX_QUESTIONS,
     TASK_KEYBOARD,
-    Draft,
     MemoryIntakeStore,
-    Question,
     TaskIntake,
-    deterministic_clarifier,
     parse_budget,
     parse_deal,
 )
@@ -85,6 +81,11 @@ def callbacks(reply: Reply) -> list[str]:
 
 async def press(control: ControlPlane, user: int, data: str) -> Reply:
     return await control.handle_callback(user, data, chat_id=user)
+
+
+async def enough(control: ControlPlane, user: int) -> Reply:
+    """«Хватит, ищи»: stop the interview and get the card."""
+    return await press(control, user, "task:enough")
 
 
 # --- the role ----------------------------------------------------------------------------
@@ -184,7 +185,9 @@ async def test_a_task_written_before_choosing_a_mode_is_kept() -> None:
     control, _, _ = plane()
     reply = await say(control, USER, "инвесторы для стартапа в Барселоне")
     assert "Сначала выберите режим" in reply.text and "mode:investors" in callbacks(reply)
-    summary = await press(control, USER, "mode:investors")
+    asked = await press(control, USER, "mode:investors")
+    assert asked.text.startswith("Понял: Барселона") and "размер вложения" in asked.text
+    summary = await enough(control, USER)
     assert "Проверьте задачу" in summary.text and "Город: Барселона" in summary.text
 
 
@@ -198,103 +201,124 @@ async def with_mode(mode: str = "real_estate") -> tuple[ControlPlane, Sink]:
 
 
 @pytest.mark.asyncio
-async def test_a_complete_task_goes_straight_to_the_summary() -> None:
+async def test_what_the_task_states_is_not_asked_again_and_the_card_is_structured() -> None:
     control, sink = await with_mode()
     reply = await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")
-    assert reply.text.startswith("Проверьте задачу")
-    for line in ("Город: Мадрид", "Сделка: аренда", "Бюджет: до 1200 €"):
-        assert line in reply.text, line
+    # City, deal, type and budget are known: only the rooms are asked, one question.
+    assert reply.text.startswith("Понял: Мадрид, аренда, квартира, до 1200 €\n\nСколько комнат нужно?")
+    assert callbacks(reply) == ["task:skip", "task:enough", "task:cancel"]
+    assert [b.text for b in reply.buttons] == ["Не важно", "Хватит, ищи", "Отмена"]
+    card = await enough(control, USER)
+    assert card.text.startswith("Проверьте задачу")
+    for line in ("Город: Мадрид", "Сделка: аренда", "Тип: квартира", "Бюджет: до 1200 €", "Комнаты: не указаны"):
+        assert line in card.text, line
     # A user sees no planner internals; the owner does.
     for noise in ("Языки поиска", "окнами", "Цель:", "real_estate", "Madrid", "/"):
-        assert noise not in reply.text, noise
-    assert reply.keyboard == TASK_KEYBOARD
+        assert noise not in card.text, noise
+    assert card.keyboard == TASK_KEYBOARD
     assert sink.envelopes == []  # nothing runs without "Запустить"
 
     await press(control, OWNER, "mode:real_estate")
-    owner = await say(control, OWNER, "квартиры в аренду в Мадриде до 1200 €")
+    await say(control, OWNER, "квартиры в аренду в Мадриде до 1200 €")
+    owner = await enough(control, OWNER)
     for line in ("Город: Мадрид", "Цель: real_estate · Madrid", "Языки поиска: ES, EN, RU, UK", "Группы: до 40, окнами по 20"):
         assert line in owner.text, line
 
 
 @pytest.mark.asyncio
-async def test_a_missing_city_is_asked_and_a_typed_or_pressed_answer_is_accepted() -> None:
+async def test_a_missing_city_is_asked_and_a_typed_answer_is_accepted() -> None:
     control, _ = await with_mode()
     question = await say(control, USER, "квартиры в аренду до 1000 евро")
-    assert question.text.startswith("В каком городе искать?")
-    assert question.buttons == (), "any place in the world: typed, never picked from a list"
+    assert question.text.startswith("Понял: аренда, квартира, до 1000 €\n\nВ каком городе искать?")
+    assert "task:skip" not in callbacks(question), "the place cannot be skipped"
     assert "Не понял город" in (await say(control, USER, "где-нибудь у моря")).text
-    summary = await say(control, USER, "Валенсия")
-    assert "Город: Валенсия" in summary.text
+    assert "Сколько комнат" in (await say(control, USER, "Валенсия")).text
+    assert "Город: Валенсия" in (await enough(control, USER)).text
 
     control, sink = await with_mode()
     await say(control, USER, "квартиры в аренду до 1000 евро")
-    summary = await say(control, USER, "в Лиссабон")
+    await say(control, USER, "в Лиссабон")
+    summary = await enough(control, USER)
     assert "Город: Лиссабон" in summary.text  # without the AI the name is kept as typed
     await press(control, USER, "task:launch")
     assert sink.envelopes[-1].arguments.startswith("mode=real_estate place=")
+
+    # «Хватит, ищи» never skips the place.
+    control, _ = await with_mode()
+    await say(control, USER, "квартиры в аренду до 1000 евро")
+    assert (await enough(control, USER)).text.startswith("Место нужно в любом случае. В каком городе")
 
 
 @pytest.mark.asyncio
 async def test_several_cities_ask_to_choose_one() -> None:
     control, sink = await with_mode()
     question = await say(control, USER, "снять квартиру в Мадриде или Барселоне до 900 €")
-    assert "несколько городов (Мадрид, Барселона)" in question.text and question.buttons == ()
-    summary = await say(control, USER, "Барселона")
+    assert "несколько городов (Мадрид, Барселона)" in question.text and "task:skip" not in callbacks(question)
+    assert "Сколько комнат" in (await say(control, USER, "Барселона")).text
+    summary = await enough(control, USER)
     assert "Город: Барселона" in summary.text
     await press(control, USER, "task:launch")
     arguments = sink.envelopes[0].arguments
-    assert arguments.startswith("mode=real_estate city=Barcelona ")
+    assert arguments.startswith("mode=real_estate city=Barcelona spec=")
     assert "Мадриде или Барселоне" in arguments  # the task itself is kept as written
     _, campaigns, notices = await dispatch(claimed("campaign", arguments))
     [campaign] = campaigns.campaigns.values()
     assert campaign.plan.location == "Barcelona"
+    assert campaign.spec is not None and campaign.spec["place"]["name"] == "Barcelona"  # the spec is stored
+    assert (campaign.plan.constraints["deal"], campaign.plan.constraints["max_price"]) == ("rent", 900)
     assert notices == []  # a user gets no campaign id; the runner's status message follows
 
 
 @pytest.mark.asyncio
-async def test_the_deal_is_asked_for_real_estate_only_and_the_budget_can_be_skipped() -> None:
+async def test_the_deal_is_asked_for_real_estate_only_and_every_field_can_be_skipped() -> None:
     control, _ = await with_mode()
     deal = await say(control, USER, "квартиры в Малаге")
-    # Both missing fields in one message; the first one has buttons.
-    assert deal.text.startswith("Уточните, пожалуйста:\n1. Аренда или покупка?\n2. Какой бюджет?")
-    assert callbacks(deal) == ["task:deal:rent", "task:deal:sale", "task:deal:any"]
+    assert deal.text.startswith("Понял: Малага, квартира\n\nАренда или покупка?")
+    assert callbacks(deal) == ["task:deal:rent", "task:deal:sale", "task:skip", "task:enough", "task:cancel"]
     budget = await press(control, USER, "task:deal:sale")
-    assert budget.text.startswith("Какой бюджет?") and callbacks(budget) == ["task:budget:skip"]
-    summary = await press(control, USER, "task:budget:skip")
-    assert "Сделка: покупка" in summary.text and "Бюджет: не указан" in summary.text
+    assert budget.text.startswith("Понял: покупка\n\nКакой бюджет?")
+    assert (await press(control, USER, "task:skip")).text.startswith("Сколько комнат")  # «Не важно» for the budget
+    assert "Район или вся Малага?" in (await press(control, USER, "task:skip")).text
+    assert (await press(control, USER, "task:skip")).text.startswith("Что обязательно должно быть?")
+    card = await press(control, USER, "task:skip")
+    assert "Сделка: покупка" in card.text and "Бюджет: не важно" in card.text and "Комнаты: не важно" in card.text
     assert "Эта кнопка устарела" in (await press(control, USER, "task:deal:rent")).text
 
     control, _ = await with_mode()
     await say(control, USER, "квартиры в Малаге")
-    await say(control, USER, "не важно")
-    assert "Бюджет: до 1500 €" in (await say(control, USER, "1 500")).text
+    assert "Какой бюджет?" in (await say(control, USER, "не важно")).text  # typed «не важно» = the button
+    assert "Сколько комнат" in (await say(control, USER, "1 500")).text
+    assert "Бюджет: до 1500 €" in (await enough(control, USER)).text
 
     control, _ = await with_mode("investors")
-    assert "Проверьте задачу" in (await say(control, USER, "стартапы в Киеве")).text  # nothing to ask
+    ticket = await say(control, USER, "стартапы в Киеве")  # investors: who is known, the ticket is next
+    assert ticket.text.startswith("Понял: Киев") and "размер вложения" in ticket.text
+    role = await say(control, USER, "от 100 тыс до 1 млн €")
+    assert "ищете деньги" in role.text and callbacks(role)[:2] == ["task:role:raising", "task:role:deploying"]
+    card = await press(control, USER, "task:role:raising")
+    assert "Тикет: от 100000 до 1000000 €" in card.text and "Ваша роль: привлекаю деньги" in card.text
 
 
 @pytest.mark.asyncio
-async def test_never_more_than_three_questions() -> None:
+async def test_one_question_at_a_time_in_a_fixed_order() -> None:
     control, _ = await with_mode()
     first = await say(control, USER, "жильё")
-    questions = [line for line in first.text.splitlines() if line[:2] in {"1.", "2.", "3.", "4."}]
-    assert len(questions) == MAX_QUESTIONS  # city, deal and budget, all in one message
-    # Answered one at a time, only the still-open questions come back.
-    second = await say(control, USER, "Севилья")
-    assert "В каком городе" not in second.text and "Аренда или покупка?" in second.text
-    third = await say(control, USER, "аренда")
-    assert third.text.startswith("Какой бюджет?")
-    assert "Проверьте задачу" in (await say(control, USER, "пропустить")).text
-
-    # A clarifier that always wants more is still capped by the slots it may ask.
-    draft = Draft(USER, USER, "real_estate", task="жильё", city="Madrid", deal="any", asked=["city", "deal", "budget"])
-    assert deterministic_clarifier(draft) is None
-    draft = Draft(USER, USER, "real_estate", task="жильё в Мадриде", asked=["x", "y", "z"])
-    assert deterministic_clarifier(draft) is None
+    assert first.text == "В каком городе искать? Напишите город, район или регион в любой стране."
+    expected = ["Аренда или покупка?", "Что ищете:", "Какой бюджет?"]
+    for answer, question in zip(["Севилья", "аренда", "квартира"], expected, strict=True):
+        assert question in (await say(control, USER, answer)).text
+    assert "Сколько комнат" in (await say(control, USER, "до 700")).text
+    assert "Район или вся Севилья?" in (await say(control, USER, "2")).text
+    assert "Что обязательно" in (await say(control, USER, "центр")).text
+    card = await say(control, USER, "лифт")
+    assert card.text.startswith("Проверьте задачу")
+    for line in ("Город: Севилья", "Районы: центр", "Сделка: аренда", "Тип: квартира", "Бюджет: до 700 €", "Комнаты: от 2",
+                 "Обязательно: лифт"):
+        assert line in card.text, line
 
 
 @pytest.mark.asyncio
-async def test_cancel_clears_the_draft_at_any_point_and_edit_starts_over() -> None:
+async def test_cancel_clears_the_draft_at_any_point_and_edit_keeps_the_task() -> None:
     control, sink = await with_mode()
     await say(control, USER, "квартиры")
     assert "Черновик удалён" in (await say(control, USER, "Отмена")).text
@@ -302,10 +326,14 @@ async def test_cancel_clears_the_draft_at_any_point_and_edit_starts_over() -> No
     await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")
     assert "Черновик удалён" in (await press(control, USER, "task:cancel")).text
     await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")
-    assert "Опишите задачу заново" in (await press(control, USER, "task:edit")).text
-    assert "устарела" in (await press(control, USER, "task:launch")).text
+    await enough(control, USER)
+    menu = await press(control, USER, "task:edit")  # «Изменить» lists the fields; the task stays
+    assert menu.text == "Что изменить?" and callbacks(menu)[:2] == ["task:field:place", "task:field:deal"]
+    assert callbacks(menu)[-1] == "task:back"
+    assert "Проверьте задачу" in (await press(control, USER, "task:back")).text
+    assert "Принято" in (await press(control, USER, "task:launch")).text
     assert await control.intake.mode(USER) == "real_estate"  # the mode survives
-    assert sink.envelopes == []
+    assert len(sink.envelopes) == 1
 
 
 @pytest.mark.asyncio
@@ -313,6 +341,7 @@ async def test_launch_queues_exactly_one_campaign_for_the_user_and_their_chat() 
     control, sink = await with_mode()
     task = text(USER, "квартиры в аренду в Мадриде до 1200 €")
     await control.handle_text(task)
+    await enough(control, USER)
     launched = await press(control, USER, "task:launch")
     assert launched.text.startswith("Принято. Начинаю поиск.")
     assert "устарела" in (await press(control, USER, "task:launch")).text  # double tap
@@ -321,6 +350,11 @@ async def test_launch_queues_exactly_one_campaign_for_the_user_and_their_chat() 
     goal, vertical, city, _place = parse_campaign_goal(envelope.arguments)
     plan = plan_campaign(goal, vertical=vertical, location=city)  # type: ignore[arg-type]
     assert (plan.location, plan.vertical, plan.constraints["deal"], plan.constraints["max_price"]) == ("Madrid", "real_estate", "rent", 1200)
+    # The confirmed requirements travel with the command and are stored on the campaign.
+    _, campaigns, _ = await dispatch(claimed("campaign", envelope.arguments))
+    [campaign] = campaigns.campaigns.values()
+    assert campaign.spec is not None and campaign.spec["budget"]["max"] == 1200 and campaign.spec["deal"] == "rent"
+    assert campaign.plan.constraints["property_type"] == "apartment"
 
 
 @pytest.mark.asyncio
@@ -336,6 +370,7 @@ async def test_a_failed_enqueue_keeps_the_summary_for_another_try() -> None:
     intake = TaskIntake(MemoryIntakeStore(), flaky)
     await intake.choose_mode(USER, USER, "real_estate")
     await intake.on_text(text(USER, "квартиры в аренду в Мадриде до 1200 €"), "квартиры в аренду в Мадриде до 1200 €")
+    await intake.on_button(USER, USER, "enough", "")
     assert "Не удалось" in (await intake.on_button(USER, USER, "launch", "")).text
     assert "Принято" in (await intake.on_button(USER, USER, "launch", "")).text
     assert len(calls) == 2
@@ -345,7 +380,7 @@ async def test_a_failed_enqueue_keeps_the_summary_for_another_try() -> None:
 async def test_campaign_goal_from_a_user_goes_through_intake_and_operators_keep_confirm() -> None:
     control, sink, _ = plane()
     await press(control, USER, "mode:real_estate")
-    assert "Проверьте задачу" in (await say(control, USER, "/campaign квартиры в аренду в Мадриде до 1200 €")).text
+    assert "Сколько комнат" in (await say(control, USER, "/campaign квартиры в аренду в Мадриде до 1200 €")).text
     assert sink.envelopes == []
     assert (await say(control, USER, "/campaign status")).text == "Проверяю, как идёт поиск."
     assert sink.envelopes[-1].arguments == "status"
@@ -364,7 +399,10 @@ async def test_a_voice_task_from_a_user_goes_through_intake() -> None:
         return b"OggS"
 
     reply = await control.handle_voice(IncomingMessage(USER, USER, next(_ids), voice_file_id="v", voice_size=100, voice_duration_seconds=3), download)
-    assert reply and "Проверьте задачу" in reply.text and "Город: Мадрид" in reply.text
+    # The transcript is shown back once, then the first question.
+    assert reply and reply.text.startswith("Я услышал: «квартиры в аренду в Мадриде до 1200 евро»\n\nПонял: Мадрид")
+    assert "Сколько комнат" in reply.text and reply.text.count("Я услышал") == 1
+    assert "Город: Мадрид" in (await enough(control, USER)).text
     assert sink.envelopes == []
     # Size checks still apply before anything is downloaded; strangers stay refused.
     too_long = IncomingMessage(USER, USER, next(_ids), voice_file_id="v", voice_size=100, voice_duration_seconds=10_000)
@@ -380,12 +418,9 @@ def test_answer_parsers() -> None:
     assert parse_budget("много") is None
 
 
-def test_a_pluggable_clarifier_can_ask_its_own_questions() -> None:
-    def always_budget(draft: Draft) -> Question | None:
-        return None if "budget" in draft.asked else Question("budget", "Сколько?", (("Пропустить", "skip"),))
-
-    intake = TaskIntake(MemoryIntakeStore(), Sink(), clarifier=always_budget)
-    assert intake.clarifier is always_budget
+def test_the_interviewer_is_pluggable_and_defaults_to_the_rules() -> None:
+    intake = TaskIntake(MemoryIntakeStore(), Sink())
+    assert intake.interviewer is None and intake.rules.model == "rules"
 
 
 # --- the Orchestra -------------------------------------------------------------------------
@@ -487,9 +522,8 @@ async def test_the_chosen_mode_wins_from_intake_through_the_queue_to_the_stored_
     for mode, task, other in (("investors", "квартиры и инвесторы в Мадриде", "real_estate"),
                               ("real_estate", "инвестиции в квартиры в Мадриде до 900 €", "investors")):
         control, sink = await with_mode(mode)
-        reply = await say(control, USER, task)
-        if "Аренда или покупка" in reply.text:
-            await press(control, USER, "task:deal:any")
+        await say(control, USER, task)
+        await enough(control, USER)
         await press(control, USER, "task:launch")
         [envelope] = sink.envelopes
         assert envelope.arguments.startswith(f"mode={mode} ")
@@ -499,6 +533,7 @@ async def test_the_chosen_mode_wins_from_intake_through_the_queue_to_the_stored_
     # Operators' plain /campaign goal keeps today's detection.
     _, campaigns, _ = await dispatch(claimed("campaign", "квартиры и инвесторы в Мадриде", user=OPERATOR))
     assert next(iter(campaigns.campaigns.values())).plan.vertical == "both"
+    assert next(iter(campaigns.campaigns.values())).spec is None
 
 
 @pytest.mark.asyncio
@@ -507,6 +542,7 @@ async def test_a_draft_untouched_for_a_day_is_gone() -> None:
 
     control, sink = await with_mode()
     await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")
+    await enough(control, USER)
     store = control.intake.store
     store.drafts[USER].updated_at -= timedelta(hours=25)  # type: ignore[attr-defined]
     assert (await press(control, USER, "task:launch")).text == "Черновик устарел, опишите задачу заново."
@@ -514,12 +550,12 @@ async def test_a_draft_untouched_for_a_day_is_gone() -> None:
 
     await say(control, USER, "квартиры в аренду до 1200 €")  # asks for the city
     store.drafts[USER].updated_at -= timedelta(hours=25)  # type: ignore[attr-defined]
-    assert "устарела" in (await press(control, USER, "task:city:0")).text
+    assert "устарела" in (await press(control, USER, "task:skip")).text
     await say(control, USER, "квартиры в аренду до 1200 €")  # asks for the city again
     store.drafts[USER].updated_at -= timedelta(hours=25)  # type: ignore[attr-defined]
     assert (await press(control, USER, "task:launch")).text == "Черновик устарел, опишите задачу заново."
     # A stale question step: the next text is a new task, not an answer.
-    assert "Проверьте задачу" in (await say(control, USER, "квартиры в аренду в Севилье до 800 €")).text
+    assert "Понял: Севилья" in (await say(control, USER, "квартиры в аренду в Севилье до 800 €")).text
 
 
 @pytest.mark.asyncio
@@ -527,12 +563,14 @@ async def test_owners_hear_when_a_user_launches() -> None:
     control, sink, outbox = plane()
     await press(control, USER, "mode:real_estate")
     await say(control, USER, "квартиры в аренду в Мадриде до 1200 €")
+    await enough(control, USER)
     await control.handle_callback(USER, "task:launch", "Ann", "ann", chat_id=USER)
     [notice] = outbox.to(OWNER)
     assert notice.text.startswith("Пользователь Ann (@ann), ID 31 запустил кампанию: real_estate · Madrid")
     # An operator launching the same way is not announced.
     await press(control, OPERATOR, "mode:real_estate")
     await say(control, OPERATOR, "квартиры в аренду в Мадриде до 1200 €")
+    await enough(control, OPERATOR)
     await control.handle_callback(OPERATOR, "task:launch", "Op", "op", chat_id=OPERATOR)
     assert len(outbox.to(OWNER)) == 1 and len(sink.envelopes) == 2
 

@@ -13,7 +13,7 @@ from bot.agents.recorder import (
     simhash64,
     site_of,
 )
-from bot.campaign.runner import CampaignRunner
+from bot.campaign.runner import CampaignRunner, RunnerConfig
 from tests.test_near_match import (
     CHAT,
     GOAL,
@@ -149,7 +149,7 @@ async def test_postgres_rows_follow_the_stream(pool) -> None:  # noqa: F811
     campaigns = PostgresCampaignStore(pool)
     messenger = ButtonMessenger()
     runner = CampaignRunner(campaigns, PostgresRunStore(pool, SafetyLimits()), messenger, None, owner_ids={OWNER},
-                            recorder=PostgresRecorder(pool))
+                            recorder=PostgresRecorder(pool), config=RunnerConfig(relevance_fail_closed=False))
     cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
                                  actor="telegram:42")
     await campaigns.set_state(cid, "running", "campaign:test")
@@ -170,3 +170,15 @@ async def test_postgres_rows_follow_the_stream(pool) -> None:  # noqa: F811
     assert await pool.fetchval("select state from agent_findings where finding_id = $1::uuid", ids["f45"]) == "sent"
     with pytest.raises(Exception):  # noqa: B017 - the check constraint: sent needs sent_at
         await pool.execute("update agent_findings set sent_at = null where finding_id = $1::uuid", ids["f45"])
+    # An excluded finding keeps why it was excluded (migration 039), e.g. a duplicate of a sent card.
+    await recorder.excluded(record_of(cid, ids["f60"], state="excluded", bucket="excluded", payload=None, text="",
+                                      reason=f"duplicate_of:{ids['f45']}"))
+    assert await pool.fetchrow("select state, bucket, reason from agent_findings where finding_id = $1::uuid",
+                               ids["f60"]) is not None
+    row = await pool.fetchrow("select state, bucket, reason from agent_findings where finding_id = $1::uuid", ids["f60"])
+    assert (row["state"], row["bucket"], row["reason"]) == ("excluded", "excluded", f"duplicate_of:{ids['f45']}")
+
+
+def test_a_record_carries_its_reason() -> None:
+    assert record_of("c", "f", state="excluded", bucket="excluded", payload=None, text="", reason="duplicate_of:f1").reason == "duplicate_of:f1"
+    assert record_of("c", "f", state="held", bucket="similar", payload=None, text="").reason is None

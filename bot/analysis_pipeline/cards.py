@@ -20,7 +20,7 @@ No ids, model names, prompts or English system text reach the card.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -128,6 +128,21 @@ def _source(link: str) -> str | None:
     return host
 
 
+def also_on(links: Sequence[Mapping[str, Any]]) -> str | None:
+    """«Также на: Fotocasa, Milanuncios» plus one bullet per link, for the same object seen elsewhere."""
+    urls = [(str(x.get("url") or "").strip(), str(x.get("site") or "").strip()) for x in links if isinstance(x, Mapping)]
+    urls = [(u, site) for u, site in urls if u]
+    if not urls:
+        return None
+    sites: list[str] = []
+    for url, site in urls:
+        name = _source(url) or site
+        if name and name not in sites:
+            sites.append(name)
+    head = "Также на: " + ", ".join(sites) if sites else "Также на:"
+    return head + "\n" + "\n".join(f"• {u}" for u, _ in urls)
+
+
 def _trim(text: str, limit: int) -> str:
     text = text.strip()
     if len(text) <= limit:
@@ -150,6 +165,7 @@ def render_card(
     language: str | None = None,
     confidence: float | None = None,
     limit: int = MAX_CARD_CHARS,
+    cluster_links: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Build the Russian card for one finding; it names the original language, never quotes the post."""
     task = task or CardTask(vertical=vertical or "real_estate")
@@ -172,11 +188,15 @@ def render_card(
         "Цена": _price(payload, deal),
         "Локация": _trim(str(payload["location"]), 200) if payload.get("location") else None,
         "Комнаты": str(payload["rooms"]) if isinstance(payload.get("rooms"), int) and payload["rooms"] > 0 else None,
+        # analysis-v6 (absent in older payloads)
+        "Район": _trim(str(payload["district"]), 120) if payload.get("district") else None,
+        "Этаж": str(payload["floor"]) if isinstance(payload.get("floor"), int) and not isinstance(payload["floor"], bool) else None,
+        "Особенности": ", ".join(str(f) for f in payload["features"][:6]) if isinstance(payload.get("features"), list) and payload["features"] else None,
     }
     if investors:
         order = ["Кто", "Локация", "Цена"]
     else:
-        order = ["Сделка", "Тип", "Цена", "Локация", "Комнаты"]
+        order = ["Сделка", "Тип", "Цена", "Локация", "Район", "Комнаты", "Этаж", "Особенности"]
         if task.deal:
             order = ["Сделка", "Тип"] + [f for f in order if f not in ("Сделка", "Тип")]
         if task.max_price:
@@ -205,6 +225,8 @@ def render_card(
             tail.append(f"Источник: {source}")
     if links:
         tail.append("Ещё ссылки:\n" + "\n".join(f"• {x}" for x in links))
+    if extra := also_on(cluster_links):
+        tail.append(extra)
     if tail:
         parts.append("\n".join(tail))
 

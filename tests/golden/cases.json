@@ -1,0 +1,505 @@
+[
+ {
+  "id": "valencia_flat_200k",
+  "text": "Купить квартиру в Валенсии до 200 000 €, от 2 комнат",
+  "kind": "apartment",
+  "deal": "sale",
+  "max_price": 200000,
+  "rooms": 2,
+  "min_area": null,
+  "portals": [
+   "idealista.com",
+   "fotocasa.es",
+   "habitaclia.com",
+   "pisos.com"
+  ],
+  "idealista": [
+   "piso",
+   "en venta",
+   "hasta 200000",
+   "2 habitaciones",
+   "Valencia",
+   "España"
+  ],
+  "place_level": "city",
+  "vertical": "real_estate",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 190000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "apartment",
+     "rooms": 3,
+     "location": "Valencia, Ruzafa"
+    }
+   },
+   {
+    "bucket": "similar",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 230000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "apartment",
+     "rooms": 2,
+     "location": "Valencia"
+    }
+   }
+  ]
+ },
+ {
+  "id": "madrid_land_2000m2",
+  "text": "Купить участок в Мадриде от 2000 м², до 400000 €",
+  "kind": "land",
+  "deal": "sale",
+  "max_price": 400000,
+  "rooms": null,
+  "min_area": 2000,
+  "spec_type": "land",
+  "portals": [
+   "idealista.com",
+   "fotocasa.es",
+   "terrenos.es",
+   "sareb.es"
+  ],
+  "idealista": [
+   "terreno",
+   "en venta",
+   "hasta 400000",
+   "Madrid",
+   "España"
+  ],
+  "place_level": "city",
+  "vertical": "real_estate",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 350000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "land",
+     "area_m2": 2500,
+     "location": "Madrid"
+    }
+   },
+   {
+    "bucket": "excluded",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 350000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "land",
+     "area_m2": 1000,
+     "location": "Madrid"
+    }
+   }
+  ]
+ },
+ {
+  "id": "barcelona_room_rent_1200",
+  "text": "Alquiler piso 1 habitación en Barcelona hasta 1200 €",
+  "kind": "apartment",
+  "deal": "rent",
+  "max_price": 1200,
+  "rooms": 1,
+  "min_area": null,
+  "portals": [
+   "idealista.com",
+   "fotocasa.es",
+   "habitaclia.com",
+   "pisos.com"
+  ],
+  "idealista": [
+   "piso",
+   "alquiler",
+   "hasta 1200",
+   "1 habitación",
+   "Barcelona",
+   "España"
+  ],
+  "place_level": "city",
+  "vertical": "real_estate",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 1100,
+     "price_currency": "EUR",
+     "deal_type": "rent",
+     "property_type": "apartment",
+     "rooms": 1,
+     "location": "Barcelona, Gràcia"
+    }
+   },
+   {
+    "bucket": "excluded",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 1100,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "apartment",
+     "rooms": 1,
+     "location": "Barcelona"
+    }
+   }
+  ]
+ },
+ {
+  "id": "malaga_house_pool_500k",
+  "text": "Casa con piscina en Málaga en venta hasta 500000 €",
+  "kind": "house",
+  "deal": "sale",
+  "max_price": 500000,
+  "rooms": null,
+  "min_area": null,
+  "portals": [
+   "idealista.com",
+   "fotocasa.es",
+   "habitaclia.com",
+   "pisos.com"
+  ],
+  "idealista": [
+   "casa",
+   "en venta",
+   "hasta 500000",
+   "Málaga",
+   "España"
+  ],
+  "place_level": "city",
+  "vertical": "real_estate",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 480000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "house",
+     "location": "Málaga, Churriana"
+    }
+   },
+   {
+    "bucket": "other",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 700000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "house",
+     "location": "Málaga"
+    }
+   }
+  ]
+ },
+ {
+  "id": "alicante_commercial",
+  "text": "Local comercial en Alicante en alquiler hasta 2000 €",
+  "kind": "commercial",
+  "deal": "rent",
+  "max_price": 2000,
+  "rooms": null,
+  "min_area": null,
+  "spec_type": "commercial",
+  "portals": [
+   "idealista.com",
+   "fotocasa.es",
+   "pisos.com",
+   "milanuncios.com"
+  ],
+  "idealista": [
+   "local",
+   "alquiler",
+   "hasta 2000",
+   "Alicante",
+   "España"
+  ],
+  "place_level": "city",
+  "vertical": "real_estate",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 1800,
+     "price_currency": "EUR",
+     "deal_type": "rent",
+     "property_type": "commercial",
+     "location": "Alicante"
+    }
+   },
+   {
+    "bucket": "excluded",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 1800,
+     "price_currency": "EUR",
+     "deal_type": "rent",
+     "property_type": "apartment",
+     "location": "Alicante"
+    }
+   }
+  ]
+ },
+ {
+  "id": "kyiv_flat_rent_20000uah",
+  "text": "Оренда квартири в Києві до 20000 грн, 2 кімнати",
+  "kind": "apartment",
+  "deal": "rent",
+  "max_price": 20000,
+  "rooms": 2,
+  "min_area": null,
+  "portals": [
+   "dom.ria.com",
+   "lun.ua",
+   "olx.ua",
+   "rieltor.ua"
+  ],
+  "idealista": null,
+  "place_level": "city",
+  "vertical": "real_estate",
+  "ua": true,
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://dom.ria.com/uk/realty-1.html",
+     "price_amount": 18000,
+     "price_currency": "UAH",
+     "deal_type": "rent",
+     "property_type": "apartment",
+     "rooms": 2,
+     "location": "Київ, Поділ"
+    }
+   },
+   {
+    "bucket": "excluded",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://dom.ria.com/uk/realty-2.html",
+     "price_amount": 18000,
+     "price_currency": "UAH",
+     "deal_type": "sale",
+     "property_type": "apartment",
+     "rooms": 2,
+     "location": "Київ"
+    }
+   }
+  ]
+ },
+ {
+  "id": "marbella_villa",
+  "text": "Villa en Marbella en venta hasta 1500000 €",
+  "kind": "house",
+  "deal": "sale",
+  "max_price": 1500000,
+  "rooms": null,
+  "min_area": null,
+  "portals": [
+   "idealista.com",
+   "fotocasa.es",
+   "habitaclia.com",
+   "pisos.com"
+  ],
+  "idealista": [
+   "Marbella",
+   "en venta",
+   "hasta 1500000",
+   "España"
+  ],
+  "place_level": "city",
+  "vertical": "real_estate",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 1400000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "house",
+     "location": "Marbella"
+    }
+   },
+   {
+    "bucket": "similar",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 1700000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "house",
+     "location": "Marbella"
+    }
+   }
+  ]
+ },
+ {
+  "id": "sevilla_studio",
+  "text": "Снять студию в Севилье до 700 €",
+  "kind": "apartment",
+  "deal": "rent",
+  "max_price": 700,
+  "rooms": null,
+  "min_area": null,
+  "portals": [
+   "idealista.com",
+   "fotocasa.es",
+   "habitaclia.com",
+   "pisos.com"
+  ],
+  "idealista": [
+   "alquiler",
+   "hasta 700",
+   "Sevilla",
+   "España"
+  ],
+  "place_level": "city",
+  "vertical": "real_estate",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 650,
+     "price_currency": "EUR",
+     "deal_type": "rent",
+     "property_type": "studio",
+     "location": "Sevilla, Triana"
+    }
+   },
+   {
+    "bucket": "other",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 1500,
+     "price_currency": "EUR",
+     "deal_type": "rent",
+     "property_type": "studio",
+     "location": "Sevilla"
+    }
+   }
+  ]
+ },
+ {
+  "id": "valencia_province",
+  "text": "Дом в провинции Валенсия, купить до 300000 €",
+  "kind": "house",
+  "deal": "sale",
+  "max_price": 300000,
+  "rooms": null,
+  "min_area": null,
+  "portals": [
+   "idealista.com",
+   "fotocasa.es",
+   "habitaclia.com",
+   "pisos.com"
+  ],
+  "idealista": [
+   "casa",
+   "en venta",
+   "hasta 300000",
+   "España"
+  ],
+  "place_level": "region",
+  "vertical": "real_estate",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 250000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "house",
+     "location": "Torrent, Valencia"
+    }
+   },
+   {
+    "bucket": "other",
+    "listing": {
+     "summary_ru": "Объявление",
+     "listing_kind": "offer",
+     "url": "https://www.idealista.com/inmueble/1/",
+     "price_amount": 500000,
+     "price_currency": "EUR",
+     "deal_type": "sale",
+     "property_type": "house",
+     "location": "Valencia"
+    }
+   }
+  ]
+ },
+ {
+  "id": "investors_malaga",
+  "text": "Инвесторы и стартапы в Малаге",
+  "kind": "investors",
+  "deal": null,
+  "max_price": null,
+  "rooms": null,
+  "min_area": null,
+  "portals": [],
+  "idealista": null,
+  "place_level": "city",
+  "vertical": "investors",
+  "listings": [
+   {
+    "bucket": "exact",
+    "listing": {
+     "summary_ru": "Бизнес-ангел из Малаги ищет стартапы",
+     "listing_kind": "offer",
+     "url": "https://linkedin.com/in/x"
+    }
+   },
+   {
+    "bucket": "excluded",
+    "listing": {
+     "summary_ru": "Найдено 43 объявления",
+     "listing_kind": "catalog",
+     "url": "https://example.com/list"
+    }
+   }
+  ]
+ }
+]

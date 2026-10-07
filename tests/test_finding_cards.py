@@ -132,7 +132,7 @@ def test_confidence_words() -> None:
 
 
 def test_parse_result_accepts_the_new_schema_and_drifted_variants() -> None:
-    assert PROMPT_VERSION == "analysis-v5"
+    assert PROMPT_VERSION == "analysis-v6"
     assert set(RESULT_SCHEMA["required"]) == set(RESULT_SCHEMA["properties"])
     assert {"summary_ru", "source_language", "price_amount", "price_currency"} <= set(RESULT_SCHEMA["required"])
     assert {"listing_kind", "country", "area_m2"} <= set(RESULT_SCHEMA["required"])
@@ -193,7 +193,7 @@ def test_an_old_payload_without_the_v4_fields_still_renders_and_is_an_offer() ->
 
 
 class SpanishAnalyzer:
-    async def analyze(self, evidence, vertical):
+    async def analyze(self, evidence, vertical, task_hint=None):
         return parse_result(json.dumps({
             "relevant": True, "confidence": 0.88, "summary": "Piso en Lavapiés", "location": "Madrid, Lavapiés",
             "price_signals": ["1.200 € al mes"], "related_links": [], "category": vertical, "reason": "offer",
@@ -211,7 +211,7 @@ async def test_pipeline_digest_and_campaign_stream_use_the_same_card() -> None:
     assert outcome.accepted and outcome.formatted == real_estate(outcome.result, evidence, "es")
     assert outcome.formatted.endswith("Язык оригинала: испанский")
     payload = {**finding_payload(outcome.result, evidence), "formatted": outcome.formatted}
-    assert payload["schema_version"] == "analysis-v4" and payload["price_amount"] == 1200.0
+    assert payload["schema_version"] == "analysis-v6" and payload["price_amount"] == 1200.0
     assert (payload["listing_kind"], payload["country"], payload["area_m2"]) == ("offer", "ES", 85.0)
 
     plan = plan_campaign("Найди квартиры в аренду в Мадриде до 1300 евро")
@@ -223,3 +223,12 @@ async def test_pipeline_digest_and_campaign_stream_use_the_same_card() -> None:
     assert "Кратко: Сдаётся квартира" in card and card.endswith("Язык оригинала: испанский")
     # A finding without a payload (legacy memory store) is sent as its text.
     assert finding_card(campaign, StreamFinding("f2", "🏠 text")) == "🏠 text"
+
+
+def test_card_shows_v6_fields_and_old_payloads_still_render() -> None:
+    from bot.analysis_pipeline.cards import render_card
+
+    card = render_card({"schema_version": "analysis-v6", "summary_ru": "Квартира", "district": "Лавапьес", "floor": 3,
+                        "features": ["terraza", "ascensor"], "deal_type": "rent"}, vertical="real_estate")
+    assert "Район: Лавапьес" in card and "Этаж: 3" in card and "Особенности: terraza, ascensor" in card
+    assert "Район" not in render_card({"schema_version": "analysis-v4", "summary_ru": "Квартира"}, vertical="real_estate")

@@ -89,7 +89,7 @@ def test_the_moscow_catalog_card_is_excluded_by_the_rules_alone() -> None:
     assert classify(MOSCOW_CARD, request).bucket == "excluded"
     # Each signal on its own is enough.
     bare = {"summary_ru": "Участок у метро", "deal_type": "sale", "property_type": "land"}
-    assert classify(bare, request).bucket == "exact"
+    assert classify(bare, request).bucket == "similar"  # no area given, a minimum asked: unverified
     assert classify({**bare, "location": "Москва"}, request).bucket == "excluded"
     assert classify({**bare, "country": "RU"}, request).bucket == "excluded"
     assert classify({**bare, "price_amount": 28_609_258, "price_currency": "RUB"}, request).bucket == "excluded"
@@ -98,6 +98,7 @@ def test_the_moscow_catalog_card_is_excluded_by_the_rules_alone() -> None:
     assert classify({**bare, "summary_ru": "43 объявления о продаже участков"}, request).bucket == "excluded"
     assert classify({**bare, "summary_ru": "Средняя стоимость участков 300 000 €"}, request).bucket == "excluded"
     # A Spanish host, a generic one and Madrid itself never exclude.
+    bare = {**bare, "area_m2": 2500}
     for link in ("https://www.idealista.com/inmueble/1/", "https://www.fotocasa.es/x", "https://x.eu/a",
                  "https://www.facebook.com/groups/1/posts/2/"):
         assert classify({**bare, "original_post_link": link}, request).bucket == "exact"
@@ -108,13 +109,13 @@ def test_the_moscow_catalog_card_is_excluded_by_the_rules_alone() -> None:
     (2500, "exact"), (2000, "exact"), (1900, "exact"), (1800, "exact"),  # ±10 % is the criterion itself
     (1600, "similar"), (1500, "similar"),  # 75-90 %: offered with «Одобрить»
     (1400, "excluded"), (900, "excluded"),
-    (None, "exact"),  # an unknown area never downgrades
+    (None, "similar"),  # an unknown area against a minimum is unverified (fail closed)
 ])
 def test_madrid_plots_by_area(area: float | None, bucket: str) -> None:
     match = classify(plot(area), madrid_request())
     assert match.bucket == bucket
     if bucket == "similar":
-        assert match.why == "area" and match.area == area
+        assert (match.why, match.area) == (("area", area) if area is not None else ("area_unknown", None))
 
 
 def test_a_catalog_page_or_a_wanted_post_in_madrid_is_excluded() -> None:
@@ -158,11 +159,11 @@ class FakeJudge:
         return verdict
 
 
-async def setup(judge: FakeJudge | None = None, **config):
+async def setup(judge: FakeJudge | None = None, **config):  # fail-closed off unless a test asks for it
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
     messenger = ButtonMessenger()
-    runner = CampaignRunner(campaigns, store, messenger, None, config=RunnerConfig(window_cooldown_seconds=0, **config),
+    runner = CampaignRunner(campaigns, store, messenger, None, config=RunnerConfig(**{"window_cooldown_seconds": 0, "relevance_fail_closed": False, **config}),
                             relevance=judge)
     plan = plan_campaign(TASK, vertical="real_estate", location="Madrid")
     cid = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=TASK, actor="telegram:42")
@@ -300,6 +301,125 @@ async def test_the_relevance_cap_is_respected() -> None:
     assert len(messenger.findings()) == 2
 
 
+async def judged(runner: CampaignRunner, campaign_id: str, store: MemoryRunStore, fid: str):
+    (finding,) = [f for f in store.findings[campaign_id] if f.id == fid]
+    return await runner._judge(await runner.campaigns.get(campaign_id), campaign_request(
+        await runner.campaigns.get(campaign_id)), finding)
+
+
+async def reasons(store: MemoryRunStore) -> dict[str, str | None]:
+    return {k: v for k, v in store.hold_reasons.items()}
+
+
+async def test_fail_closed_without_a_judge_holds_exact_as_unverified() -> None:
+    _, store, messenger, runner, cid = await setup(None, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    assert store.buckets["a"][0] == "similar" and messenger.findings() == []
+    assert (await reasons(store))["a"] == "Не проверено ИИ: сбой проверки"
+    match = await judged(runner, cid, store, "a")
+    assert (match.bucket, match.why, match.note) == ("similar", "unverified", "Не проверено ИИ: сбой проверки")
+
+
+async def test_a_paused_judge_leaves_the_finding_unstreamed_and_it_is_sent_once_the_judge_is_back() -> None:
+    judge = FakeJudge(RelevanceError("timeout"), MATCH)
+    _, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    add(store, cid, "b", plot(2600))
+    await runner.tick()  # a: the call fails; b: judge paused. Neither held nor streamed.
+    assert "a" not in store.buckets and "b" not in store.buckets and messenger.findings() == []
+    assert len(judge.calls) == 1 and await store.relevance(cid, "a") is None
+    await runner.tick()  # still paused: no new call
+    assert len(judge.calls) == 1 and messenger.findings() == []
+    runner._relevance_paused_until = None  # the pause is over
+    await runner.tick()
+    assert store.buckets["a"][0] == "exact" and store.buckets["b"][0] == "exact"
+    assert len(messenger.findings()) == 2 and not store.hold_reasons
+
+
+async def test_a_paused_judge_does_not_block_the_batch_behind_it() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    _, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True, max_stream_per_step=1)
+    for n in range(3):
+        add(store, cid, f"f{n}", plot(2500 + n))
+    await runner.tick()  # f0 fails and is remembered; the paused judge defers nothing new at the front
+    assert [f.id for f in await store.unstreamed_findings(cid, 5, skip=set(runner._relevance_misses))] == ["f1", "f2"]
+    await runner.tick()
+    await runner.tick()
+    assert not [f for f in await store.unstreamed_findings(cid, 5, skip=set(runner._relevance_misses))]
+    assert len(judge.calls) == 1 and messenger.findings() == []
+
+
+async def test_a_call_that_keeps_failing_is_held_similar_after_the_retry_limit() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    _, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True, relevance_retry_limit=3)
+    add(store, cid, "a", plot(2500))
+    for attempt in (1, 2):
+        await runner.tick()
+        runner._relevance_paused_until = None
+        assert "a" not in store.buckets and len(judge.calls) == attempt
+    await runner.tick()  # the third failure: permanent
+    assert len(judge.calls) == 3 and store.buckets["a"][0] == "similar" and messenger.findings() == []
+    assert (await reasons(store))["a"] == "Не проверено ИИ: сбой проверки"
+    stored = await store.relevance(cid, "a")
+    assert stored is not None and stored.verdict is None
+    assert "a" not in runner._relevance_misses
+
+
+async def test_the_cap_and_a_missing_judge_hold_similar_at_once_with_the_reason() -> None:
+    judge = FakeJudge(MATCH)
+    _, store, messenger, runner, cid = await setup(judge, max_relevance_calls=1, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    add(store, cid, "b", plot(2600))
+    await runner.tick()
+    assert len(messenger.findings()) == 1 and store.buckets["b"][0] == "similar"
+    assert (await reasons(store))["b"] == "Не проверено ИИ: лимит проверок исчерпан"
+    held = await store.held_findings(cid, "similar", 5)
+    assert [f.hold_reason for f in held] == ["Не проверено ИИ: лимит проверок исчерпан"]
+
+
+async def test_the_question_about_unverified_findings_is_neutral_and_area_unknown_is_named() -> None:
+    _, store, _, runner, cid = await setup(None, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    deviation = await runner._deviation(await runner.campaigns.get(cid), madrid_request(),
+                                        (await store.held_findings(cid, "similar", 1))[0])
+    assert deviation.kind == "unverified"
+    assert near.similar_question(deviation, exact_found=True) == (
+        "Есть ещё варианты, которые не удалось проверить автоматически. Показать?")
+    assert "ИИ" not in near.similar_question(deviation, exact_found=False)
+    off = (await setup(None, relevance_fail_closed=False))[3]
+    assert (await off._deviation(await runner.campaigns.get(cid), madrid_request(),
+                                 (await store.held_findings(cid, "similar", 1))[0])).kind == "other"
+    unknown = await runner._deviation(await runner.campaigns.get(cid), madrid_request(),
+                                      type(held := (await store.held_findings(cid, "similar", 1))[0])(
+                                          "z", "t", plot(None), vertical=held.vertical))
+    assert unknown.phrase == "площадь не указана"
+    assert near.similar_question(unknown, exact_found=True) == "Есть ещё похожие варианты (площадь не указана). Показать?"
+
+
+async def test_a_campaign_does_not_complete_while_findings_wait_for_the_judge_but_not_forever() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    campaigns, store, _, runner, cid = await setup(judge, relevance_fail_closed=True, analysis_grace_seconds=0)
+    add(store, cid, "a", plot(2500))
+    campaign = await campaigns.get(cid)
+    await runner._stream(campaign)
+    assert "a" not in store.buckets
+    assert await runner._stream(campaign, final=True) == 0  # ending: a miss is permanent
+    assert store.buckets["a"][0] == "similar"
+
+
+async def test_fail_closed_never_touches_investors_and_can_be_switched_off() -> None:
+    _, store, messenger, runner, cid = await setup(None, relevance_fail_closed=True)
+    store.add_finding(cid, "inv", "🏠 inv", payload=plot(None), original="post", vertical="investors")
+    await runner.tick()
+    assert store.buckets["inv"][0] == "exact"
+    _, store, messenger, runner, cid = await setup(None, relevance_fail_closed=False)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    assert store.buckets["a"][0] == "exact" and len(messenger.findings()) == 1
+
+
 def test_parse_relevance_accepts_drift_and_keeps_users_away_from_english() -> None:
     assert set(SCHEMA["required"]) == set(SCHEMA["properties"])
     ok = parse_relevance('{"verdict": "near", "reason": "Метро дальше.", "deviation_ru": "Дальше от метро"}')
@@ -384,7 +504,7 @@ async def test_every_web_query_for_madrid_names_the_place() -> None:
     # Russian/Ukrainian queries carry the Spanish name in Latin letters and stay a minority.
     cyrillic = [q for q in round_ if q.language in ("ru", "uk")]
     assert cyrillic and all("Madrid" in q.text for q in cyrillic) and len(cyrillic) <= 3 + 1
-    assert "terreno Comunidad de Madrid" in [q.text for q in round_]
+    assert "terreno Comunidad de Madrid España" in [q.text for q in round_]
     for _ in range(3):
         template = await TemplateQueryGenerator().generate(task, used=[], count=12)
         assert all(names_madrid(q.text) for q in template)
@@ -419,7 +539,7 @@ async def test_web_worker_searches_spain_and_drops_foreign_sites() -> None:
                              config=WebSearchConfig(cover_portals=False))
     await worker.tick()  # the round
     await worker.tick()  # the search
-    assert searcher.calls == [("купить участок у метро Madrid", "es-ES")]
+    assert searcher.calls == [("купить участок у метро Madrid Испания", "es-ES")]
     queued = {u.url for u in await store.next_urls(cid, 10)}
     assert queued == {"https://www.idealista.com/inmueble/12345/", "https://www.fotocasa.es/es/x/1/d"}
     assert query_task(await campaigns.get(cid)).country == "ES"
@@ -560,3 +680,28 @@ async def test_postgres_relevance_is_stored_once_and_excluded_findings_are_never
     await store.save_relevance(cid, ids["good"], Relevance("reject", "x"))  # never overwritten
     assert (await store.relevance(cid, ids["good"])).verdict == "match"
     assert await store.relevance(cid, ids["moscow"]) is None
+
+
+async def test_drain_does_not_complete_while_a_paused_judge_still_holds_findings() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    campaigns, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()  # the call fails: "a" is remembered as a miss, the judge is paused
+    assert "a" in runner._relevance_misses
+    campaign = await campaigns.get(cid)
+    run = await store.get_run(cid)
+    await runner._drain(campaign, run, "queue_exhausted")
+    assert (await campaigns.get(cid)).state != "completed"
+    assert "a" not in store.buckets and messenger.findings() == []
+
+
+async def test_terminal_step_with_a_paused_judge_holds_findings_before_the_summary() -> None:
+    judge = FakeJudge(RelevanceError("timeout"))
+    campaigns, store, messenger, runner, cid = await setup(judge, relevance_fail_closed=True)
+    add(store, cid, "a", plot(2500))
+    await runner.tick()
+    assert "a" not in store.buckets
+    await campaigns.set_state(cid, "cancelled", "campaign:test")
+    await runner.step(cid)
+    assert store.buckets["a"][0] == "similar" and messenger.findings() == []
+    assert (await reasons(store))["a"] == "Не проверено ИИ: сбой проверки"

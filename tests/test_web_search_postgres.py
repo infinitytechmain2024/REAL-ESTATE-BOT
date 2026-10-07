@@ -131,7 +131,7 @@ async def test_web_pages_become_campaign_findings_streamed_once_with_their_links
 
     messenger = FakeMessenger()
     runner = CampaignRunner(PostgresCampaignStore(pool), PostgresRunStore(pool, SafetyLimits()), messenger,
-                            config=RunnerConfig(window_cooldown_seconds=0), owner_ids={OPERATOR},
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0), owner_ids={OPERATOR},
                             web=PostgresWebStore(pool))
     await runner.tick()
     await runner.tick()
@@ -252,3 +252,142 @@ async def test_a_site_that_refuses_bots_gives_posts_from_its_search_results(pool
         "search_snippet": 5}
     assert await pool.fetchval("select blocked_until > now() from web_hosts where host = 'idealista.com'")
     assert await pool.fetchval("select search_title from web_campaign_urls limit 1") == title
+
+
+async def test_another_campaign_may_repeat_a_query_unless_reuse_hours_say_otherwise(pool) -> None:
+    from bot.web_search.models import GeneratedQuery
+
+    store = PostgresWebStore(pool)
+    first, second, third = await new_campaign(pool), await new_campaign(pool), await new_campaign(pool)
+    query = [GeneratedQuery("terreno Boadilla Madrid", "es")]
+    assert await store.add_queries(first, 1, query, reuse_hours=0) == 1
+    await pool.execute("update web_search_queries set state = 'searched', searched_at = now()")
+    assert await store.add_queries(second, 1, query, reuse_hours=0) == 1      # no cross-campaign block
+    assert await store.add_queries(second, 2, query, reuse_hours=0) == 0      # its own repeat: unique key
+    assert await store.add_queries(third, 1, query, reuse_hours=72) == 0      # blocked when > 0
+    assert await pool.fetchval("select state from web_search_queries where campaign_id = $1::uuid", third) == "skipped"
+    assert await pool.fetchval("select state from web_search_queries where campaign_id = $1::uuid", second) == "pending"
+
+
+async def test_an_index_page_is_queued_again_after_its_ttl_and_a_listing_never(pool) -> None:
+    from bot.web_search.models import Candidate
+
+    store = PostgresWebStore(pool)
+    first, second = await new_campaign(pool), await new_campaign(pool)
+    await store.start_run(first)
+    index = QueuedUrl(INDEX_URL, url_key(INDEX_URL), "fotocasa.es", 0, "index")
+    listing = QueuedUrl(LISTING, url_key(LISTING), "idealista.com", 0, "listing")
+    for url in (index, listing):
+        await store.enqueue(first, [Candidate(url.url, url.url_key, url.host, 0, url.kind)])
+        ticket = await store.begin_fetch(first, url, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+        assert not isinstance(ticket, str)
+        await store.finish_fetch(ticket, PageResult(True, url.kind, url.url, "t", "" if url.kind == "index" else "x" * 200))
+    assert await pool.fetchval("select kind from web_seen_urls where url_key = $1", index.url_key) == "index"
+
+    def candidates(cid: str) -> list[Candidate]:
+        return [Candidate(u.url, u.url_key, u.host, 0, u.kind) for u in (index, listing)]
+
+    # fresh: both are duplicates for another campaign
+    assert await store.enqueue(second, candidates(second)) == 0
+    await pool.execute("delete from web_campaign_urls where campaign_id = $1::uuid", second)
+    # 8 days later: the index page is queued, the listing still a duplicate
+    await pool.execute("update web_seen_urls set finished_at = now() - interval '8 days'")
+    assert await store.enqueue(second, candidates(second)) == 1
+    states = dict(await pool.fetch("select kind, state from web_campaign_urls where campaign_id = $1::uuid", second))
+    assert states == {"index": "queued", "listing": "duplicate"}
+    ticket = await store.begin_fetch(second, index, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    assert not isinstance(ticket, str)
+    assert await pool.fetchval("select state from web_seen_urls where url_key = $1", index.url_key) == "fetching"
+    await store.finish_fetch(ticket, PageResult(True, "index", INDEX_URL, "t"))
+    # the TTL disabled (0): never again
+    await pool.execute("update web_seen_urls set finished_at = now() - interval '30 days'")
+    third = await new_campaign(pool)
+    assert await store.enqueue(third, candidates(third), index_ttl_days=0) == 0
+    assert await store.begin_fetch(third, index, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
+                                   index_ttl_days=0) == DUPLICATE
+
+
+async def test_renders_are_counted_in_the_database(pool) -> None:
+    from bot.web_search.models import Candidate
+
+    store = PostgresWebStore(pool)
+    cid, other = await new_campaign(pool), await new_campaign(pool)
+    assert await store.renders_used(cid) == 0
+    await store.enqueue(cid, [Candidate(LISTING, url_key(LISTING), "idealista.com", 0, "listing"),
+                              Candidate(INDEX_URL, url_key(INDEX_URL), "fotocasa.es", 0, "index")])
+    await store.mark_rendered(cid, url_key(LISTING))
+    await store.mark_rendered(cid, url_key(LISTING))  # idempotent
+    assert await store.renders_used(cid) == 1 and await store.renders_used(other) == 0
+    await store.mark_rendered(cid, url_key(INDEX_URL))
+    assert await PostgresWebStore(pool).renders_used(cid) == 2  # survives a new store (a restart)
+
+
+async def test_scrape_api_reads_are_counted_in_the_database(pool) -> None:
+    from bot.web_search.models import Candidate
+
+    store = PostgresWebStore(pool)
+    cid = await new_campaign(pool)
+    await store.enqueue(cid, [Candidate(LISTING, url_key(LISTING), "idealista.com", 0, "listing")])
+    assert await store.scrapes_used(cid) == 0
+    await store.mark_scraped(cid, url_key(LISTING))
+    await store.mark_scraped(cid, url_key(LISTING))
+    assert await PostgresWebStore(pool).scrapes_used(cid) == 1
+
+
+async def test_host_blocks_are_tracked_per_layer(pool) -> None:
+    store = PostgresWebStore(pool)
+    cid = await new_campaign(pool)
+    urls = [QueuedUrl(f"https://www.idealista.com/inmueble/{80000000 + n}/", url_key(f"https://www.idealista.com/inmueble/{80000000 + n}/"),
+                      "idealista.com", 0, "listing") for n in range(5)]
+    assert await store.layer_state("idealista.com") == {"http": True, "render": True}  # unknown host
+    for url in urls[:3]:  # three HTTP refusals; the page was then read by the browser
+        ticket = await store.begin_fetch(cid, url, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
+                                         render_layer=True)
+        assert not isinstance(ticket, str)
+        await store.layer_refused(url.host, "http")
+        await store.finish_fetch(ticket, PageResult(True, "listing", url.url, "t", f"Piso {url.url} " * 20, layer="render"))
+    row = await pool.fetchrow("select * from web_hosts where host = 'idealista.com'")
+    assert row["http_refusals"] == 3 and row["http_blocked_until"] is not None
+    assert row["render_refusals"] == 0 and row["render_blocked_until"] is None and row["blocked_until"] is None
+    assert row["pages_fetched"] == 3
+    assert await store.layer_state("idealista.com") == {"http": False, "render": True}
+    # not blocked for the browser: a fetch is still given out
+    ticket = await store.begin_fetch(cid, urls[3], vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
+                                     render_layer=True)
+    assert not isinstance(ticket, str)
+    # three browser refusals block that layer too, and now the host is blocked altogether
+    for _ in range(3):
+        await store.finish_fetch(ticket, PageResult(False, "listing", urls[3].url, error="render_blocked", layer="render"))
+    row = await pool.fetchrow("select * from web_hosts where host = 'idealista.com'")
+    assert row["render_refusals"] == 3 and row["render_blocked_until"] is not None and row["blocked_until"] is not None
+    assert await store.layer_state("idealista.com") == {"http": False, "render": False}
+    assert await store.begin_fetch(cid, urls[4], vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
+                                   render_layer=True) == "host_blocked"
+    # without the browser layer the host was blocked after the HTTP refusals alone
+    assert await store.begin_fetch(cid, urls[4], vertical="real_estate", lease_seconds=300, max_runtime_seconds=60) == "host_blocked"
+    # the scrape API has no block: with it enabled the host is never host_blocked
+    assert not isinstance(await store.begin_fetch(cid, urls[4], vertical="real_estate", lease_seconds=300,
+                                                  max_runtime_seconds=60, render_layer=True, scrape_layer=True), str)
+
+
+async def test_http_only_refusals_set_the_legacy_block_without_a_browser_layer(pool) -> None:
+    store = PostgresWebStore(pool)
+    cid = await new_campaign(pool)
+    for n in range(3):
+        url = f"https://www.fotocasa.es/es/comprar/vivienda/madrid/{90000000 + n}/d"
+        queued = QueuedUrl(url, url_key(url), "fotocasa.es", 0, "listing")
+        ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+        assert not isinstance(ticket, str)
+        await store.finish_fetch(ticket, PageResult(False, "listing", url, error="http_403"))
+    row = await pool.fetchrow("select * from web_hosts where host = 'fotocasa.es'")
+    assert row["http_blocked_until"] is not None and row["blocked_until"] is not None
+    assert row["consecutive_refusals"] == 3
+    assert await store.layer_state("fotocasa.es") == {"http": False, "render": True}
+
+
+async def test_migration_034_carries_an_earlier_block_over_to_both_layers(pool) -> None:
+    await pool.execute("insert into web_hosts (host, blocked_until) values ('old.example', now() + interval '5 hours')")
+    sql = next(p for p in MIGRATIONS if p.name.startswith("034_")).read_text(encoding="utf-8")
+    await pool.execute(sql)  # idempotent: applying it again after the data exists
+    row = await pool.fetchrow("select http_blocked_until, render_blocked_until, blocked_until from web_hosts where host = 'old.example'")
+    assert row["http_blocked_until"] == row["render_blocked_until"] == row["blocked_until"]

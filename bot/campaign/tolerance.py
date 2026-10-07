@@ -13,7 +13,7 @@ campaign in exactly one bucket (``campaign_findings.bucket``, migration 019):
 Budget
 ------
 The plan's ``max_price`` is the requested amount (intake and the architect
-turn «до 1200 €» and a bare «1200 €» into it; the currency is always EUR).
+turn «до 1200 €» and a bare «1200 €» into it; the currency is the plan's ``currency``, else the country's, else EUR).
 
 * ``BUDGET_TOLERANCE`` (10 %): the exact band is the amount ± 10 %. A budget
   given as a maximum («до 50 000») has no lower edge: anything cheaper than the
@@ -45,9 +45,17 @@ Other constraints
   стоимость») too. A payload without ``listing_kind`` is an offer.
 * Area: a minimum area in the task («от 2000 м²», ``min_area_of``) with a
   known ``area_m2``: from 90 % of it (the same ±10 % tolerance as the budget)
-  it is exact, from 75 % similar, below that excluded. An unknown area never
-  downgrades a listing.
-* Rooms are shown on the card but do not change the bucket.
+  it is exact, from 75 % similar, below that excluded. When the task has a
+  minimum area and the listing's area is unknown, it is similar, never exact
+  (fail closed); without a minimum area an unknown area changes nothing.
+* Max area: a listing with a known area above 110 % of ``max_area`` is other.
+* Min price: a listing with a known price below 90 % of ``min_price`` is other.
+* Property type: when both the request and the listing name one of apartment
+  (studio counts), house, land or commercial and they differ, the listing is
+  excluded; room, other and an unknown type are lenient.
+* Rooms: when the task names a number of rooms and the listing's known count is
+  lower, it is other; an unknown count (or more rooms) changes nothing.
+* A budget with an unknown listing price is other (see Budget).
 * Findings of the investors vertical carry no prices; they are always exact.
 """
 
@@ -71,7 +79,8 @@ AREA_SIMILAR_FLOOR = 0.75  # from 75 % of the minimum area: similar; below: excl
 Bucket = Literal["exact", "similar", "other", "excluded"]
 _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
-Why = Literal["price", "area", "location", "deal", "kind", "foreign", "currency", "ai"]
+Why = Literal["price", "area", "area_max", "rooms", "location", "deal", "kind", "type", "foreign", "currency", "ai",
+              "unverified", "area_unknown"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -93,7 +102,11 @@ class Request:
     deal: str | None = None
     location: str | None = None  # the plan's place (any place in the world)
     min_area: float | None = None  # «от 2000 м²» in the task, square metres
+    rooms: int | None = None  # the plan's rooms constraint
     country: str | None = None  # ISO-2; derived from ``location`` when not given
+    max_area: float | None = None  # the plan's max_area constraint, square metres
+    min_price: float | None = None  # the plan's min_price constraint
+    property_type: str | None = None  # apartment | house | land | commercial (room/other/any: not compared)
 
     @property
     def country_code(self) -> str | None:
@@ -107,6 +120,7 @@ class Match:
     distance: float = 0.0
     why: str | None = None  # the main deviation (``Why``) when not exact
     area: float | None = None  # the listing's area when it is the deviation
+    note: str | None = None  # owner-facing Russian reason (e.g. «Не проверено ИИ: ...»), when not from the rules
 
 
 def worse(a: Match, b: Match) -> Match:
@@ -119,9 +133,10 @@ def worse(a: Match, b: Match) -> Match:
 
 
 _AREA = re.compile(
-    r"(?<!\w)(?:от|від|не менее|не менше|минимум|мінімум|min(?:imum)?|from|at least|desde|m[aá]s de|>=|≥|>)\s*"
+    r"(?<!\w)(?:от|від|не менее|не менше|минимум|мінімум|min(?:imum)?|from|at least|desde|a partir de|"
+    r"al menos|m[ií]nimo(?:\s+de)?|m[aá]s de|>=|≥|>)\s*"
     r"(\d{1,3}(?:[ .,]\d{3})+|\d+(?:[.,]\d+)?)\s*(тыс\w*\.?|тис\w*\.?|k)?\s*"
-    r"(м²|м2|кв\.?\s*м\w*|m²|m2|sq\.?\s*m|metros?(?:\s+cuadrados)?|квадрат\w*|сот\w*|га\b|ha\b|hect\w*|гект\w*)",
+    r"(м²|м2|кв\.?\s*м\w*|m²|m2|sq\.?\s*m|sqm\b|metros?(?:\s+cuadrados)?|квадрат\w*|сот\w*|га\b|ha\b|hect\w*|гект\w*)",
     re.IGNORECASE,
 )
 
@@ -178,7 +193,7 @@ def foreign(payload: dict[str, Any], request: Request) -> Match | None:
             return Match("excluded", math.inf, "foreign")
     if geo.foreign_tld(geo.host_of_link(payload.get("original_post_link") or payload.get("url")), country):
         return Match("excluded", math.inf, "foreign")
-    expected = geo.CURRENCY.get(country)
+    expected = request.currency
     currency = currency_code(payload.get("price_currency"))
     if expected and currency and currency != expected:
         return Match("excluded", math.inf, "currency")
@@ -196,6 +211,16 @@ def area_match(area: float, minimum: float) -> Match:
     return Match("excluded", distance, "area", area)
 
 
+_TYPE_GROUP = {"apartment": "apartment", "studio": "apartment", "house": "house", "land": "land",
+               "commercial": "commercial"}
+
+
+def _positive(value: Any) -> float | None:
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+        return float(value)
+    return None
+
+
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
                 text: str | None = None, country: str | None = None) -> Request:
     """The bucketing request of a campaign plan (``plan.constraints``, ``plan.location``, ``plan.country``;
@@ -204,11 +229,19 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         return Request(location=location, country=country)
     amount = constraints.get("max_price")
     deal = constraints.get("deal")
+    rooms = constraints.get("rooms")
+    stated = currency_code(constraints.get("currency"))
+    code = country or geo.country_of(location)
     return Request(
         amount=amount if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0 else None,
+        currency=stated or geo.CURRENCY.get(code or "") or DEFAULT_CURRENCY,
         deal=deal if deal in ("rent", "sale") else None,
         location=location,
-        min_area=min_area_of(text),
+        min_area=_positive(constraints.get("min_area")) or min_area_of(text),
+        max_area=_positive(constraints.get("max_area")),
+        min_price=_positive(constraints.get("min_price")),
+        property_type=_TYPE_GROUP.get(str(constraints.get("property_type") or "")),
+        rooms=rooms if isinstance(rooms, int) and not isinstance(rooms, bool) and rooms > 0 else None,
         country=country,
     )
 
@@ -237,6 +270,10 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
     deal = payload.get("deal_type")
     if request.deal and deal in ("rent", "sale") and deal != request.deal:
         return Match("excluded", math.inf, "deal")
+    wanted = request.property_type
+    offered = _TYPE_GROUP.get(str(payload.get("property_type") or ""))
+    if wanted and offered and wanted != offered:
+        return Match("excluded", math.inf, "type")
     elsewhere = foreign(payload, request)
     if elsewhere is not None:
         return elsewhere
@@ -246,6 +283,16 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
         result = area_match(float(area), request.min_area)
         if result.bucket == "excluded":
             return result
+    elif request.min_area:
+        result = Match("similar", 0.0, "area_unknown")  # unknown area against a minimum: unverified
+    if request.max_area and _positive(area) and float(area) > request.max_area * (1 + AREA_TOLERANCE) + 1e-9:
+        result = worse(result, Match("other", math.inf, "area_max", float(area)))
+    listed = payload.get("rooms")
+    if (request.rooms and isinstance(listed, int | float) and not isinstance(listed, bool)
+            and 0 < listed < request.rooms):
+        result = worse(result, Match("other", math.inf, "rooms"))
+    if _below_min_price(payload, request):
+        result = worse(result, Match("other", math.inf, "price"))
     if request.location and isinstance(payload.get("location"), str):
         places = find_places(payload["location"])
         if places and request.location not in places:
@@ -257,6 +304,13 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
     if price is None or currency != request.currency:
         return worse(result, Match("other", math.inf, "price"))
     return worse(result, budget_match(price, request.amount, is_max=request.is_max))
+
+
+def _below_min_price(payload: dict[str, Any], request: Request) -> bool:
+    price = price_of(payload)
+    currency = currency_code(payload.get("price_currency")) or request.currency
+    return bool(request.min_price and price is not None and currency == request.currency
+                and price < request.min_price * (1 - BUDGET_TOLERANCE) - 1e-9)
 
 
 def budget_match(price: float, amount: int, *, is_max: bool = True) -> Match:

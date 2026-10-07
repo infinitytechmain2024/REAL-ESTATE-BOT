@@ -216,7 +216,7 @@ async def test_an_investor_search_sends_reach_contacts_once_and_waits_for_the_re
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
     messenger = FakeMessenger()
-    runner = CampaignRunner(campaigns, store, messenger, None, now=Clock(), config=RunnerConfig(max_people=2))
+    runner = CampaignRunner(campaigns, store, messenger, None, now=Clock(), config=RunnerConfig(relevance_fail_closed=False, max_people=2))
     goal = "Найди инвесторов в Мадриде"
     cid = await campaigns.create(plan_campaign(goal), chat_id=CHAT, requested_by=8, source_text=goal, actor="t")
     await campaigns.set_state(cid, "running", "campaign:test")

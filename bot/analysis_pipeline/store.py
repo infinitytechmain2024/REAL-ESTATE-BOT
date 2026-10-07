@@ -11,9 +11,30 @@ from .openrouter import PROMPT_VERSION
 ACTOR = "analysis_pipeline"
 
 
+def build_task_hint(goal: str | None, place: str | None, spec: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A small, bounded dict of what the requester wants; empty values are left out."""
+    spec = spec if isinstance(spec, dict) else {}
+    budget = spec.get("budget") if isinstance(spec.get("budget"), dict) else {}
+    rooms = spec.get("rooms") if isinstance(spec.get("rooms"), dict) else {}
+    hint = {
+        "goal": (goal or "")[:200],
+        "place": (place or "")[:80],
+        "deal": spec.get("deal"),
+        "property_type": spec.get("property_type"),
+        "budget_max": budget.get("max"),
+        "budget_currency": budget.get("currency"),
+        "rooms_min": rooms.get("min"),
+        "rooms_max": rooms.get("max"),
+    }
+    hint = {k: v for k, v in hint.items() if v not in (None, "", [])}
+    return hint or None
+
+
 class PostgresAnalysisStore:
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, *, exclude_platforms: tuple[str, ...] = ()):
         self.database_url = database_url
+        # Platforms another worker owns (the live reduction worker takes ``website``): never claimed here.
+        self.exclude_platforms = list(exclude_platforms)
         self.pool: Any = None
 
     async def connect(self):
@@ -44,6 +65,7 @@ class PostgresAnalysisStore:
                        select p.id from collected_posts p join monitoring_sources s on s.id=p.source_id
                         where p.state='normalised' and s.state='active' and s.deleted_at is null
                           and s.vertical in ('real_estate','investors','both')
+                          and s.platform <> all($3::text[])
                           and (p.analysis_claimed_at is null or p.analysis_claimed_at < now() - make_interval(secs => $2))
                         order by p.collected_at
                         for update of p skip locked limit $1)
@@ -59,6 +81,7 @@ class PostgresAnalysisStore:
                                              order by created_at limit 10) c), '[]'::jsonb)::text as comments""",
                 limit,
                 claim_seconds,
+                self.exclude_platforms,
             )
 
     async def save(self, evidence: Evidence, vertical: str, outcome, model: str, claim_token: str | None = None):
@@ -116,6 +139,27 @@ class PostgresAnalysisStore:
             post_id,
             claim_token,
         )
+
+    async def task_hint(self, post_id: str) -> dict[str, Any] | None:
+        """The campaign's search (goal, place, deal, budget, rooms) for a post collected by a campaign, else None.
+
+        One join: post -> acquisition run -> batch item -> batch -> campaign. The hint is prompt DATA only.
+        """
+        row = await self._pool().fetchrow(
+            """select c.plan->>'goal' as goal, c.plan->>'location' as place, c.spec
+                 from collected_posts p
+                 join acquisition_runs r on r.id=p.acquisition_run_id
+                 join acquisition_batch_items i on i.id=r.batch_item_id
+                 join acquisition_batches b on b.id=i.batch_id
+                 join campaigns c on c.id=b.campaign_id
+                where p.id=$1::uuid""",
+            post_id,
+        )
+        if not row:
+            return None
+        spec = row["spec"]
+        spec = json.loads(spec) if isinstance(spec, str) else (spec or {})
+        return build_task_hint(row["goal"], row["place"], spec)
 
     async def campaign_finding_ids(self, finding_ids: list[str]) -> set[str]:
         """The findings among ``finding_ids`` whose post came from a campaign's Facebook batch or social search."""

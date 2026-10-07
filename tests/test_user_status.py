@@ -65,7 +65,7 @@ def build(*, owners: frozenset[int] = frozenset({OWNER}), groups: int = 20, mess
     discovery = FakeDiscovery(campaigns, store, groups)
     clock = Clock()
     runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids=owners,
-                            config=RunnerConfig(window_cooldown_seconds=120, analysis_grace_seconds=600))
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=120, analysis_grace_seconds=600))
     plan = plan_campaign(GOAL).model_copy(update={"limits": CampaignLimits(max_groups=groups)})
     return campaigns, store, messenger, clock, runner, plan
 
@@ -333,3 +333,68 @@ def test_the_group_being_read_is_named_only_when_the_name_is_safe() -> None:
     long = group_status("Квартиры " * 20)
     assert long.endswith("…»…") and len(long) < 100 and is_user_status(long)
     assert not is_user_status("Ищу в группе Facebook «https://x»…")
+
+
+# --- the website stage's live line: «сайт · слой · прочитано / найдено» ---------------------------------
+
+
+def test_web_status_texts_for_every_state() -> None:
+    from bot.campaign.status_text import web_done_status, web_progress_status
+
+    assert (web_progress_status("idealista.com", "browser", 37, 12, 4, 8)
+            == "Сейчас: сайты · idealista.com (браузер) · прочитано 37 · найдено 12 · порталов 4/8")
+    assert web_progress_status("www.fotocasa.es", "http", 3, 1, 0, 2) == (
+        "Сейчас: сайты · fotocasa.es (напрямую) · прочитано 3 · найдено 1 · порталов 0/2")
+    assert web_progress_status("x.com", "api", 1, 0, 0, 1).startswith("Сейчас: сайты · x.com (API) ·")
+    assert web_progress_status(None, None, 0, 0) == "Сейчас: сайты · прочитано 0 · найдено 0"  # between pages
+    assert web_progress_status("bad host <b>", "http", 2, 1) == "Сейчас: сайты · прочитано 2 · найдено 1"
+    assert web_done_status(37, 12) == "Сайты: готово · прочитано 37 · найдено 12"
+    for text in (web_progress_status("idealista.com", "browser", 37, 12, 4, 8), web_done_status(0, 0),
+                 web_progress_status(None, None, 5, 2)):
+        assert is_user_status(text), text
+        assert_user_safe(text) if "Сейчас" not in text and "Сайты" not in text else None
+    assert not is_user_status("Сейчас: сайты · idealista.com (браузер) · прочитано 37 · найдено 12 · порталов 4/8 · 9")
+    assert not is_user_status("Сейчас: сайты · idealista.com (http_403) · прочитано 1 · найдено 1")
+    assert not is_user_status("Сайты: готово · прочитано x · найдено 1")
+
+
+async def test_users_get_the_web_progress_line_and_owners_the_technical_one_with_refusals() -> None:
+    from bot.web_search.models import WebProgress, WebStatus
+    from tests.test_campaign_runner import create, make
+
+    class Web:
+        progress = WebProgress("idealista.com", "browser", 37, 12, 4, 8, (("http", 3), ("browser", 1)))
+
+        async def web_status(self, campaign_id: str) -> WebStatus:
+            return WebStatus(True, "idealista.com", "сайты: страниц 37/60 · сайт idealista.com", self.progress)
+
+    campaigns, _, messenger, _, clock, runner, plan = make()
+    web = Web()
+    runner.web = web
+    user_cid = await campaigns.create(plan, chat_id=-1, requested_by=8, source_text=GOAL, actor="telegram:8")
+    owner_cid = await create(campaigns, plan)
+    await runner.step(user_cid)
+    await runner.step(owner_cid)
+    user_text = next(t for c, _, t in messenger.sent if c == -1)
+    assert user_text == "Сейчас: сайты · idealista.com (браузер) · прочитано 37 · найдено 12 · порталов 4/8"
+    owner_text = next(t for c, _, t in messenger.sent if c == CHAT)
+    assert "сайты: страниц 37/60" in owner_text and "idealista.com: отказы напрямую 3, браузер 1" in owner_text
+
+    # one message edited in place; the counters moving every page are throttled to one edit per interval
+    web.progress = WebProgress("idealista.com", "http", 40, 13, 4, 8)
+    await runner.step(user_cid)
+    edits = len(messenger.edits)
+    clock.advance(11)
+    await runner.step(user_cid)
+    assert len(messenger.edits) == edits + 1 and "прочитано 40" in messenger.edits[-1][2]
+
+    class Done(Web):
+        progress = WebProgress(None, None, 52, 17, 8, 8, finished=True)
+
+        async def web_status(self, campaign_id: str) -> WebStatus:
+            return WebStatus(False, None, "сайты: готово", self.progress)
+
+    runner.web = Done()
+    clock.advance(11)
+    await runner.step(user_cid)
+    assert messenger.edits[-1][2] == "Сайты: готово · прочитано 52 · найдено 17"

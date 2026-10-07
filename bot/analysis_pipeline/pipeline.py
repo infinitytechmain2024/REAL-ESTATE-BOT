@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import Any
 
 from .filters import filter_evidence
 from .formatters import investors, real_estate
@@ -22,11 +23,18 @@ class AnalysisPipeline:
     def __init__(self, analyzer) -> None:
         self.analyzer = analyzer
 
-    async def process(self, evidence: Evidence, vertical: str) -> PipelineOutcome:
+    async def process(
+        self, evidence: Evidence, vertical: str, task_hint: dict[str, Any] | None = None
+    ) -> PipelineOutcome:
         decision = filter_evidence(evidence, vertical)
         if not decision.accepted:
             return PipelineOutcome(False, decision.reason, decision.language)
-        result = await self.analyzer.analyze(evidence, vertical)
+        # The hint is passed only when the post belongs to a campaign (analyzers without the parameter keep working).
+        result = await (
+            self.analyzer.analyze(evidence, vertical, task_hint=task_hint)
+            if task_hint
+            else self.analyzer.analyze(evidence, vertical)
+        )
         if not result.relevant or result.category not in (vertical,):
             return PipelineOutcome(False, "model_not_relevant", decision.language, result=result)
         formatter = real_estate if vertical == "real_estate" else investors

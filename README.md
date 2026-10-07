@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 The migration script applies `001_init.sql` through
-`030_campaign_summary.sql` in order. It records SHA-256 checksums in
+`039_campaign_metrics.sql` in order. It records SHA-256 checksums in
 `public.schema_migrations`, locks concurrent runs, and refuses an edited
 already-applied migration. Use `docker compose down` for a normal stop; never
 use `down -v` on a system containing needed data.
@@ -39,11 +39,20 @@ which of them an investor search already sent.
 `029_web_search_snippets.sql` keeps the search engine's title and snippet of each queued URL, so a
 listing on a site that refuses bots (Idealista) still becomes a card built from the search result.
 `030_campaign_summary.sql` marks the end-of-campaign summary (what each source gave) as sent, once.
+`031_task_draft_steps.sql` lets a task draft be saved at the `ask` and `target` steps, so clarifying questions are kept.
+`032_web_seen_urls_ttl.sql` lets an index (search/list) page be read again after `WEB_SEARCH_INDEX_TTL_DAYS`
+and keeps the web stage's browser-render count in the database.
+`033_campaign_finding_hold_reason.sql` stores why a finding was held unverified (the AI check could not run), for owners.
+`034_web_fetch_layers.sql` tracks a site's refusals and blocks per fetch layer (HTTP, browser) and counts scrape-API reads.
+`035_campaign_specs.sql` adds the structured task (`TaskSpec`, JSON) to campaigns and to the task draft, so the interviewer keeps it across answers.
+`036_campaign_finding_clusters.sql` groups the same property seen on several sites into one card (`cluster_id`, `cluster_links`, `duplicate_of`; state `duplicate`).
+`037_reach_enrichment.sql` adds the investor reach enrichment to `reach_contacts` (`enriched_at`, `contacts`, `profile_text`, `score`).
+`038_finding_review.sql` stores the reviewer's criteria matrix per finding (`review`), the reason a finding was held or excluded (`why`) and marks the user's final report as sent once (`final_report_sent_at`).
+`039_campaign_metrics.sql` adds `campaign_metrics` (per-campaign totals for `/campaign report`), the stored card number (`campaign_findings.card_number`), the fetch layer per page (`web_campaign_urls.layer`) and the reason a finding was excluded unsent (`agent_findings.reason`).
 
-Future Telegram, controlled workers, and persistent browser services are
-intentional disabled placeholders under the Compose `future` profile. Their
-implementation must have bounded permissions and own health checks before it
-is enabled. See [VPS hardening notes](docs/VPS_HARDENING.md) before deployment.
+The whole pipeline (interviewer, campaigns, web search, analysis, reviewer, final
+report) is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). See the
+[VPS hardening notes](docs/VPS_HARDENING.md) before deployment.
 
 ### Open Telegram control plane
 
@@ -89,8 +98,9 @@ name, @username and ID and four buttons:
   presses Solved / Resume, and may use `/login`. Nothing else.
 - **Approve as user (Пользователь)** -- no verification, no browser, no
   control: the user picks a mode (/start), describes a search task in text or
-  voice, answers up to three clarifying questions and launches it with the
-  **Запустить** button; they may also use `/campaign status` and
+  voice, answers the interviewer's questions one at a time (no fixed limit
+  of three; at most `INTERVIEW_MAX_ROUNDS`, and «Хватит, ищи» ends the interview) and launches
+  the task from the confirmation card with the **Запустить** button; they may also use `/campaign status` and
   `/campaign cancel <id>` for their own campaigns (see
   [docs/CAMPAIGNS.md](docs/CAMPAIGNS.md)). User campaigns share the global
   Facebook quotas and breakers.
@@ -437,316 +447,33 @@ is persisted as a normalized `collected_posts` record for later analysis.
 
 ---
 
-Telegram-бот, который ищет объекты недвижимости и потенциальных партнёров по
-открытым источникам: разбирает запрос через LLM, ищет в собственном инстансе
-SearXNG, читает найденные страницы, фильтрует результаты и присылает каждый
-отдельным сообщением.
+## Legacy: автономный бот
 
-Материалы для BotFather (имя, описания, команды) — в [`bot_description.md`](bot_description.md).
-
----
-
-## Как это работает
-
-```
-сообщение (текст или голос)
-   │
-   ├─ голос → STT (Whisper через OpenAI-совместимый API)
-   │
-   ├─ LLM: извлечение параметров        → ParsedQuery (локация, бюджет, площадь, язык…)
-   ├─ QueryBuilder: 4–6 поисковых строк    на языке региона + английском
-   ├─ SearXNG: параллельный поиск       → слияние и дедупликация по url_hash
-   │  └─ + доп. источники (группы Facebook, Google Maps) — параллельно,
-   │     текст поста приходит уже прочитанным
-   ├─ Supabase: отсев уже показанного
-   ├─ Fetcher: загрузка и извлечение текста топ-N страниц
-   ├─ LLM: оценка, фильтрация, структурирование
-   └─ Supabase: сохранение (UNIQUE user_id + url_hash) → отправка пользователю
-```
-
-После извлечения параметров каждый этап **деградирует, а не падает**: не
-работает парсер — ранжируем по сниппетам; не отвечает LLM-ранкер — отдаём
-результаты поиска с пометкой; недоступен Supabase — результаты всё равно
-отправляются, просто не запоминаются.
-
-Facebook — тот же принцип, только жёстче. Источник читает разметку, которую
-Facebook меняет без предупреждения, поэтому «сломался» — это ожидаемое
-состояние, а не исключительное. Упал, завис, разлогинился, показал
-checkpoint — поиск отвечает тем, что нашёл в вебе, источник попадает в
-список недоступных, а через PIPELINE_SOURCE_TIMEOUT_SECONDS зависший
-источник просто перестают ждать.
-`scripts/pipeline_probe.py` проверяет именно это обещание.
-
-## Структура
-
-```
-bot/
-├── main.py            точка входа: сборка сервисов, polling или webhook
-├── config.py          все настройки из окружения (pydantic-settings v2)
-├── handlers/          /start, текст, голос, кнопки, глобальный обработчик ошибок
-├── keyboards/         только inline-клавиатуры
-├── middlewares/       контекст логов, upsert пользователя, троттлинг
-├── models/            Pydantic-модели: ParsedQuery, SearchHit, StructuredResult…
-├── prompts/           тексты промптов (extract / rank / details)
-├── services/
-│   ├── llm/           абстракция провайдеров + менеджер с фолбэком
-│   ├── stt/           распознавание речи, та же схема
-│   ├── search/        клиент SearXNG и построитель запросов
-│   ├── parser/        загрузка страниц и извлечение текста
-│   ├── db/            репозиторий Supabase + SQL-миграция
-│   └── pipeline.py    оркестрация всего сценария
-└── utils/             нормализация URL и url_hash, работа с текстом
-
-searxng/               полный снимок официального SearXNG (см. searxng/VENDOR.md)
-docker/entrypoint.sh   запуск SearXNG и бота в одном контейнере
-```
-
-## Быстрый старт
-
-### Docker (рекомендуется)
-
-Один контейнер поднимает и SearXNG, и бота — ровно то же самое поедет на Render.
-
-```sh
-python scripts/setup_env.py   # спросит ключи и запишет .env
-docker compose up --build
-```
-
-Скрипт читает ключи скрытым вводом (в терминале и в истории команд они не
-остаются) и пишет `.env` с правами `0600`. Ничего никуда не отправляется —
-ключи попадают только в локальный файл. Можно и вручную: `cp .env.example .env`
-и заполнить `TELEGRAM_TOKEN` плюс ключ одного LLM-провайдера.
-
-### Локально, без Docker
-
-```sh
-make install    # venv, зависимости, Chromium для резервного фетчера
-make setup      # спросит ключи и запишет .env
-make searxng    # терминал 1
-make run        # терминал 2
-```
-
-То же самое руками, если make не нужен:
-
-```sh
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt \
-    -r searxng/requirements.txt -r searxng/requirements-server.txt
-playwright install chromium
-
-cp .env.example .env
-
-# терминал 1 — SearXNG
-SEARXNG_SECRET=dev-secret \
-SEARXNG_SETTINGS_PATH=$PWD/searxng/settings/settings.yml \
-PYTHONPATH=$PWD:$PWD/searxng \
-granian --interface wsgi --host 127.0.0.1 --port 8888 searxng.api_only:application
-
-# терминал 2 — бот
-python -m bot.main
-```
-
-Проверить, что поиск отвечает:
-
-```sh
-curl -s 'http://127.0.0.1:8888/search?q=land+for+sale+cyprus&format=json' | head -c 400
-```
+Прежний автономный Telegram-бот (поиск через встроенный SearXNG, LLM-конвейер,
+Render) не входит в кампанейный стек и не разворачивается. Код, тесты, вендоренный
+SearXNG, `Dockerfile` и `render.yaml` лежат в [`legacy/`](legacy/README.md).
 
 ## Локальная разработка
 
-### Проверки
-
 ```sh
-make check         # всё разом: снимок, lint, импорты, конфиг, миграция, гейт
-make lint          # только ruff
-make probe-gate    # только живой просмотр Facebook
-make check-vendor  # только целостность вендоренного SearXNG
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env              # или: python scripts/setup_env.py
+make check                        # lint, импорты, тесты
 ```
 
-`make check-vendor` проверяет, что снимок SearXNG дошёл до репозитория целиком.
-Проверка появилась не на пустом месте: правило `data/` в корневом `.gitignore`
-(написанное для рабочего каталога бота) не было привязано к корню, а непривязанное
-правило совпадает на любой глубине — и git молча не закоммитил
-`searxng/searx/data/`. Это пакет из 16 файлов, который SearXNG импортирует при
-старте, так что на свежем клоне поиск не поднимался вообще:
-`ImportError: cannot import name 'data' from 'searx'`. На машине, где снимок
-делали, всё работало — файлы просто лежали на диске. Ни lint, ни байт-компиляция
-`searxng/` не трогают, поэтому не поймал никто. Теперь ловит эта проверка — и
-заодно любое другое ignore-правило, дотягивающееся до снимка.
-
-`make probe-gate` — единственная проверка здесь, которая гоняет настоящий код
-по настоящему сценарию: поднимает заглушки вместо noVNC и websockify и дёргает
-гейт так, как это сделал бы телефон (ссылка, страница, сокет, подпротокол,
-кадры в обе стороны, закрытие). Браузер ей не нужен, идёт полсекунды, и именно
-она поймала три ошибки, из-за которых ссылка из Telegram открывалась в пустоту.
-Её же гоняет CI на каждый push.
-
-`ruff format` в `make check` нет намеренно: дерево старше текущего
-форматтера, 16 файлов не прошли бы. Это отдельная уборка, а не условие для
-того, чтобы проверки вообще были.
-
-### macOS на Apple Silicon
-
-Повседневно бот запускается нативно — `make run`, безо всякого Docker, и
-`make browsers` качает arm64-сборку Chromium. Быстро и без эмуляции.
-
-Docker на M-процессоре — это про «проверить перед деплоем», а не про
-повседневную работу: образ собирается под `linux/amd64`, потому что Google не
-выпускает `google-chrome-stable` под arm64. Docker Desktop прогонит его через
-Rosetta (включается в Settings → General → «Use Rosetta for x86/amd64
-emulation», заметно быстрее) или через QEMU (медленно, по умолчанию).
-Платформа уже закреплена в `docker-compose.yml`, отдельных флагов не нужно.
-
-### Facebook локально
-
-Локально ничего из серверной машинерии не нужно: ни Xvfb, ни x11vnc, ни noVNC,
-ни туннеля. Без `FACEBOOK_CDP_URL` бот сам запускает браузер через Playwright и
-просто открывает окно у вас на экране — входите и проходите проверку в нём.
-
-Нужен установленный **Google Chrome** (обычное приложение в `/Applications`):
-сессия Facebook запускается с `channel="chrome"`, то есть настоящим Chrome, а
-не сборкой Chromium из Playwright — у настоящего браузера обычный отпечаток, и
-для автоматизации Facebook это строго лучше. `make browsers` его не качает и
-не должен.
-
-```sh
-FACEBOOK_ENABLED=true
-FACEBOOK_HEADLESS=false                   # чтобы окно было видно
-FACEBOOK_ADMIN_TELEGRAM_IDS=<ваш id>
-FACEBOOK_GROUP_URLS=https://www.facebook.com/groups/...
-# FACEBOOK_CDP_URL и FACEBOOK_DESKTOP_PUBLIC_BASE — не задавать
-```
-
-Профиль ложится в `./data/facebook_profile` и переживает перезапуски, так что
-вход нужен один раз. `/facebook` в Telegram работает и здесь, только кнопки
-«Открыть Facebook» не будет: `FACEBOOK_DESKTOP_PUBLIC_BASE` не задан, ссылку
-выдавать не на что — бот так и напишет и предложит окно на этой машине. Это не
-ошибка, а ровно тот случай, для которого писался запасной текст.
-
-Прочитать реальную группу и посмотреть, что вышло:
-
-```sh
-python scripts/facebook_probe.py "<ссылка на группу>" "<поисковая фраза>"
-```
-
-### Что на Mac проверить нельзя
-
-Xvfb, x11vnc и noVNC — линуксовые, и весь путь «кнопка в Telegram → токен →
-живое окно на сервере» целиком собирается только там. Логику гейта закрывает
-`make probe-gate`, всё остальное — только на VPS (или в Docker на линуксовой
-машине). Зелёный `make check` про этот стек не говорит ничего.
-
-## Настройка
-
-Все параметры — в [`.env.example`](.env.example) с комментариями. Обязательны
-только `TELEGRAM_TOKEN` и ключ одного LLM-провайдера.
-
-### Смена LLM-провайдера
-
-Меняется одной переменной. Все перечисленные провайдеры уже реализованы:
-
-| `LLM_PROVIDER` | Ключ | Комментарий |
-|---|---|---|
-| `openrouter` | `OPENROUTER_API_KEY` | один ключ, большинство моделей |
-| `groq` | `GROQ_API_KEY` | самый быстрый инференс |
-| `together`, `fireworks` | `TOGETHER_API_KEY`, `FIREWORKS_API_KEY` | открытые модели |
-| `anthropic` | `ANTHROPIC_API_KEY` | Claude, через Messages API |
-| `openai` | `OPENAI_API_KEY` | |
-| `nvidia` | `NVIDIA_API_KEY` | NIM / каталог NGC |
-| `openai_compatible` | `LLM_API_KEY` + `LLM_BASE_URL` | vLLM, Ollama, LM Studio и любой другой совместимый endpoint |
-
-Можно задать цепочку резерва — `LLM_FALLBACK_PROVIDERS=anthropic,groq`. Провайдер
-без настроенного ключа просто пропускается, а не считается сбоем.
-
-Разные модели на разные задачи:
-
-```sh
-LLM_MODEL_EXTRACT=openai/gpt-4o-mini              # дешёвая, разбирает запрос
-LLM_MODEL_RANK=anthropic/claude-sonnet-4.5        # умная, ранжирует и пишет описания
-```
-
-### Добавление нового провайдера
-
-Один файл и одна строка декоратора — остальной код не меняется.
-Для OpenAI-совместимого API достаточно трёх атрибутов класса:
-
-```python
-# bot/services/llm/my_provider.py
-from typing import ClassVar
-
-from bot.services.llm.openai_compatible import OpenAICompatibleProvider
-from bot.services.llm.registry import register_llm
-
-
-@register_llm("my_provider")
-class MyProvider(OpenAICompatibleProvider):
-    name: ClassVar[str] = "my_provider"
-    default_base_url: ClassVar[str | None] = "https://api.example.com/v1"
-    api_key_env_vars: ClassVar[tuple[str, ...]] = ("MY_PROVIDER_API_KEY",)
-```
-
-Импортируйте модуль в `bot/services/llm/__init__.py` — и `LLM_PROVIDER=my_provider`
-работает. Для API с другим протоколом наследуйтесь от `LLMProvider` и реализуйте
-`chat()`; `chat_structured()` со схемой и починкой невалидного JSON достанется
-бесплатно. Речь (`bot/services/stt/`) устроена точно так же.
-
-### Распознавание речи
-
-```sh
-STT_PROVIDER=openrouter             # или groq_whisper, openai_whisper, nvidia
-STT_MODEL=openai/whisper-large-v3-turbo
-```
-
-Голосовые Telegram приходят в OGG/Opus, который принимают все перечисленные
-endpoint'ы, — ffmpeg не нужен. `STT_ENABLED=false` вежливо отключает приём
-голоса.
-
-## Supabase
-
-Применить миграцию (SQL-редактор Supabase или `psql`):
-
-```sh
-psql "$SUPABASE_DB_URL" -f bot/services/db/migrations/001_init.sql
-```
-
-Затем указать `SUPABASE_URL` и `SUPABASE_KEY` (**service_role** — на таблицах
-включён RLS без разрешающих политик).
-
-Таблицы: `users`, `searches`, `results`, `feedback`.
-Защита от дубликатов — ограничение `UNIQUE (user_id, url_hash)` на `results`,
-где `url_hash` = SHA-256 от нормализованного URL (`bot/utils/urls.py`: нижний
-регистр хоста, без `www.`, без фрагмента, без `utm_*`/`fbclid`, отсортированные
-параметры, `http` сведён к `https`). Ограничение действует на пользователя, а не
-глобально, — два разных человека могут увидеть один и тот же объект, но каждый
-только один раз.
-
-**Без Supabase бот работает**, но: результаты не сохраняются, дедупликация между
-сессиями не работает и **кнопки под результатами не показываются** — нажатие
-некуда записать. При старте об этом пишется предупреждение.
+`make test` гонит тесты без Postgres (Postgres-тесты пропускаются без
+`SYSTEM_TEST_DATABASE_URL`). `ruff format` в проверках нет намеренно: дерево
+старше текущего форматтера. Тесты прежнего бота — в `legacy/tests/`, pytest их
+не собирает.
 
 ## Деплой на VPS
 
-### Обновление бота на VPS — одна команда
-
-```sh
-cd /opt/real-estate-bot && ./scripts/update.sh
-```
-
-Если не помните, где лежит проект: `docker compose ls` — путь в колонке
-`CONFIG FILES`.
-
-Скрипт берёт свежий код с GitHub (только fast-forward: если на сервере
-правили файлы руками, он остановится и покажет какие), скачивает свежие
-образы postgres/redis/caddy/searxng, пересобирает образы бота, накатывает
-миграции базы (`scripts/apply_migrations.sh`), пересоздаёт и перезапускает
-все контейнеры, удаляет старые образы и показывает `docker compose ps`.
-Данные (база, профиль Facebook, сертификаты) живут в томах и не трогаются.
-Другая ветка: `BRANCH=main ./scripts/update.sh`. То же самое: `make update`.
-
-Боевой вариант, если нужен Facebook. Браузер с залогиненным профилем должен
-жить постоянно, а к нему в любой момент должен прийти человек с телефона —
-когда Facebook попросит подтверждение. Render так не умеет: там имеет смысл
-только «бот без Facebook» из раздела ниже.
+Боевой стек — только `docker-compose.yml`: сервисы перечислены в
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Прежний автономный бот, Tailscale
+Funnel, шлюз `FACEBOOK_DESKTOP_*` и Render сюда не относятся (см. `legacy/`).
+Браузер с залогиненным профилем Facebook живёт в сервисе `browser`; к нему с
+телефона приходят через Telegram Mini App по HTTPS-адресу VPS (Caddy).
 
 ### Какая машина нужна
 
@@ -756,207 +483,192 @@ cd /opt/real-estate-bot && ./scripts/update.sh
 | RAM | 8 GB | 16 GB |
 | Диск | 50 GB NVMe | 100 GB |
 
-**Архитектура — обязательно x86_64 (amd64).** Google не собирает
-`google-chrome-stable` под arm64, поэтому на ARM-машине образ просто не
-соберётся; в `docker-compose.yml` платформа закреплена явно.
+ОС: чистый Ubuntu 24.04 LTS, архитектура x86_64. Образы с панелями (CyberPanel,
+CloudPanel и подобные) занимают порты 80/443 и память, они только мешают.
+Память нужна в первую очередь сервису `browser`: Chromium с профилем Facebook
+(0.8–1.5 GB) плюс разовые чтения страниц; если память кончится, ядро убьёт самый
+крупный процесс, то есть браузер с залогиненной сессией. Центр обработки данных
+выбирайте ближе к региону, из которого аккаунт Facebook обычно входит: чужой IP
+чаще вызывает checkpoint.
 
-Почему два ядра — минимум. В момент проверки одно ядро занято Chrome, который
-рисует страницу Facebook, второе — x11vnc, который кодирует картинку для
-вашего телефона. На одном ядре живой просмотр начинает ощутимо тормозить ровно
-тогда, когда по нему нужно попадать пальцем.
+### 1. Что нужно заранее
 
-Почему 8 GB — минимум. Постоянно висят Chrome с профилем Facebook (0.8–1.5 GB),
-SearXNG (~0.3 GB), бот (~0.2 GB), Xvfb с x11vnc (~0.1 GB); на пике добавляется
-Chromium парсера — ещё до 1 GB. Если память кончится, ядро Linux убьёт самый
-крупный процесс, то есть именно тот Chrome, в котором лежит залогиненная
-сессия, и проверку придётся проходить заново.
+- Токен бота от @BotFather (`TELEGRAM_TOKEN`) и ваш числовой Telegram ID
+  (`TELEGRAM_OPERATOR_IDS`; бот сообщит его в ответ на `/run`).
+- Ключ OpenRouter (`OPENROUTER_API_KEY`): интервьюер, план поиска, анализ,
+  рецензент, отчёт и голос работают через него. Без ключа бот стартует, но
+  вопросы задают встроенные правила, а находки без проверки модели считаются
+  «похожими».
+- Необязательно, для сайтов: ключ Google CSE (`GOOGLE_CSE_API_KEY`,
+  `GOOGLE_CSE_CX`, второй поисковый бэкенд), прокси с резидентскими адресами
+  (`WEB_SEARCH_PROXY_URL`) и scrape API для порталов, которые отказывают и
+  HTTP, и браузеру (`WEB_SEARCH_SCRAPE_API_URL`, `WEB_SEARCH_SCRAPE_API_KEY`).
+- Имя для HTTPS: не нужна покупка домена, `<ip-через-дефисы>.sslip.io`
+  указывает на IP (`203-0-113-7.sslip.io`). Порты 80 и 443 должны быть открыты.
 
-**ОС:** чистый Ubuntu 24.04 LTS. Образы с панелями (CyberPanel, CloudPanel и
-подобные) занимают порты 80/443 и память — они тут только мешают.
-
-**Локация ЦОД:** выбирайте ближе к региону, из которого аккаунт Facebook
-логинится обычно. Несовпадение географии IP — главная причина, по которой
-checkpoint появляется чаще, чем хотелось бы. Ни один тариф от этого не
-избавляет; смягчает только `PARSER_BROWSER_PROXY_URL` с резидентским прокси.
-
-### 1. Docker
+### 2. Docker, swap, код
 
 ```sh
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER && newgrp docker
-```
 
-На машине с 8 GB стоит добавить swap — он не заменяет память, но даёт ядру
-шанс вытеснить что-то неактивное вместо того, чтобы кого-то убить:
-
-```sh
+# на машине с 8 GB: swap не заменяет память, но даёт ядру что вытеснить
 sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
 sudo mkswap /swapfile && sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-```
 
-### 2. Код и `.env`
-
-```sh
 sudo git clone https://github.com/infinitytechmain2024/REAL-ESTATE-BOT.git /opt/real-estate-bot
 sudo chown -R $USER: /opt/real-estate-bot
 cd /opt/real-estate-bot
-python3 scripts/setup_env.py        # спросит ключи, запишет .env с правами 0600
+cp .env.example .env && chmod 600 .env
 ```
 
-Каталог `data/` переживает пересоздание контейнера — в нём лежат профиль
-Chrome и файл токена. Контейнер работает не от root (uid 10001), а bind-mount
-перекрывает права, выставленные при сборке, поэтому каталог нужно создать
-заранее и отдать ему:
+### 3. `.env`: минимум
+
+Подробные комментарии к каждому ключу — в [`.env.example`](.env.example). Эти
+значения нужны, чтобы стек поднялся и бот отвечал:
 
 ```sh
-mkdir -p data && sudo chown 10001:10001 data
+TELEGRAM_TOKEN=123456789:AA...
+TELEGRAM_OPERATOR_IDS=123456789            # владельцы, через запятую
+POSTGRES_PASSWORD=<openssl rand -base64 32>
+REDIS_PASSWORD=<openssl rand -base64 32>
+# Пароли должны совпасть с теми, что внутри URL:
+DATABASE_URL=postgresql://monitoring_app:<POSTGRES_PASSWORD>@postgres:5432/monitoring
+REDIS_URL=redis://:<REDIS_PASSWORD>@redis:6379/0
+BROWSER_SESSION_API_TOKEN=<openssl rand -base64 32>
+OPENROUTER_API_KEY=sk-or-v1-...
+# Живой браузер для /login и проверок Facebook:
+LIVE_VIEW_DOMAIN=203-0-113-7.sslip.io
+LIVE_VIEW_PUBLIC_URL=https://203-0-113-7.sslip.io
+LIVE_VIEW_BIND=0.0.0.0                     # открыть 80/443 у Caddy
+
+# необязательно
+GOOGLE_CSE_API_KEY=
+GOOGLE_CSE_CX=
+WEB_SEARCH_BACKENDS=searxng,google_cse     # без ключей Google пропускается
+WEB_SEARCH_PROXY_URL=
+WEB_SEARCH_SCRAPE_API_URL=
+WEB_SEARCH_SCRAPE_API_KEY=
 ```
 
-Без этого Chrome не сможет писать в профиль, и логин не переживёт ни одного
-перезапуска.
+`python3 scripts/setup_env.py` спросит ключи и запишет `.env` с правами 0600;
+`python3 scripts/fix_env.py` проверит согласованность паролей и URL. Модели
+по ролям (интервьюер, архитектор, рецензент, отчёт) и их рекомендуемые значения —
+в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); переменная доходит до контейнера
+только если она перечислена в блоке `environment` его сервиса в
+`docker-compose.yml`.
 
-### 3. Tailscale Funnel
-
-Нужен только для Facebook: это то, что делает кнопку в Telegram открываемой
-с любого телефона, не публикуя наружу ни одного своего порта.
+Firewall: снаружи нужны только SSH и HTTPS для Caddy; Postgres, Redis, SearXNG и
+API браузера наружу не публикуются, а noVNC и порт отладки Chromium открывать
+нельзя никогда.
 
 ```sh
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-sudo tailscale funnel --bg 8090     # именно 8090 — не 6080 и не порт CDP
-sudo tailscale funnel status
+sudo ufw allow OpenSSH && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp && sudo ufw enable
 ```
 
-Funnel включается для tailnet один раз в
-[админке ACL](https://login.tailscale.com/admin/acls); если он ещё не включён,
-команда сама напечатает нужный фрагмент. Адрес вида
-`https://<машина>.<tailnet>.ts.net`, который она выведет, идёт в
-`FACEBOOK_DESKTOP_PUBLIC_BASE`. После перезагрузки проверьте
-`tailscale funnel status` — конфигурация обычно восстанавливается сама, но если
-нет, команду нужно повторить (или положить в systemd-юнит).
-
-### 4. Переменные Facebook
-
-В `.env` (подробные комментарии — в [`.env.example`](.env.example)):
+### 4. Миграции и запуск
 
 ```sh
-FACEBOOK_ENABLED=true
-FACEBOOK_ADMIN_TELEGRAM_IDS=123456789          # кому придёт кнопка
-FACEBOOK_DESKTOP_PUBLIC_BASE=https://<машина>.<tailnet>.ts.net
-FACEBOOK_GROUP_URLS=https://www.facebook.com/groups/...
-# FACEBOOK_DESKTOP_PIN=1234                    # ещё один рубеж перед живым просмотром
+./scripts/apply_migrations.sh            # 001 ... 039, с контрольными суммами
+docker compose up -d --build            # первая сборка долгая
+docker compose ps
+curl -fsS http://127.0.0.1:8080/healthz
+docker compose logs -f telegram campaign-runner
 ```
 
-Двухфакторную аутентификацию на рабочем аккаунте лучше выключить — она убирает
-из входа шаг с кодом. Checkpoint она не убирает: ради него всё это и сделано.
+В логах `campaign-runner` должна появиться строка `campaign.runner.ready`, в
+логах `telegram` — готовность бота. Если `campaign.runner.relevance_rules_only`
+или `discovery_disabled` — не задан `OPENROUTER_API_KEY` или
+`BROWSER_SESSION_API_TOKEN`.
 
-### 5. Запуск
+### 5. Вход в Facebook
+
+В личном чате с ботом (вы в `TELEGRAM_OPERATOR_IDS`):
+
+```text
+/login facebook facebook-main
+```
+
+Нажмите **Open browser**, войдите в аккаунт руками (в том числе код из SMS),
+затем **Done, I am logged in**. Профиль станет `ready`. Двухфакторную
+аутентификацию на рабочем аккаунте лучше выключить: она убирает шаг с кодом, но
+не убирает checkpoint. То же для `/login instagram`, `/login tiktok`,
+`/login linkedin`, если нужен соцпоиск. Запасной путь без Telegram:
+`bash scripts/browser_login.sh facebook facebook-main`.
+
+### 6. Обновление
 
 ```sh
-docker compose up -d --build        # первая сборка долгая: ставится Chrome
-docker compose logs -f
+cd /opt/real-estate-bot && ./scripts/update.sh
 ```
 
-В логах при `FACEBOOK_ENABLED=true` должны появиться строки `entrypoint:`
-про Xvfb, Chrome, x11vnc и noVNC — если какой-то из них нет, дальше смотреть
-нечего, Facebook работать не будет.
+Если не помните, где лежит проект: `docker compose ls`, путь в колонке
+`CONFIG FILES`. Скрипт берёт свежий код с GitHub (только fast-forward: если на
+сервере правили файлы руками, он остановится и покажет какие), скачивает свежие
+образы postgres/redis/caddy/searxng, пересобирает образы бота, накатывает
+миграции (`scripts/apply_migrations.sh`), пересоздаёт и перезапускает все
+контейнеры, удаляет старые образы и показывает `docker compose ps`. Данные
+(база, профили браузера, сертификаты) живут в томах и не трогаются. Другая
+ветка: `BRANCH=main ./scripts/update.sh`; то же самое: `make update`.
 
-### 6. Проверка
+### Проверка после деплоя
 
-Сначала — путь «ссылка из Telegram → живой браузер», без Chrome и без телефона:
+Золотая задача: **«квартира в Валенсии до 200 000 €, от 2 комнат, покупка»**.
+Отправьте её боту в личном чате от имени одобренного пользователя (или владельца)
+и пройдите шаги.
+
+1. **Режим.** `/start`, выберите «🏡 Участки и объекты».
+2. **Вопросы.** В этой формулировке сказано всё обязательное (место, сделка,
+   тип, бюджет, комнаты), поэтому бот может сразу показать карточку. Чтобы
+   увидеть интервью, начните короче: «квартира в Валенсии». Бот задаёт по одному
+   вопросу (сделка, бюджет, комнаты) с примерами и кнопками «Не важно»,
+   «Хватит, ищи», «Отмена»; ответ на несколько полей одним сообщением принимается.
+3. **Карточка ТЗ** («Проверьте задачу»): город Валенсия, покупка, квартира, бюджет
+   до 200 000 €, от 2 комнат; кнопки «Запустить / Изменить / Отмена». «Изменить»
+   меняет одно поле и возвращает к карточке.
+4. **Запуск.** «Запустить»: «Принято. Начинаю поиск.», затем одно сообщение статуса,
+   которое редактируется на месте: «Ищу в Facebook…», «Ищу в интернете…» и строка
+   по сайтам вида «Сейчас: сайты · idealista.com (браузер) · прочитано 37 ·
+   найдено 12 · порталов 4/8» (слой: напрямую, браузер или API). Владельцы видят
+   техническую строку с отказами по слоям.
+5. **Карточки.** По одной, с хвостом «Найдено: N · ищу дальше». Объект, который
+   нашёлся на нескольких сайтах, приходит одной карточкой со строкой «Также на: …».
+   Похожие (чуть дороже бюджета) ждут «Одобрить». Каждая точная карточка: город
+   Валенсия, цена не выше 220 000 € (бюджет плюс допуск 10 %), от 2 комнат.
+6. **Итог.** «Поиск завершён.», затем «📋 Отчёт по поиску»: сколько отправлено и
+   отклонено по причинам, 10 лучших карточек, воронка по сайтам, непрочитанные
+   сайты и 2–4 рекомендации. Владельцам перед ним приходит «📊 Итог поиска».
+
+Ориентир приёмки (`PLAN.md`): не меньше 30 точных карточек, не меньше 90 % из них
+в Валенсии, и по 10 и больше с Idealista и Fotocasa. Если портал не читается,
+в отчёте он будет в списке «не прочитались»: включите прокси или scrape API.
 
 ```sh
-docker compose exec bot python scripts/gate_probe.py
+docker compose logs --tail 50 campaign-runner | grep web_search
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
-Скрипт поднимает заглушки вместо noVNC и websockify и дёргает гейт так, как это
-сделал бы телефон. Все проверки должны пройти. Это дешевле, чем выяснять, что
-ссылка не открывается, в момент, когда checkpoint уже висит.
-
-Потом — по-настоящему: отправьте боту `/facebook`, нажмите кнопку и убедитесь,
-что окно Chrome видно и на нажатия реагирует. Сделайте это **до** того, как
-понадобится, а не после.
-
-### Лимиты ресурсов
-
-`docker-compose.yml` ограничивает контейнер: `mem_limit`, `cpus` и `shm_size`.
-Значения рассчитаны на 4 vCPU / 16 GB; для 2 vCPU / 8 GB в комментарии рядом
-указаны другие. Смысл в том, чтобы предел выставил Docker — раньше, чем до
-процессов доберётся OOM killer ядра и убьёт залогиненный Chrome.
-
-`shm_size` отдельно: Docker по умолчанию монтирует `/dev/shm` размером 64 MB,
-а Chrome держит там разделяемую память между своими процессами. При прокрутке
-группы с картинками этого не хватает, и вкладки начинают умирать с «Target
-closed» на вид случайно, при свободной памяти на хосте.
-
-### Что смотрит наружу
-
-Ничего, что нужно открывать самому. Бот работает в режиме polling — входящие
-подключения ему не нужны; SearXNG, noVNC, x11vnc и порт CDP слушают только
-`127.0.0.1`. Единственная дверь снаружи — гейт на 8090, и до него доходит
-только трафик через Tailscale Funnel. Поэтому firewall можно закрыть целиком,
-кроме SSH:
-
-```sh
-sudo ufw allow OpenSSH && sudo ufw enable
+```sql
+select bucket, state, count(*) from campaign_findings
+ where campaign_id = (select id from campaigns order by created_at desc limit 1)
+ group by bucket, state;
 ```
-
-Никогда не выставляйте наружу 6080 (noVNC) или порт CDP: первый пускает к
-браузеру без токена, второй — это полное управление браузером по HTTP без
-всякой аутентификации.
 
 ### Обслуживание
 
 ```sh
-docker compose logs -f --tail=100        # логи
-docker compose restart bot               # перезапуск без пересборки
-git pull && docker compose up -d --build # обновление
-tar czf fb-profile.tgz data/             # бэкап профиля (в нём живая сессия)
+docker compose logs -f --tail=100 campaign-runner   # логи сервиса
+docker compose restart campaign-runner              # перезапуск без пересборки
+docker compose down                                 # остановка; никогда down -v
 ```
 
-Бэкап профиля стоит снять сразу после того, как вы первый раз прошли вход и
-проверку: восстановить его быстрее, чем проходить checkpoint заново.
+Бэкап профилей браузера (в них живые сессии) снимите сразу после первого входа:
 
-## Деплой на Render
-
-Вариант для бота без Facebook. Постоянно живого браузера, в который можно
-зайти с телефона, здесь не получится — для этого нужен раздел выше.
-
-[`render.yaml`](render.yaml) описывает один Docker-сервис с обоими процессами.
-
-1. New → Blueprint, указать репозиторий.
-2. Заполнить переменные, помеченные `sync: false` (токен, ключи, Supabase).
-3. Deploy.
-
-По умолчанию это **background worker** в режиме polling: публичный URL не нужен,
-а API SearXNG остаётся на loopback, недоступный извне. Фоновые воркеры доступны
-только на платных планах.
-
-Для webhook закомментируйте worker и раскомментируйте web-сервис в конце
-`render.yaml`, затем задайте `TELEGRAM_WEBHOOK_URL` = адрес сервиса. Наружу
-торчит webhook-сервер бота, SearXNG по-прежнему на `127.0.0.1`.
-
-## SearXNG
-
-`searxng/` — полный снимок официального репозитория, коммит и все локальные
-изменения зафиксированы в [`searxng/VENDOR.md`](searxng/VENDOR.md).
-
-Требование «только backend + JSON API» выполнено на уровне маршрутизации, а не
-удалением файлов, — чтобы снимок можно было обновлять:
-
-- `searxng/settings/settings.yml` задаёт `search.formats: [json]`. В upstream
-  стоит `[html]`, при котором `/search?format=json` отдаёт 403.
-- `searxng/api_only.py` — WSGI-обёртка, пропускающая только `/search`,
-  `/healthz`, `/config`, `/stats` и `/metrics`. На `/`, `/preferences`,
-  `/about`, `/static/*`, `/autocompleter` и `/image_proxy` возвращается 404.
-
-Движки: Google, Bing, DuckDuckGo, Brave, Startpage, Mojeek, Qwant, Wikipedia,
-Wikidata. Первые четыре и Qwant с Mojeek в upstream выключены по умолчанию,
-поэтому включены явно и взвешены — универсальные поисковики выше
-энциклопедических.
-
-Обновление снимка — по инструкции в `VENDOR.md`.
+```sh
+docker run --rm -v real-estate-monitor_browser_profiles:/p -v "$PWD":/b alpine \
+  tar czf /b/browser-profiles.tgz -C /p .
+```
 
 ## Полезные команды
 
@@ -983,19 +695,14 @@ operational API conditions and are never written to the database.
 ```sh
 make help          # список целей
 make setup         # спросить ключи и записать .env
-make install       # venv, зависимости и браузер
-make browsers      # только Chromium для Playwright
-make run           # бот локально
-make searxng       # SearXNG локально
+make install       # venv и зависимости
 make lint          # ruff
-make probe-gate    # живой просмотр Facebook, целиком
-make check-vendor  # целостность вендоренного SearXNG
-make check         # снимок, lint, импорты, конфиг, миграция, гейт
-make check-api     # SearXNG JSON API (SearXNG должен быть запущен)
-make docker-up     # то же, что на Render
+make test          # тесты без Postgres
+make check         # lint, импорты, конфиг, миграция, тесты
+make docker-up     # весь стек docker compose
 ```
 
 ## Лицензии
 
-Код бота — в этом репозитории. `searxng/` распространяется под AGPL-3.0-or-later
-(см. `searxng/LICENSE`) и является немодифицированным снимком стороннего проекта.
+Код бота — в этом репозитории. `legacy/searxng/` распространяется под AGPL-3.0-or-later
+(см. `legacy/searxng/LICENSE`) и является снимком стороннего проекта, в стеке не используется.

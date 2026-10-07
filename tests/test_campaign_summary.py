@@ -81,6 +81,7 @@ def test_the_relevance_check_sees_the_listing_and_knows_a_search_result() -> Non
                + SEARCH_RESULT_NOTE
     data = finding_data({"summary_ru": "Участок 1200 м²"}, original=original)
     assert data["excerpt"].startswith("Terreno en venta en Boadilla") and data["from_search"] is True
+    assert finding_data({}, original="x\nДанные со страницы результатов idealista.com")["from_search"] is True
     assert finding_data({"summary_ru": "x"}, original="Piso en Madrid " * 200)["from_search"] is False
     assert len(finding_data({}, original="a " * 2000)["excerpt"]) == 700
 
@@ -94,7 +95,7 @@ def build(messenger: FakeMessenger | None = None):
     messenger = messenger or FakeMessenger()
     clock = Clock()
     runner = CampaignRunner(campaigns, store, messenger, FakeDiscovery(campaigns, store, 3), now=clock,
-                            config=RunnerConfig(), owner_ids={OWNER})
+                            config=RunnerConfig(relevance_fail_closed=False), owner_ids={OWNER})
     return campaigns, store, messenger, clock, runner
 
 

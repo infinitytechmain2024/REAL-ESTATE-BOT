@@ -27,6 +27,7 @@ from bot.control_plane.intake import (
     key_command,
     mode_menu,
 )
+from bot.control_plane.interviewer import Interviewer
 from bot.control_plane.live_view import (
     PLATFORM_NAMES,
     LiveViewCoordinator,
@@ -43,7 +44,6 @@ from bot.control_plane.models import (
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.control_plane.store import ControlPlaneStore
 from bot.control_plane.stt import Transcriber, TranscriptionError
-from bot.control_plane.understanding import Understander
 from bot.control_plane.voice_commands import clean_transcript, spoken_command
 from bot.operators import ROLES, OperatorSet
 
@@ -121,7 +121,7 @@ class ControlPlane:
         intake_store: IntakeStore | None = None,
         offers: near.OfferDesk | None = None,
         campaigns: CampaignStore | None = None,
-        understander: Understander | None = None,
+        interviewer: Interviewer | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
@@ -135,9 +135,10 @@ class ControlPlane:
                              operators=self.operators, auto_operator_ids=settings.auto_operator_user_ids)
         # Mode choice and task intake (bot/control_plane/intake.py); launching always needs "Запустить".
         # Only the owner sees planner details and queue ids in intake replies.
-        # ``understander`` reads tasks with AI; None (tests, no key) keeps the deterministic rules.
+        # ``interviewer`` interviews with AI; None (tests, no key) keeps the deterministic rules.
         self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners,
-                                 technical=self._is_owner, understander=understander)
+                                 technical=self._is_owner, interviewer=interviewer,
+                                 max_rounds=settings.interview_max_rounds)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""
@@ -371,9 +372,10 @@ class ControlPlane:
         text = clean_transcript(transcript.text)
         # Spoken commands (status, pause all, ...) are for those who control collection; a user's words are a task.
         command = spoken_command(text) if self._can_control(message.user_id) else None
-        command_reply = await self._handle_command(message, command or text)
+        # The intake shows a user's voice task back to them once («Я услышал: «…»»).
+        command_reply = await self._handle_command(replace(message, transcript=text) if not command else message, command or text)
         if not owner:
-            # The transcript is internal: nobody but the owner ever sees it echoed back.
+            # Users hear their words back once from the intake («Я услышал»); only the owner gets the transcript block.
             # Operators still see which command a short phrase was mapped to.
             heard = f"Understood as: {command}\n\n" if command else ""
             return replace(command_reply, text=heard + command_reply.text)
@@ -455,7 +457,7 @@ class ControlPlane:
             if role is None:
                 return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
             text = ("Commands: /status, /run <scope>, /pause <scope>, /resume <scope>, /cancel <scope>, "
-                    "/campaign <goal> | status | cancel <id>, "
+                    "/campaign <goal> | status | report [<id>] | cancel <id>, "
                     "/login [facebook|instagram|tiktok|linkedin] [profile-name]. Confirm changes with: confirm <token>.")
             if role == "owner":
                 text += " Owners: /settings (roles with buttons), /operators, /role <ID> helper|user|operator, /revoke <ID>, /auto on|off|status."
@@ -508,11 +510,15 @@ class ControlPlane:
             return refusal
         if command == "campaign":
             if not arguments.strip():
-                return Reply("Use /campaign <what and where to search>, /campaign status, or /campaign cancel <id>.")
+                return Reply("Use /campaign <what and where to search>, /campaign status, /campaign report [<id>], or /campaign cancel <id>.")
             if arguments.strip().lower() == "status":
                 # Read-only: no confirmation; the Orchestra answers in this chat.
                 await self.command_sink(CommandEnvelope(command, "status", message.chat_id, message.user_id, message.message_id))
                 return Reply("Campaign status requested.")
+            if (report := _report_arguments(arguments)) is not None:
+                # Read-only too: the campaign's metrics (PLAN 4.4); owners may name any campaign.
+                await self.command_sink(CommandEnvelope(command, report, message.chat_id, message.user_id, message.message_id))
+                return Reply("Собираю отчёт по поиску.")
         cancelling = command == "campaign" and arguments.split(maxsplit=1)[0].lower() == "cancel"
         if command in AUTO_COMMANDS and not cancelling and await self.auto.applies_to(message.user_id):
             return await self._auto_queue(message, command, arguments)
@@ -530,6 +536,10 @@ class ControlPlane:
         if goal.lower() == "status":
             await self.command_sink(CommandEnvelope(command, "status", message.chat_id, message.user_id, message.message_id))
             return Reply("Проверяю, как идёт поиск.")
+        if (report := _report_arguments(goal)) is not None:
+            # Their own campaign only (the Orchestra checks the owner): the latest of this chat, or the one named.
+            await self.command_sink(CommandEnvelope(command, report, message.chat_id, message.user_id, message.message_id))
+            return Reply("Собираю отчёт по поиску.")
         if _is_cancel(goal):
             # Users never see campaign ids: «cancel» (with or without one) stops their running search.
             return await self._stop_search(message)
@@ -576,6 +586,15 @@ class ControlPlane:
 def _button_key(campaign_id: str) -> int:
     """A negative message id (Telegram's are positive) unique to the campaign: the Orchestra's idempotency key."""
     return -int(hashlib.sha256(f"stop:{campaign_id}".encode()).hexdigest()[:15], 16) - 1
+
+
+def _report_arguments(arguments: str) -> str | None:
+    """``report`` or ``report <id>`` -> the normalised arguments; None when this is not a report request
+    (three or more words after «report» are a goal)."""
+    parts = arguments.split()
+    if not parts or parts[0].lower() != "report" or len(parts) > 2:
+        return None
+    return " ".join(["report", *parts[1:]])
 
 
 def _is_cancel(arguments: str) -> bool:

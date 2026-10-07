@@ -9,7 +9,9 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from bot.campaign.architect import InvalidGoal, plan_campaign
+from bot.campaign.metrics import campaign_title, report_text
 from bot.campaign.models import TERMINAL_STATES, Campaign
+from bot.campaign.spec import TaskSpec
 from bot.campaign.status_text import DONE, NOTHING, campaign_label
 
 from .models import ClaimedCommand, ClaimLost, CommandReceipt, CommandState, ConfirmedCommand
@@ -17,6 +19,7 @@ from .parser import (
     CommandValidationError,
     parse_campaign,
     parse_campaign_goal,
+    parse_campaign_spec,
     parse_run,
     parse_scope,
 )
@@ -31,6 +34,16 @@ Notifier = Callable[[int, str], Awaitable[None]]
 MAX_BACKOFF_SECONDS = 30.0
 REAP_INTERVAL_SECONDS = 60.0
 NOT_STOPPABLE = "Этот поиск уже завершён или недоступен."
+
+
+def _task_spec(raw: dict[str, Any] | None) -> TaskSpec | None:
+    """The queued ``spec=`` token as a ``TaskSpec``; an unreadable one rejects the command, nothing is stored."""
+    if raw is None:
+        return None
+    try:
+        return TaskSpec.model_validate(raw)
+    except ValueError as exc:
+        raise CommandValidationError("spec is not a valid task description") from exc
 
 
 class OrchestraDispatcher:
@@ -146,6 +159,22 @@ class OrchestraDispatcher:
                 campaign = None
             result = {"status": "finished", "campaign_id": campaign.id if campaign else None, "reply": campaign_status(campaign)}
             user_reply = user_campaign_status(campaign)
+        elif action == "report":
+            # The campaign's numbers (``campaign_metrics``): the given id, else the chat's latest. A user sees only a
+            # campaign they requested, and without the technical lines (queries, pages per fetch layer).
+            campaign = await self.campaigns.get(value) if value else await self.campaigns.latest_for_chat(item.chat_id)
+            if own_only and campaign is not None and campaign.requested_by != item.user_id:
+                campaign = None
+            if campaign is None:
+                reply = "Кампания не найдена. Отчёт доступен только по своим кампаниям." if own_only else (
+                    f"Кампания {value} не найдена." if value else "В этом чате ещё нет кампаний.")
+                result = {"status": "unchanged", "campaign_id": value or None, "reply": reply}
+                user_reply = reply
+            else:
+                metrics = await self.campaigns.refresh_metrics(campaign.id)
+                reply = report_text(metrics, campaign_title(campaign), technical=self._is_owner(item.user_id))
+                result = {"status": "finished", "campaign_id": campaign.id, "reply": reply}
+                user_reply = reply
         elif action == "cancel" and own_only and not await self._owns(value, item.user_id):
             log.warning("orchestra.campaign_cancel_refused", extra={"command_id": item.id, "user_id": item.user_id})
             result = {"status": "refused", "campaign_id": value, "reply": f"Можно остановить только свою кампанию; {value} не ваша или не найдена."}
@@ -159,10 +188,14 @@ class OrchestraDispatcher:
             user_reply = NOT_STOPPABLE if not cancelled else None if own_only else DONE
         else:
             # Intake queues "mode=<vertical> place=<names> <task>": the person's choices override detection.
+            # ... and, from the interviewer, "spec=<TaskSpec JSON>": the confirmed requirements.
             goal, vertical, city, place = parse_campaign_goal(value)
-            plan = plan_campaign(goal, vertical=vertical, location=city, place=place)  # type: ignore[arg-type]  # InvalidGoal: nothing is stored
+            spec = _task_spec(parse_campaign_spec(value))
+            plan = plan_campaign(goal, vertical=vertical, location=city, place=place,  # type: ignore[arg-type]  # InvalidGoal: nothing is stored
+                                 spec=spec)
+            extra: dict[str, Any] = {"spec": spec.model_dump(mode="json")} if spec is not None else {}
             created = await self.campaigns.create(plan, chat_id=item.chat_id, requested_by=item.user_id,
-                                                  source_text=goal, actor=actor)
+                                                  source_text=goal, actor=actor, **extra)
             result = {"status": "planned", "campaign_id": created, "reply": f"Кампания {created} запланирована: {plan.goal}"}
         try:
             await self.store.complete(item, CommandState.FINISHED, result)

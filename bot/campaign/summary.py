@@ -80,6 +80,12 @@ def _sites(sources: Sequence[SourceCount], reports: Sequence[object], portals: S
     return {host: Site(host, **row) for host, row in merged.items()}
 
 
+def site_stats(sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = ()) -> dict[str, Site]:
+    """Both stores' numbers per site (a portal's subdomains count as the portal): ``links``, ``read``, ``refused``,
+    ``sent``, ``held`` ... See ``Site``."""
+    return _sites(sources, reports, portals)
+
+
 def _site_line(site: Site) -> str:
     parts = [plural(site.links, "ссылка", "ссылки", "ссылок") + " в поиске"] if site.links else []
     if site.read:
@@ -105,27 +111,11 @@ def _nothing_line(site: Site) -> str:
     return f"{site_name(site.host)} — {why}"
 
 
-def summary_text(goal: str, sources: Sequence[SourceCount], reports: Sequence[object],
-                 portals: Sequence[str] = ()) -> str:
-    """The Russian summary message (see the module notes)."""
-    lines = ["📊 Итог поиска", f"🎯 {goal}"]
-    sent = sum(s.sent for s in sources)
-    held = sum(s.held for s in sources)
-    total = f"Отправлено объявлений: {sent}"
-    if held:
-        total += f" · ещё похожих вариантов: {held}"
-    lines += [total, ""]
-
-    for platform in ("facebook", "instagram", "tiktok", "linkedin", "telegram"):
-        rows = [s for s in sources if s.platform == platform]
-        if not rows:
-            continue
-        posts, cards, waiting = sum(r.posts for r in rows), sum(r.sent for r in rows), sum(r.held for r in rows)
-        groups = sum(r.sources for r in rows)
-        read = plural(posts, "пост", "поста", "постов")
-        where = f"{plural(groups, 'группа', 'группы', 'групп')}, " if platform == "facebook" else ""
-        lines.append(f"{PLATFORM_NAMES[platform]} — {where}{read} {_cards(cards, waiting)}")
-
+def site_lines(sources: Sequence[SourceCount], reports: Sequence[object],
+               portals: Sequence[str] = ()) -> tuple[list[str], list[Site]]:
+    """One line per site (the known portals in priority order, then the busiest others, the rest summed) and the
+    portals the search found nothing on. Shared by the owners' summary and the user's final report."""
+    lines: list[str] = []
     sites = _sites(sources, reports, portals)
     shown: set[str] = set()
     nothing: list[Site] = []
@@ -148,6 +138,32 @@ def summary_text(goal: str, sources: Sequence[SourceCount], reports: Sequence[ob
         pages = sum(s.read + s.from_search for s in rest)
         lines.append(f"Другие сайты ({len(rest)}) — прочитано {pages} "
                      f"{_cards(sum(s.sent for s in rest), sum(s.held for s in rest))}")
+    return lines, nothing
+
+
+def summary_text(goal: str, sources: Sequence[SourceCount], reports: Sequence[object],
+                 portals: Sequence[str] = ()) -> str:
+    """The Russian summary message (see the module notes)."""
+    lines = ["📊 Итог поиска", f"🎯 {goal}"]
+    sent = sum(s.sent for s in sources)
+    held = sum(s.held for s in sources)
+    total = f"Отправлено объявлений: {sent}"
+    if held:
+        total += f" · ещё похожих вариантов: {held}"
+    lines += [total, ""]
+
+    for platform in ("facebook", "instagram", "tiktok", "linkedin", "telegram"):
+        rows = [s for s in sources if s.platform == platform]
+        if not rows:
+            continue
+        posts, cards, waiting = sum(r.posts for r in rows), sum(r.sent for r in rows), sum(r.held for r in rows)
+        groups = sum(r.sources for r in rows)
+        read = plural(posts, "пост", "поста", "постов")
+        where = f"{plural(groups, 'группа', 'группы', 'групп')}, " if platform == "facebook" else ""
+        lines.append(f"{PLATFORM_NAMES[platform]} — {where}{read} {_cards(cards, waiting)}")
+
+    site_rows, nothing = site_lines(sources, reports, portals)
+    lines += site_rows
     if nothing:
         lines += ["", "Не нашлось в поиске: " + ", ".join(site_name(s.host) for s in nothing)]
     if len(lines) == 4:

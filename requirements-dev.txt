@@ -20,3 +20,7 @@ ruff==0.15.8
 # extension, which is a poor thing to make every clone of this repo pay for
 # to run one optional check. The target skips itself with a message when it
 # is missing; `pip install pglast` if you want it.
+
+# tests/test_deployment.py parses docker-compose.yml to check that every
+# setting reaches its service.
+pyyaml==6.0.1

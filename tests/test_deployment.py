@@ -1,102 +1,10 @@
-"""Deployment-shape rules that no unit test would otherwise catch.
-
-Two invariants live here. The Facebook password should not be sitting on the
-machine when the human-login path is the primary one, and the portal fetcher
-must never share a browser with the Facebook session -- routing an Idealista
-request through the logged-in profile would put the operator's Facebook
-identity behind every listing fetch.
-"""
+"""Deployment-shape rules that no unit test would otherwise catch."""
 
 from __future__ import annotations
 
 import os
 import subprocess
 from pathlib import Path
-
-from bot.config import FacebookSettings, ParserSettings, Settings
-from bot.main import deployment_warnings
-
-
-def _settings(**facebook: object) -> Settings:
-    return Settings(facebook=FacebookSettings(enabled=True, **facebook))
-
-
-# --- 6.4 stored credentials ------------------------------------------------
-
-
-def test_a_stored_facebook_password_is_called_out() -> None:
-    """Primary path is a human logging in; the password need not be here.
-
-    With 2FA switched off on the bot account, a stored password is most of
-    what protects it, sitting next to a browser that is already logged in.
-    """
-    warnings = deployment_warnings(
-        _settings(login_email="bot@example.com", login_password="hunter2")
-    )
-
-    assert any("FACEBOOK_PASSWORD" in w for w in warnings), warnings
-
-
-def test_no_warning_when_credentials_are_absent() -> None:
-    assert deployment_warnings(_settings()) == []
-
-
-def test_facebook_disabled_says_nothing() -> None:
-    """Whatever is in the file, an unused module is not a live risk."""
-    settings = Settings(facebook=FacebookSettings(enabled=False, login_password="hunter2"))
-    assert deployment_warnings(settings) == []
-
-
-# --- 6.5 the two browsers stay separate ------------------------------------
-
-
-def test_the_portal_fetcher_cannot_be_pointed_at_the_facebook_browser() -> None:
-    """There must be no knob that reuses the logged-in profile for portals.
-
-    This asserts the separation is structural rather than a convention: the
-    parser's settings expose no profile directory and no CDP endpoint, so
-    there is nothing to set that would make an Idealista fetch travel through
-    the Facebook session. It is a guard against a future option being added
-    without anyone weighing what it would mean.
-    """
-    knobs = set(ParserSettings.model_fields)
-
-    assert not {field for field in knobs if "profile" in field}
-    assert not {field for field in knobs if "cdp" in field}
-    assert not {field for field in knobs if "user_data" in field}
-
-
-def test_facebook_owns_the_profile_and_cdp_settings() -> None:
-    """The other half of the same rule: those knobs belong to Facebook alone."""
-    facebook = set(FacebookSettings.model_fields)
-
-    assert "profile_dir" in facebook
-    assert "cdp_url" in facebook
-
-
-# --- the vendored SearXNG must survive a clone ------------------------------
-
-
-def test_the_runtime_ignore_rule_does_not_swallow_searxng() -> None:
-    """`data/` unanchored matches a directory of that name at any depth.
-
-    It did exactly that to `searxng/searx/data`, the vendored engine, currency
-    and locale tables. Without them `from searx.data import ENGINE_TRAITS`
-    fails and SearXNG cannot start at all, so every clone of this repository
-    had no working search engine while the bot's own tests stayed green.
-    """
-    repo = Path(__file__).resolve().parent.parent
-    result = subprocess.run(
-        ["git", "check-ignore", "-v", "searxng/searx/data/engines.json"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode != 0, (
-        f"the vendored SearXNG data package is gitignored by: {result.stdout.strip()}"
-    )
 
 
 def test_the_bots_own_runtime_directory_is_still_ignored() -> None:
@@ -150,33 +58,6 @@ def test_an_env_backup_cannot_be_added_again() -> None:
     assert result.returncode == 0, ".env.backup is not gitignored"
 
 
-def test_the_local_model_server_stays_on_loopback() -> None:
-    """A model server on a home network answers anyone who asks.
-
-    It has no authentication of any kind, exactly like the CDP port, so the
-    rule is the same one: bind to 127.0.0.1 and publish nothing.
-    """
-    script = Path(__file__).resolve().parent.parent / "scripts" / "run_llm.sh"
-    body = script.read_text(encoding="utf-8")
-
-    assert script.stat().st_mode & 0o111, "scripts/run_llm.sh is not executable"
-    assert "--host 127.0.0.1" in body, "the local model server must bind to loopback"
-    assert "0.0.0.0" not in body
-
-
-def test_the_local_model_server_sets_the_two_things_ollama_does_not() -> None:
-    """The whole reason this script exists rather than `ollama run`.
-
-    A 4096-token default that truncates silently, and a KV cache that cannot be
-    quantised, are what made a large context unusable.
-    """
-    script = Path(__file__).resolve().parent.parent / "scripts" / "run_llm.sh"
-    body = script.read_text(encoding="utf-8")
-
-    assert "--ctx-size" in body
-    assert "--cache-type-k" in body
-
-
 def test_vps_update_script_migrates_restarts_and_never_drops_data() -> None:
     script = Path(__file__).resolve().parents[1] / "scripts/update.sh"
     text = script.read_text(encoding="utf-8")
@@ -185,3 +66,51 @@ def test_vps_update_script_migrates_restarts_and_never_drops_data() -> None:
     assert "pull --ignore-buildable" in text and "build --pull" in text and "up -d --force-recreate" in text
     assert text.index("apply_migrations") < text.index("up -d --force-recreate")  # schema first, then new code
     assert "down -v" not in text and "volume rm" not in text and "prune -a" not in text
+
+
+_SERVICE_SETTINGS = {
+    "telegram": ["bot/control_plane/settings.py"],
+    "campaign-runner": ["bot/campaign/settings.py", "bot/web_search/settings.py"],
+    "analysis-worker": ["bot/analysis_pipeline/settings.py"],
+    "analysis-pipeline": ["bot/analysis_pipeline/settings.py"],
+    "reduction-worker": ["bot/agents/settings.py"],
+    "agent-reach-worker": ["bot/agent_reach/settings.py"],
+    "scrapling-worker": ["bot/scrapling_connector/settings.py"],
+    "verification": ["bot/verification/settings.py"],
+}
+
+
+def test_compose_passes_every_setting_to_its_service() -> None:
+    """A setting that .env.example documents must reach the service that reads it."""
+    import re
+
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    services = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+
+    missing: list[str] = []
+    for service, files in _SERVICE_SETTINGS.items():
+        spec = services[service]
+        if spec.get("env_file"):
+            continue
+        passed = set(spec.get("environment") or {})
+        for name in files:
+            text = (repo / name).read_text(encoding="utf-8")
+            names = set(re.findall(r'validation_alias="([A-Z0-9_]+)"', text))
+            names |= set(re.findall(r'(?:_bounded_int|_bounded|_on_off|environ\.get|env\.get)\(\s*(?:env,\s*)?"([A-Z0-9_]+)"', text))
+            missing += [f"{service}: {n}" for n in sorted(names - passed)]
+    assert missing == [], f"settings never reach their service: {missing}"
+
+    example: dict[str, str] = {}
+    for line in (repo / ".env.example").read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^([A-Z0-9_]+)=(.*)$", line)
+        if match:
+            example[match[1]] = match[2].strip()
+    stale: list[str] = []
+    for service, spec in services.items():
+        for key, value in (spec.get("environment") or {}).items():
+            match = re.fullmatch(r"\$\{[A-Z0-9_]+:-(.*)\}", str(value))
+            if match and key in example and "..." not in example[key] and match[1] != example[key]:
+                stale.append(f"{service}: {key} compose={match[1]!r} .env.example={example[key]!r}")
+    assert stale == [], f"compose defaults differ from .env.example: {stale}"

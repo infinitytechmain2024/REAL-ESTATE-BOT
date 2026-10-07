@@ -52,6 +52,7 @@ class FindingRecord:
     telegram_message_id: int | None = None
     send_attempts: int = 0
     agent: str = AGENT
+    reason: str | None = None  # why it was excluded unsent, e.g. ``duplicate_of:<head finding id>`` (migration 039)
 
 
 class Recorder(Protocol):
@@ -66,7 +67,8 @@ class Recorder(Protocol):
 
 
 def record_of(campaign_id: str, finding_id: str, *, state: State, bucket: str | None,
-              payload: dict[str, Any] | None, text: str, card_text: str | None = None) -> FindingRecord:
+              payload: dict[str, Any] | None, text: str, card_text: str | None = None,
+              reason: str | None = None) -> FindingRecord:
     payload = payload or {}
     link = str(payload.get("original_post_link") or payload.get("url") or "").strip() or None
     return FindingRecord(
@@ -74,6 +76,7 @@ def record_of(campaign_id: str, finding_id: str, *, state: State, bucket: str | 
         site=site_of(link) if link else "unknown", url=link,
         url_key=url_key(link) if link else f"finding:{finding_id}",
         fingerprint=fingerprint(payload), simhash=simhash64(text), facts=facts_of(payload), card_text=card_text,
+        reason=reason[:120] if reason else None,
     )
 
 
@@ -176,14 +179,15 @@ class PostgresRecorder:
         # A row already sent is never moved back: the user has seen it.
         await self.pool.execute(
             """insert into agent_findings (campaign_id, finding_id, state, bucket, site, url, url_key, fingerprint,
-                                           simhash, facts, card_text, agent)
-               values ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
+                                           simhash, facts, card_text, agent, reason)
+               values ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)
                on conflict (campaign_id, finding_id) do update
                   set state = excluded.state, bucket = coalesce(excluded.bucket, agent_findings.bucket),
-                      card_text = coalesce(excluded.card_text, agent_findings.card_text), updated_at = now()
+                      card_text = coalesce(excluded.card_text, agent_findings.card_text),
+                      reason = excluded.reason, updated_at = now()
                 where agent_findings.state <> 'sent'""",
             r.campaign_id, r.finding_id, r.state, r.bucket, r.site, r.url, r.url_key, r.fingerprint, r.simhash,
-            json.dumps(r.facts, ensure_ascii=False), r.card_text, r.agent)
+            json.dumps(r.facts, ensure_ascii=False), r.card_text, r.agent, r.reason)
 
 
 class MemoryRecorder:

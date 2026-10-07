@@ -1,14 +1,15 @@
 [project]
 name = "real-estate-bot"
 version = "0.1.0"
-description = "Telegram bot that researches property listings and investors via SearXNG and an LLM"
+description = "Telegram-controlled real-estate and investor research campaigns"
 requires-python = ">=3.11"
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-# The vendored SearXNG snapshot is upstream code and is linted upstream.
-extend-exclude = ["searxng"]
+# legacy/ is the retired standalone bot (incl. the vendored SearXNG snapshot):
+# kept for reference, not deployed, not linted.
+extend-exclude = ["legacy"]
 
 [tool.ruff.lint]
 # BLE001 is enabled so that every broad `except Exception` has to be
@@ -29,6 +30,8 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# legacy/tests belong to the retired standalone bot and need its code; see legacy/README.md.
+norecursedirs = ["legacy", ".git", "node_modules"]
 # Every test here is async; opting in per-test would be pure ceremony.
 asyncio_mode = "auto"
 addopts = "-q"

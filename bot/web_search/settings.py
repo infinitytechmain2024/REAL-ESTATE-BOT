@@ -2,10 +2,24 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+import logging
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .fetcher import checked_impersonation
+from .scrape_api import ScrapeApiClient
+from .search_backends import (
+    BACKEND_NAMES,
+    GoogleCseClient,
+    MergedSearcher,
+    SearchBackend,
+    SerpApiClient,
+)
+from .searxng import SearxngClient
 from .worker import WebSearchConfig
+
+log = logging.getLogger(__name__)
 
 
 class WebSearchSettings(BaseSettings):
@@ -14,6 +28,13 @@ class WebSearchSettings(BaseSettings):
     enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_ENABLED")
     searxng_url: str = Field(default="http://searxng:8080", validation_alias="WEB_SEARCH_SEARXNG_URL")
     searxng_timeout_seconds: float = Field(default=25, ge=3, le=120, validation_alias="WEB_SEARCH_SEARXNG_TIMEOUT_SECONDS")
+    # Search backends: comma list of searxng | google_cse | serpapi. A named backend without its key is skipped.
+    backends_raw: str = Field(default="searxng", validation_alias="WEB_SEARCH_BACKENDS")
+    google_cse_api_key: str = Field(default="", repr=False, validation_alias="GOOGLE_CSE_API_KEY")
+    google_cse_cx: str = Field(default="", validation_alias="GOOGLE_CSE_CX")
+    serpapi_api_key: str = Field(default="", repr=False, validation_alias="SERPAPI_API_KEY")
+    google_cse_daily_cap: int = Field(default=90, ge=0, le=100_000, validation_alias="WEB_SEARCH_GOOGLE_CSE_DAILY_CAP")
+    serpapi_daily_cap: int = Field(default=90, ge=0, le=100_000, validation_alias="WEB_SEARCH_SERPAPI_DAILY_CAP")
     poll_seconds: float = Field(default=15, ge=2, le=600, validation_alias="WEB_SEARCH_POLL_SECONDS")
 
     # Query generation: OpenRouter with the analysis key; without it, deterministic templates.
@@ -22,12 +43,17 @@ class WebSearchSettings(BaseSettings):
     query_timeout_seconds: float = Field(default=30, ge=3, le=120, validation_alias="OPENROUTER_WEB_QUERY_TIMEOUT_SECONDS")
 
     queries_per_round: int = Field(default=12, ge=1, le=30, validation_alias="WEB_SEARCH_QUERIES_PER_ROUND")
-    max_queries_per_campaign: int = Field(default=40, ge=1, le=200, validation_alias="WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN")
-    results_per_query: int = Field(default=10, ge=1, le=30, validation_alias="WEB_SEARCH_RESULTS_PER_QUERY")
-    max_pages_per_campaign: int = Field(default=150, ge=1, le=500, validation_alias="WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN")
-    max_pages_per_host: int = Field(default=30, ge=1, le=100, validation_alias="WEB_SEARCH_MAX_PAGES_PER_HOST")
-    max_links_per_index: int = Field(default=10, ge=0, le=30, validation_alias="WEB_SEARCH_MAX_LINKS_PER_INDEX")
-    max_pages_per_day: int = Field(default=1500, ge=1, le=10_000, validation_alias="WEB_SEARCH_MAX_PAGES_PER_DAY")
+    max_queries_per_campaign: int = Field(default=80, ge=1, le=200, validation_alias="WEB_SEARCH_MAX_QUERIES_PER_CAMPAIGN")
+    results_per_query: int = Field(default=30, ge=1, le=30, validation_alias="WEB_SEARCH_RESULTS_PER_QUERY")
+    pages_per_query: int = Field(default=2, ge=1, le=5, validation_alias="WEB_SEARCH_PAGES_PER_QUERY")
+    # Hours a query another campaign searched blocks the same query (0: never; a campaign never repeats its own).
+    query_reuse_hours: int = Field(default=0, ge=0, le=720, validation_alias="WEB_SEARCH_QUERY_REUSE_HOURS")
+    # Days after which an index (search/list) page may be read again; its listing links go through the usual dedup.
+    index_ttl_days: int = Field(default=7, ge=0, le=365, validation_alias="WEB_SEARCH_INDEX_TTL_DAYS")
+    max_pages_per_campaign: int = Field(default=400, ge=1, le=500, validation_alias="WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN")
+    max_pages_per_host: int = Field(default=100, ge=1, le=100, validation_alias="WEB_SEARCH_MAX_PAGES_PER_HOST")
+    max_links_per_index: int = Field(default=40, ge=0, le=100, validation_alias="WEB_SEARCH_MAX_LINKS_PER_INDEX")
+    max_pages_per_day: int = Field(default=3000, ge=1, le=10_000, validation_alias="WEB_SEARCH_MAX_PAGES_PER_DAY")
     max_queries_per_day: int = Field(default=300, ge=1, le=5_000, validation_alias="WEB_SEARCH_MAX_QUERIES_PER_DAY")
     max_minutes_per_campaign: int = Field(default=240, ge=5, le=10_080, validation_alias="WEB_SEARCH_MAX_MINUTES_PER_CAMPAIGN")
     blocked_hosts_raw: str = Field(default="", validation_alias="WEB_SEARCH_BLOCKED_HOSTS")
@@ -43,9 +69,30 @@ class WebSearchSettings(BaseSettings):
     # Pages drawn by JavaScript (HTTP 200 but empty): read once more in the browser (the Agent Reach path).
     render_enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_ENABLED")
     render_timeout_seconds: float = Field(default=30, ge=5, le=60, validation_alias="WEB_SEARCH_RENDER_TIMEOUT_SECONDS")
-    max_renders_per_campaign: int = Field(default=15, ge=0, le=200, validation_alias="WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN")
+    max_renders_per_campaign: int = Field(default=60, ge=0, le=200, validation_alias="WEB_SEARCH_MAX_RENDERS_PER_CAMPAIGN")
+    # A page the plain fetch was refused (403/429/503, a captcha page) is tried once in the browser
+    # (robots.txt still decides first); then the search-result card. Off: only empty JS pages are rendered.
+    render_on_refusal: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_ON_REFUSAL")
+    # A refused depth-0 index (search/list) page may use the browser; the scrape API is never used for index pages.
+    render_index_on_refusal: bool = Field(default=True, validation_alias="WEB_SEARCH_RENDER_INDEX_ON_REFUSAL")
+    # Optional last layer for pages both HTTP and the browser were refused: GET {url}?url=<page> with
+    # "Authorization: Bearer <key>" (a Zyte / ScraperAPI / Bright Data style unlocker). Empty: off. Never logged.
+    scrape_api_url: str = Field(default="", validation_alias="WEB_SEARCH_SCRAPE_API_URL")
+    scrape_api_key: str = Field(default="", repr=False, validation_alias="WEB_SEARCH_SCRAPE_API_KEY")
+    scrape_api_timeout_seconds: float = Field(default=60, ge=5, le=180, validation_alias="WEB_SEARCH_SCRAPE_API_TIMEOUT_SECONDS")
+    max_scrape_api_per_campaign: int = Field(default=40, ge=0, le=500, validation_alias="WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN")
     # Optional outbound proxy/VPN for page fetches (http://, https://, socks5://). Never logged.
-    proxy_url: str = Field(default="", validation_alias="WEB_SEARCH_PROXY_URL")
+    # Several proxies may be given comma-separated (one sticky proxy per host).
+    proxy_url: str = Field(default="", repr=False, validation_alias="WEB_SEARCH_PROXY_URL")
+    # Browser-impersonating fetch via curl_cffi: off | chrome | safari | firefox | a profile name (chrome124).
+    impersonate: str = Field(default="chrome", max_length=40, validation_alias="WEB_SEARCH_IMPERSONATE")
+    # UA sent on page requests when impersonating; empty: the Chrome 124 / Windows default for the profile.
+    browser_user_agent: str = Field(default="", max_length=300, validation_alias="WEB_SEARCH_BROWSER_USER_AGENT")
+
+    @field_validator("impersonate")
+    @classmethod
+    def _known_profile(cls, value: str) -> str:
+        return checked_impersonation(value)
 
     def blocked_hosts(self) -> frozenset[str]:
         return frozenset(h.strip().lower().removeprefix("www.") for h in self.blocked_hosts_raw.replace(",", " ").split()
@@ -54,11 +101,61 @@ class WebSearchSettings(BaseSettings):
     def config(self) -> WebSearchConfig:
         return WebSearchConfig(
             queries_per_round=self.queries_per_round, max_queries_per_campaign=self.max_queries_per_campaign,
-            results_per_query=self.results_per_query, max_pages_per_campaign=self.max_pages_per_campaign,
+            results_per_query=self.results_per_query, pages_per_query=self.pages_per_query,
+            query_reuse_hours=self.query_reuse_hours, index_ttl_days=self.index_ttl_days, max_pages_per_campaign=self.max_pages_per_campaign,
             max_pages_per_host=self.max_pages_per_host, max_links_per_index=self.max_links_per_index,
             max_pages_per_day=self.max_pages_per_day, max_queries_per_day=self.max_queries_per_day,
             max_minutes_per_campaign=self.max_minutes_per_campaign, blocked_hosts=self.blocked_hosts(),
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
-            cover_portals=self.cover_portals,
+            cover_portals=self.cover_portals, render_on_refusal=self.render_on_refusal,
+            render_index_on_refusal=self.render_index_on_refusal,
+            max_scrape_api_per_campaign=self.max_scrape_api_per_campaign if self.scrape_api_url else 0,
         )
+
+    def scraper(self) -> ScrapeApiClient | None:
+        """The scrape-API layer, or None when ``WEB_SEARCH_SCRAPE_API_URL`` is empty."""
+        if not self.scrape_api_url:
+            return None
+        return ScrapeApiClient(self.scrape_api_url, self.scrape_api_key, timeout_seconds=self.scrape_api_timeout_seconds,
+                               max_bytes=self.max_content_bytes)
+
+    def backend_names(self) -> list[str]:
+        names: list[str] = []
+        for raw in self.backends_raw.replace(";", ",").split(","):
+            name = raw.strip().lower()
+            if not name:
+                continue
+            if name not in BACKEND_NAMES:
+                log.warning("web_search.unknown_backend %s", name)
+            elif name not in names:
+                names.append(name)
+        return names or ["searxng"]
+
+    def searcher(self, searxng_client: SearxngClient) -> SearchBackend:
+        """The SearXNG client alone when it is the only usable backend, else a ``MergedSearcher``."""
+        config = self.config()
+        timeout = self.searxng_timeout_seconds
+        backends: list[SearchBackend] = []
+        caps: dict[str, int] = {}
+        for name in self.backend_names():
+            if name == "searxng":
+                backends.append(searxng_client)
+            elif name == "google_cse":
+                if not (self.google_cse_api_key and self.google_cse_cx):
+                    log.warning("web_search.backend_skipped google_cse: GOOGLE_CSE_API_KEY/GOOGLE_CSE_CX missing")
+                    continue
+                backends.append(GoogleCseClient(self.google_cse_api_key, self.google_cse_cx,
+                                                max_results=config.results_per_query, timeout=timeout))
+                caps[name] = self.google_cse_daily_cap
+            elif name == "serpapi":
+                if not self.serpapi_api_key:
+                    log.warning("web_search.backend_skipped serpapi: SERPAPI_API_KEY missing")
+                    continue
+                backends.append(SerpApiClient(self.serpapi_api_key, max_results=config.results_per_query, timeout=timeout))
+                caps[name] = self.serpapi_daily_cap
+        if not backends:
+            return searxng_client
+        if backends == [searxng_client]:
+            return searxng_client
+        return MergedSearcher(backends, max_results=config.results_per_query, daily_caps=caps)
