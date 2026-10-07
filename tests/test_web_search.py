@@ -1088,3 +1088,51 @@ def test_a_query_without_a_property_word_is_dropped_by_localise() -> None:
     kept = localise([GeneratedQuery("200000 60 m2 Madrid", "es"), GeneratedQuery("hasta 200000 euros Madrid", "es"),
                      GeneratedQuery("piso en venta Madrid", "es")], task)
     assert [q.text.split(" España")[0] for q in kept] == ["piso en venta Madrid"]
+
+
+def test_property_word_covers_every_kind_word_and_the_reviewers_list() -> None:
+    from bot.web_search.queries import _KIND_TERMS, _KIND_WORDS
+    from bot.web_search.urls import has_property_word
+    words = [w for ws in _KIND_WORDS.values() for w in ws]
+    terms = [t for kind, langs in _KIND_TERMS.items() if kind != "investors" for ts in langs.values() for t in ts]
+    listed = ["oficina", "garaje", "parking", "aparcamiento", "trastero", "edificio", "hotel", "adosado", "masia",
+              "obra nueva", "inmobiliaria", "bajo comercial", "nave", "local", "solar", "parcela", "finca", "home",
+              "homes", "real estate", "property", "penthouse", "studio", "townhouse", "garage", "office", "warehouse",
+              "гараж", "офис", "офіс", "помещение", "приміщення", "земля", "участок", "ділянка", "жилье", "житло",
+              "пентхаус", "таунхаус", "котедж", "студия", "склад", "нерухомість", "недвижимость"]
+    for word in (*words, *terms, *listed):
+        assert has_property_word(f"busco {word} en Valencia"), word
+    assert not has_property_word("inversores y business angels para startups")
+    assert not has_property_word("calculadora de hipotecas casablanca")
+
+
+def test_serp_evidence_accepts_agency_hits_without_digits_and_rejects_news() -> None:
+    from bot.web_search.urls import listing_evidence
+    assert listing_evidence("Piso en Valencia - Inmobiliaria X", "Luminoso, tres habitaciones, cerca del metro")
+    assert listing_evidence("Pisos en venta | Inmobiliaria Ruzafa", "")
+    assert listing_evidence("Квартира в Валенсии", "Продам квартиру, две комнаты")
+    assert not listing_evidence("El precio de la vivienda en Valencia sube", "Los expertos opinan sobre el mercado")
+    assert not listing_evidence("Busco piso en Valencia", "куплю квартиру, сниму комнату")
+
+
+def test_path_deal_with_both_words_is_ambiguous() -> None:
+    from bot.web_search.urls import path_deal
+    assert path_deal("https://x.es/alquiler-venta/pisos/") is None
+    assert path_deal("https://x.es/for-sale/to-rent/") is None
+    assert path_deal("https://x.es/venta/pisos/") == "sale" and path_deal("https://x.es/alquiler/pisos/") == "rent"
+
+
+async def test_host_has_listing_is_asked_once_per_host_per_step() -> None:
+    from bot.web_search.worker import WebSearchWorker
+    worker = WebSearchWorker.__new__(WebSearchWorker)
+    worker._listing_hosts = {}
+    calls: list[str] = []
+
+    class Store:
+        async def funnel(self, campaign_id: str):
+            calls.append(campaign_id)
+            return [("a.es", 0, 0, 2)]
+    worker.store = Store()  # type: ignore[assignment]
+    assert await worker._host_has_listing("c", "a.es") and await worker._host_has_listing("c", "a.es")
+    assert not await worker._host_has_listing("c", "b.es")
+    assert calls == ["c", "c"]  # one query per host, not per URL

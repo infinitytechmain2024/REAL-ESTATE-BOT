@@ -294,11 +294,50 @@ async def test_the_same_facebook_post_in_two_groups_is_one_card() -> None:
 
 async def test_same_phone_and_price_with_other_text_is_one_card() -> None:
     store, messenger, runner, cid = await setup()
-    fb("f1", FB_A, "Vendo piso en Valencia, 150.000 €. Tel 612 345 678", price_amount=150_000)
-    fb("f2", FB_B, "Urge venta apartamento centro precio 150000 euros llamar 612345678 gracias", price_amount=150_500)
+    fb("f1", FB_A, "Vendo piso en Valencia, 150.000 €. Tel 612 345 678", price_amount=150_000, area_m2=80)
+    fb("f2", FB_B, "Urge venta apartamento centro precio 150000 euros llamar 612345678 gracias", price_amount=150_500,
+       area_m2=81)
     flush(store, cid)
     await runner.step(cid)
     assert len(messenger.findings()) == 1 and store.duplicates == {"f2": "f1"}
+
+
+def _agent(body: str, url: str, **kw: object) -> Listing:
+    payload = {"price_amount": 1200, "price_currency": "EUR", "deal_type": "rent", "rooms": 2} | kw
+    return listing_of(payload, url=url, body=body)
+
+
+AGENT = "Alquilo piso luminoso con balcon amueblado cerca del metro y del mercado central contacto agencia Casa Buena "
+
+
+def test_one_agents_phone_and_price_do_not_merge_other_flats() -> None:
+    tel = "612 345 678"
+    a = _agent(AGENT + "tel " + tel, FB_A, address="Calle Colon 5", location="Valencia")
+    b = _agent(AGENT + "tel " + tel, FB_B, address="Avenida Blasco Ibanez 40", location="Valencia")
+    assert not same_object(a, b)  # two streets
+    c = _agent("Alquilo piso en Mislata tel " + tel + " 1200 euros", FB_A, address="Calle Colon 5")
+    d = _agent("Se alquila apartamento en Benimaclet llamar " + tel + " 1200 euros", FB_B, address="Calle Sueca 9")
+    assert not same_object(c, d)  # different streets, same phone and price
+    tercera = _agent(AGENT + "Planta tercera tel " + tel, FB_A)
+    primera = _agent(AGENT + "Planta primera tel " + tel, FB_B)
+    assert not same_object(tercera, primera)  # one template, another floor
+    assert same_object(tercera, _agent(AGENT + "Planta tercera tel " + tel, FB_B))  # the same post in two groups
+
+
+def test_phone_and_price_need_an_area_or_rooms_and_text_agreement() -> None:
+    tel = "tel 612 345 678"
+    one = _agent("Alquilo piso centro " + tel, FB_A)
+    other = _agent("Se alquila apartamento amplio zona norte " + tel, FB_B)
+    assert not same_object(one, other)  # no area, texts too far apart
+    assert same_object(_agent("Alquilo piso centro " + tel, FB_A, area_m2=70),
+                       _agent("Se alquila apartamento amplio zona norte " + tel, FB_B, area_m2=71))
+
+
+def test_text_price_is_used_only_when_the_text_has_one_amount() -> None:
+    from bot.campaign.dedup import main_price
+    assert main_price("Piso 150.000 € ... (150.000 €)") == 150_000
+    assert main_price("Alquiler 1200 € y fianza 2400 €") is None
+    assert listing_of({"price_amount": 900}, body="Alquiler 1200 € y fianza 2400 €").price == 900
 
 
 async def test_one_agency_template_with_other_price_gives_two_cards() -> None:

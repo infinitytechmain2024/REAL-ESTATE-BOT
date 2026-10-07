@@ -176,6 +176,7 @@ class WebSearchWorker:
         self.planner = planner  # writes the campaign's search plan once, before its first round
         self.token = str(uuid.uuid4())
         self._progress: dict[str, WebProgress] = {}  # campaign id -> live numbers (also shown through the store)
+        self._listing_hosts: dict[tuple[str, str], bool] = {}  # (campaign, host) -> has a listing, reset every step
 
     def progress(self, campaign_id: str) -> WebProgress:
         """The live progress of the campaign's web stage: current host and layer, pages read, listings found,
@@ -231,6 +232,7 @@ class WebSearchWorker:
                 await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
 
     async def step(self, campaign_id: str) -> None:
+        self._listing_hosts = {}  # per-tick cache of ``_host_has_listing``
         campaign = await self.campaigns.get(campaign_id)
         if campaign is None:
             return
@@ -424,8 +426,11 @@ class WebSearchWorker:
             await self._track(campaign.id, url.host, None, url=url.url)
 
     async def _host_has_listing(self, campaign_id: str, host: str) -> bool:
-        """The host has already produced at least one listing post in this campaign."""
-        return any(row[0] == host and row[3] > 0 for row in await self.store.funnel(campaign_id))
+        """The host has already produced at least one listing post in this campaign (asked once per host per tick)."""
+        key = (campaign_id, host)
+        if key not in self._listing_hosts:
+            self._listing_hosts[key] = any(row[0] == host and row[3] > 0 for row in await self.store.funnel(campaign_id))
+        return self._listing_hosts[key]
 
     async def _keep_search_result(self, campaign: Campaign, url: QueuedUrl, error: str | None) -> bool:
         """Store ``url``'s search result as its post without asking the site; False when there is none."""
