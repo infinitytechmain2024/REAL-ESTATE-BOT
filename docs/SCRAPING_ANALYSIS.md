@@ -162,7 +162,7 @@ Selenium **не обнаружен**. Playwright используется тол
 
 ### 3.2 Как передаются параметры поиска
 
-1. `TaskSpec` (`bot/campaign/spec.py:427`, pydantic) содержит `place` (name, country, level, districts, radius_km), `deal`, `property_type`, `budget: Money(min,max,currency)`, `rooms: Range`, `area: Range`, `must_have`, `exclude`, `sources(required/extra/blocked)`, `deviations`. Хранится в `campaigns.spec` (JSON).
+1. `TaskSpec` (`bot/campaign/spec.py:427`, pydantic) содержит `place` (name, country, level, districts, radius_km), `deal`, `property_type`, `budget: Money(min,max,currency)`, `rooms: Rooms`, `area_m2: Range`, `must_have`, `exclude`, `sources(required/extra/blocked)`, `deviations`. Хранится в `campaigns.spec` (JSON).
 2. `architect.plan_campaign` / `plan_with_model` строит `CampaignPlan` (`bot/campaign/models.py`) с полями `location`, `location_aliases`, `country` и `constraints: dict`. Разрешённые ключи `constraints` (`CONSTRAINT_KEYS`): `deal, max_price, min_price, rooms, min_area, max_area, property_type, districts, currency`. Заполнение — `architect.py:294-311`.
 3. Для веб-этапа `query_task(campaign)` (`worker.py:156`) собирает `QueryTask` (`queries.py:171`): `location`, `constraints`, `country_code`, `place_level`, `search_plan`, `blocked_hosts`.
 4. Для фильтрации после анализа `tolerance.request_for(constraints, …)` (`tolerance.py:261`) строит `Request`.
