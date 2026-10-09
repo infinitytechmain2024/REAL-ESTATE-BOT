@@ -86,7 +86,7 @@
 - data-consistency
 
 **Зона ответственности:**
-- Миграция 042_listing_sources.sql
+- Миграция 043_listing_sources.sql
 - begin_fetch / finish_fetch под layer="api"
 
 ---

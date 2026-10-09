@@ -154,6 +154,8 @@ class PageResult:
     contacted: robots.txt, a blocked site) and the post is the search engine's title and snippet.
     ``via`` "index": the same, but the post was built from the listing data (JSON-LD ``ItemList``) of the
     index page the link was found on.
+    ``via`` "api": structured listing facts from a listing provider. The literals are prepared here;
+    API retry claims and host accounting are implemented separately in Phase 3.
     """
 
     ok: bool
@@ -163,10 +165,11 @@ class PageResult:
     text: str = ""
     error: str | None = None
     query: str | None = None
-    via: Literal["page", "search", "index"] = "page"
+    via: Literal["page", "search", "index", "api"] = "page"
     # the layer that produced this result or its error: "http", "render" (browser), "scrape" (unlocker API),
-    # "none" (the site was never asked). A refusal counts against that layer's block of the host only.
-    layer: Literal["http", "render", "scrape", "none"] = "http"
+    # "api" (structured listing provider), "none" (the site was never asked).
+    # Host refusal accounting for provider results is handled in Phase 3.
+    layer: Literal["http", "render", "scrape", "none", "api"] = "http"
 
 
 @dataclass(frozen=True, slots=True)

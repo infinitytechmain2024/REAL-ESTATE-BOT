@@ -4,6 +4,7 @@ portal index pages, caps, robots.txt, the fetcher's policy and the campaign stat
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -15,7 +16,7 @@ from bot.campaign.runs import MemoryRunStore
 from bot.campaign.status_text import FACEBOOK, SEARCHING, is_user_status
 from bot.web_search.extract import listing_links, looks_like_index, parse_html, post_text
 from bot.web_search.fetcher import FetchedPage, FetchError, PageFetcher
-from bot.web_search.models import GeneratedQuery, WebStatus
+from bot.web_search.models import Candidate, FetchTicket, GeneratedQuery, PageResult, WebStatus
 from bot.web_search.queries import (
     FallbackQueryGenerator,
     OpenRouterQueryGenerator,
@@ -30,7 +31,9 @@ from bot.web_search.queries import (
     query_key,
 )
 from bot.web_search.searxng import SearchError, SearchHit, SearxngClient
+from bot.web_search.sources import SourceListing
 from bot.web_search.store import MemoryWebStore
+from bot.web_search.structured import facts_block
 from bot.web_search.urls import (
     SPAIN_PORTALS,
     SPAIN_PORTALS_BY_KIND,
@@ -1145,3 +1148,55 @@ async def test_host_has_listing_is_asked_once_per_host_per_step() -> None:
     assert await worker._host_has_listing("c", "a.es") and await worker._host_has_listing("c", "a.es")
     assert not await worker._host_has_listing("c", "b.es")
     assert calls == ["c", "c"]  # one query per host, not per URL
+
+
+def test_source_listing_facts_preserve_plot_area_for_analysis_prefilter() -> None:
+    from dataclasses import FrozenInstanceError
+
+    from bot.analysis_pipeline.models import Evidence
+    from bot.analysis_pipeline.prefilter import TaskContext, listing_area, listing_deal, prefilter
+
+    listing = SourceListing("https://www.idealista.com/inmueble/12345678/", "Terreno en Madrid",
+                            price=250000, currency="EUR", area_m2=120, plot_m2=2200,
+                            property_type="land", deal="sale", address="Madrid")
+    text = facts_block(asdict(listing))
+    evidence = Evidence(post_id="p", source_id="s", canonical_url=listing.url, title=listing.title, text=text)
+    assert json.loads(text.removeprefix("JSON-LD: "))["area_m2"] == 120
+    assert listing_area(evidence) == 2200
+    assert listing_deal(evidence) == "sale"
+    assert prefilter(evidence, TaskContext("c", deal="sale", property_type="land", min_area=2000)) is None
+    assert prefilter(evidence, TaskContext("c", deal="rent")) == "deal"
+    small = replace(listing, plot_m2=1000)
+    assert prefilter(evidence.model_copy(update={"text": facts_block(asdict(small))}),
+                     TaskContext("c", min_area=2000)) == "area"
+    unknown = replace(listing, plot_m2=None)
+    assert listing_area(evidence.model_copy(update={"text": facts_block(asdict(unknown))})) is None
+    with pytest.raises(FrozenInstanceError):
+        listing.plot_m2 = 1  # type: ignore[misc]
+    minimal = SourceListing(listing.url, listing.title)
+    assert minimal.description == "" and minimal.plot_m2 is None and minimal.price is None
+
+
+async def test_memory_store_persists_structured_api_listing() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    listing = SourceListing("https://www.idealista.com/inmueble/12345678/", "Terreno en Madrid",
+                            plot_m2=2200, deal="sale")
+    key = url_key(listing.url)
+    assert await store.enqueue(cid, [Candidate(listing.url, key, "idealista.com", kind="listing")]) == 1
+    queued, = await store.next_urls(cid, 1)
+    ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=60,
+                                     max_runtime_seconds=120, contact_site=False)
+    assert isinstance(ticket, FetchTicket)
+    text = facts_block(asdict(listing))
+    post_id = await store.finish_fetch(ticket, PageResult(ok=True, final_url=listing.url,
+                                                        title=listing.title, text=text, via="api", layer="api"))
+    assert post_id is not None
+    assert store.posts[0]["id"] == post_id
+    assert store.posts[0]["text"] == text and store.posts[0]["via"] == "api"
+    assert store.posts[0]["url"] == listing.url
+    assert store.urls[cid][key].layer == "api" and store.urls[cid][key].state == "fetched"
+    assert store.seen[key]["post_id"] == post_id
+    assert await store.host_refusals("idealista.com") == {"http": 0, "render": 0}
+    assert await store.layer_state("idealista.com") == {"http": True, "render": True}

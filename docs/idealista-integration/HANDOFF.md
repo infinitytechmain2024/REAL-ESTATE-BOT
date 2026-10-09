@@ -1,7 +1,7 @@
 # HANDOFF — состояние интеграции и что доделать
 
 Ветка: `claude/optimistic-feynman-y4ayed` (от `main` @ `06988dc`). Коммиты исходного handoff: `77f6cf8` (пакет + анализ), `c3b535c` (Phase −1), `aebff1e` (handoff).
-Тесты Phase −1: `1417 passed, 0 skipped` (вместе с Postgres-тестами), `ruff check bot tests` — чисто. Результаты текущих фаз указаны ниже.
+Тесты Phase −1: `1417 passed, 0 skipped` (вместе с Postgres-тестами), `ruff check bot tests` — чисто. Фаза 1: **1421 passed, 0 skipped**, ruff чисто, golden **70 passed**; подробности ниже.
 
 ## 1. Что сделано
 
@@ -45,8 +45,7 @@
 ## 2. Что осталось (шаги 4–7 исходной задачи)
 
 - **Шаг 4 выполнен 2026-10-10** — [PROVIDERS.md](PROVIDERS.md): пять акторов Apify, Scrape.do, официальный API и таблица 20 доменов с ценами/оценками часов/первичными ссылками. Владелец выбрал axlymxp + Scrape.do и разрешил фазы 0–1 ответом «yes» (2026-10-10).
-- **Шаг 5** — реализация `PLAN.md`, фазы 0–5 (ListingSource, ApifyIdealistaSource, миграция 043, `layer="api"`,
-  Scrape.do, отчёты).
+- **Шаг 5 частично выполнен** — фазы 0–1 завершены: DESIGN, ListingSource/SourceListing, Literal api, миграция 043. Остались фазы 2–5 (актор/worker, store retry/counters, Scrape.do, отчёты). ⛔ Остановка после фазы 1, ждать «ок».
 - **Шаг 6** — живой smoke-тест с лимитом $1.
 - **Шаг 7** — CHECKLIST.md построчно и обновление этого файла.
 
@@ -65,8 +64,19 @@
 - [DESIGN.md](DESIGN.md): точки интеграции, SourceListing/ListingSource, JSON-LD и plot_m2, первый раунд/идемпотентность, store/counters, безопасный fallback и gates перед live.
 - Выбор провайдера утверждён; Phase 1 ограничена контрактами, Literal и CHECK 043. pages_api и долговечный claim запуска реализуются последующими аддитивными миграциями.
 - Проверки в изолированных локальных контейнерах Python 3.11/PostgreSQL 16: полный pytest **1416 passed, 1 skipped** (268.63 s); пропуск — существующий браузерный тест с фиксированным `/opt/pw-browsers/chromium`. После настройки пути этот тест отдельно **1 passed**. Все 1417 тестов выполнены успешно, включая PostgreSQL. Ruff чисто; golden **70 passed**.
-- В тестовом контейнере установлены requirements.txt/requirements-dev.txt, Chromium и Linux Docker Compose CLI для проверок compose; рабочие Docker-сервисы и VPS не менялись. Команды полной проверки: `docker exec -e PYTHONPATH=. real-estate-phase1-python python -m pytest -q -o addopts=""`, затем `docker exec real-estate-phase1-python ruff check bot tests`. Три TEST_DATABASE_URL направлены только в отдельную `bot_test`.
+- В тестовом контейнере установлены requirements.txt/requirements-dev.txt, Chromium и Linux Docker Compose CLI для проверок compose; рабочие Docker-сервисы и VPS не менялись. Команды полной проверки: `docker exec -e PYTHONPATH=. real-estate-phase1-python python -m pytest -q -o addopts=""`, затем `docker exec real-estate-phase1-python ruff check bot tests`. Три TEST_DATABASE_URL направлены только в отдельную `bot_test`. Для повторного запуска сохранённого тестового окружения: `docker start real-estate-phase1-postgres real-estate-phase1-python`.
 - Следующий шаг: foundation фазы 1, затем контрольная остановка перед фазой 2. Платные вызовы не разрешены.
+
+### Фаза 1 выполнена (2026-10-10)
+
+- `bot/web_search/sources/base.py:12,28`: frozen+slots SourceListing и структурный ListingSource, экспорт через __init__.py. `plot_m2` отдельный optional факт, порядок исходных positional аргументов сохранён; внешняя валидация — будущий адаптер.
+- `bot/web_search/models.py:168`: via/layer расширены api. Worker и store не менялись, актор не подключён; phase3 accounting/retry явно остаются открытыми.
+- `bot/services/db/migrations/043_listing_sources.sql`: расширен только layer CHECK, NULL/http/render/scrape/none сохранены. Миграция добавлена в оба списка scripts/apply_migrations.sh. Старые SQL не редактировались; применено только в отдельной локальной тестовой БД. На VPS не применялось.
+- Новые тесты: `tests/test_web_search.py:1153,1180` (JSON-LD→prefilter/Memory), `tests/test_web_search_postgres.py:82,125` (API post/campaign/raw_payload и сохранность отказов; реальное обновление заполненной039, отрицательные CHECK, повтор043).
+- Проверки: targeted Memory/web **63 passed**, PostgreSQL **18 passed, 0 skipped**; полный pytest **1421 passed, 0 skipped** за 288.59 s (82 существующих предупреждения, столько же было в фазе 0); `ruff check bot tests` чисто; golden **70 passed**. `bash -n scripts/apply_migrations.sh`, `git diff --check` чисто. Ревью принято без блокирующих замечаний.
+- Новых настроек .env, зависимостей и изменений Dockerfile нет: foundation использует stdlib/существующий QueryTask; campaign-runner уже копирует весь bot/. Проверки image imports/deployment/foundation пройдены в полном pytest.
+- Ограничение: via=api умеет сохраняться, но успешный API-read ещё не учитывается корректно обоими store в host counters; API пока выключен/не подключён. Исправление в фазе 3. Не объявлять завершённым пункт «via/layer api поддерживаются везде» или готовый поиск Idealista.
+- Следующий шаг после «ок»: фаза 2 ApifyIdealistaSource для выбранного axly; затем фаза 3 store/worker и следующая остановка. Для актора требуется проверенная input schema и земельный fixture; платные API/VPS отдельно не разрешены. Live smoke не запускался, расходы $0.
 
 ## 3. Как запустить тесты локально
 

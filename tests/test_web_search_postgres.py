@@ -23,7 +23,7 @@ from bot.campaign.runner import CampaignRunner, RunnerConfig
 from bot.campaign.runs import PostgresRunStore
 from bot.campaign.store import PostgresCampaignStore
 from bot.orchestra.store import SafetyLimits
-from bot.web_search.models import PageResult, QueuedUrl
+from bot.web_search.models import Candidate, FetchTicket, PageResult, QueuedUrl
 from bot.web_search.store import BUSY, DUPLICATE, PostgresWebStore
 from bot.web_search.urls import url_key
 from bot.web_search.worker import WebSearchConfig, WebSearchWorker
@@ -77,6 +77,83 @@ async def new_campaign(pool) -> str:
                                  actor="test")
     await campaigns.set_state(cid, "running", "test")
     return cid
+
+
+async def test_structured_api_listing_uses_the_existing_post_and_campaign_path(pool) -> None:
+    cid = await new_campaign(pool)
+    store = PostgresWebStore(pool)
+    await store.start_run(cid)
+    queued = QueuedUrl(LISTING, url_key(LISTING), "idealista.com", 0, "listing")
+    assert await store.enqueue(cid, [Candidate(queued.url, queued.url_key, queued.host, kind="listing")]) == 1
+    # An existing HTML block is left intact by importing a ready structured result.
+    await pool.execute(
+        """insert into web_hosts (host, http_refusals, render_refusals, consecutive_refusals,
+                                 http_blocked_until, render_blocked_until, blocked_until)
+           values ('idealista.com', 3, 4, 3, now() + interval '1 hour',
+                   now() + interval '2 hours', now() + interval '1 hour')""")
+    before = await pool.fetchrow(
+        """select http_refusals, render_refusals, consecutive_refusals,
+                  http_blocked_until, render_blocked_until, blocked_until
+             from web_hosts where host = 'idealista.com'""")
+    ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                     max_runtime_seconds=60, contact_site=False)
+    assert isinstance(ticket, FetchTicket)
+    text = 'JSON-LD: {"price": 180000, "plot_m2": 2500, "deal": "sale"}\nTerreno en Madrid'
+    post_id = await store.finish_fetch(
+        ticket, PageResult(True, final_url=LISTING, title="Terreno en Madrid", text=text, via="api", layer="api"))
+    assert post_id is not None
+    row = await pool.fetchrow(
+        """select p.id::text, p.canonical_url, p.body_text, p.state, p.raw_payload->>'via' as via,
+                  p.raw_payload->>'campaign_id' as campaign, b.campaign_id::text as linked_campaign,
+                  s.platform, r.state as run_state
+             from collected_posts p join monitoring_sources s on s.id = p.source_id
+             join acquisition_runs r on r.id = p.acquisition_run_id
+             join acquisition_batch_items i on i.id = r.batch_item_id
+             join acquisition_batches b on b.id = i.batch_id where p.id = $1::uuid""", post_id)
+    assert tuple(row) == (post_id, LISTING, text, "normalised", "api", cid, cid, "website", "succeeded")
+    assert tuple(await pool.fetchrow(
+        "select state, layer from web_campaign_urls where campaign_id = $1::uuid and url_key = $2",
+        cid, queued.url_key)) == ("fetched", "api")
+    assert tuple(await pool.fetchrow(
+        "select state, post_id::text from web_seen_urls where url_key = $1", queued.url_key)) == ("fetched", post_id)
+    assert await pool.fetchrow(
+        """select http_refusals, render_refusals, consecutive_refusals,
+                  http_blocked_until, render_blocked_until, blocked_until
+             from web_hosts where host = 'idealista.com'""") == before
+
+
+async def test_listing_source_migration_upgrades_populated_039_and_is_idempotent(pool) -> None:
+    import asyncpg
+
+    # Start from the actual old schema, with existing rows; do not simulate its CHECK.
+    await pool.execute("drop schema public cascade; create schema public;")
+    for path in MIGRATIONS:
+        if path.name[:3] <= "039":
+            await pool.execute(path.read_text(encoding="utf-8"))
+    cid = await new_campaign(pool)
+    old_layers = [None, "http", "render", "scrape", "none"]
+    for n, layer in enumerate(old_layers):
+        url = f"https://www.idealista.com/inmueble/{90000000 + n}/"
+        await pool.execute(
+            """insert into web_campaign_urls (campaign_id, url_key, url, host, layer)
+               values ($1::uuid, $2, $3, 'idealista.com', $4)""", cid, url_key(url), url, layer)
+    with pytest.raises(asyncpg.CheckViolationError):
+        await pool.execute("update web_campaign_urls set layer = 'api' where layer = 'http'")
+    for path in MIGRATIONS:
+        if path.name[:3] > "039":
+            await pool.execute(path.read_text(encoding="utf-8"))
+    assert [r[0] for r in await pool.fetch("select layer from web_campaign_urls order by url")] == old_layers
+    await pool.execute("update web_campaign_urls set layer = 'api' where layer = 'http'")
+    sql = next(p for p in MIGRATIONS if p.name == "043_listing_sources.sql").read_text(encoding="utf-8")
+    for _ in range(2):
+        await pool.execute(sql)
+        assert [r[0] for r in await pool.fetch("select layer from web_campaign_urls order by url")] == [
+            None, "api", "render", "scrape", "none"]
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute("update web_campaign_urls set layer = 'unknown'")
+        # A different CHECK on the same table remains enforced.
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute("update web_campaign_urls set state = 'unknown'")
 
 
 def web_worker(pool, fetcher: FakeFetcher, queries: list[str]) -> WebSearchWorker:

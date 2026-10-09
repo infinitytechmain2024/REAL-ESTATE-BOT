@@ -20,9 +20,11 @@
 - [x] Architecture Agent подтверждает точки интеграции и протокол ListingSource — `DESIGN.md`
 
 ## Phase 1 — Foundation
-- [ ] Implementation Agent создаёт `bot/web_search/sources/`
-- [ ] Реализует `ListingSource` + `SourceListing`
-- [ ] Database Agent готовит миграцию `043_listing_sources.sql`
+- [x] Implementation Agent создаёт `bot/web_search/sources/`
+- [x] Реализует `ListingSource` + `SourceListing` (plot_m2 отдельно)
+- [x] Database Agent готовит миграцию `043_listing_sources.sql`, оба списка apply_migrations.sh, тесты Memory/реального PostgreSQL
+
+Проверки фазы 1: **1421 passed, 0 skipped**, ruff чисто, golden **70 passed**. Ревью принято. Контрольная остановка перед фазой 2.
 
 ## Phase 2 — Apify Integration
 - [ ] Implementation Agent пишет `ApifyIdealistaSource`

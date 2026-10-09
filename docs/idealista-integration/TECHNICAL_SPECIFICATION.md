@@ -27,13 +27,16 @@ class SourceListing:
     property_type: str | None = None
     deal: str | None = None
     description: str = ""
+    plot_m2: float | None = None
 ```
+
+`plot_m2` — подтверждённая площадь участка отдельно от постройки; расширение исходного ТЗ согласовано в DESIGN.md. Foundation реализован в sources/base.py; нормализация внешнего payload — фаза 2.
 
 ## 3. ApifyIdealistaSource
 
-- Рекомендуемые акторы: `azzouzana/idealista-scraper` или `dz_omar/idealista-scraper-api`
+- Владелец выбрал `axlymxp/idealista-scraper` (2026-10-10); первоначальные рекомендации azzouzana/dz_omar пересмотрены по PROVIDERS.md. Земельный output и семантика площади требуют проверки до live.
 - Вызов только в первом раунде кампании
-- Результаты писать через `store.finish_fetch(via="api", layer="api")`
+- Результаты писать через `store.finish_fetch(ticket, PageResult(..., via="api", layer="api"))`; отдельные kwargs via/layer метод не принимает.
 - Текст формировать так, чтобы analysis-worker понимал данные (JSON-LD стиль)
 
 ## 4. Error Handling
@@ -43,6 +46,6 @@ class SourceListing:
 
 ## 5. Database
 
-- Миграция должна расширить допустимые значения `layer` значением `'api'`
+- Миграция 043 расширяет допустимые значения `layer` значением `'api'`; прежние миграции не редактировать.
 - `begin_fetch` должен позволять повторно брать `failed` URL при layer="api"
 - Вызовы с via="api" не должны увеличивать счётчики отказов хоста
