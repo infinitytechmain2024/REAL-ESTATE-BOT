@@ -1,5 +1,15 @@
 # Implementation Plan
 
+## Phase −1 — Быстрые фиксы без новых сервисов (добавлено, см. SCRAPING_ANALYSIS.md §4)
+- [x] Allowlist порталов клиента (`WEB_SEARCH_DOMAIN_POLICY=strict`), словари и научные сайты в чёрном списке
+- [x] Слово сделки в каждом запросе; фильтр сделки по пути и заголовку на любом сайте
+- [x] Отчёт: «площадь не указана» / «ИИ-проверка не сработала» / «бюджет исчерпан» раздельно, ошибки ИИ по кодам; analysis-worker не теряет посты молча
+- [x] Парсер площади и сделки (испанские числа, гектары, parcela vs construida), JSON-LD `plot_m2`, `verify_facts` не верит «2» из «m2»
+- [x] Circuit breaker по сайту (`WEB_SEARCH_HOST_BREAKER_REFUSALS`), включая scrape API
+- [x] Бюджет прогона `CAMPAIGN_BUDGET_USD`, журнал `campaign_costs` (миграция 042), расход по этапам в отчёте
+- [x] Префильтр до LLM (сделка, площадь); дедуп URL уже был (`web_seen_urls`, `url_key`) — покрыт тестом
+- Миграция Idealista в фазе 1 получит номер **043**
+
 ## Phase 0 — Подготовка (Orchestrator + Architecture)
 - [ ] Orchestrator запускает Architecture Agent
 - [ ] Architecture Agent подтверждает точки интеграции и протокол ListingSource

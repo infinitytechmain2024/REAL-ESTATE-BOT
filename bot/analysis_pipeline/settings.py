@@ -20,6 +20,9 @@ class AnalysisSettings(BaseSettings):
     # in live mode (AGENT_REDUCTION_MODE=live, AGENT_REDUCTION_SOURCES=website): that one then owns the website
     # posts and this worker keeps Facebook and the social networks. Empty (default): every platform.
     exclude_platforms: str = Field(default="", validation_alias="ANALYSIS_EXCLUDE_PLATFORMS")
+    # The most one campaign may spend in USD across every service (bot/utils/costs.py); 0: no limit. A campaign over
+    # it gets no more model calls here: its posts are closed and counted in its report.
+    budget_usd: float = Field(default=5.0, ge=0, le=10_000, validation_alias="CAMPAIGN_BUDGET_USD")
 
     @property
     def excluded_platforms(self) -> tuple[str, ...]:

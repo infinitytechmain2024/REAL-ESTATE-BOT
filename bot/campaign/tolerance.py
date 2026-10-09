@@ -91,7 +91,7 @@ Bucket = Literal["exact", "similar", "other", "excluded"]
 _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
 Why = Literal["price", "area", "area_max", "rooms", "location", "deal", "kind", "type", "foreign", "currency", "ai",
-              "unverified", "area_unknown", "approved_deviation"]
+              "unverified", "area_unknown", "approved_deviation", "ai_failed", "cost_cap"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -160,9 +160,20 @@ _AREA = re.compile(
 )
 
 
+# «2000 м² и больше», «2.000 m2 o más», «2000 sqm or more», «2000 м²+»: the minimum written after the number.
+_AREA_AFTER = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:[ .,]\d{3})+|\d+(?:[.,]\d+)?)\s*()"
+    r"(м²|м2|кв\.?\s*м\w*|m²|m2|sq\.?\s*m|sqm\b|metros?(?:\s+cuadrados)?|сот\w*|га\b|ha\b|hect\w*|гект\w*)"
+    r"\s*(?:\+|и\s+(?:больше|более)|или\s+(?:больше|более)|і\s+більше|або\s+більше|y\s+m[aá]s|o\s+m[aá]s|"
+    r"or\s+more|and\s+(?:more|above)|como\s+m[ií]nimo|минимум|мінімум)",
+    re.IGNORECASE,
+)
+
+
 def min_area_of(text: str | None) -> float | None:
-    """The minimum area a task asks for, in m²: «от 2000 м²», «≥ 1 500 m2», «від 20 соток», «от 1 га»."""
-    for found in _AREA.finditer(text or ""):
+    """The minimum area a task asks for, in m²: «от 2000 м²», «≥ 1 500 m2», «від 20 соток», «от 1 га»,
+    «2000 м² и больше»."""
+    for found in [*_AREA.finditer(text or ""), *_AREA_AFTER.finditer(text or "")]:
         raw = found.group(1).replace(" ", "")
         if re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", raw):
             number = float(re.sub(r"[.,]", "", raw))

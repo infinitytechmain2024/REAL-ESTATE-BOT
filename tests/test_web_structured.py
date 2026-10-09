@@ -16,8 +16,15 @@ from tests.test_web_search import (
     ListGenerator,
     campaign,
     run_until_done,
-    worker,
 )
+from tests.test_web_search import (
+    worker as _worker,
+)
+
+
+def worker(*args, **config):
+    """These pages live on made-up agency sites (example-pisos.es): the soft domain policy lets such a site in."""
+    return _worker(*args, **{"domain_policy": "soft", **config})
 
 PAGE = "https://www.example-pisos.es/inmueble/12345/"
 LISTING = {

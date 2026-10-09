@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -61,6 +62,15 @@ class WebSearchSettings(BaseSettings):
     blocked_hosts_raw: str = Field(default="", validation_alias="WEB_SEARCH_BLOCKED_HOSTS")
     # Search every known portal of the country (Idealista, Fotocasa first), not only those the model picks.
     cover_portals: bool = Field(default=True, validation_alias="WEB_SEARCH_COVER_PORTALS")
+    # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
+    # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or
+    # an area), off (the old rule: a property word and a deal word). A country without a portal list is soft.
+    domain_policy: Literal["strict", "soft", "off"] = Field(default="strict", validation_alias="WEB_SEARCH_DOMAIN_POLICY")
+    # A site refused (403/429/captcha on every layer tried) this many pages in a row is skipped for the rest of the
+    # campaign; its search results stay as cards. 0: off.
+    host_breaker_refusals: int = Field(default=3, ge=0, le=100, validation_alias="WEB_SEARCH_HOST_BREAKER_REFUSALS")
+    # USD one paid search query costs (Google CSE / SerpAPI; SearXNG is free), for CAMPAIGN_BUDGET_USD.
+    paid_query_cost_usd: float = Field(default=0.0, ge=0, le=10, validation_alias="WEB_SEARCH_PAID_QUERY_COST_USD")
 
     # Fetching public pages.
     user_agent: str = Field(default="RealEstateResearchBot/0.2 (+https://github.com/infinitytechmain2024/REAL-ESTATE-BOT)",
@@ -90,6 +100,8 @@ class WebSearchSettings(BaseSettings):
     scrape_api_key: str = Field(default="", repr=False, validation_alias="WEB_SEARCH_SCRAPE_API_KEY")
     scrape_api_timeout_seconds: float = Field(default=60, ge=5, le=180, validation_alias="WEB_SEARCH_SCRAPE_API_TIMEOUT_SECONDS")
     max_scrape_api_per_campaign: int = Field(default=40, ge=0, le=500, validation_alias="WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN")
+    # USD one scrape-API read costs (booked per call, refused ones too), for CAMPAIGN_BUDGET_USD.
+    scrape_api_cost_usd: float = Field(default=0.0, ge=0, le=10, validation_alias="WEB_SEARCH_SCRAPE_API_COST_USD")
     # Optional outbound proxy/VPN for page fetches (http://, https://, socks5://). Never logged.
     # Several proxies may be given comma-separated (one sticky proxy per host).
     proxy_url: str = Field(default="", repr=False, validation_alias="WEB_SEARCH_PROXY_URL")
@@ -124,6 +136,11 @@ class WebSearchSettings(BaseSettings):
             verified_host_interval_seconds=self.verified_host_interval_seconds,
             pages_per_verification=self.pages_per_verification,
             max_scrape_api_per_campaign=self.max_scrape_api_per_campaign if self.scrape_api_url else 0,
+            domain_policy=self.domain_policy, host_breaker_refusals=self.host_breaker_refusals,
+            scrape_cost_usd=self.scrape_api_cost_usd,
+            query_cost_usd=self.paid_query_cost_usd * sum(
+                1 for n in self.backend_names() if (n == "google_cse" and self.google_cse_api_key and self.google_cse_cx)
+                or (n == "serpapi" and self.serpapi_api_key)),
         )
 
     def scraper(self) -> ScrapeApiClient | None:

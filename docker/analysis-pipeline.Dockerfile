@@ -5,6 +5,8 @@ RUN useradd --create-home --uid 10006 analyst
 COPY docker/requirements-analysis-pipeline.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot/analysis_pipeline/ ./bot/analysis_pipeline/
+# The cost ledger and the deterministic area/deal reading (bot/utils/costs.py, listing_text.py).
+COPY bot/utils/ ./bot/utils/
 RUN chown -R analyst:analyst /app
 USER analyst
 CMD ["python", "-m", "bot.analysis_pipeline.main"]

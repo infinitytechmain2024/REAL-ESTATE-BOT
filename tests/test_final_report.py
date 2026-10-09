@@ -135,19 +135,46 @@ def test_outcome_rows_become_a_tally() -> None:
     assert (counts.sent, counts.held, counts.rejected, counts.total) == (6, 6, 3, 17)
 
 
-def test_a_report_warns_when_most_findings_could_not_be_checked(caplog: pytest.LogCaptureFixture) -> None:
-    few = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 9)])
-    assert few.unverified_majority is True  # 9 of 10
+def test_a_report_warns_when_the_ai_check_failed_for_most_findings(caplog: pytest.LogCaptureFixture) -> None:
+    few = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "ai_failed", 9)])
+    assert few.unverified_majority is True  # 9 of 10 never judged
     with caplog.at_level("WARNING"):
         text = report_text("цель", few, [], [], [], [])
-    assert "⚠️ Большинство находок не удалось проверить автоматически (9 из 10): проверьте ключ ИИ и лимиты" in text
+    assert "⚠️ ИИ-проверка не сработала для большинства находок (9 из 10)" in text
+    assert "ИИ-проверка не сработала: 9" in text
     assert "campaign.unverified_majority" in caplog.text
-    exactly = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 9),
+    exactly = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "cost_cap", 9),
                      OutcomeCount("held", "excluded", "place", 50)])  # the rejected do not dilute the share
-    assert exactly.unverified_majority
-    ok = tally([OutcomeCount("sent", "exact", None, 2), OutcomeCount("held", "similar", "unverified", 4),
+    assert exactly.unverified_majority and exactly.ai_failed == 9
+    ok = tally([OutcomeCount("sent", "exact", None, 2), OutcomeCount("held", "similar", "ai_failed", 4),
                 OutcomeCount("held", "similar", "budget", 4)])
-    assert not ok.unverified_majority and "Большинство находок" not in report_text("цель", ok, [], [], [], [])
+    assert not ok.unverified_majority and "большинства находок" not in report_text("цель", ok, [], [], [], [])
+
+
+def test_listings_without_an_area_are_not_blamed_on_the_ai_key() -> None:
+    """The Madrid land run: most held findings had no area (a ≥2000 m² task), which said «проверьте ключ ИИ»."""
+    run = tally([OutcomeCount("held", "similar", "area_unknown", 25), OutcomeCount("held", "similar", "unverified", 6),
+                 OutcomeCount("held", "similar", None, 6)])
+    assert run.held_unverified == 31 and not run.unverified_majority
+    text = report_text("участок · Мадрид · покупка · от 2000 м²", run, [], [], [], [])
+    assert "ключ ИИ" not in text and "большинства находок" not in text
+    assert "площадь не указана: 25" in text and "не удалось подтвердить: 6" in text
+
+
+def test_the_report_shows_the_money_the_skips_and_the_model_errors() -> None:
+    from bot.campaign.final_report import cost_lines
+    from bot.utils.costs import CostSummary
+
+    spent = CostSummary({"llm": 0.9, "scrape": 0.15, "search": 0.0}, {}, {"llm:http_401": 3, "llm:model_request_refused_400": 1},
+                        {"llm:prefilter_deal": 14, "llm:prefilter_area": 40})
+    lines = cost_lines(spent, budget=1.0)
+    assert lines[0] == "💶 Расход: $1.05 из $1.00 (ИИ $0.90 · Scrape API $0.15)"
+    assert lines[1].startswith("⛔ Бюджет прогона исчерпан")
+    assert lines[2] == "Отсеяно до ИИ (без затрат): 54 — участок меньше нужного 40, другой тип сделки 14"
+    assert lines[3] == "⚠️ Ошибки ИИ: http_401 ×3, model_request_refused_400 ×1"
+    assert cost_lines(None) == [] and cost_lines(CostSummary(), 0) == ["💶 Расход: $0.00"]
+    text = report_text("цель", tally([OutcomeCount("sent", "exact", None, 1)]), [], [], [], [], costs=lines)
+    assert "💶 Расход: $1.05 из $1.00" in text and "⚠️ Ошибки ИИ: http_401 ×3" in text
     edge = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 4)])
     assert not edge.unverified_majority, "exactly 80 % is not more than 80 %"
 

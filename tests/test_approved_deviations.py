@@ -144,7 +144,7 @@ async def test_an_unverified_similar_finding_is_held_even_with_deviations_approv
     await runner.tick()
     await runner.tick()
     assert cards(messenger) == [] and len(messenger.asks) == 1
-    assert store.whys["f49"] == "unverified" and await store.offer_state(cid, "similar") == "asked"
+    assert store.whys["f49"] == "ai_failed" and await store.offer_state(cid, "similar") == "asked"  # no judge ran
 
 
 async def test_without_deviations_the_similar_question_comes_with_the_first_similar_finding() -> None:

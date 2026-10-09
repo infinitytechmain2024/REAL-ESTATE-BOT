@@ -61,6 +61,7 @@ _JOB_NOTES = {"captcha": "captcha", "interstitial": "security check", "access_de
 
 # begin_fetch refusals (the URL's campaign row gets this state; 'busy' leaves it queued)
 DUPLICATE, SOURCE_UNAVAILABLE, HOST_BLOCKED, BUSY = "duplicate", "source_unavailable", "host_blocked", "busy"
+HOST_BREAKER = "host_breaker"  # a URL dropped because its site kept refusing us in this campaign (worker breaker)
 
 
 class WebStore(Protocol):
@@ -149,7 +150,7 @@ def _url_bucket(state: str, detail: str | None) -> int | None:
         return 2
     if state == "fetched":
         return 1
-    if state in ("failed", "robots") or (state == "skipped" and detail in (HOST_BLOCKED, VERIFICATION_EXPIRED)):
+    if state in ("failed", "robots") or (state == "skipped" and detail in (HOST_BLOCKED, HOST_BREAKER, VERIFICATION_EXPIRED)):
         return 3
     return None
 

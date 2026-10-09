@@ -28,6 +28,7 @@ from typing import Any, Literal, Protocol
 
 import httpx
 
+from bot.utils import costs
 from bot.web_search.models import INDEX_RESULT_NOTE, SEARCH_RESULT_NOTE
 
 from . import geo
@@ -250,6 +251,7 @@ class OpenRouterRelevanceJudge:
             "model": self.model,
             "temperature": 0,
             "max_tokens": 200,
+            "usage": costs.USAGE,
             "response_format": {"type": "json_schema",
                                 "json_schema": {"name": "finding_relevance", "strict": True, "schema": SCHEMA}},
             "messages": [
@@ -263,7 +265,9 @@ class OpenRouterRelevanceJudge:
             payload["response_format"] = {"type": "json_object"}
             response = await self._post(payload)
         if response.status_code != 200:
+            await costs.error("llm", f"http_{response.status_code}", item=self.model)
             raise RelevanceError("http_error", status=response.status_code)
+        await costs.llm_response(self.model, response)
         try:
             return parse_relevance(response.json()["choices"][0]["message"]["content"], model=self.model)
         except Exception as exc:
@@ -345,8 +349,9 @@ def review_reason(review: Any) -> str:
 
 # Match.why -> the category the final report counts a held or excluded finding under (``campaign_findings.why``).
 CATEGORY = {"price": "budget", "currency": "budget", "location": "place", "foreign": "place", "deal": "deal",
-            "type": "type", "rooms": "rooms", "area": "area", "area_max": "area", "area_unknown": "unverified",
+            "type": "type", "rooms": "rooms", "area": "area", "area_max": "area", "area_unknown": "area_unknown",
             "kind": "kind", "unverified": "unverified", "ai": "ai", "criteria": "criteria",
+            "ai_failed": "ai_failed", "cost_cap": "cost_cap",
             "approved_deviation": "approved"}
 # The reviewer's criterion -> the rules' ``Match.why``.
 CRITERION_WHY = {"place": "location", "deal": "deal", "type": "type", "budget": "price", "rooms": "rooms",

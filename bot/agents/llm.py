@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+from bot.utils import costs
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 
@@ -62,6 +64,7 @@ class OpenRouterJSON:
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "response_format": ({"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}}
                                 if schema else {"type": "json_object"}),
+            "usage": costs.USAGE,
         }
         try:
             response = await self._client.post(self.url, headers=self._headers, json=payload)
@@ -73,7 +76,9 @@ class OpenRouterJSON:
         except httpx.HTTPError as exc:
             raise LLMError(f"network:{type(exc).__name__}") from exc
         if response.status_code >= 400:
+            await costs.error("llm", f"http_{response.status_code}", item=model)
             raise LLMError(f"http_{response.status_code}")
+        await costs.llm_response(model, response)
         try:
             content = response.json()["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:

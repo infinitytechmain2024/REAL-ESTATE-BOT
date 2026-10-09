@@ -35,6 +35,8 @@ from bot.campaign.models import TERMINAL_STATES, Campaign
 from bot.campaign.search_plan import blocked_hosts_of, country_portals, source_hosts
 from bot.campaign.spec import TaskSpec
 from bot.campaign.store import CampaignStore
+from bot.utils import costs
+from bot.utils.listing_text import deal_of
 
 from .extract import (
     MIN_INDEX_LINKS,
@@ -69,7 +71,15 @@ from .queries import (
 from .render import ChallengeDetected, Renderer, RenderError
 from .scrape_api import Scraper
 from .searxng import Searcher, SearchError
-from .store import _REFUSALS, BUSY, HOST_BLOCKED, VERIFICATION_EXPIRED, WebStore, funnel_totals
+from .store import (
+    _REFUSALS,
+    BUSY,
+    HOST_BLOCKED,
+    HOST_BREAKER,
+    VERIFICATION_EXPIRED,
+    WebStore,
+    funnel_totals,
+)
 from .structured import Structured, facts_block, from_jsonld, structured
 from .urls import (
     classify_page,
@@ -79,6 +89,7 @@ from .urls import (
     host_of,
     known_portal,
     listing_evidence,
+    listing_figures,
     portal_listing,
     url_key,
 )
@@ -86,6 +97,9 @@ from .urls import (
 log = logging.getLogger(__name__)
 MIN_POST_CHARS = 120
 MIN_SNIPPET_CHARS = 60  # title + snippet: less than this says nothing about the listing
+
+
+DOMAIN_POLICIES = ("strict", "soft", "off")
 
 
 @dataclass(frozen=True)
@@ -121,6 +135,15 @@ class WebSearchConfig:
     human_verification: bool = False
     verified_host_interval_seconds: float = 8    # gap between two reads of one verified site
     pages_per_verification: int = 40             # pages read through the browser after one passed check
+    # Which sites a search result may come from (``domain_policy``): strict -- only the country's known portals and the
+    # sites the plan or the person named; soft -- also other sites whose hit shows a property with a price or an area;
+    # off -- also hits with a property word and a deal word (the old rule). A country without known portals is soft.
+    domain_policy: str = "strict"
+    # A site whose pages were refused (403/429/captcha, on every layer tried) this many times in a row is skipped for
+    # the rest of the campaign: its search results are kept as cards, no layer (and no paid unlocker) is tried again.
+    host_breaker_refusals: int = 3               # 0: off
+    scrape_cost_usd: float = 0.0                 # what one scrape-API read costs (the ledger, CAMPAIGN_BUDGET_USD)
+    query_cost_usd: float = 0.0                  # what one search query costs (paid backends; SearXNG is free)
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -133,7 +156,9 @@ class WebSearchConfig:
                 and 1 <= self.max_rounds <= 50 and 5 <= self.max_minutes_per_campaign <= 7 * 24 * 60
                 and 60 <= self.lease_seconds <= 3600 and 1 <= self.page_runtime_seconds <= 600
                 and 0 <= self.max_renders_per_campaign <= 200 and 0 <= self.max_scrape_api_per_campaign <= 500
-                and 0 <= self.verified_host_interval_seconds <= 300 and 1 <= self.pages_per_verification <= 200):
+                and 0 <= self.verified_host_interval_seconds <= 300 and 1 <= self.pages_per_verification <= 200
+                and self.domain_policy in DOMAIN_POLICIES and 0 <= self.host_breaker_refusals <= 100
+                and 0 <= self.scrape_cost_usd <= 10 and 0 <= self.query_cost_usd <= 10):
             raise ValueError("unsafe web search limits")
 
 
@@ -188,6 +213,10 @@ class WebSearchWorker:
         self._progress: dict[str, WebProgress] = {}  # campaign id -> live numbers (also shown through the store)
         self._listing_hosts: dict[tuple[str, str], bool] = {}  # (campaign, host) -> has a listing, reset every step
         self._verified_at: dict[str, datetime] = {}  # site -> when it was last read through the verified browser
+        # (campaign, site) -> pages refused in a row in this campaign; a site at ``host_breaker_refusals`` is tripped
+        # (in memory: after a restart a tripped site gets that many tries again, its queued URLs stay skipped)
+        self._refused: dict[tuple[str, str], int] = {}
+        self._tripped: set[tuple[str, str]] = set()
 
     def progress(self, campaign_id: str) -> WebProgress:
         """The live progress of the campaign's web stage: current host and layer, pages read, listings found,
@@ -258,7 +287,8 @@ class WebSearchWorker:
         if run.state != "searching" or not await self.store.take_lease(campaign_id, self.token, self.config.lease_seconds):
             return
         try:
-            await self._advance(campaign)
+            with costs.scope(campaign_id):  # every paid call of this step is booked on the campaign
+                await self._advance(campaign)
         finally:
             await self.store.drop_lease(campaign_id, self.token)
 
@@ -267,6 +297,9 @@ class WebSearchWorker:
         started = await self.store.started_at(cid)
         if started is not None and self.now() - started > timedelta(minutes=cfg.max_minutes_per_campaign):
             await self._done(campaign, "time_cap")
+            return
+        if await costs.over_budget(cid):  # CAMPAIGN_BUDGET_USD spent (all services together)
+            await self._done(campaign, "budget_cap")
             return
         counts = await self.store.counts(cid)
         usage = await self.store.usage()
@@ -342,8 +375,9 @@ class WebSearchWorker:
         task = query_task(campaign)
         blocked = self.config.blocked_hosts | task.blocked_hosts
         # The kind is what the URL looks like (an index page is expected; a concrete listing URL is never queued here).
+        deal = campaign_deal(campaign)
         candidates = [Candidate(u, url_key(u), host_of(u), 0, classify_url(u)) for u in plan_portal_urls(task.search_plan)
-                      if fetchable(u, blocked) and classify_url(u) != "listing"]
+                      if fetchable(u, blocked) and classify_url(u) != "listing" and not deal_conflict(u, deal)]
         if candidates:
             await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
 
@@ -351,6 +385,7 @@ class WebSearchWorker:
         task = query_task(campaign)
         blocked = self.config.blocked_hosts | task.blocked_hosts
         deal, known, real_estate = campaign_deal(campaign), known_hosts_of(campaign), campaign.plan.vertical == "real_estate"
+        allowed = self._allowed_hosts(campaign, known)
         for query in await self.store.pending_queries(campaign.id, self.config.queries_per_tick):
             await self.store.set_progress(campaign.id, None, self._line(query_count, pages, "поиск"))
             try:
@@ -360,18 +395,19 @@ class WebSearchWorker:
                 log.warning("web_search.search_failed %s", exc.code, extra={"campaign_id": campaign.id})
                 await self.store.query_done(query.id, ok=False, results=0, new_urls=0, error=exc.code)
                 continue
+            if self.config.query_cost_usd:
+                await costs.record("search", provider="search_api", item="query", cost_usd=self.config.query_cost_usd)
             candidates: list[Candidate] = []
             dropped = 0
             for hit in hits[: self.config.results_per_query]:
                 if not fetchable(hit.url, blocked):
                     continue
                 host = host_of(hit.url)
-                if deal and known_portal(host, known) and deal_conflict(hit.url, deal):
-                    dropped += 1  # a rent page for a sale campaign (and vice versa)
+                if deal and (deal_conflict(hit.url, deal) or deal_of(hit.title) not in (None, deal)):
+                    dropped += 1  # a rent page for a sale campaign (and vice versa): its path or its title says so
                     continue
-                if (real_estate and not known_portal(host, known)
-                        and not listing_evidence(hit.title, hit.snippet)):
-                    dropped += 1  # an unknown site whose hit shows no property and no figures: news, a dictionary ...
+                if real_estate and not self._host_allowed(host, known, allowed, hit.title, hit.snippet):
+                    dropped += 1  # not a client portal (strict), or a hit without a listing's figures: a dictionary ...
                     continue
                 if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
                     continue
@@ -384,6 +420,41 @@ class WebSearchWorker:
                                                            "dropped": dropped, "hits": len(hits)})
             new = await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
             await self.store.query_done(query.id, ok=True, results=len(hits), new_urls=new)
+
+    def _allowed_hosts(self, campaign: Campaign, known: frozenset[str]) -> frozenset[str]:
+        """The sites a strict campaign may read: the country's portals plus the plan's and the person's (empty: the
+        country has no portal list, so a site the person named must not become the only one -- the campaign is soft)."""
+        portals = country_portals(campaign.plan.country)
+        return frozenset((*portals, *known)) if portals else frozenset()
+
+    def _host_allowed(self, host: str, known: frozenset[str], allowed: frozenset[str], title: str,
+                      snippet: str) -> bool:
+        """Whether a search hit on ``host`` may be queued under ``domain_policy`` (see ``WebSearchConfig``)."""
+        policy = self.config.domain_policy
+        if policy == "strict" and allowed:
+            return any(host == h or host.endswith("." + h) for h in allowed)
+        if known_portal(host, known):
+            return True
+        if policy == "off":
+            return listing_evidence(title, snippet)
+        return listing_evidence(title, snippet) and listing_figures(title, snippet)
+
+    def _note_read(self, campaign_id: str, host: str, result: PageResult) -> bool:
+        """Count a refused page of ``host`` (a page read resets the count); True when the site trips the breaker now."""
+        limit, key = self.config.host_breaker_refusals, (campaign_id, host)
+        if not limit or key in self._tripped:
+            return False
+        if result.ok and result.via == "page":
+            self._refused.pop(key, None)
+            return False
+        error = result.error or ""
+        if error not in BREAKER_ERRORS and not error.startswith("scrape_http_4"):
+            return False
+        self._refused[key] = self._refused.get(key, 0) + 1
+        if self._refused[key] < limit:
+            return False
+        self._tripped.add(key)
+        return True
 
     # -- pages --
 
@@ -398,6 +469,10 @@ class WebSearchWorker:
             if budget <= 0:
                 break
             if url.host in waiting:  # a challenge met earlier in this very tick
+                continue
+            if (campaign.id, url.host) in self._tripped:  # the site kept refusing us: its search result is all we keep
+                await self.store.mark_url(campaign.id, url.url_key, "skipped", HOST_BREAKER)
+                await self._keep_search_result(campaign, url, None)
                 continue
             attempts = await self.store.host_attempts(campaign.id, url.host)
             if attempts >= cfg.max_pages_per_host:
@@ -457,10 +532,14 @@ class WebSearchWorker:
                 pages -= 1
                 await self._track(campaign.id, url.host, None, url=url.url)
                 continue
+            tripped = self._note_read(campaign.id, url.host, result)
             if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
                 card = search_result(url, result.error)
                 result = replace(card, layer=result.layer) if card else result
             await self.store.finish_fetch(ticket, result)
+            if tripped:  # its queued URLs are dropped one by one above, each keeping its search-result card
+                log.warning("web_search.host_breaker", extra={"campaign_id": campaign.id, "host": url.host,
+                                                              "refusals": self.config.host_breaker_refusals})
             deal = campaign_deal(campaign)
             children = [c for c in children if fetchable(c.url, cfg.blocked_hosts | query_task(campaign).blocked_hosts)
                         and not deal_conflict(c.url, deal)]
@@ -508,7 +587,8 @@ class WebSearchWorker:
         render = (may_render and self._render_layer() and layers.get("render", True)
                   and await self.store.renders_used(campaign_id) < cfg.max_renders_per_campaign)
         scrape = (may_scrape and self.scraper is not None
-                  and await self.store.scrapes_used(campaign_id) < cfg.max_scrape_api_per_campaign)
+                  and await self.store.scrapes_used(campaign_id) < cfg.max_scrape_api_per_campaign
+                  and not await costs.over_budget(campaign_id))
         return render, scrape
 
     async def _read(self, campaign: Campaign, url: QueuedUrl,
@@ -582,7 +662,8 @@ class WebSearchWorker:
             await self._leave(url, http_result)
             if current.ok:
                 return current, children
-        if may_scrape and self.scraper is not None and await self.store.scrapes_used(cid) < cfg.max_scrape_api_per_campaign:
+        if (may_scrape and self.scraper is not None and await self.store.scrapes_used(cid) < cfg.max_scrape_api_per_campaign
+                and not await costs.over_budget(cid)):
             await self._leave(url, current)
             current, children = await self._scrape(cid, url)
             if current.ok:
@@ -628,6 +709,8 @@ class WebSearchWorker:
         cfg = self.config
         self._set_layer(campaign_id, "api")
         await self.store.mark_scraped(campaign_id, url.url_key)
+        # Booked before the call: a provider may bill a refused or timed-out request too (the safe side of a budget).
+        await costs.record("scrape", provider="scrape_api", item=url.host, cost_usd=cfg.scrape_cost_usd)
         try:
             page = await asyncio.wait_for(self.scraper.fetch(url.url), timeout=cfg.page_runtime_seconds * 2)
         except FetchError as exc:
@@ -768,6 +851,8 @@ BLOCK_MARKERS = ("captcha", "datadome", "are you a robot", "access denied")
 MAX_BLOCK_PAGE_CHARS = 400
 REFUSALS = _REFUSALS
 RENDER_ON = ("http_403", "http_429", "http_503", "captcha")   # HTTP refusals that send the page to the next layer
+# A page's final error that counts toward the site's breaker: a refusal or an anti-bot page on any layer.
+BREAKER_ERRORS = frozenset({*_REFUSALS, "render_blocked"})
 
 
 def looks_blocked(title: str, text: str) -> bool:

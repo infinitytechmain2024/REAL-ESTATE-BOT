@@ -187,7 +187,7 @@ async def test_template_generator_rounds_never_repeat_and_cover_languages_and_po
 async def test_worker_generates_rounds_passing_used_queries_up_to_the_cap() -> None:
     campaigns = MemoryCampaignStore()
     cid = await campaign(campaigns)
-    queries = [f"terreno {town} Madrid" for town in (
+    queries = [f"terreno venta {town} Madrid" for town in (
         "Boadilla", "Pozuelo", "Majadahonda", "Rozas", "Torrelodones", "Galapagar", "Villanueva", "Brunete",
         "Navalcarnero", "Arganda", "Rivas", "Alcobendas", "Tres Cantos", "Colmenar", "Algete", "Getafe",
         "Leganes", "Fuenlabrada", "Mostoles", "Alcorcon", "Parla", "Pinto", "Valdemoro", "Aranjuez", "Chinchon",
@@ -211,10 +211,10 @@ async def test_a_round_without_new_queries_ends_the_stage() -> None:
     campaigns = MemoryCampaignStore()
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
-    generator = ListGenerator(["terreno Boadilla Madrid", "terrenos boadilla madrid"])
+    generator = ListGenerator(["terreno venta Boadilla Madrid", "terrenos venta boadilla madrid"])
     w = worker(campaigns, store, FakeSearcher(), FakeFetcher(), generator, cover_portals=False)
     await run_until_done(w, cid)
-    assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Madrid España"]
+    assert [q.text for q in store.queries[cid]] == ["terreno venta Boadilla Madrid España"]
     assert store.runs[cid].stop_reason == "queries_exhausted"
 
 
@@ -223,12 +223,12 @@ async def test_a_query_another_campaign_searched_recently_is_not_searched_again(
     first = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher()
-    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]),
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno venta Boadilla Madrid"]),
                cover_portals=False, query_reuse_hours=72)
     await run_until_done(w, first)
     second = await campaign(campaigns)
     await run_until_done(w, second)
-    assert searcher.calls == [("terreno Boadilla Madrid España", "es-ES")]  # a Spanish campaign searches Spain
+    assert searcher.calls == [("terreno venta Boadilla Madrid España", "es-ES")]  # a Spanish campaign searches Spain
     assert [q.state for q in store.queries[second]] == ["skipped"]
 
 
@@ -456,7 +456,7 @@ async def test_the_same_url_from_two_queries_is_fetched_once() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     listing = "https://www.idealista.com/inmueble/98765432/"
-    searcher = FakeSearcher({"terreno Boadilla Madrid España": [listing],
+    searcher = FakeSearcher({"terreno Boadilla Madrid en venta España": [listing],
                              "parcela Pozuelo venta Madrid España": [listing + "?utm_source=bing", "http://idealista.com/inmueble/98765432"]})
     fetcher = FakeFetcher()
     w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]))
@@ -537,13 +537,15 @@ async def test_caps_per_campaign_per_site_and_per_day() -> None:
     more = [f"https://agencia{n}.es/inmueble/venta-{7000000 + n}" for n in range(6)]
     fetcher2 = FakeFetcher()
     await run_until_done(worker(campaigns, store, FakeSearcher(default=more), fetcher2,
-                                ListGenerator(["parcela Pozuelo venta"]), max_pages_per_campaign=3), other)
+                                ListGenerator(["parcela Pozuelo venta"]), max_pages_per_campaign=3,
+                                domain_policy="off"), other)
     assert len(fetcher2.fetched) == 3 and store.runs[other].stop_reason == "page_cap"
 
     third = await campaign(campaigns)
     fetcher3 = FakeFetcher()
     await run_until_done(worker(campaigns, store, FakeSearcher(default=[f"https://otra{n}.es/anuncio/{8000000 + n}" for n in range(4)]),
-                                fetcher3, ListGenerator(["solar Rivas venta"]), max_pages_per_day=7), third)
+                                fetcher3, ListGenerator(["solar Rivas venta"]), max_pages_per_day=7,
+                                domain_policy="off"), third)
     assert fetcher3.fetched == [] and store.runs[third].stop_reason == "daily_page_cap"
 
 
@@ -555,7 +557,7 @@ async def test_robots_disallowed_pages_and_refusing_sites_are_left_alone() -> No
     refusing = [f"https://www.idealista.com/inmueble/{60000000 + n}/" for n in range(5)]
     fetcher = FakeFetcher(disallow={private}, errors={u: "http_403" for u in refusing})
     w = worker(campaigns, store, FakeSearcher(default=[private, *refusing]), fetcher,
-               ListGenerator(["terreno Boadilla Madrid"]), pages_per_tick=1)
+               ListGenerator(["terreno Boadilla Madrid"]), pages_per_tick=1, host_breaker_refusals=0)
     await run_until_done(w, cid)
     assert private not in fetcher.fetched and store.urls[cid][url_key(private)].state == "robots"
     assert fetcher.fetched == refusing[:3]  # three refusals block the site for a while
@@ -616,7 +618,7 @@ async def test_a_failed_search_is_recorded_and_the_stage_goes_on() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher(default=["https://www.idealista.com/inmueble/12121212/"])
-    searcher.fail.add("terreno Boadilla Madrid España")
+    searcher.fail.add("terreno Boadilla Madrid en venta España")  # the sale campaign's deal word is added
     fetcher = FakeFetcher()
     await run_until_done(worker(campaigns, store, searcher, fetcher,
                                 ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]),
@@ -860,7 +862,8 @@ async def test_a_hit_with_another_places_markers_is_not_queued_for_a_spanish_cam
     good, bad = "https://www.example.com/inmueble/11112222/", "https://www.example.com/inmueble/33334444/"
     searcher = FakeSearcher(default=[good, bad], texts={bad: ("Casa en Valencia, Carabobo", "Bs. 40.000")})
     fetcher = FakeFetcher()
-    w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
+    w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False,
+               domain_policy="soft")
     await run_until_done(w, cid)
     assert fetcher.fetched == [good]
 
@@ -988,7 +991,8 @@ def test_unknown_impersonation_profile_falls_back_to_chrome() -> None:
 # --- the web stage spends its budget on listings: denylist, SERP prefilter, host cap, deal, queries ---
 
 
-async def _queued_after_search(url_hits: dict[str, tuple[str, str]], *, goal_plan=None, cid_deal: str | None = None):
+async def _queued_after_search(url_hits: dict[str, tuple[str, str]], *, goal_plan=None, cid_deal: str | None = None,
+                               **config):
     campaigns = MemoryCampaignStore()
     cid = await campaign(campaigns)
     if goal_plan is not None:
@@ -997,7 +1001,8 @@ async def _queued_after_search(url_hits: dict[str, tuple[str, str]], *, goal_pla
         await campaigns.set_state(cid, "running", "test")
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher(default=list(url_hits), texts=url_hits)
-    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False,
+               **config)
     await w.step(cid)
     await w.step(cid)
     return {host_of(k) for k in store.urls.get(cid, {}) and [u.url for u in store.urls[cid].values()]}, store, cid
@@ -1033,8 +1038,10 @@ async def test_serp_hits_without_evidence_and_on_denied_hosts_are_not_queued() -
         "https://periodico-local.es/economia/precio-vivienda-valencia-9999999": ("El precio de la vivienda en Valencia",
                                                                                 "El precio medio de la vivienda sube"),
     }
+    hosts, *_ = await _queued_after_search(hits, domain_policy="soft")
+    assert hosts == {"fotocasa.es", "agencia-sol.es"}  # soft: an unknown site whose hit shows a listing's figures
     hosts, *_ = await _queued_after_search(hits)
-    assert hosts == {"fotocasa.es", "agencia-sol.es"}
+    assert hosts == {"fotocasa.es"}  # strict (the default): only the country's portals and the named sites
 
 
 async def test_an_unknown_host_gets_five_pages_until_it_gives_a_listing_then_the_normal_cap() -> None:
@@ -1044,7 +1051,7 @@ async def test_an_unknown_host_gets_five_pages_until_it_gives_a_listing_then_the
     urls = [f"https://agencia-gris.es/inmueble/venta-{7000000 + n}" for n in range(9)]
     fetcher = FakeFetcher(errors={u: "http_404" for u in urls})  # never a listing
     w = worker(campaigns, store, FakeSearcher(default=urls), fetcher, ListGenerator(["terreno Boadilla Madrid"]),
-               cover_portals=False)
+               cover_portals=False, domain_policy="soft")
     await run_until_done(w, cid)
     assert len(fetcher.fetched) == 5
     assert sum(r.detail == "unknown_host_cap" for r in store.urls[cid].values()) == 4
@@ -1053,7 +1060,8 @@ async def test_an_unknown_host_gets_five_pages_until_it_gives_a_listing_then_the
     good = [f"https://agencia-buena.es/inmueble/venta-{7100000 + n}" for n in range(9)]
     fetcher2 = FakeFetcher()  # every page is a listing
     await run_until_done(worker(campaigns, store, FakeSearcher(default=good), fetcher2,
-                                ListGenerator(["parcela Pozuelo venta"]), cover_portals=False), other)
+                                ListGenerator(["parcela Pozuelo venta"]), cover_portals=False, domain_policy="soft"),
+                         other)
     assert len(fetcher2.fetched) == 9
 
 
@@ -1077,7 +1085,8 @@ async def test_a_portal_hit_of_the_opposite_deal_is_not_queued() -> None:
     rent_url = "https://www.pisos.com/alquilar/piso-valencia-12345679/"
     _, store, cid = await _queued_after_search({sale_url: EVIDENCE, rent_url: EVIDENCE})
     assert {u.url for u in store.urls[cid].values()} == {sale_url}
-    _, store, cid = await _queued_after_search({sale_url: EVIDENCE, rent_url: EVIDENCE},
+    neutral = ("Piso en Madrid", "Piso 2 hab. 85 m² 900 €")  # EVIDENCE's «en venta» title would itself say «sale»
+    _, store, cid = await _queued_after_search({sale_url: neutral, rent_url: neutral},
                                                goal_plan="квартира в аренду Мадрид до 900 €")
     assert {u.url for u in store.urls[cid].values()} == {rent_url}
 

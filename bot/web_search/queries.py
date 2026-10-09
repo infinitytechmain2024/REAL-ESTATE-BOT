@@ -41,6 +41,7 @@ from typing import Any, Literal, Protocol
 import httpx
 
 from bot.campaign import geo
+from bot.utils import costs
 
 from .models import QUERY_LANGUAGES, GeneratedQuery
 from .urls import (
@@ -391,8 +392,32 @@ def localise(queries: list[GeneratedQuery], task: QueryTask) -> list[GeneratedQu
             text = clean_query(f"{text} {task.place_alias(query.language)}")
             if text is None or not geo.mentions_place(text, needed, strict=city):
                 continue
+        text = with_deal(text, task, query.language)
+        if text is None:
+            continue
         out.append(GeneratedQuery(with_country(text, task, query.language), query.language))
     return out
+
+
+# Any deal word, either deal: a query that names one is left as it is (``with_deal`` adds one to the others).
+_DEAL_WORD = re.compile(
+    r"(?<!\w)(?:venta|vende\w*|vendo|comprar|compra|alquiler\w*|alquila\w*|alquilo|arrendamiento|for\s+sale|for\s+rent"
+    r"|buy|rent|rental|to\s+let|sale)(?!\w)|(?<!\w)(?:купить|купити|куплю|продаж\w*|продам|аренд\w*|оренд\w*|снять|зняти"
+    r"|сдам|здам)", re.IGNORECASE)
+
+
+def with_deal(text: str, task: QueryTask, language: str | None) -> str | None:
+    """``text`` with the campaign's deal word when it names no deal (a buyer's query must not find rentals);
+    None when it does not fit. No deal in the task, or another vertical: ``text`` as it is."""
+    deal = task.constraints.get("deal")
+    if task.vertical != "real_estate" or deal not in ("sale", "rent") or _DEAL_WORD.search(text):
+        return text
+    language = language if language in QUERY_LANGUAGES else ("ru" if _CYRILLIC.search(text) else "es")
+    word = _DEAL_TERMS[deal].get(language, _DEAL_TERMS[deal]["es"])[0]
+    words = text.split()
+    if words and words[0].startswith("site:"):  # «site:x.com terreno Madrid» -> «site:x.com terreno en venta Madrid»
+        return clean_query(" ".join([words[0], words[1] if len(words) > 1 else "", word, *words[2:]]))
+    return clean_query(f"{text} {word}")
 
 
 def with_country(text: str, task: QueryTask, language: str | None) -> str:
@@ -523,6 +548,7 @@ class OpenRouterQueryGenerator:
             "model": self.model,
             "temperature": 0.7,
             "max_tokens": 1500,
+            "usage": costs.USAGE,
             "response_format": {"type": "json_schema",
                                 "json_schema": {"name": "web_search_queries", "strict": True, "schema": SCHEMA}},
             "messages": [
@@ -535,7 +561,9 @@ class OpenRouterQueryGenerator:
             payload["response_format"] = {"type": "json_object"}
             response = await self._post(payload)
         if response.status_code != 200:
+            await costs.error("llm", f"http_{response.status_code}", item=self.model)
             raise QueryGenerationError("http_error", status=response.status_code)
+        await costs.llm_response(self.model, response)
         try:
             return parse_queries(response.json()["choices"][0]["message"]["content"])
         except Exception as exc:

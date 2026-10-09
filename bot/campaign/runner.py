@@ -58,6 +58,7 @@ import httpx
 
 from bot.agents.recorder import PostgresRecorder, Recorder, record_of
 from bot.analysis_pipeline.cards import CardTask, also_on, render_card
+from bot.utils import costs
 
 from . import offers, people
 from .dedup import Listing, listing_of, same_object, site_of
@@ -235,6 +236,9 @@ class WebProgress(Protocol):
 
 UNVERIFIED_CAP = "Не проверено ИИ: лимит проверок исчерпан"
 UNVERIFIED_FAILED = "Не проверено ИИ: сбой проверки"
+UNVERIFIED_BUDGET = "Не проверено ИИ: бюджет прогона исчерпан"
+# Held findings whose owner-facing note is stored (``hold_reason``): the AI check could not run or could not confirm.
+NOTED_WHYS = frozenset({"unverified", "ai_failed", "cost_cap"})
 
 
 @dataclass(frozen=True)
@@ -389,6 +393,10 @@ class CampaignRunner:
         campaign = await self.campaigns.get(campaign_id)
         if campaign is None:
             return
+        with costs.scope(campaign_id):  # the AI checks and the final report are booked on the campaign
+            await self._step(campaign_id, campaign)
+
+    async def _step(self, campaign_id: str, campaign: Campaign) -> None:
         line = ""
         if campaign.state not in TERMINAL_STATES:
             await self._stream(campaign)
@@ -572,7 +580,7 @@ class CampaignRunner:
                 deferred += 1
                 continue
             if match.bucket != "exact":
-                reason = match.note if match.why == "unverified" else None
+                reason = match.note if match.why in NOTED_WHYS else None
                 if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance, reason,
                                                  why=reason_category(match.why)):
                     if reason:
@@ -688,7 +696,9 @@ class CampaignRunner:
                     self._miss(finding.id, 0)  # remembered, so a paused judge does not block the batch
                     return None
                 self._relevance_misses.pop(finding.id, None)
-                return Match("similar", match.distance, "unverified", note=note or UNVERIFIED_FAILED)
+                # Not «unverified by the data» but «the check never ran»: counted apart, so the report names the cause.
+                why = "cost_cap" if note == UNVERIFIED_BUDGET else "ai_failed"
+                return Match("similar", match.distance, why, note=note or UNVERIFIED_FAILED)
             return match
         if verdict.review:  # the reviewer's criteria matrix decides (see ``relevance.review_match``)
             return review_match(match, verdict.review)
@@ -718,6 +728,8 @@ class CampaignRunner:
             return stored, (UNVERIFIED_FAILED if stored.verdict is None else None), False
         if self.relevance is None:
             return None, UNVERIFIED_FAILED, False
+        if await costs.over_budget(campaign.id):  # CAMPAIGN_BUDGET_USD spent: no more paid checks for this campaign
+            return None, UNVERIFIED_BUDGET, False
         if self._relevance_paused_until is not None and self.now() < self._relevance_paused_until:
             return None, UNVERIFIED_FAILED, True
         if await self.store.relevance_calls(campaign.id) >= self.config.max_relevance_calls:
@@ -987,8 +999,10 @@ class CampaignRunner:
             request = campaign_request(campaign)
             title = task_title(request, campaign.plan.location_aliases.get("ru"), campaign.plan.goal)
             offers = {bucket: await self.store.offer_state(campaign.id, bucket) for bucket in ("similar", "other")}
+            sink = costs.ledger()
+            spent = await sink.summary(campaign.id) if sink is not None else None
             text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals,
-                                                 offers=offers)
+                                                 offers=offers, costs=spent, budget=costs.budget())
             await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
             log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})
@@ -1272,6 +1286,7 @@ async def main() -> None:
 
     settings = CampaignRunnerSettings()
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=6)
+    costs.install(costs.PostgresLedger(pool), settings.budget_usd)  # every paid call of this process is booked
     messenger = TelegramMessenger(settings.telegram_token)
     campaigns = PostgresCampaignStore(pool)
     discovery = None
