@@ -13,16 +13,16 @@
 ## Step 4 — Проверка провайдеров (2026-10-10)
 - [x] Публичные первичные источники: пять акторов Apify, Scrape.do, официальный Idealista API
 - [x] `PROVIDERS.md`: цены, схема/ограничения, таблица всех 20 доменов и оценки разработки
-- [ ] Владелец выбирает провайдера и подтверждает переход к фазе 0 (контрольная остановка HANDOFF)
+- [x] Владелец выбрал `axlymxp/idealista-scraper` + Scrape.do fallback и подтвердил переход к фазе 0 (2026-10-10)
 
 ## Phase 0 — Подготовка (Orchestrator + Architecture)
-- [ ] Orchestrator запускает Architecture Agent
-- [ ] Architecture Agent подтверждает точки интеграции и протокол ListingSource
+- [x] Orchestrator запускает Architecture Agent
+- [x] Architecture Agent подтверждает точки интеграции и протокол ListingSource — `DESIGN.md`
 
 ## Phase 1 — Foundation
 - [ ] Implementation Agent создаёт `bot/web_search/sources/`
 - [ ] Реализует `ListingSource` + `SourceListing`
-- [ ] Database Agent готовит миграцию `042_listing_sources.sql`
+- [ ] Database Agent готовит миграцию `043_listing_sources.sql`
 
 ## Phase 2 — Apify Integration
 - [ ] Implementation Agent пишет `ApifyIdealistaSource`
