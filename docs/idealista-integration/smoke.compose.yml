@@ -1,0 +1,44 @@
+# Temporary override for the one-campaign Madrid land smoke. Use explicitly with
+# docker compose -f docker-compose.yml -f docs/idealista-integration/smoke.compose.yml.
+# No secret values belong in this file. Stop/recreate these four services using
+# the base compose file after collecting the campaign results.
+services:
+  campaign-runner:
+    environment:
+      OPENROUTER_API_KEY: ${SMOKE_OPENROUTER_API_KEY:?set SMOKE_OPENROUTER_API_KEY}
+      CAMPAIGN_BUDGET_USD: "1"
+      APIFY_IDEALISTA_ENABLED: "true"
+      APIFY_TOKEN: ${APIFY_TOKEN:?set APIFY_TOKEN}
+      APIFY_IDEALISTA_ACTOR: axlymxp/idealista-scraper
+      APIFY_IDEALISTA_MAX_RESULTS: "20"
+      APIFY_IDEALISTA_LOCATION_NAME: Madrid
+      APIFY_IDEALISTA_LOCATION_ID: 0-EU-ES-28-07-001-079
+      APIFY_IDEALISTA_MAX_CHARGE_USD: "0.10"
+      WEB_SEARCH_BACKENDS: searxng
+      WEB_SEARCH_SCRAPE_API_URL: ""
+      CAMPAIGN_SEARCH_PLAN_ENABLED: "false"
+      SOCIAL_SEARCH_PLATFORMS: ""
+      INVESTOR_REACH_ENABLED: "false"
+      CAMPAIGN_COMMENT_LEADS: "off"
+      OPENROUTER_WEB_QUERY_MODEL: openai/gpt-4o-mini
+      OPENROUTER_ANALYSIS_MODEL: openai/gpt-4o-mini
+      OPENROUTER_REVIEW_MODEL: openai/gpt-4o-mini
+      OPENROUTER_MATCH_MODEL: openai/gpt-4o-mini
+      OPENROUTER_FINAL_MODEL: openai/gpt-4o-mini
+
+  analysis-worker:
+    environment:
+      OPENROUTER_API_KEY: ${SMOKE_OPENROUTER_API_KEY:?set SMOKE_OPENROUTER_API_KEY}
+      OPENROUTER_ANALYSIS_MODEL: openai/gpt-4o-mini
+      CAMPAIGN_BUDGET_USD: "1"
+      ANALYSIS_BATCH_SIZE: "1"
+
+  telegram:
+    environment:
+      OPENROUTER_API_KEY: ${SMOKE_OPENROUTER_API_KEY:?set SMOKE_OPENROUTER_API_KEY}
+      OPENROUTER_INTERVIEW_MODEL: openai/gpt-4o-mini
+      OPENROUTER_INTAKE_MODEL: openai/gpt-4o-mini
+
+  reduction-worker:
+    environment:
+      AGENT_REDUCTION_ENABLED: "false"

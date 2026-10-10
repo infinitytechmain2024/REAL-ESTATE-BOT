@@ -62,8 +62,25 @@ SSH-доступ к `srv2000490` работает. Проект находитс
    OPENROUTER_FINAL_MODEL=openai/gpt-4o-mini
    ```
 
-   `APIFY_TOKEN`, `APIFY_IDEALISTA_LOCATION_ID` и отдельный `OPENROUTER_API_KEY`
-   должны существовать в защищённой среде; их значения сюда не копировать.
+   `APIFY_TOKEN` и отдельный `SMOKE_OPENROUTER_API_KEY` должны существовать в
+   защищённой среде; ID муниципалитета задан во временном override, значения ключей
+   сюда не копировать.
+   Для VPS подготовлен [временный Compose override](smoke.compose.yml): он подставляет
+   `SMOKE_OPENROUTER_API_KEY` в campaign-runner, analysis-worker и Telegram,
+   ограничивает Apify, отключает лишние платные пути и reduction-worker на время теста.
+   Применять его только к этим четырём сервисам после проверки обоих ключей:
+
+   ```bash
+   docker compose --env-file .env -f docker-compose.yml -f docs/idealista-integration/smoke.compose.yml \
+     up -d --no-deps --no-build --force-recreate campaign-runner analysis-worker telegram reduction-worker
+   ```
+
+   После фиксации результатов вернуть эти сервисы к обычному Compose-конфигу:
+
+   ```bash
+   docker compose --env-file .env -f docker-compose.yml \
+     up -d --no-deps --no-build --force-recreate campaign-runner analysis-worker telegram reduction-worker
+   ```
 5. Расчётный предел при подтверждённой изоляции и последовательных запросах: Apify
    `$0.10` + ключ OpenRouter `$0.50` + запас на один запрос, который пересечёт лимит ключа.
    Для `gpt-4o-mini`
