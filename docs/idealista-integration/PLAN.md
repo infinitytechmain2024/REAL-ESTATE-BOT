@@ -46,5 +46,10 @@
 Проверки фазы 4: **1510 passed, 0 skipped** (PostgreSQL и golden включены), Ruff чисто.
 
 ## Phase 5 — Reporting & Polish
-- [ ] Учёт layer="api" в отчётах и метриках
-- [ ] Reviewer Agent проводит финальную проверку по CHECKLIST.md
+- [x] Учёт layer="api" в отчётах и метриках; `pages_api` в миграции 045, метка «Idealista (API)»
+  только при реальном чтении API.
+- [x] Reviewer Agent проводит финальную проверку по CHECKLIST.md —
+  [REVIEW_PHASE_5.md](REVIEW_PHASE_5.md).
+
+Проверки фазы 5: **1512 passed, 0 skipped** (PostgreSQL и golden включены), Ruff чисто.
+Контрольная остановка перед живым smoke-тестом.

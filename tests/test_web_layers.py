@@ -249,7 +249,7 @@ async def test_scrape_api_client_sends_the_key_and_the_encoded_url_and_hides_the
     assert "s3cret" not in repr(client)
 
 
-async def test_scrape_do_query_auth_and_billed_error_have_no_secret() -> None:
+async def test_scrape_do_query_auth_and_billed_error_have_no_secret(caplog) -> None:
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -258,6 +258,7 @@ async def test_scrape_do_query_auth_and_billed_error_have_no_secret() -> None:
 
     client = ScrapeApiClient("https://api.scrape.do/", "topsecret", auth_mode="query_token", render=True,
                              super_proxy=True, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    caplog.set_level("INFO", logger="httpx")
     with pytest.raises(ScrapeBillingError) as caught:
         await client.fetch(URLS[0])
     assert caught.value.code == "scrape_http_400" and caught.value.credits == 25
@@ -265,7 +266,13 @@ async def test_scrape_do_query_auth_and_billed_error_have_no_secret() -> None:
     assert seen[0].url.params["geoCode"] == "es"
     assert seen[0].url.params["render"] == "true" and seen[0].url.params["super"] == "true"
     assert "authorization" not in seen[0].headers
-    assert "topsecret" not in repr(client) + str(caught.value)
+    assert "topsecret" not in repr(client) + str(caught.value) + caplog.text
+    await client.aclose()
+
+
+def test_scrape_do_rejects_an_unencrypted_endpoint() -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        ScrapeApiClient("http://api.scrape.do/", "topsecret", auth_mode="query_token")
 
 
 async def test_scrape_do_response_credits_replace_the_prebooked_estimate() -> None:

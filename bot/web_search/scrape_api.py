@@ -9,6 +9,7 @@ never logged and never part of an error code.
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 from urllib.parse import quote, urlsplit
 
@@ -17,6 +18,21 @@ import httpx
 from .fetcher import FetchedPage, FetchError, _decode
 
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
+
+
+class _RedactToken(logging.Filter):
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._values = (token, quote(token, safe=""))
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = message
+        for value in self._values:
+            redacted = redacted.replace(value, "[redacted]")
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
 
 
 class Scraper(Protocol):
@@ -46,8 +62,12 @@ class ScrapeApiClient:
             raise ValueError("scrape api url must be http(s)")
         if auth_mode not in ("bearer", "query_token"):
             raise ValueError("unknown scrape api auth mode")
-        if auth_mode == "query_token" and (not api_key or urlsplit(api_url).hostname != "api.scrape.do"):
-            raise ValueError("Scrape.do requires a key and api.scrape.do endpoint")
+        if auth_mode == "query_token" and (not api_key or urlsplit(api_url).hostname != "api.scrape.do"
+                                            or urlsplit(api_url).scheme != "https"):
+            raise ValueError("Scrape.do requires a key and HTTPS api.scrape.do endpoint")
+        self._log_filter = _RedactToken(api_key) if auth_mode == "query_token" else None
+        if self._log_filter:
+            logging.getLogger("httpx").addFilter(self._log_filter)
         self._url, self._key, self.max_bytes = api_url, api_key, max_bytes
         self.auth_mode = auth_mode
         self.geo_code, self.render, self.super_proxy = geo_code, render, super_proxy
@@ -60,7 +80,11 @@ class ScrapeApiClient:
         return "ScrapeApiClient(...)"
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        try:
+            await self._client.aclose()
+        finally:
+            if self._log_filter:
+                logging.getLogger("httpx").removeFilter(self._log_filter)
 
     async def fetch(self, url: str) -> FetchedPage:
         separator = "&" if "?" in self._url else "?"

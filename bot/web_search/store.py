@@ -149,9 +149,10 @@ def _site_queries(rows: list[tuple[str, int]]) -> dict[str, tuple[int, int]]:
 
 
 def _reports(queries: dict[str, tuple[int, int]], urls: dict[str, list[int]],
-             unverified: frozenset[str] = frozenset()) -> list[SiteReport]:
+             unverified: frozenset[str] = frozenset(), api_reads: dict[str, int] | None = None) -> list[SiteReport]:
     hosts = sorted(set(queries) | set(urls))
-    return [SiteReport(h, *queries.get(h, (0, 0)), *urls.get(h, [0, 0, 0, 0]), h in unverified) for h in hosts]
+    return [SiteReport(h, *queries.get(h, (0, 0)), *urls.get(h, [0, 0, 0, 0]), h in unverified,
+                       (api_reads or {}).get(h, 0)) for h in hosts]
 
 
 def _url_bucket(state: str, detail: str | None) -> int | None:
@@ -619,10 +620,11 @@ class PostgresWebStore:
             """select query_text, coalesce(result_count, 0) as results from web_search_queries
                 where campaign_id = $1::uuid and query_text ilike '%site:%' and state = 'searched'""", campaign_id)
         urls = await self.pool.fetch(
-            """select host, state, detail, count(*) as n from web_campaign_urls
-                where campaign_id = $1::uuid group by host, state, detail""", campaign_id)
+            """select host, state, detail, layer, count(*) as n from web_campaign_urls
+                where campaign_id = $1::uuid group by host, state, detail, layer""", campaign_id)
         counts: dict[str, list[int]] = {}
         unverified: set[str] = set()
+        api_reads: dict[str, int] = {}
         for r in urls:
             row = counts.setdefault(r["host"], [0, 0, 0, 0])
             row[0] += r["n"]
@@ -631,7 +633,10 @@ class PostgresWebStore:
                 row[bucket] += r["n"]
             if r["detail"] == VERIFICATION_EXPIRED:
                 unverified.add(r["host"])
-        return _reports(_site_queries([(r["query_text"], r["results"]) for r in queries]), counts, frozenset(unverified))
+            if r["state"] == "fetched" and r["layer"] == "api" and r["detail"] != "search_snippet":
+                api_reads[r["host"]] = api_reads.get(r["host"], 0) + r["n"]
+        return _reports(_site_queries([(r["query_text"], r["results"]) for r in queries]), counts,
+                        frozenset(unverified), api_reads)
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         row = await self.pool.fetchrow(
@@ -1290,6 +1295,7 @@ class MemoryWebStore:
         queries = [(q.text, q.results) for q in self.queries.get(campaign_id, []) if q.state == "searched"]
         counts: dict[str, list[int]] = {}
         unverified: set[str] = set()
+        api_reads: dict[str, int] = {}
         for u in self.urls.get(campaign_id, {}).values():
             row = counts.setdefault(u.host, [0, 0, 0, 0])
             row[0] += 1
@@ -1298,7 +1304,9 @@ class MemoryWebStore:
                 row[bucket] += 1
             if u.detail == VERIFICATION_EXPIRED:
                 unverified.add(u.host)
-        return _reports(_site_queries(queries), counts, frozenset(unverified))
+            if u.state == "fetched" and u.layer == "api" and u.detail != "search_snippet":
+                api_reads[u.host] = api_reads.get(u.host, 0) + 1
+        return _reports(_site_queries(queries), counts, frozenset(unverified), api_reads)
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         state = self._campaign_state(campaign_id)

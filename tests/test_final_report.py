@@ -178,6 +178,11 @@ def test_the_report_shows_the_money_the_skips_and_the_model_errors() -> None:
     text = report_text("цель", tally([OutcomeCount("sent", "exact", None, 1)]), [], [], [], [], costs=lines)
     assert "💶 Расход: $1.05 из $1.00" in text and "⚠️ Ошибки ИИ: http_401 ×3" in text
     assert "⚠️ Ошибки API порталов: apify_http_429 ×2" in text
+    separate = cost_lines(CostSummary(by_stage={"api": 0.20, "scrape": 0.10}))
+    assert separate == ["💶 Расход: $0.30 (API порталов $0.20 · Scrape API $0.10)"]
+    estimated = cost_lines(CostSummary(by_stage={"scrape": 0.05}, estimates={"scrape": 0.05}))
+    assert estimated == ["💶 Расход: $0.05 (Scrape API $0.05)",
+                         "Из них оценка без подтверждения провайдера: $0.05"]
     edge = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 4)])
     assert not edge.unverified_majority, "exactly 80 % is not more than 80 %"
 

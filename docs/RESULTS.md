@@ -1,5 +1,8 @@
 # Результаты изменений
 
+- 2026-10-10, Idealista phase 5: `pages_api`, метка «Idealista (API)» для реального API-чтения,
+  раздельные API/Scrape API счётчики и финальная приёмка. Полный pytest: 1512 passed, 0 skipped;
+  Ruff чисто. [Приёмка](idealista-integration/REVIEW_PHASE_5.md). Live/VPS не запускались.
 - 2026-10-10, Idealista phase 4: Scrape.do через существующий unlocker; query token/ES/render/super,
   учёт фактических credits или явно помеченной оценки. Полный pytest: 1510 passed, 0 skipped;
   Ruff чисто. Платных вызовов не было. [Конфигурация](idealista-integration/SCRAPE_DO_CONFIGURATION.md).

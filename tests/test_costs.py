@@ -53,6 +53,7 @@ async def test_costs_are_booked_on_the_scoped_campaign_and_capped(ledger) -> Non
     assert summary.by_stage == {"llm": 0.6, "scrape": pytest.approx(0.5)} and summary.total == pytest.approx(1.1)
     assert summary.errors == {"llm:http_401": 1} and summary.skips == {"llm:prefilter_deal": 1}
     assert summary.by_item["idealista.com"] == pytest.approx(0.5)
+    assert summary.estimates == {}
     with pytest.raises(ValueError):
         await costs.record("bogus")
 
@@ -137,12 +138,14 @@ async def test_unique_source_cost_replaces_estimate_and_keeps_regular_calls(ledg
         for _ in range(3):
             await costs.record_unique("api", key="listing-source:c1:idealista", provider="apify", item="actor",
                                       cost_usd=0.5, code="estimated", units=1)
+        assert (await ledger.summary("c1")).estimates == {"api": 0.5}
         await costs.record_unique("api", key="listing-source:c1:idealista", provider="apify", item="actor",
                                   cost_usd=0.03, units=1)
         await costs.record("api", provider="apify", item="actor", cost_usd=0.02)
     assert len(ledger.entries) == 2
     assert ledger.entries[0].code == ""
     assert await ledger.spent("c1") == pytest.approx(0.05)
+    assert (await ledger.summary("c1")).estimates == {}
 
 
 async def test_unique_cost_actual_usage_survives_later_failure_estimates(ledger) -> None:

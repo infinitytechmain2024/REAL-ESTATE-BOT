@@ -1202,6 +1202,8 @@ async def test_memory_store_persists_structured_api_listing() -> None:
     assert await store.layer_state("idealista.com") == {"http": True, "render": True}
     assert store.hosts["idealista.com"]["fetched"] == 1
     assert store.hosts["idealista.com"]["failed"] == 0
+    report = next(item for item in await store.site_report(cid) if item.host == "idealista.com")
+    assert (report.read, report.read_api) == (1, 1)
 
 
 @pytest.mark.parametrize("same_campaign", [True, False])

@@ -114,6 +114,8 @@ async def test_structured_api_listing_uses_the_existing_post_and_campaign_path(p
     assert tuple(await pool.fetchrow(
         "select state, layer from web_campaign_urls where campaign_id = $1::uuid and url_key = $2",
         cid, queued.url_key)) == ("fetched", "api")
+    report = next(item for item in await store.site_report(cid) if item.host == "idealista.com")
+    assert (report.read, report.read_api) == (1, 1)
     assert tuple(await pool.fetchrow(
         "select state, post_id::text from web_seen_urls where url_key = $1", queued.url_key)) == ("fetched", post_id)
     assert await pool.fetchrow(

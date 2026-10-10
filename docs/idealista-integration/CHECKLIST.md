@@ -3,14 +3,17 @@
 - [x] ListingSource protocol реализован — `bot/web_search/sources/base.py:28`; SourceListing с отдельным plot_m2, экспорт в sources/__init__.py.
 - [x] ApifyIdealistaSource написан и покрыт обработкой ошибок — tests/test_apify_source.py, HTTPX mocks; default-off, live fixture не получен.
 - [x] _from_sources создаёт claim/POST только в первом раунде; _resume_sources обрабатывает existing run/cache без нового запуска — tests/test_listing_source_worker.py.
-- [ ] via/layer=api: core store/worker поддержаны и проверены; pages_api/полная отчётность ещё требуют фазы 5.
+- [x] via/layer=api, pages_api и полная отчётность проверены Memory/реальным PostgreSQL —
+  `test_web_search.py`, `test_web_search_postgres.py`, `test_campaign_metrics.py`.
 - [x] Failed URL можно повторно захватывать через API — Memory и реальный Postgres, same/other campaign; успешные/snippet URL защищены.
 - [x] API success/failure не меняет HTTP/render refusals/blocked_until, не трогает HTML breaker — success/failure tests с исходными ненулевыми отказами.
-- [ ] В отчётах видно "Idealista (API)"
-- [x] APIFY Settings/.env.example/compose/docs синхронны; Scrape.do settings остаются фазой 4.
-- [x] Базовые тесты проходят — фаза 3: полный pytest 1508 passed, 0 skipped, Postgres/golden включены; Ruff чисто. Повторная приёмка после фазы 5.
-- [x] Mock/system регрессии других порталов проходят в полном pytest фазы 3; live-доступность 20 порталов не утверждается, повторить после фазы 5.
-- [x] Токен repr=False/Bearer, безопасные исключения и логи, .env.example без ключей — tests/test_apify_source.py и deployment tests; повторить после фазы 4 query auth.
+- [x] В отчётах видно «Idealista (API)» только при API-чтении — `test_campaign_summary.py`,
+  `SiteReport.read_api` в обоих stores; общий `site_lines` используют summary и final_report.
+- [x] APIFY/Scrape.do Settings/.env.example/compose/docs синхронны; `test_deployment.py` в полном прогоне.
+- [x] Базовые тесты проходят — фаза 5: полный pytest **1512 passed, 0 skipped**, Postgres/golden включены; Ruff чисто.
+- [x] Mock/system регрессии других порталов прошли в полном pytest фазы 5; live-доступность 20 порталов не утверждается.
+- [x] Токены `repr=False`; Scrape.do требует HTTPS, query-token скрыт из info-лога, ошибки без секрета —
+  `test_apify_source.py`, `test_web_layers.py`, deployment tests; `.env.example` без ключей.
 
 ## Проверка foundation (фаза 1, 2026-10-10)
 
@@ -32,4 +35,6 @@
 - [x] Host success/failure и progress.read правильно учитывают API; persistent scrape не переименован.
 - [x] API ошибки видны в финальном отчёте; skip означает отсутствие вызова ИИ, а не отсутствие расходов на источник.
 
-Доказательства и пределы приёмки: [REVIEW_PHASE_3.md](REVIEW_PHASE_3.md). Фазы 4–5 и smoke впереди.
+Доказательства и пределы приёмки: [REVIEW_PHASE_3.md](REVIEW_PHASE_3.md),
+[REVIEW_PHASE_5.md](REVIEW_PHASE_5.md). Smoke впереди; живой actor output, точный location ID
+и общий жёсткий лимит $1 ещё не проверены.

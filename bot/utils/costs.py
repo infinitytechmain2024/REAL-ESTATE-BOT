@@ -73,6 +73,7 @@ class CostSummary:
     by_item: dict[str, float] = field(default_factory=dict)
     errors: dict[str, int] = field(default_factory=dict)   # "stage:code" -> count
     skips: dict[str, int] = field(default_factory=dict)    # "stage:code" -> count
+    estimates: dict[str, float] = field(default_factory=dict)  # stage -> unconfirmed USD already included in by_stage
 
     @property
     def total(self) -> float:
@@ -91,16 +92,19 @@ def _summary(entries: list[Entry]) -> CostSummary:
     items: Counter[str] = Counter()
     errors: Counter[str] = Counter()
     skips: Counter[str] = Counter()
+    estimates: Counter[str] = Counter()
     for e in entries:
         if e.kind == "cost":
             stages[e.stage] += e.cost_usd
             if e.item:
                 items[e.item] += e.cost_usd
+            if e.code.startswith("estimated"):
+                estimates[e.stage] += e.cost_usd
         elif e.kind == "error":
             errors[f"{e.stage}:{e.code}"] += e.units
         else:
             skips[f"{e.stage}:{e.code}"] += e.units
-    return CostSummary(dict(stages), dict(items), dict(errors), dict(skips))
+    return CostSummary(dict(stages), dict(items), dict(errors), dict(skips), dict(estimates))
 
 
 @dataclass

@@ -447,6 +447,9 @@ def cost_lines(spent: CostSummary | None, budget: float = 0.0) -> list[str]:
                         if v > 0)
     limit = f" из {_usd(budget)}" if budget > 0 else ""
     lines.append(f"💶 Расход: {_usd(spent.total)}{limit}" + (f" ({stages})" if stages else ""))
+    if spent.estimates:
+        estimate = sum(spent.estimates.values())
+        lines.append(f"Из них оценка без подтверждения провайдера: {_usd(estimate)}")
     if budget > 0 and spent.total >= budget:
         lines.append("⛔ Бюджет прогона исчерпан: поиск и проверки остановлены, часть находок не проверена")
     skips: Counter[str] = Counter()
