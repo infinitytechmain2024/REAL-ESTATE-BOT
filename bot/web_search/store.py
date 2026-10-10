@@ -13,7 +13,7 @@ import hashlib
 import json
 import re
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -27,12 +27,14 @@ from .models import (
     PendingQuery,
     QueuedUrl,
     SiteReport,
+    SourceRun,
     Usage,
     WebProgress,
     WebRun,
     WebStatus,
 )
 from .queries import query_key
+from .sources.base import SourceListing
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,6 +67,13 @@ HOST_BREAKER = "host_breaker"  # a URL dropped because its site kept refusing us
 
 
 class WebStore(Protocol):
+    async def claim_source(self, campaign_id: str, name: str) -> tuple[SourceRun, bool]: ...
+    async def source_runs(self, campaign_id: str) -> list[SourceRun]: ...
+    async def save_source_run(self, campaign_id: str, name: str, run_id: str, dataset_id: str | None) -> None: ...
+    async def source_ready(self, campaign_id: str, name: str, listings: list[SourceListing]) -> None: ...
+    async def advance_source_import(self, campaign_id: str, name: str, offset: int) -> None: ...
+    async def finish_source(self, campaign_id: str, name: str, error_code: str | None = None) -> None: ...
+
     async def recover(self, lease_seconds: int) -> int: ...
     async def campaign_ids(self) -> list[str]: ...
     async def take_lease(self, campaign_id: str, token: str, seconds: int) -> bool: ...
@@ -176,6 +185,55 @@ class PostgresWebStore:
         self.job_hours = job_hours  # VERIFICATION_JOB_HOURS: how long an open web_challenge job lives
         self.human_verification = human_verification  # WEB_SEARCH_HUMAN_VERIFICATION: no jobs to report when off
         self.live: dict[str, WebProgress] = {}  # the worker's in-memory progress, shown by ``web_status``
+
+    @staticmethod
+    def _source_run(row) -> SourceRun:
+        listings = row["listings"]
+        if isinstance(listings, str):
+            listings = json.loads(listings)
+        return SourceRun(str(row["campaign_id"]), row["name"], row["state"], row["run_id"], row["dataset_id"],
+                         tuple(SourceListing(**item) for item in listings), row["import_offset"], row["error_code"])
+
+    async def claim_source(self, campaign_id: str, name: str) -> tuple[SourceRun, bool]:
+        row = await self.pool.fetchrow(
+            """insert into web_listing_source_runs (campaign_id, name) values ($1::uuid, $2)
+               on conflict do nothing returning *""", campaign_id, name)
+        if row is not None:
+            return self._source_run(row), True
+        row = await self.pool.fetchrow(
+            "select * from web_listing_source_runs where campaign_id=$1::uuid and name=$2", campaign_id, name)
+        return self._source_run(row), False
+
+    async def source_runs(self, campaign_id: str) -> list[SourceRun]:
+        rows = await self.pool.fetch(
+            "select * from web_listing_source_runs where campaign_id=$1::uuid order by name", campaign_id)
+        return [self._source_run(row) for row in rows]
+
+    async def save_source_run(self, campaign_id: str, name: str, run_id: str, dataset_id: str | None) -> None:
+        await self.pool.execute(
+            """update web_listing_source_runs set run_id=$3, dataset_id=coalesce($4,dataset_id),
+               state=case when state='starting' then 'running' else state end, updated_at=now()
+               where campaign_id=$1::uuid and name=$2 and (run_id is null or run_id=$3)""",
+            campaign_id, name, run_id, dataset_id)
+
+    async def source_ready(self, campaign_id: str, name: str, listings: list[SourceListing]) -> None:
+        await self.pool.execute(
+            """update web_listing_source_runs set state='ready', listings=$3::jsonb, updated_at=now()
+               where campaign_id=$1::uuid and name=$2 and state in ('starting', 'running')""",
+            campaign_id, name, json.dumps([asdict(item) for item in listings], allow_nan=False))
+
+    async def advance_source_import(self, campaign_id: str, name: str, offset: int) -> None:
+        if offset < 0:
+            raise ValueError("negative source import offset")
+        await self.pool.execute(
+            """update web_listing_source_runs set import_offset=greatest(import_offset,$3), updated_at=now()
+               where campaign_id=$1::uuid and name=$2 and state='ready'""", campaign_id, name, offset)
+
+    async def finish_source(self, campaign_id: str, name: str, error_code: str | None = None) -> None:
+        await self.pool.execute(
+            """update web_listing_source_runs set state=$3, error_code=$4, updated_at=now()
+               where campaign_id=$1::uuid and name=$2 and state not in ('completed','failed')""",
+            campaign_id, name, "failed" if error_code else "completed", error_code)
 
     def note_progress(self, campaign_id: str, progress: WebProgress) -> None:
         self.live[campaign_id] = progress
@@ -855,6 +913,7 @@ class MemoryWebStore:
 
     campaigns: object | None = None  # a MemoryCampaignStore, for campaign_ids()/web_status()
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    sources: dict[tuple[str, str], SourceRun] = field(default_factory=dict)
     runs: dict[str, WebRun] = field(default_factory=dict)
     started: dict[str, datetime] = field(default_factory=dict)
     leases: dict[str, tuple[str, datetime]] = field(default_factory=dict)
@@ -872,6 +931,47 @@ class MemoryWebStore:
     job_hours: int = 24
     human_verification: bool = True
     _order: int = 0
+
+    async def claim_source(self, campaign_id: str, name: str) -> tuple[SourceRun, bool]:
+        key = (campaign_id, name)
+        fresh = key not in self.sources
+        if fresh:
+            self.sources[key] = SourceRun(campaign_id, name)
+        return self.sources[key], fresh
+
+    async def source_runs(self, campaign_id: str) -> list[SourceRun]:
+        return sorted((run for (cid, _), run in self.sources.items() if cid == campaign_id), key=lambda r: r.name)
+
+    async def save_source_run(self, campaign_id: str, name: str, run_id: str, dataset_id: str | None) -> None:
+        key = (campaign_id, name)
+        row = self.sources.get(key)
+        if row is not None and row.run_id in (None, run_id):
+            self.sources[key] = replace(row, run_id=run_id, dataset_id=dataset_id or row.dataset_id,
+                                        state="running" if row.state == "starting" else row.state)
+
+    async def source_ready(self, campaign_id: str, name: str, listings: list[SourceListing]) -> None:
+        key = (campaign_id, name)
+        row = self.sources.get(key)
+        if row is not None and row.state in ("starting", "running"):
+            # Match the persisted snapshot: caller mutations cannot alter stored facts.
+            snapshot = json.loads(json.dumps([asdict(item) for item in listings], allow_nan=False))
+            self.sources[key] = replace(row, state="ready", listings=tuple(SourceListing(**item) for item in snapshot))
+
+    async def advance_source_import(self, campaign_id: str, name: str, offset: int) -> None:
+        if offset < 0:
+            raise ValueError("negative source import offset")
+        key = (campaign_id, name)
+        row = self.sources.get(key)
+        if row is not None and row.state == "ready":
+            if offset > len(row.listings):
+                raise ValueError("source import offset exceeds snapshot")
+            self.sources[key] = replace(row, import_offset=max(row.import_offset, offset))
+
+    async def finish_source(self, campaign_id: str, name: str, error_code: str | None = None) -> None:
+        key = (campaign_id, name)
+        row = self.sources.get(key)
+        if row is not None and row.state not in ("completed", "failed"):
+            self.sources[key] = replace(row, state="failed" if error_code else "completed", error_code=error_code)
 
     def note_progress(self, campaign_id: str, progress: WebProgress) -> None:
         self.live[campaign_id] = progress

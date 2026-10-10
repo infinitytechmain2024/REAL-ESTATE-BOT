@@ -130,3 +130,30 @@ async def test_the_postgres_ledger_on_migration_042() -> None:
     finally:
         costs.install(None)
         await pool.close()
+
+
+async def test_unique_source_cost_replaces_estimate_and_keeps_regular_calls(ledger) -> None:
+    with costs.scope("c1"):
+        for _ in range(3):
+            await costs.record_unique("api", key="listing-source:c1:idealista", provider="apify", item="actor",
+                                      cost_usd=0.5, code="estimated", units=1)
+        await costs.record_unique("api", key="listing-source:c1:idealista", provider="apify", item="actor",
+                                  cost_usd=0.03, units=1)
+        await costs.record("api", provider="apify", item="actor", cost_usd=0.02)
+    assert len(ledger.entries) == 2
+    assert ledger.entries[0].code == ""
+    assert await ledger.spent("c1") == pytest.approx(0.05)
+
+
+async def test_unique_cost_actual_usage_survives_later_failure_estimates(ledger) -> None:
+    with costs.scope("c1"):
+        await costs.record_unique("api", key="source:c1", provider="apify", item="actor",
+                                  cost_usd=0.03)
+        await costs.record_unique("api", key="source:c1", provider="apify", item="actor",
+                                  cost_usd=0.5, code="estimated_launch_uncertain")
+        assert await ledger.spent("c1") == pytest.approx(0.03)
+        await costs.record_unique("api", key="source:c1", provider="apify", item="actor",
+                                  cost_usd=0.04)
+    assert len(ledger.entries) == 1
+    assert ledger.entries[0].code == ""
+    assert await ledger.spent("c1") == pytest.approx(0.04)

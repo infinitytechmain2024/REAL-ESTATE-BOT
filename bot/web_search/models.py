@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .sources.base import SourceListing
 
 UrlKind = Literal["listing", "index", "unknown"]
 RunState = Literal["searching", "done", "stopped"]
@@ -184,3 +187,17 @@ class HostVerification:
     state: Literal["none", "open", "verified", "unsolved"] = "none"
     job_id: str | None = None
     solved_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRun:
+    """Durable source checkpoint: a claimed launch is never launched a second time."""
+
+    campaign_id: str
+    name: str
+    state: Literal["starting", "running", "ready", "completed", "failed"] = "starting"
+    run_id: str | None = None
+    dataset_id: str | None = None
+    listings: tuple[SourceListing, ...] = ()
+    import_offset: int = 0
+    error_code: str | None = None

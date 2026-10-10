@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from bot.campaign import geo
@@ -55,6 +56,7 @@ from .models import (
     FetchTicket,
     PageResult,
     QueuedUrl,
+    SourceRun,
     WebProgress,
 )
 from .queries import (
@@ -71,6 +73,13 @@ from .queries import (
 from .render import ChallengeDetected, Renderer, RenderError
 from .scrape_api import Scraper
 from .searxng import Searcher, SearchError
+from .sources import ListingSource, SourceListing
+from .sources.apify import (
+    PermanentApifyError,
+    SourceRunContext,
+    TemporaryApifyError,
+    source_run_scope,
+)
 from .store import (
     _REFUSALS,
     BUSY,
@@ -199,6 +208,7 @@ class WebSearchWorker:
         renderer: Renderer | None = None,
         scraper: Scraper | None = None,
         planner: SearchPlanner | None = None,
+        sources: tuple[ListingSource, ...] = (),
         config: WebSearchConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         cancel_job: Callable[[str, str], Awaitable[bool]] | None = None,
@@ -209,6 +219,7 @@ class WebSearchWorker:
         self.renderer, self.scraper = renderer, scraper
         self.cancel_job = cancel_job  # the verification store's ``cancel(job_id, actor)``
         self.planner = planner  # writes the campaign's search plan once, before its first round
+        self.sources = sources
         self.token = str(uuid.uuid4())
         self._progress: dict[str, WebProgress] = {}  # campaign id -> live numbers (also shown through the store)
         self._listing_hosts: dict[tuple[str, str], bool] = {}  # (campaign, host) -> has a listing, reset every step
@@ -279,6 +290,7 @@ class WebSearchWorker:
         run = await self.store.get_run(campaign_id)
         if campaign.state in TERMINAL_STATES:
             if run is not None and run.state == "searching":
+                await self._stop_sources(campaign, f"campaign_{campaign.state}")
                 await self.store.finish(campaign_id, "stopped", f"campaign_{campaign.state}")
                 await self._release_idle_jobs()
             return
@@ -296,7 +308,10 @@ class WebSearchWorker:
         cfg, cid = self.config, campaign.id
         started = await self.store.started_at(cid)
         if started is not None and self.now() - started > timedelta(minutes=cfg.max_minutes_per_campaign):
+            await self._stop_sources(campaign, "time_cap")
             await self._done(campaign, "time_cap")
+            return
+        if await self._resume_sources(campaign):
             return
         if await costs.over_budget(cid):  # CAMPAIGN_BUDGET_USD spent (all services together)
             await self._done(campaign, "budget_cap")
@@ -338,6 +353,7 @@ class WebSearchWorker:
         cfg = self.config
         if used_count == 0:  # the first round: the search plan (once), then its direct portal pages
             campaign = await self._with_search_plan(campaign)
+            await self._from_sources(campaign)
             await self._enqueue_portal_urls(campaign)
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
@@ -355,6 +371,210 @@ class WebSearchWorker:
         log.info("web_search.round", extra={"campaign_id": campaign.id, "round": round_no, "generated": len(queries),
                                             "added": added})
         return bool(queries)
+
+    async def _source_limit(self, campaign: Campaign, source: ListingSource) -> int:
+        counts, usage = await self.store.counts(campaign.id), await self.store.usage()
+        host_left = [self.config.max_pages_per_host - await self.store.host_attempts(campaign.id, host)
+                     for host in source.hosts]
+        return max(0, min(self.config.max_pages_per_campaign - counts.pages,
+                          self.config.max_pages_per_day - usage.pages,
+                          min(host_left, default=0), getattr(source, "max_items", 20)))
+
+    async def _source_charge(self, campaign_id: str, charge: float) -> float | None:
+        """A paid launch fails closed when its shared budget cannot be read."""
+        sink = costs.ledger()
+        if sink is None or await costs.over_budget(campaign_id):
+            return None
+        try:
+            spent = await sink.spent(campaign_id)
+        except Exception:  # noqa: BLE001 - an unreadable budget disables this paid provider
+            return None
+        if not math.isfinite(spent) or spent < 0 or not math.isfinite(charge) or charge <= 0:
+            return None
+        remaining = costs.budget() - spent if costs.budget() > 0 else charge
+        return min(charge, remaining) if remaining > 0 else None
+
+    async def _from_sources(self, campaign: Campaign) -> None:
+        """Claim new provider work only in the first round; persisted claims prevent repeated POSTs."""
+        task = query_task(campaign)
+        for source in self.sources:
+            blocked = task.blocked_hosts | self.config.blocked_hosts
+            if not source.supports(task) or any(not fetchable(f"https://{host}/", blocked) for host in source.hosts):
+                continue
+            run, fresh = await self.store.claim_source(campaign.id, source.name)
+            if not fresh:
+                continue
+            limit = await self._source_limit(campaign, source)
+            charge = await self._source_charge(campaign.id, getattr(source, "max_charge_usd", 0.0))
+            if not limit or charge is None:
+                await self.store.finish_source(campaign.id, source.name, error_code="apify_launch_limits")
+                await costs.skip("api", "apify_launch_limits", item=source.name)
+                continue
+            await self._search_source(campaign, source, run, launch_allowed=True, limit=limit, charge=charge)
+
+    async def _resume_sources(self, campaign: Campaign) -> bool:
+        """Resume cached imports or the known run, even after query generation has been committed."""
+        sources = {s.name: s for s in self.sources}
+        task = query_task(campaign)
+        blocked = task.blocked_hosts | self.config.blocked_hosts
+        for run in await self.store.source_runs(campaign.id):
+            source = sources.get(run.name)
+            if run.state in ("completed", "failed"):
+                continue
+            if source is None:
+                await self.store.finish_source(campaign.id, run.name, error_code="apify_disabled_during_run")
+                await costs.error("api", "apify_disabled_during_run", item=run.name, campaign_id=campaign.id)
+                continue
+            if not source.supports(task) or any(not fetchable(f"https://{host}/", blocked) for host in source.hosts):
+                await self._fail_source(campaign.id, source, "apify_task_changed")
+                continue
+            if run.state == "starting" and not run.run_id:
+                await self._fail_source(campaign.id, source, "apify_launch_uncertain", estimated=True)
+                continue
+            if run.state == "running":
+                await self._search_source(campaign, source, run, launch_allowed=False,
+                                          limit=getattr(source, "max_items", 20))
+            # Reload because polling may have replaced running with ready.
+            current = next((r for r in await self.store.source_runs(campaign.id) if r.name == run.name), run)
+            if current.state == "ready":
+                if await self._import_source(campaign, source, current):
+                    return True
+            elif current.state == "running":
+                return True
+        return False
+
+    async def _fail_source(self, cid: str, source: ListingSource, code: str, *, estimated: bool = False) -> None:
+        if estimated:
+            await costs.record_unique("api", key=f"listing-source:{cid}:{source.name}", provider="apify",
+                                      item=getattr(source, "actor_id", source.name),
+                                      cost_usd=getattr(source, "max_charge_usd", 0.0),
+                                      code="estimated_launch_uncertain", campaign_id=cid)
+        await self.store.finish_source(cid, source.name, error_code=code)
+        await costs.error("api", code, item=source.name, campaign_id=cid)
+
+    async def _search_source(self, campaign: Campaign, source: ListingSource, run: SourceRun, *,
+                             launch_allowed: bool, limit: int, charge: float | None = None) -> None:
+        cid = campaign.id
+
+        async def save_run(run_id: str, dataset_id: str | None) -> None:
+            # Book a clearly labelled ceiling before the durable run checkpoint. A crash
+            # or campaign expiry must not make an already launched paid run invisible.
+            await costs.record_unique("api", key=f"listing-source:{cid}:{source.name}", provider="apify",
+                                      item=getattr(source, "actor_id", source.name),
+                                      cost_usd=charge if charge is not None else getattr(source, "max_charge_usd", 0.0),
+                                      code="estimated_pending_run", campaign_id=cid)
+            await self.store.save_source_run(cid, source.name, run_id, dataset_id)
+
+        async def reconcile_usage(run_id: str, amount: float, *, estimated: bool = False) -> None:
+            await costs.record_unique("api", key=f"listing-source:{cid}:{source.name}", provider="apify",
+                                      item=getattr(source, "actor_id", source.name), cost_usd=amount,
+                                      code="estimated" if estimated else "", campaign_id=cid)
+
+        context = SourceRunContext(campaign_id=cid, source_name=source.name, run_id=run.run_id,
+                                   dataset_id=run.dataset_id, max_charge_usd=(charge if charge is not None
+                                                                          else getattr(source, "max_charge_usd", 0.0)),
+                                   launch_allowed=launch_allowed, save_run=save_run, reconcile_usage=reconcile_usage)
+        await self._track(cid, next(iter(source.hosts), None), "api")
+        try:
+            with source_run_scope(context):
+                timeout = min(getattr(source, "timeout_seconds", 120) + 75, self.config.lease_seconds - 30)
+                listings = await asyncio.wait_for(source.search(query_task(campaign), limit=limit), timeout=timeout)
+            if len(listings) > min(limit, 50):
+                await costs.record("api", kind="skip", code="apify_result_limit", item=source.name,
+                                   units=len(listings) - min(limit, 50), campaign_id=cid)
+                listings = listings[:min(limit, 50)]
+            await self.store.source_ready(cid, source.name, listings)
+        except TemporaryApifyError as exc:
+            # The adapter books uncertain charges. Handled failure ends this attempt and allows HTML fallback.
+            await self._fail_source(cid, source, exc.code)
+        except PermanentApifyError as exc:
+            await self._fail_source(cid, source, exc.code)
+        except TimeoutError:
+            await self._fail_source(cid, source, "apify_worker_timeout", estimated=True)
+        except Exception:  # noqa: BLE001 - provider failure must preserve the ordinary search fallback
+            await self._fail_source(cid, source, "apify_source_failed", estimated=True)
+
+    async def _stop_sources(self, campaign: Campaign, reason: str) -> None:
+        """Settle an existing run when its campaign stops; never launch new provider work."""
+        sources = {s.name: s for s in self.sources}
+        for run in await self.store.source_runs(campaign.id):
+            if run.state in ("completed", "failed"):
+                continue
+            source = sources.get(run.name)
+            settle = getattr(source, "settle", None)
+            if run.run_id and settle is not None:
+                async def save_run(run_id: str, dataset_id: str | None, checkpoint: SourceRun = run) -> None:
+                    await self.store.save_source_run(campaign.id, checkpoint.name, run_id, dataset_id)
+
+                async def reconcile_usage(run_id: str, amount: float, *, estimated: bool = False,
+                                          checkpoint: SourceRun = run, provider: ListingSource = source) -> None:
+                    await costs.record_unique("api", key=f"listing-source:{campaign.id}:{checkpoint.name}", provider="apify",
+                                              item=getattr(provider, "actor_id", checkpoint.name), cost_usd=amount,
+                                              code="estimated" if estimated else "", campaign_id=campaign.id)
+
+                context = SourceRunContext(campaign.id, run.name, run.run_id, run.dataset_id,
+                                           getattr(source, "max_charge_usd", .10), False, save_run, reconcile_usage)
+                try:
+                    await asyncio.wait_for(settle(context), timeout=90)
+                except Exception:  # noqa: BLE001 - cleanup failure remains explicit and must not prevent stopping
+                    await costs.error("api", "apify_settlement_failed", item=run.name, campaign_id=campaign.id)
+            await self.store.finish_source(campaign.id, run.name, error_code=f"apify_{reason}"[:80])
+            await costs.error("api", f"apify_{reason}"[:80], item=run.name, campaign_id=campaign.id)
+
+    def _source_text(self, listing: SourceListing) -> str | None:
+        facts = {k: v for k, v in asdict(listing).items() if v is not None and k != "description"}
+        if facts.get("property_type") == "land":
+            facts["property_type"] = "landparcel"
+        fixed = f"{facts_block(facts)}\n{listing.title}\nСсылка: {listing.url}"
+        if len(fixed) > self.config.max_post_chars:
+            return None
+        description = listing.description[:max(0, self.config.max_post_chars - len(fixed) - 1)]
+        return f"{fixed}\n{description}" if description else fixed
+
+    async def _import_source(self, campaign: Campaign, source: ListingSource, run: SourceRun) -> bool:
+        """True keeps HTML waiting when a provider row is busy or the per-tick import quota is used."""
+        cid, task = campaign.id, query_task(campaign)
+        blocked = task.blocked_hosts | self.config.blocked_hosts
+        done = 0
+        for offset in range(run.import_offset, len(run.listings)):
+            listing = run.listings[offset]
+            host = host_of(listing.url)
+            text = self._source_text(listing)
+            if (not fetchable(listing.url, blocked) or host not in source.hosts
+                    or classify_url(listing.url) != "listing" or text is None
+                    or deal_conflict(listing.url, campaign_deal(campaign))
+                    or (listing.deal and campaign_deal(campaign) and listing.deal != campaign_deal(campaign))
+                    or geo.foreign_tld(host, task.country)
+                    or geo.foreign_markers_hit(task.country, f"{listing.title} {listing.address or ''}")):
+                await costs.skip("api", "apify_invalid_listing", item=source.name)
+                await self.store.advance_source_import(cid, source.name, offset + 1)
+                continue
+            if not await self._source_limit(campaign, source) or await costs.over_budget(cid):
+                await costs.skip("api", "apify_import_limits", item=source.name)
+                await self.store.finish_source(cid, source.name, error_code="apify_import_limits")
+                return False
+            key = url_key(listing.url)
+            await self.store.enqueue(cid, [Candidate(listing.url, key, host, kind="listing")],
+                                     index_ttl_days=self.config.index_ttl_days)
+            queued = QueuedUrl(listing.url, key, host, 0, "listing", listing.title)
+            ticket = await self.store.begin_fetch(cid, queued, vertical=campaign.plan.vertical,
+                                                  lease_seconds=self.config.lease_seconds,
+                                                  max_runtime_seconds=self.config.page_runtime_seconds,
+                                                  contact_site=False, index_ttl_days=self.config.index_ttl_days)
+            if ticket == BUSY:
+                return True
+            if isinstance(ticket, FetchTicket):
+                await self.store.finish_fetch(ticket, PageResult(ok=True, final_url=listing.url,
+                                                                title=listing.title, text=text,
+                                                                via="api", layer="api"))
+            await self.store.advance_source_import(cid, source.name, offset + 1)
+            done += 1
+            if done >= self.config.pages_per_tick:
+                if offset + 1 == len(run.listings):
+                    await self.store.finish_source(cid, source.name)
+                return offset + 1 < len(run.listings)
+        await self.store.finish_source(cid, source.name)
+        return False
 
     async def _with_search_plan(self, campaign: Campaign) -> Campaign:
         """The campaign with its model-written search plan: asked once (idempotent), stored, never required."""

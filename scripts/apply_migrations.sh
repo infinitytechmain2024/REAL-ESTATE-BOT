@@ -13,7 +13,7 @@ if [[ ! -f "$env_file" ]]; then
 fi
 
 compose=(docker compose --env-file "$env_file")
-for required in 001_init.sql 002_facebook.sql 003_orchestration.sql 004_telegram_control_plane.sql 005_orchestra_dispatcher.sql 006_openrouter_transcription.sql 007_live_view_sessions.sql 008_analysis_pipeline.sql 009_verification_flow.sql 010_verification_telegram_identity.sql 011_operator_access_requests.sql 012_collector_launch_requests.sql 013_analysis_claims.sql 014_campaigns.sql 015_campaign_groups.sql 016_campaign_runs.sql 017_control_settings.sql 018_user_role_task_drafts.sql 019_campaign_near_matches.sql 020_campaign_excluded_findings.sql 021_campaign_web_search.sql 022_social_search.sql 023_campaign_finding_relevance.sql 024_agent_findings.sql 025_agent_reductions.sql 026_campaign_comment_leads.sql 027_investor_reach.sql 028_reach_company_kind.sql 029_web_search_snippets.sql 030_campaign_summary.sql 031_task_draft_steps.sql 032_web_seen_urls_ttl.sql 033_campaign_finding_hold_reason.sql 034_web_fetch_layers.sql 035_campaign_specs.sql 036_campaign_finding_clusters.sql 037_reach_enrichment.sql 038_finding_review.sql 039_campaign_metrics.sql 040_live_status.sql 041_web_verification.sql 042_campaign_costs.sql 043_listing_sources.sql; do
+for required in 001_init.sql 002_facebook.sql 003_orchestration.sql 004_telegram_control_plane.sql 005_orchestra_dispatcher.sql 006_openrouter_transcription.sql 007_live_view_sessions.sql 008_analysis_pipeline.sql 009_verification_flow.sql 010_verification_telegram_identity.sql 011_operator_access_requests.sql 012_collector_launch_requests.sql 013_analysis_claims.sql 014_campaigns.sql 015_campaign_groups.sql 016_campaign_runs.sql 017_control_settings.sql 018_user_role_task_drafts.sql 019_campaign_near_matches.sql 020_campaign_excluded_findings.sql 021_campaign_web_search.sql 022_social_search.sql 023_campaign_finding_relevance.sql 024_agent_findings.sql 025_agent_reductions.sql 026_campaign_comment_leads.sql 027_investor_reach.sql 028_reach_company_kind.sql 029_web_search_snippets.sql 030_campaign_summary.sql 031_task_draft_steps.sql 032_web_seen_urls_ttl.sql 033_campaign_finding_hold_reason.sql 034_web_fetch_layers.sql 035_campaign_specs.sql 036_campaign_finding_clusters.sql 037_reach_enrichment.sql 038_finding_review.sql 039_campaign_metrics.sql 040_live_status.sql 041_web_verification.sql 042_campaign_costs.sql 043_listing_sources.sql 044_web_listing_source_runs.sql; do
   [[ -f "bot/services/db/migrations/$required" ]] || {
     echo "Required migration is missing: $required" >&2
     exit 2
@@ -71,7 +71,8 @@ for migration_path in bot/services/db/migrations/001_init.sql \
                       bot/services/db/migrations/040_live_status.sql \
                       bot/services/db/migrations/041_web_verification.sql \
                       bot/services/db/migrations/042_campaign_costs.sql \
-                      bot/services/db/migrations/043_listing_sources.sql; do
+                      bot/services/db/migrations/043_listing_sources.sql \
+                      bot/services/db/migrations/044_web_listing_source_runs.sql; do
   migration="$(basename "$migration_path")"
   digest="$(checksum "$migration_path")"
   existing="$("${compose[@]}" exec -T postgres sh -ec \

@@ -81,6 +81,7 @@ class CostSummary:
 
 class Ledger(Protocol):
     async def add(self, entry: Entry) -> None: ...
+    async def upsert(self, entry: Entry, key: str) -> None: ...
     async def spent(self, campaign_id: str) -> float: ...
     async def summary(self, campaign_id: str) -> CostSummary: ...
 
@@ -107,9 +108,20 @@ class MemoryLedger:
     """In-process twin of ``PostgresLedger`` (tests)."""
 
     entries: list[Entry] = field(default_factory=list)
+    keys: dict[str, int] = field(default_factory=dict)
 
     async def add(self, entry: Entry) -> None:
         self.entries.append(entry)
+
+    async def upsert(self, entry: Entry, key: str) -> None:
+        if key in self.keys:
+            previous = self.entries[self.keys[key]]
+            if entry.code.startswith("estimated") and not previous.code.startswith("estimated"):
+                return
+            self.entries[self.keys[key]] = entry
+        else:
+            self.keys[key] = len(self.entries)
+            self.entries.append(entry)
 
     async def spent(self, campaign_id: str) -> float:
         return sum(e.cost_usd for e in self.entries if e.campaign_id == campaign_id and e.kind == "cost")
@@ -128,6 +140,20 @@ class PostgresLedger:
                values ($1::uuid, $2, $3, nullif($4, ''), nullif($5, ''), nullif($6, ''), $7, $8)""",
             entry.campaign_id, entry.stage, entry.kind, entry.provider[:40], entry.item[:120], entry.code[:80],
             max(0, entry.units), max(0.0, entry.cost_usd))
+
+    async def upsert(self, entry: Entry, key: str) -> None:
+        await self.pool.execute(
+            """insert into campaign_costs
+               (campaign_id, stage, kind, provider, item, code, units, cost_usd, idempotency_key)
+               values ($1::uuid,$2,$3,nullif($4,''),nullif($5,''),nullif($6,''),$7,$8,$9)
+               on conflict (idempotency_key) do update set
+               campaign_id=excluded.campaign_id, stage=excluded.stage, kind=excluded.kind,
+               provider=excluded.provider, item=excluded.item, code=excluded.code,
+               units=excluded.units, cost_usd=excluded.cost_usd
+               where coalesce(campaign_costs.code, '') like 'estimated%'
+                  or coalesce(excluded.code, '') not like 'estimated%'""",
+            entry.campaign_id, entry.stage, entry.kind, entry.provider[:40], entry.item[:120], entry.code[:80],
+            max(0, entry.units), max(0.0, entry.cost_usd), key)
 
     async def spent(self, campaign_id: str) -> float:
         value = await self.pool.fetchval(
@@ -191,6 +217,22 @@ async def record(stage: str, *, kind: str = "cost", provider: str = "", item: st
         await sink.add(entry)
     except Exception:  # noqa: BLE001 - bookkeeping must never stop the work it books
         log.warning("costs.record_failed", extra={"stage": stage, "kind": kind})
+
+
+async def record_unique(stage: str, *, key: str, provider: str, item: str, cost_usd: float, code: str = "",
+                        units: int = 1, campaign_id: str | None = None) -> None:
+    """Upsert one run's globally stable key; estimates never replace known actual usage."""
+    sink = ledger()
+    if sink is None:
+        return
+    if stage not in STAGES or not key:
+        raise ValueError("unknown cost stage or empty idempotency key")
+    entry = Entry(campaign_id or current(), stage, "cost", provider, item, code, units,
+                  max(0.0, cost_usd) if math.isfinite(cost_usd) else 0.0)
+    try:
+        await sink.upsert(entry, key)
+    except Exception:  # noqa: BLE001 - bookkeeping must never stop the work it books
+        log.warning("costs.record_unique_failed", extra={"stage": stage})
 
 
 async def error(stage: str, code: str, *, item: str = "", campaign_id: str | None = None) -> None:

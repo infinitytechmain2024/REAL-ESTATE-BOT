@@ -255,3 +255,57 @@ Memory-тесты, tests/test_project_foundation.py/test_image_imports.py для
 золотые тесты; зафиксировать реальные результаты в handoff. Отметка дизайна в PLAN
 не означает реализацию фаз 1–5 или пройденный smoke. Финальный CHECKLIST остаётся
 незакрытым до соответствующих фаз. После фазы 1 показать foundation и ждать «ок».
+
+## Уточнение фаз 2–3 после разрешения владельца (2026-10-10)
+
+Владелец ответом «ok» разрешил фазы 2–3 после приёмки foundation. Контрольная
+остановка остаётся после фазы 3; платные вызовы и VPS не разрешены.
+
+Публичная [input schema axly](https://apify.com/axlymxp/idealista-scraper/input-schema)
+проверена повторно: обязательны country/locationName/locationId/propertyType/operation;
+maxItems — 1–50 на страницу, numPage начинается с 1. Реальный земельный output не
+получен. Адаптер ограничивает импорт одной выдачей/50 строками и не обещает полноту
+поиска; size не попадает ни в area_m2, ни в plot_m2 без доказанной семантики. Город и
+locationId задаются явно; пустой ID отключает поддержку задачи, ID не угадывается.
+
+Подтверждённые интерфейсы:
+
+- `SourceRunContext` и `source_run_scope` в `sources/apify.py` сохраняют Protocol
+  search(task,limit). Контекст содержит campaign_id/source_name, run_id/dataset_id,
+  launch_allowed, верхний денежный cap и callbacks save_run/reconcile_usage.
+- `save_run(run_id,dataset_id)` сохраняет ответ POST сразу до polling. Только новый
+  атомарный claim разрешает POST. Existing starting без run_id — неопределённый
+  исход, безопасная ошибка/fallback без второго POST; known run возобновляется GET.
+  Это at-most-once запуск, не обещание exactly-once внешней операции.
+- Миграция 044 хранит `(campaign_id,name)` и состояние starting/running/ready/
+  completed/failed, provider run/dataset, snapshot SourceListing и import_offset.
+  SourceRun.listings — tuple[SourceListing,...]. WebStore методы claim_source,
+  source_runs, save_source_run, source_ready, advance_source_import, finish_source
+  одинаковы для Memory/Postgres. Никаких HTTP внутри SQL-транзакции.
+- `_from_sources` создаёт claim только в первом раунде после planner. В `_advance`
+  отдельная обработка возобновляет существующий run или готовый snapshot независимо
+  от количества созданных запросов. BUSY оставляет offset, не запускает actor вновь
+  и не позволяет HTML-worker забрать тот же queued URL. Сбой провайдера явно
+  журналируется и оставляет обычный поиск работоспособным.
+- `costs.record_unique(..., key=listing-source:campaign_id:name)` обновляет одну
+  запись абсолютной стоимости вместо повторного суммирования на resume. Миграция
+  044 добавляет nullable unique idempotency_key в campaign_costs. Обычный record
+  не меняется. Фактическое usageTotalUsd заменяет явно помеченную оценку; неизвестный
+  исход POST учитывается консервативной оценкой cap, без объявления её реальной ценой.
+  Однозначный отказ POST 4xx — error, не фиктивный расход полного cap.
+- Максимальная цена запуска ограничена настройкой и читаемым остатком бюджета;
+  недоступность budget-state запрещает source launch. Это ещё не резерв общего
+  бюджета всех сервисов; гарантия live ≤$1 остаётся отдельным gate. Cleanup GET/abort
+  уже начатого run допускается для остановки и сверки списаний после budget hit.
+- Phase2 использует настоящий via/layer=api, contact_site=False при импорте свежих
+  URL. Accounting/retry семантика store меняется только отдельной фазой 3. Статус
+  unlocker заменяет прежнюю scrape-метку api фазой 3; persistent scrape не переименован.
+
+Новые настройки (Phase2): APIFY_IDEALISTA_ENABLED=false, APIFY_TOKEN (repr=False),
+APIFY_IDEALISTA_ACTOR, APIFY_IDEALISTA_MAX_RESULTS<=50, APIFY_IDEALISTA_LOCATION_NAME,
+APIFY_IDEALISTA_LOCATION_ID (пустой по умолчанию), APIFY_IDEALISTA_TIMEOUT_SECONDS<=120,
+APIFY_IDEALISTA_MAX_CHARGE_USD>0. Все передаются только campaign-runner, задокументированы
+и включены в .env.example с комментариями. Сеть тестируется HTTPX mock, fixtures
+синтетические и не объявляются проверенными данными Idealista.
+
+Уточнение lifecycle фазы 2: save_run callback предварительно записывает estimated_pending_run; это обеспечивает видимость расхода при crash/time_cap. При time_cap/cancel worker вызывает settle существующего run (GET/abort/billing, ≤90 s), не запускает actor и не импортирует новые данные. Недоступный/выключенный провайдер оставляет явную оценку и ошибку, а не обещание известного факта.

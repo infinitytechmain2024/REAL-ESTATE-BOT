@@ -27,9 +27,11 @@
 Проверки фазы 1: **1421 passed, 0 skipped**, ruff чисто, golden **70 passed**. Ревью принято. Контрольная остановка перед фазой 2.
 
 ## Phase 2 — Apify Integration
-- [ ] Implementation Agent пишет `ApifyIdealistaSource`
-- [ ] Resilience Agent добавляет полную обработку ошибок
-- [ ] Интеграция в `WebSearchWorker._new_round` через `_from_sources`
+- [x] Implementation Agent пишет `ApifyIdealistaSource`
+- [x] Resilience Agent добавляет обработку ошибок, cap, безопасный abort/billing и синтетические тесты
+- [x] Интеграция в `WebSearchWorker._new_round` через `_from_sources`; durable claim/cache/offset (044), default-off конфиг
+
+Проверки фазы 2: **1491 passed, 0 skipped**, Ruff чисто. Схема input проверена публично; живой output и площадь участка не проверены.
 
 ## Phase 3 — Store & Worker
 - [ ] Database Agent + Implementation Agent обновляют `begin_fetch` / `finish_fetch`

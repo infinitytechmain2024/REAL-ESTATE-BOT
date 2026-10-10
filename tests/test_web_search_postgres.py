@@ -638,3 +638,50 @@ async def test_the_render_profile_is_never_a_collector_profile(pool) -> None:
                values ('website-main', 'website', 'volume:browser_profiles', 'ready')""")
         own = await conn.fetchval("select id::text from browser_profiles where profile_name = 'website-main'")
         assert await ready_profile(conn, "website") == own
+
+
+async def test_source_claim_race_and_durable_import_snapshot(pool) -> None:
+    import asyncio
+
+    from bot.web_search.sources.base import SourceListing
+
+    cid = await new_campaign(pool)
+    store = PostgresWebStore(pool)
+    claims = await asyncio.gather(*(store.claim_source(cid, "idealista") for _ in range(8)))
+    assert sum(fresh for _, fresh in claims) == 1
+    assert all(run.state == "starting" and run.run_id is None for run, _ in claims)
+    await store.save_source_run(cid, "idealista", "run1", "dataset1")
+    listings = [SourceListing(LISTING, "Terreno", plot_m2=2000)]
+    await store.source_ready(cid, "idealista", listings)
+    restarted = PostgresWebStore(pool)
+    run, fresh = await restarted.claim_source(cid, "idealista")
+    assert not fresh and run.state == "ready" and run.listings == tuple(listings)
+    await restarted.advance_source_import(cid, "idealista", 1)
+    await restarted.advance_source_import(cid, "idealista", 0)
+    await restarted.source_ready(cid, "idealista", [])  # resumed fetch cannot overwrite a checkpoint
+    await restarted.finish_source(cid, "idealista", "source_failed")
+    run = (await restarted.source_runs(cid))[0]
+    assert run.state == "failed" and run.error_code == "source_failed"
+    assert run.import_offset == 1 and run.listings == tuple(listings)
+    assert run.run_id == "run1" and run.dataset_id == "dataset1"
+    assert not (await restarted.claim_source(cid, "idealista"))[1]
+
+
+async def test_unique_costs_on_postgres_are_one_run_including_concurrent_callbacks(pool) -> None:
+    import asyncio
+
+    from bot.utils import costs
+
+    cid = await new_campaign(pool)
+    sink = costs.PostgresLedger(pool)
+    entry = costs.Entry(cid, "api", provider="apify", item="actor", code="estimated", cost_usd=0.5)
+    key = f"listing-source:{cid}:idealista"
+    await asyncio.gather(*(sink.upsert(entry, key) for _ in range(8)))
+    await sink.upsert(costs.Entry(cid, "api", provider="apify", item="actor", cost_usd=0.031), key)
+    await asyncio.gather(*(sink.upsert(entry, key) for _ in range(8)))
+    assert await sink.spent(cid) == pytest.approx(0.031)
+    await sink.upsert(costs.Entry(cid, "api", provider="apify", item="actor", cost_usd=0.032), key)
+    await sink.add(costs.Entry(cid, "api", cost_usd=0.001))
+    assert await pool.fetchval("select count(*) from campaign_costs where idempotency_key=$1", key) == 1
+    assert await sink.spent(cid) == pytest.approx(0.033)
+    assert (await sink.summary(cid)).by_stage == {"api": pytest.approx(0.033)}

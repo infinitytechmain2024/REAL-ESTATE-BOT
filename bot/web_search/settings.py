@@ -18,6 +18,7 @@ from .search_backends import (
     SerpApiClient,
 )
 from .searxng import SearxngClient
+from .sources import ListingSource
 from .worker import WebSearchConfig
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,15 @@ class WebSearchSettings(BaseSettings):
     google_cse_daily_cap: int = Field(default=90, ge=0, le=100_000, validation_alias="WEB_SEARCH_GOOGLE_CSE_DAILY_CAP")
     serpapi_daily_cap: int = Field(default=90, ge=0, le=100_000, validation_alias="WEB_SEARCH_SERPAPI_DAILY_CAP")
     poll_seconds: float = Field(default=15, ge=2, le=600, validation_alias="WEB_SEARCH_POLL_SECONDS")
+
+    apify_idealista_enabled: bool = Field(default=False, validation_alias="APIFY_IDEALISTA_ENABLED")
+    apify_token: str = Field(default="", repr=False, validation_alias="APIFY_TOKEN")
+    apify_idealista_actor: str = Field(default="axlymxp/idealista-scraper", validation_alias="APIFY_IDEALISTA_ACTOR")
+    apify_idealista_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_IDEALISTA_MAX_RESULTS")
+    apify_idealista_location_name: str = Field(default="Madrid", validation_alias="APIFY_IDEALISTA_LOCATION_NAME")
+    apify_idealista_location_id: str = Field(default="", validation_alias="APIFY_IDEALISTA_LOCATION_ID")
+    apify_idealista_timeout_seconds: float = Field(default=120, ge=1, le=120, validation_alias="APIFY_IDEALISTA_TIMEOUT_SECONDS")
+    apify_idealista_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_IDEALISTA_MAX_CHARGE_USD")
 
     # Query generation: OpenRouter with the analysis key; without it, deterministic templates.
     openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
@@ -149,6 +159,22 @@ class WebSearchSettings(BaseSettings):
             return None
         return ScrapeApiClient(self.scrape_api_url, self.scrape_api_key, timeout_seconds=self.scrape_api_timeout_seconds,
                                max_bytes=self.max_content_bytes)
+
+    def sources(self) -> tuple[ListingSource, ...]:
+        """Default-off providers: disabling the source does not construct an HTTP client."""
+        if not self.apify_idealista_enabled:
+            return ()
+        if not self.apify_token:
+            log.warning("web_search.apify_disabled", extra={"code": "apify_token_missing"})
+            return ()
+        from .sources.apify import ApifyIdealistaSource
+
+        return (ApifyIdealistaSource(token=self.apify_token, actor_id=self.apify_idealista_actor,
+                                    location_name=self.apify_idealista_location_name,
+                                    location_id=self.apify_idealista_location_id,
+                                    max_items=self.apify_idealista_max_results,
+                                    timeout_seconds=self.apify_idealista_timeout_seconds,
+                                    max_charge_usd=self.apify_idealista_max_charge_usd),)
 
     def backend_names(self) -> list[str]:
         names: list[str] = []

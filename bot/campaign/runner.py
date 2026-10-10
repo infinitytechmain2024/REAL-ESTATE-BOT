@@ -1398,12 +1398,14 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
                                    profile_source=web_store.render_profile if config.human_verification else None,
                                    detect_challenges=config.human_verification)
     scraper = settings.scraper()
+    sources = settings.sources()
     planner = runner_settings.search_planner()
     worker = WebSearchWorker(campaigns, web_store, searcher, fetcher, FallbackQueryGenerator(model),
-                             renderer=renderer, scraper=scraper, planner=planner, config=config,
+                             renderer=renderer, scraper=scraper, planner=planner, sources=sources, config=config,
                              cancel_job=verification.cancel)
     closers = ([searcher.aclose, fetcher.aclose] + ([model.aclose] if model else [])
-               + ([scraper.aclose] if scraper else []) + ([planner.aclose] if planner else []))
+               + ([scraper.aclose] if scraper else []) + ([planner.aclose] if planner else [])
+               + [source.aclose for source in sources])
     return worker, settings.poll_seconds, closers
 
 
