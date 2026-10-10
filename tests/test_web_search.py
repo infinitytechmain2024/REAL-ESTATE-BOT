@@ -4,6 +4,7 @@ portal index pages, caps, robots.txt, the fetcher's policy and the campaign stat
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -15,7 +16,7 @@ from bot.campaign.runs import MemoryRunStore
 from bot.campaign.status_text import FACEBOOK, SEARCHING, is_user_status
 from bot.web_search.extract import listing_links, looks_like_index, parse_html, post_text
 from bot.web_search.fetcher import FetchedPage, FetchError, PageFetcher
-from bot.web_search.models import GeneratedQuery, WebStatus
+from bot.web_search.models import Candidate, FetchTicket, GeneratedQuery, PageResult, WebStatus
 from bot.web_search.queries import (
     FallbackQueryGenerator,
     OpenRouterQueryGenerator,
@@ -30,7 +31,9 @@ from bot.web_search.queries import (
     query_key,
 )
 from bot.web_search.searxng import SearchError, SearchHit, SearxngClient
+from bot.web_search.sources import SourceListing
 from bot.web_search.store import MemoryWebStore
+from bot.web_search.structured import facts_block
 from bot.web_search.urls import (
     SPAIN_PORTALS,
     SPAIN_PORTALS_BY_KIND,
@@ -187,7 +190,7 @@ async def test_template_generator_rounds_never_repeat_and_cover_languages_and_po
 async def test_worker_generates_rounds_passing_used_queries_up_to_the_cap() -> None:
     campaigns = MemoryCampaignStore()
     cid = await campaign(campaigns)
-    queries = [f"terreno {town} Madrid" for town in (
+    queries = [f"terreno venta {town} Madrid" for town in (
         "Boadilla", "Pozuelo", "Majadahonda", "Rozas", "Torrelodones", "Galapagar", "Villanueva", "Brunete",
         "Navalcarnero", "Arganda", "Rivas", "Alcobendas", "Tres Cantos", "Colmenar", "Algete", "Getafe",
         "Leganes", "Fuenlabrada", "Mostoles", "Alcorcon", "Parla", "Pinto", "Valdemoro", "Aranjuez", "Chinchon",
@@ -211,10 +214,10 @@ async def test_a_round_without_new_queries_ends_the_stage() -> None:
     campaigns = MemoryCampaignStore()
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
-    generator = ListGenerator(["terreno Boadilla Madrid", "terrenos boadilla madrid"])
+    generator = ListGenerator(["terreno venta Boadilla Madrid", "terrenos venta boadilla madrid"])
     w = worker(campaigns, store, FakeSearcher(), FakeFetcher(), generator, cover_portals=False)
     await run_until_done(w, cid)
-    assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Madrid España"]
+    assert [q.text for q in store.queries[cid]] == ["terreno venta Boadilla Madrid España"]
     assert store.runs[cid].stop_reason == "queries_exhausted"
 
 
@@ -223,12 +226,12 @@ async def test_a_query_another_campaign_searched_recently_is_not_searched_again(
     first = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher()
-    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]),
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno venta Boadilla Madrid"]),
                cover_portals=False, query_reuse_hours=72)
     await run_until_done(w, first)
     second = await campaign(campaigns)
     await run_until_done(w, second)
-    assert searcher.calls == [("terreno Boadilla Madrid España", "es-ES")]  # a Spanish campaign searches Spain
+    assert searcher.calls == [("terreno venta Boadilla Madrid España", "es-ES")]  # a Spanish campaign searches Spain
     assert [q.state for q in store.queries[second]] == ["skipped"]
 
 
@@ -456,7 +459,7 @@ async def test_the_same_url_from_two_queries_is_fetched_once() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     listing = "https://www.idealista.com/inmueble/98765432/"
-    searcher = FakeSearcher({"terreno Boadilla Madrid España": [listing],
+    searcher = FakeSearcher({"terreno Boadilla Madrid en venta España": [listing],
                              "parcela Pozuelo venta Madrid España": [listing + "?utm_source=bing", "http://idealista.com/inmueble/98765432"]})
     fetcher = FakeFetcher()
     w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]))
@@ -537,13 +540,15 @@ async def test_caps_per_campaign_per_site_and_per_day() -> None:
     more = [f"https://agencia{n}.es/inmueble/venta-{7000000 + n}" for n in range(6)]
     fetcher2 = FakeFetcher()
     await run_until_done(worker(campaigns, store, FakeSearcher(default=more), fetcher2,
-                                ListGenerator(["parcela Pozuelo venta"]), max_pages_per_campaign=3), other)
+                                ListGenerator(["parcela Pozuelo venta"]), max_pages_per_campaign=3,
+                                domain_policy="off"), other)
     assert len(fetcher2.fetched) == 3 and store.runs[other].stop_reason == "page_cap"
 
     third = await campaign(campaigns)
     fetcher3 = FakeFetcher()
     await run_until_done(worker(campaigns, store, FakeSearcher(default=[f"https://otra{n}.es/anuncio/{8000000 + n}" for n in range(4)]),
-                                fetcher3, ListGenerator(["solar Rivas venta"]), max_pages_per_day=7), third)
+                                fetcher3, ListGenerator(["solar Rivas venta"]), max_pages_per_day=7,
+                                domain_policy="off"), third)
     assert fetcher3.fetched == [] and store.runs[third].stop_reason == "daily_page_cap"
 
 
@@ -555,7 +560,7 @@ async def test_robots_disallowed_pages_and_refusing_sites_are_left_alone() -> No
     refusing = [f"https://www.idealista.com/inmueble/{60000000 + n}/" for n in range(5)]
     fetcher = FakeFetcher(disallow={private}, errors={u: "http_403" for u in refusing})
     w = worker(campaigns, store, FakeSearcher(default=[private, *refusing]), fetcher,
-               ListGenerator(["terreno Boadilla Madrid"]), pages_per_tick=1)
+               ListGenerator(["terreno Boadilla Madrid"]), pages_per_tick=1, host_breaker_refusals=0)
     await run_until_done(w, cid)
     assert private not in fetcher.fetched and store.urls[cid][url_key(private)].state == "robots"
     assert fetcher.fetched == refusing[:3]  # three refusals block the site for a while
@@ -616,7 +621,7 @@ async def test_a_failed_search_is_recorded_and_the_stage_goes_on() -> None:
     cid = await campaign(campaigns)
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher(default=["https://www.idealista.com/inmueble/12121212/"])
-    searcher.fail.add("terreno Boadilla Madrid España")
+    searcher.fail.add("terreno Boadilla Madrid en venta España")  # the sale campaign's deal word is added
     fetcher = FakeFetcher()
     await run_until_done(worker(campaigns, store, searcher, fetcher,
                                 ListGenerator(["terreno Boadilla Madrid", "parcela Pozuelo venta"]),
@@ -860,7 +865,8 @@ async def test_a_hit_with_another_places_markers_is_not_queued_for_a_spanish_cam
     good, bad = "https://www.example.com/inmueble/11112222/", "https://www.example.com/inmueble/33334444/"
     searcher = FakeSearcher(default=[good, bad], texts={bad: ("Casa en Valencia, Carabobo", "Bs. 40.000")})
     fetcher = FakeFetcher()
-    w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
+    w = worker(campaigns, store, searcher, fetcher, ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False,
+               domain_policy="soft")
     await run_until_done(w, cid)
     assert fetcher.fetched == [good]
 
@@ -988,7 +994,8 @@ def test_unknown_impersonation_profile_falls_back_to_chrome() -> None:
 # --- the web stage spends its budget on listings: denylist, SERP prefilter, host cap, deal, queries ---
 
 
-async def _queued_after_search(url_hits: dict[str, tuple[str, str]], *, goal_plan=None, cid_deal: str | None = None):
+async def _queued_after_search(url_hits: dict[str, tuple[str, str]], *, goal_plan=None, cid_deal: str | None = None,
+                               **config):
     campaigns = MemoryCampaignStore()
     cid = await campaign(campaigns)
     if goal_plan is not None:
@@ -997,7 +1004,8 @@ async def _queued_after_search(url_hits: dict[str, tuple[str, str]], *, goal_pla
         await campaigns.set_state(cid, "running", "test")
     store = MemoryWebStore(campaigns)
     searcher = FakeSearcher(default=list(url_hits), texts=url_hits)
-    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False)
+    w = worker(campaigns, store, searcher, FakeFetcher(), ListGenerator(["terreno Boadilla Madrid"]), cover_portals=False,
+               **config)
     await w.step(cid)
     await w.step(cid)
     return {host_of(k) for k in store.urls.get(cid, {}) and [u.url for u in store.urls[cid].values()]}, store, cid
@@ -1033,8 +1041,10 @@ async def test_serp_hits_without_evidence_and_on_denied_hosts_are_not_queued() -
         "https://periodico-local.es/economia/precio-vivienda-valencia-9999999": ("El precio de la vivienda en Valencia",
                                                                                 "El precio medio de la vivienda sube"),
     }
+    hosts, *_ = await _queued_after_search(hits, domain_policy="soft")
+    assert hosts == {"fotocasa.es", "agencia-sol.es"}  # soft: an unknown site whose hit shows a listing's figures
     hosts, *_ = await _queued_after_search(hits)
-    assert hosts == {"fotocasa.es", "agencia-sol.es"}
+    assert hosts == {"fotocasa.es"}  # strict (the default): only the country's portals and the named sites
 
 
 async def test_an_unknown_host_gets_five_pages_until_it_gives_a_listing_then_the_normal_cap() -> None:
@@ -1044,7 +1054,7 @@ async def test_an_unknown_host_gets_five_pages_until_it_gives_a_listing_then_the
     urls = [f"https://agencia-gris.es/inmueble/venta-{7000000 + n}" for n in range(9)]
     fetcher = FakeFetcher(errors={u: "http_404" for u in urls})  # never a listing
     w = worker(campaigns, store, FakeSearcher(default=urls), fetcher, ListGenerator(["terreno Boadilla Madrid"]),
-               cover_portals=False)
+               cover_portals=False, domain_policy="soft")
     await run_until_done(w, cid)
     assert len(fetcher.fetched) == 5
     assert sum(r.detail == "unknown_host_cap" for r in store.urls[cid].values()) == 4
@@ -1053,7 +1063,8 @@ async def test_an_unknown_host_gets_five_pages_until_it_gives_a_listing_then_the
     good = [f"https://agencia-buena.es/inmueble/venta-{7100000 + n}" for n in range(9)]
     fetcher2 = FakeFetcher()  # every page is a listing
     await run_until_done(worker(campaigns, store, FakeSearcher(default=good), fetcher2,
-                                ListGenerator(["parcela Pozuelo venta"]), cover_portals=False), other)
+                                ListGenerator(["parcela Pozuelo venta"]), cover_portals=False, domain_policy="soft"),
+                         other)
     assert len(fetcher2.fetched) == 9
 
 
@@ -1077,7 +1088,8 @@ async def test_a_portal_hit_of_the_opposite_deal_is_not_queued() -> None:
     rent_url = "https://www.pisos.com/alquilar/piso-valencia-12345679/"
     _, store, cid = await _queued_after_search({sale_url: EVIDENCE, rent_url: EVIDENCE})
     assert {u.url for u in store.urls[cid].values()} == {sale_url}
-    _, store, cid = await _queued_after_search({sale_url: EVIDENCE, rent_url: EVIDENCE},
+    neutral = ("Piso en Madrid", "Piso 2 hab. 85 m² 900 €")  # EVIDENCE's «en venta» title would itself say «sale»
+    _, store, cid = await _queued_after_search({sale_url: neutral, rent_url: neutral},
                                                goal_plan="квартира в аренду Мадрид до 900 €")
     assert {u.url for u in store.urls[cid].values()} == {rent_url}
 
@@ -1136,3 +1148,146 @@ async def test_host_has_listing_is_asked_once_per_host_per_step() -> None:
     assert await worker._host_has_listing("c", "a.es") and await worker._host_has_listing("c", "a.es")
     assert not await worker._host_has_listing("c", "b.es")
     assert calls == ["c", "c"]  # one query per host, not per URL
+
+
+def test_source_listing_facts_preserve_plot_area_for_analysis_prefilter() -> None:
+    from dataclasses import FrozenInstanceError
+
+    from bot.analysis_pipeline.models import Evidence
+    from bot.analysis_pipeline.prefilter import TaskContext, listing_area, listing_deal, prefilter
+
+    listing = SourceListing("https://www.idealista.com/inmueble/12345678/", "Terreno en Madrid",
+                            price=250000, currency="EUR", area_m2=120, plot_m2=2200,
+                            property_type="land", deal="sale", address="Madrid")
+    text = facts_block(asdict(listing))
+    evidence = Evidence(post_id="p", source_id="s", canonical_url=listing.url, title=listing.title, text=text)
+    assert json.loads(text.removeprefix("JSON-LD: "))["area_m2"] == 120
+    assert listing_area(evidence) == 2200
+    assert listing_deal(evidence) == "sale"
+    assert prefilter(evidence, TaskContext("c", deal="sale", property_type="land", min_area=2000)) is None
+    assert prefilter(evidence, TaskContext("c", deal="rent")) == "deal"
+    small = replace(listing, plot_m2=1000)
+    assert prefilter(evidence.model_copy(update={"text": facts_block(asdict(small))}),
+                     TaskContext("c", min_area=2000)) == "area"
+    unknown = replace(listing, plot_m2=None)
+    assert listing_area(evidence.model_copy(update={"text": facts_block(asdict(unknown))})) is None
+    with pytest.raises(FrozenInstanceError):
+        listing.plot_m2 = 1  # type: ignore[misc]
+    minimal = SourceListing(listing.url, listing.title)
+    assert minimal.description == "" and minimal.plot_m2 is None and minimal.price is None
+
+
+async def test_memory_store_persists_structured_api_listing() -> None:
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    listing = SourceListing("https://www.idealista.com/inmueble/12345678/", "Terreno en Madrid",
+                            plot_m2=2200, deal="sale")
+    key = url_key(listing.url)
+    assert await store.enqueue(cid, [Candidate(listing.url, key, "idealista.com", kind="listing")]) == 1
+    queued, = await store.next_urls(cid, 1)
+    ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=60,
+                                     max_runtime_seconds=120, contact_site=False)
+    assert isinstance(ticket, FetchTicket)
+    text = facts_block(asdict(listing))
+    post_id = await store.finish_fetch(ticket, PageResult(ok=True, final_url=listing.url,
+                                                        title=listing.title, text=text, via="api", layer="api"))
+    assert post_id is not None
+    assert store.posts[0]["id"] == post_id
+    assert store.posts[0]["text"] == text and store.posts[0]["via"] == "api"
+    assert store.posts[0]["url"] == listing.url
+    assert store.urls[cid][key].layer == "api" and store.urls[cid][key].state == "fetched"
+    assert store.seen[key]["post_id"] == post_id
+    assert await store.host_refusals("idealista.com") == {"http": 0, "render": 0}
+    assert await store.layer_state("idealista.com") == {"http": True, "render": True}
+    assert store.hosts["idealista.com"]["fetched"] == 1
+    assert store.hosts["idealista.com"]["failed"] == 0
+    report = next(item for item in await store.site_report(cid) if item.host == "idealista.com")
+    assert (report.read, report.read_api) == (1, 1)
+
+
+@pytest.mark.parametrize("same_campaign", [True, False])
+@pytest.mark.parametrize("api_success", [True, False])
+async def test_memory_api_reclaims_failed_url_without_changing_html_refusals(same_campaign, api_success):
+    store = MemoryWebStore()
+    candidate = Candidate("https://www.idealista.com/inmueble/12345678/", "api-retry", "idealista.com", kind="listing")
+    await store.enqueue("old", [candidate])
+    queued, = await store.next_urls("old", 1)
+    ticket = await store.begin_fetch("old", queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.finish_fetch(ticket, PageResult(False, final_url=candidate.url, error="http_403"))
+    cid = "old" if same_campaign else "new"
+    assert await store.enqueue(cid, [candidate]) == 0
+    host = store.hosts[candidate.host]
+    until = datetime.now(UTC) + timedelta(hours=1)
+    host.update(http_refusals=3, render_refusals=4, refusals=3, http_blocked_until=until,
+                render_blocked_until=until, blocked_until=until)
+    before = {k: v for k, v in host.items() if k not in ("fetched", "failed")}
+    assert await store.enqueue(cid, [candidate], layer="api") == 1
+    queued, = await store.next_urls(cid, 1)
+    ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                     max_runtime_seconds=60, layer="api")
+    assert isinstance(ticket, FetchTicket)
+    post = await store.finish_fetch(ticket, PageResult(api_success, final_url=candidate.url,
+        text='JSON-LD: {"plot_m2": 2500}', error=None if api_success else "http_403", via="api", layer="api"))
+    assert bool(post) == api_success
+    assert {k: v for k, v in host.items() if k not in ("fetched", "failed")} == before
+    assert host["fetched"] == int(api_success) and host["failed"] == 1 + int(not api_success)
+    assert store.urls[cid][candidate.url_key].layer == "api"
+    assert store.seen[candidate.url_key]["state"] == ("fetched" if api_success else "failed")
+    if api_success:
+        assert await store.enqueue(cid, [candidate], layer="api") == 0
+        assert await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                       max_runtime_seconds=60, layer="api") == "duplicate"
+
+
+async def test_memory_api_does_not_steal_active_claim_upgrade_snippet_or_override_pause():
+    store = MemoryWebStore()
+    candidate = Candidate("https://www.idealista.com/inmueble/12345678/", "claim", "idealista.com", kind="listing")
+    await store.enqueue("old", [candidate])
+    queued, = await store.next_urls("old", 1)
+    ticket = await store.begin_fetch("old", queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.enqueue("new", [candidate], layer="api")
+    assert await store.begin_fetch("new", queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "busy"
+    assert store.seen[candidate.url_key]["campaign_id"] == "old"
+    await store.finish_fetch(ticket, PageResult(True, text="Search snippet", via="search", layer="none"))
+    assert await store.begin_fetch("new", queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "duplicate"
+    assert len(store.posts) == 1
+    store.seen[candidate.url_key]["state"] = "failed"
+    store.paused_hosts.add(candidate.host)
+    assert not await store.source_available(candidate.host)
+    assert await store.enqueue("new", [candidate], layer="api") == 1
+    assert await store.begin_fetch("new", queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "source_unavailable"
+    assert await store.enqueue("new", [candidate], layer="api") == 0
+
+
+async def test_memory_api_can_recover_stale_claim():
+    store = MemoryWebStore()
+    candidate = Candidate("https://www.idealista.com/inmueble/12345678/", "stale", "idealista.com", kind="listing")
+    await store.enqueue("old", [candidate])
+    queued, = await store.next_urls("old", 1)
+    await store.begin_fetch("old", queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    store.seen[candidate.url_key]["claimed_at"] = datetime.now(UTC) - timedelta(hours=1)
+    await store.enqueue("new", [candidate], layer="api")
+    assert isinstance(await store.begin_fetch("new", queued, vertical="real_estate", lease_seconds=300,
+                                              max_runtime_seconds=60, layer="api"), FetchTicket)
+
+
+async def test_memory_api_obeys_queue_policy_but_can_bypass_html_only_block():
+    store = MemoryWebStore()
+    candidate = Candidate("https://www.idealista.com/inmueble/12345678/", "policy", "idealista.com", kind="listing")
+    await store.enqueue("c", [candidate])
+    queued, = await store.next_urls("c", 1)
+    ticket = await store.begin_fetch("c", queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.finish_fetch(ticket, PageResult(False, error="http_403"))
+    store.urls["c"][candidate.url_key].state = "skipped"
+    store.urls["c"][candidate.url_key].detail = "page_cap"
+    assert await store.enqueue("c", [candidate], layer="api") == 0
+    assert await store.begin_fetch("c", queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "page_cap"
+    store.urls["c"][candidate.url_key].detail = "host_blocked"
+    assert await store.enqueue("c", [candidate], layer="api") == 1
+    assert isinstance(await store.begin_fetch("c", queued, vertical="real_estate", lease_seconds=300,
+                                               max_runtime_seconds=60, layer="api"), FetchTicket)

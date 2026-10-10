@@ -33,7 +33,7 @@ def test_the_owners_report_is_technical_and_the_users_is_not() -> None:
     owner = report_text(METRICS, "квартира · Валенсия", technical=True)
     assert owner.splitlines()[0] == "📊 Отчёт по поиску: квартира · Валенсия"
     assert "Запросов в поиск: 12 · результатов: 340" in owner
-    assert "Страниц прочитано: 25 (HTTP 18 · браузер 5 · API 2) · не открылось: 4" in owner
+    assert "Страниц прочитано: 25 (HTTP 18 · браузер 5 · Scrape API 2) · не открылось: 4" in owner
     assert "Найдено: 10 объявлений" in owner
     assert "Точных: 4 · похожих: 2 · других: 1 · повторов: 1 · отклонено: 3" in owner
     assert owner.index("не тот город или район: 1") < owner.index("дороже бюджета: 2")  # the reasons in the report's order
@@ -182,6 +182,7 @@ async def test_postgres_recomputes_the_row_from_queries_pages_and_findings(pool)
             """insert into web_search_queries (campaign_id, round_no, query_text, query_key, state, result_count)
                values ($1::uuid, 1, $2, $2, $3, $4)""", cid, f"q{n}", state, results)
     pages = [("fetched", "http", None)] * 3 + [("fetched", "render", None), ("fetched", "scrape", None),
+                                                 ("fetched", "api", None),
                                                  ("fetched", "http", "search_snippet"), ("fetched", "none", "search_snippet"),
                                                  ("failed", "http", "http_403"), ("failed", "render", "render_blocked"),
                                                  ("queued", None, None), ("skipped", None, "robots")]
@@ -202,15 +203,16 @@ async def test_postgres_recomputes_the_row_from_queries_pages_and_findings(pool)
 
     got = await campaigns.refresh_metrics(cid)
     assert (got.queries, got.results) == (2, 15)
-    assert (got.pages_http, got.pages_render, got.pages_scrape, got.pages_failed) == (3, 1, 1, 2)
+    assert (got.pages_http, got.pages_render, got.pages_scrape, got.pages_api, got.pages_failed) == (3, 1, 1, 1, 2)
     assert (got.findings, got.exact, got.similar, got.other, got.duplicates) == (4, 1, 1, 0, 1)
-    assert got.excluded == {"budget": 1} and got.pages_read == 5 and got.rejected == 1
+    assert got.excluded == {"budget": 1} and got.pages_read == 6 and got.rejected == 1
     stored = await campaigns.campaign_metrics(cid)
     assert stored == got
     assert await campaigns.refresh_metrics(cid) == (await campaigns.campaign_metrics(cid))  # idempotent, one row
     assert await pool.fetchval("select count(*) from campaign_metrics") == 1
     text = report_text(got, "x")
-    assert "Страниц прочитано: 5 (HTTP 3 · браузер 1 · API 1) · не открылось: 2" in text and "дороже бюджета: 1" in text
+    assert "Страниц прочитано: 6 (HTTP 3 · браузер 1 · Scrape API 1 · API порталов 1) · не открылось: 2" in text
+    assert "дороже бюджета: 1" in text
     with pytest.raises(ValueError):
         await campaigns.refresh_metrics("not-a-uuid")
     json.dumps(got.excluded)
@@ -228,7 +230,7 @@ async def test_postgres_finish_fetch_records_the_layer(pool) -> None:
     store = PostgresWebStore(pool)
     await store.start_run(cid)
     text = "Piso en venta en Valencia, Ruzafa, 3 habitaciones, 85 m2, 199.000 euros. " * 3
-    for n, (host, layer, ok) in enumerate([("idealista.com", "http", True), ("fotocasa.es", "render", True),
+    for n, (host, layer, ok) in enumerate([("idealista.com", "api", True), ("fotocasa.es", "render", True),
                                            ("pisos.com", "scrape", True), ("habitaclia.com", "http", False)]):
         url = f"https://www.{host}/inmueble/{n}000000/"
         queued = QueuedUrl(url, url_key(url), host, 0, "listing")
@@ -236,13 +238,13 @@ async def test_postgres_finish_fetch_records_the_layer(pool) -> None:
             "insert into web_campaign_urls (campaign_id, url_key, url, host, kind) values ($1::uuid, $2, $3, $4, 'listing')",
             cid, queued.url_key, url, host)
         ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60,
-                                         render_layer=True, scrape_layer=True)
+                                         render_layer=True, scrape_layer=True, layer="api" if layer == "api" else "http")
         assert not isinstance(ticket, str)
         await store.finish_fetch(ticket, PageResult(ok, "listing", url, "t", text if ok else "", layer=layer,
                                                     error=None if ok else "http_404"))
     layers = {r["host"]: (r["state"], r["layer"]) for r in await pool.fetch(
         "select host, state, layer from web_campaign_urls where campaign_id = $1::uuid", cid)}
-    assert layers == {"idealista.com": ("fetched", "http"), "fotocasa.es": ("fetched", "render"),
+    assert layers == {"idealista.com": ("fetched", "api"), "fotocasa.es": ("fetched", "render"),
                       "pisos.com": ("fetched", "scrape"), "habitaclia.com": ("failed", "http")}
     got = await campaigns.refresh_metrics(cid)
-    assert (got.pages_http, got.pages_render, got.pages_scrape, got.pages_failed) == (1, 1, 1, 1)
+    assert (got.pages_http, got.pages_render, got.pages_scrape, got.pages_api, got.pages_failed) == (0, 1, 1, 1, 1)

@@ -14,6 +14,8 @@ COPY bot/control_plane/ ./bot/control_plane/
 COPY bot/orchestra/ ./bot/orchestra/
 # /campaign plans and stores campaigns (planning and storage only; no discovery stack).
 COPY bot/campaign/ ./bot/campaign/
+# The cost ledger the campaign's LLM clients book into (bot/utils/costs.py).
+COPY bot/utils/ ./bot/utils/
 RUN chown -R appuser:appuser /app
 USER appuser
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

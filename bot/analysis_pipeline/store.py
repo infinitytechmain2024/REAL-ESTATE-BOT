@@ -7,6 +7,7 @@ from typing import Any
 from .formatters import finding_payload
 from .models import Evidence
 from .openrouter import PROMPT_VERSION
+from .prefilter import TaskContext, context_of
 
 ACTOR = "analysis_pipeline"
 
@@ -25,6 +26,7 @@ def build_task_hint(goal: str | None, place: str | None, spec: dict[str, Any] | 
         "budget_currency": budget.get("currency"),
         "rooms_min": rooms.get("min"),
         "rooms_max": rooms.get("max"),
+        "area_min_m2": (spec.get("area_m2") or {}).get("min") if isinstance(spec.get("area_m2"), dict) else None,
     }
     hint = {k: v for k, v in hint.items() if v not in (None, "", [])}
     return hint or None
@@ -160,6 +162,25 @@ class PostgresAnalysisStore:
         spec = row["spec"]
         spec = json.loads(spec) if isinstance(spec, str) else (spec or {})
         return build_task_hint(row["goal"], row["place"], spec)
+
+    async def task_context(self, post_id: str) -> TaskContext | None:
+        """The campaign a web/Facebook post was collected for and its hard numbers (``prefilter``), else None."""
+        row = await self._pool().fetchrow(
+            """select c.id::text as id, c.plan->'constraints' as constraints, c.spec
+                 from collected_posts p
+                 join acquisition_runs r on r.id=p.acquisition_run_id
+                 join acquisition_batch_items i on i.id=r.batch_item_id
+                 join acquisition_batches b on b.id=i.batch_id
+                 join campaigns c on c.id=b.campaign_id
+                where p.id=$1::uuid""",
+            post_id,
+        )
+        if not row:
+            return None
+        constraints, spec = row["constraints"], row["spec"]
+        constraints = json.loads(constraints) if isinstance(constraints, str) else constraints
+        spec = json.loads(spec) if isinstance(spec, str) else spec
+        return context_of(row["id"], constraints, spec)
 
     async def campaign_finding_ids(self, finding_ids: list[str]) -> set[str]:
         """The findings among ``finding_ids`` whose post came from a campaign's Facebook batch or social search."""

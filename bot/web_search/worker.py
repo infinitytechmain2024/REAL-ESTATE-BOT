@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from bot.campaign import geo
@@ -35,6 +36,8 @@ from bot.campaign.models import TERMINAL_STATES, Campaign
 from bot.campaign.search_plan import blocked_hosts_of, country_portals, source_hosts
 from bot.campaign.spec import TaskSpec
 from bot.campaign.store import CampaignStore
+from bot.utils import costs
+from bot.utils.listing_text import deal_of
 
 from .extract import (
     MIN_INDEX_LINKS,
@@ -53,6 +56,7 @@ from .models import (
     FetchTicket,
     PageResult,
     QueuedUrl,
+    SourceRun,
     WebProgress,
 )
 from .queries import (
@@ -69,7 +73,22 @@ from .queries import (
 from .render import ChallengeDetected, Renderer, RenderError
 from .scrape_api import Scraper
 from .searxng import Searcher, SearchError
-from .store import _REFUSALS, BUSY, HOST_BLOCKED, VERIFICATION_EXPIRED, WebStore, funnel_totals
+from .sources import ListingSource, SourceListing
+from .sources.apify import (
+    PermanentApifyError,
+    SourceRunContext,
+    TemporaryApifyError,
+    source_run_scope,
+)
+from .store import (
+    _REFUSALS,
+    BUSY,
+    HOST_BLOCKED,
+    HOST_BREAKER,
+    VERIFICATION_EXPIRED,
+    WebStore,
+    funnel_totals,
+)
 from .structured import Structured, facts_block, from_jsonld, structured
 from .urls import (
     classify_page,
@@ -79,6 +98,7 @@ from .urls import (
     host_of,
     known_portal,
     listing_evidence,
+    listing_figures,
     portal_listing,
     url_key,
 )
@@ -86,6 +106,9 @@ from .urls import (
 log = logging.getLogger(__name__)
 MIN_POST_CHARS = 120
 MIN_SNIPPET_CHARS = 60  # title + snippet: less than this says nothing about the listing
+
+
+DOMAIN_POLICIES = ("strict", "soft", "off")
 
 
 @dataclass(frozen=True)
@@ -121,6 +144,15 @@ class WebSearchConfig:
     human_verification: bool = False
     verified_host_interval_seconds: float = 8    # gap between two reads of one verified site
     pages_per_verification: int = 40             # pages read through the browser after one passed check
+    # Which sites a search result may come from (``domain_policy``): strict -- only the country's known portals and the
+    # sites the plan or the person named; soft -- also other sites whose hit shows a property with a price or an area;
+    # off -- also hits with a property word and a deal word (the old rule). A country without known portals is soft.
+    domain_policy: str = "strict"
+    # A site whose pages were refused (403/429/captcha, on every layer tried) this many times in a row is skipped for
+    # the rest of the campaign: its search results are kept as cards, no layer (and no paid unlocker) is tried again.
+    host_breaker_refusals: int = 3               # 0: off
+    scrape_cost_usd: float = 0.0                 # what one scrape-API read costs (the ledger, CAMPAIGN_BUDGET_USD)
+    query_cost_usd: float = 0.0                  # what one search query costs (paid backends; SearXNG is free)
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -133,7 +165,9 @@ class WebSearchConfig:
                 and 1 <= self.max_rounds <= 50 and 5 <= self.max_minutes_per_campaign <= 7 * 24 * 60
                 and 60 <= self.lease_seconds <= 3600 and 1 <= self.page_runtime_seconds <= 600
                 and 0 <= self.max_renders_per_campaign <= 200 and 0 <= self.max_scrape_api_per_campaign <= 500
-                and 0 <= self.verified_host_interval_seconds <= 300 and 1 <= self.pages_per_verification <= 200):
+                and 0 <= self.verified_host_interval_seconds <= 300 and 1 <= self.pages_per_verification <= 200
+                and self.domain_policy in DOMAIN_POLICIES and 0 <= self.host_breaker_refusals <= 100
+                and 0 <= self.scrape_cost_usd <= 10 and 0 <= self.query_cost_usd <= 10):
             raise ValueError("unsafe web search limits")
 
 
@@ -174,6 +208,7 @@ class WebSearchWorker:
         renderer: Renderer | None = None,
         scraper: Scraper | None = None,
         planner: SearchPlanner | None = None,
+        sources: tuple[ListingSource, ...] = (),
         config: WebSearchConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         cancel_job: Callable[[str, str], Awaitable[bool]] | None = None,
@@ -184,10 +219,15 @@ class WebSearchWorker:
         self.renderer, self.scraper = renderer, scraper
         self.cancel_job = cancel_job  # the verification store's ``cancel(job_id, actor)``
         self.planner = planner  # writes the campaign's search plan once, before its first round
+        self.sources = sources
         self.token = str(uuid.uuid4())
         self._progress: dict[str, WebProgress] = {}  # campaign id -> live numbers (also shown through the store)
         self._listing_hosts: dict[tuple[str, str], bool] = {}  # (campaign, host) -> has a listing, reset every step
         self._verified_at: dict[str, datetime] = {}  # site -> when it was last read through the verified browser
+        # (campaign, site) -> pages refused in a row in this campaign; a site at ``host_breaker_refusals`` is tripped
+        # (in memory: after a restart a tripped site gets that many tries again, its queued URLs stay skipped)
+        self._refused: dict[tuple[str, str], int] = {}
+        self._tripped: set[tuple[str, str]] = set()
 
     def progress(self, campaign_id: str) -> WebProgress:
         """The live progress of the campaign's web stage: current host and layer, pages read, listings found,
@@ -250,6 +290,7 @@ class WebSearchWorker:
         run = await self.store.get_run(campaign_id)
         if campaign.state in TERMINAL_STATES:
             if run is not None and run.state == "searching":
+                await self._stop_sources(campaign, f"campaign_{campaign.state}")
                 await self.store.finish(campaign_id, "stopped", f"campaign_{campaign.state}")
                 await self._release_idle_jobs()
             return
@@ -258,7 +299,8 @@ class WebSearchWorker:
         if run.state != "searching" or not await self.store.take_lease(campaign_id, self.token, self.config.lease_seconds):
             return
         try:
-            await self._advance(campaign)
+            with costs.scope(campaign_id):  # every paid call of this step is booked on the campaign
+                await self._advance(campaign)
         finally:
             await self.store.drop_lease(campaign_id, self.token)
 
@@ -266,7 +308,13 @@ class WebSearchWorker:
         cfg, cid = self.config, campaign.id
         started = await self.store.started_at(cid)
         if started is not None and self.now() - started > timedelta(minutes=cfg.max_minutes_per_campaign):
+            await self._stop_sources(campaign, "time_cap")
             await self._done(campaign, "time_cap")
+            return
+        if await self._resume_sources(campaign):
+            return
+        if await costs.over_budget(cid):  # CAMPAIGN_BUDGET_USD spent (all services together)
+            await self._done(campaign, "budget_cap")
             return
         counts = await self.store.counts(cid)
         usage = await self.store.usage()
@@ -305,6 +353,7 @@ class WebSearchWorker:
         cfg = self.config
         if used_count == 0:  # the first round: the search plan (once), then its direct portal pages
             campaign = await self._with_search_plan(campaign)
+            await self._from_sources(campaign)
             await self._enqueue_portal_urls(campaign)
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
@@ -322,6 +371,218 @@ class WebSearchWorker:
         log.info("web_search.round", extra={"campaign_id": campaign.id, "round": round_no, "generated": len(queries),
                                             "added": added})
         return bool(queries)
+
+    async def _source_limit(self, campaign: Campaign, source: ListingSource) -> int:
+        for host in source.hosts:
+            if not await self.store.source_available(host):
+                return 0
+        counts, usage = await self.store.counts(campaign.id), await self.store.usage()
+        host_left = [self.config.max_pages_per_host - await self.store.host_attempts(campaign.id, host)
+                     for host in source.hosts]
+        return max(0, min(self.config.max_pages_per_campaign - counts.pages,
+                          self.config.max_pages_per_day - usage.pages,
+                          min(host_left, default=0), getattr(source, "max_items", 20)))
+
+    async def _source_charge(self, campaign_id: str, charge: float) -> float | None:
+        """A paid launch fails closed when its shared budget cannot be read."""
+        sink = costs.ledger()
+        if sink is None or await costs.over_budget(campaign_id):
+            return None
+        try:
+            spent = await sink.spent(campaign_id)
+        except Exception:  # noqa: BLE001 - an unreadable budget disables this paid provider
+            return None
+        if not math.isfinite(spent) or spent < 0 or not math.isfinite(charge) or charge <= 0:
+            return None
+        remaining = costs.budget() - spent if costs.budget() > 0 else charge
+        return min(charge, remaining) if remaining > 0 else None
+
+    async def _from_sources(self, campaign: Campaign) -> None:
+        """Claim new provider work only in the first round; persisted claims prevent repeated POSTs."""
+        task = query_task(campaign)
+        for source in self.sources:
+            blocked = task.blocked_hosts | self.config.blocked_hosts
+            if not source.supports(task) or any(not fetchable(f"https://{host}/", blocked) for host in source.hosts):
+                continue
+            run, fresh = await self.store.claim_source(campaign.id, source.name)
+            if not fresh:
+                continue
+            limit = await self._source_limit(campaign, source)
+            charge = await self._source_charge(campaign.id, getattr(source, "max_charge_usd", 0.0))
+            if not limit or charge is None:
+                await self.store.finish_source(campaign.id, source.name, error_code="apify_launch_limits")
+                await costs.skip("api", "apify_launch_limits", item=source.name)
+                continue
+            await self._search_source(campaign, source, run, launch_allowed=True, limit=limit, charge=charge)
+
+    async def _resume_sources(self, campaign: Campaign) -> bool:
+        """Resume cached imports or the known run, even after query generation has been committed."""
+        sources = {s.name: s for s in self.sources}
+        task = query_task(campaign)
+        blocked = task.blocked_hosts | self.config.blocked_hosts
+        for run in await self.store.source_runs(campaign.id):
+            source = sources.get(run.name)
+            if run.state in ("completed", "failed"):
+                continue
+            if source is None:
+                await self.store.finish_source(campaign.id, run.name, error_code="apify_disabled_during_run")
+                await costs.error("api", "apify_disabled_during_run", item=run.name, campaign_id=campaign.id)
+                continue
+            if not source.supports(task) or any(not fetchable(f"https://{host}/", blocked) for host in source.hosts):
+                await self._fail_source(campaign.id, source, "apify_task_changed")
+                continue
+            if run.state == "starting" and not run.run_id:
+                await self._fail_source(campaign.id, source, "apify_launch_uncertain", estimated=True)
+                continue
+            if run.state == "running":
+                await self._search_source(campaign, source, run, launch_allowed=False,
+                                          limit=getattr(source, "max_items", 20))
+            # Reload because polling may have replaced running with ready.
+            current = next((r for r in await self.store.source_runs(campaign.id) if r.name == run.name), run)
+            if current.state == "ready":
+                if await self._import_source(campaign, source, current):
+                    return True
+            elif current.state == "running":
+                return True
+        return False
+
+    async def _fail_source(self, cid: str, source: ListingSource, code: str, *, estimated: bool = False) -> None:
+        if estimated:
+            await costs.record_unique("api", key=f"listing-source:{cid}:{source.name}", provider="apify",
+                                      item=getattr(source, "actor_id", source.name),
+                                      cost_usd=getattr(source, "max_charge_usd", 0.0),
+                                      code="estimated_launch_uncertain", campaign_id=cid)
+        await self.store.finish_source(cid, source.name, error_code=code)
+        await costs.error("api", code, item=source.name, campaign_id=cid)
+
+    async def _search_source(self, campaign: Campaign, source: ListingSource, run: SourceRun, *,
+                             launch_allowed: bool, limit: int, charge: float | None = None) -> None:
+        cid = campaign.id
+
+        async def save_run(run_id: str, dataset_id: str | None) -> None:
+            # Book a clearly labelled ceiling before the durable run checkpoint. A crash
+            # or campaign expiry must not make an already launched paid run invisible.
+            await costs.record_unique("api", key=f"listing-source:{cid}:{source.name}", provider="apify",
+                                      item=getattr(source, "actor_id", source.name),
+                                      cost_usd=charge if charge is not None else getattr(source, "max_charge_usd", 0.0),
+                                      code="estimated_pending_run", campaign_id=cid)
+            await self.store.save_source_run(cid, source.name, run_id, dataset_id)
+
+        async def reconcile_usage(run_id: str, amount: float, *, estimated: bool = False) -> None:
+            await costs.record_unique("api", key=f"listing-source:{cid}:{source.name}", provider="apify",
+                                      item=getattr(source, "actor_id", source.name), cost_usd=amount,
+                                      code="estimated" if estimated else "", campaign_id=cid)
+
+        context = SourceRunContext(campaign_id=cid, source_name=source.name, run_id=run.run_id,
+                                   dataset_id=run.dataset_id, max_charge_usd=(charge if charge is not None
+                                                                          else getattr(source, "max_charge_usd", 0.0)),
+                                   launch_allowed=launch_allowed, save_run=save_run, reconcile_usage=reconcile_usage)
+        await self._track(cid, next(iter(source.hosts), None), "api")
+        try:
+            with source_run_scope(context):
+                timeout = min(getattr(source, "timeout_seconds", 120) + 75, self.config.lease_seconds - 30)
+                listings = await asyncio.wait_for(source.search(query_task(campaign), limit=limit), timeout=timeout)
+            if len(listings) > min(limit, 50):
+                await costs.record("api", kind="skip", code="apify_result_limit", item=source.name,
+                                   units=len(listings) - min(limit, 50), campaign_id=cid)
+                listings = listings[:min(limit, 50)]
+            await self.store.source_ready(cid, source.name, listings)
+        except TemporaryApifyError as exc:
+            # The adapter books uncertain charges. Handled failure ends this attempt and allows HTML fallback.
+            await self._fail_source(cid, source, exc.code)
+        except PermanentApifyError as exc:
+            await self._fail_source(cid, source, exc.code)
+        except TimeoutError:
+            await self._fail_source(cid, source, "apify_worker_timeout", estimated=True)
+        except Exception:  # noqa: BLE001 - provider failure must preserve the ordinary search fallback
+            await self._fail_source(cid, source, "apify_source_failed", estimated=True)
+
+    async def _stop_sources(self, campaign: Campaign, reason: str) -> None:
+        """Settle an existing run when its campaign stops; never launch new provider work."""
+        sources = {s.name: s for s in self.sources}
+        for run in await self.store.source_runs(campaign.id):
+            if run.state in ("completed", "failed"):
+                continue
+            source = sources.get(run.name)
+            settle = getattr(source, "settle", None)
+            if run.run_id and settle is not None:
+                async def save_run(run_id: str, dataset_id: str | None, checkpoint: SourceRun = run) -> None:
+                    await self.store.save_source_run(campaign.id, checkpoint.name, run_id, dataset_id)
+
+                async def reconcile_usage(run_id: str, amount: float, *, estimated: bool = False,
+                                          checkpoint: SourceRun = run, provider: ListingSource = source) -> None:
+                    await costs.record_unique("api", key=f"listing-source:{campaign.id}:{checkpoint.name}", provider="apify",
+                                              item=getattr(provider, "actor_id", checkpoint.name), cost_usd=amount,
+                                              code="estimated" if estimated else "", campaign_id=campaign.id)
+
+                context = SourceRunContext(campaign.id, run.name, run.run_id, run.dataset_id,
+                                           getattr(source, "max_charge_usd", .10), False, save_run, reconcile_usage)
+                try:
+                    await asyncio.wait_for(settle(context), timeout=90)
+                except Exception:  # noqa: BLE001 - cleanup failure remains explicit and must not prevent stopping
+                    await costs.error("api", "apify_settlement_failed", item=run.name, campaign_id=campaign.id)
+            await self.store.finish_source(campaign.id, run.name, error_code=f"apify_{reason}"[:80])
+            await costs.error("api", f"apify_{reason}"[:80], item=run.name, campaign_id=campaign.id)
+
+    def _source_text(self, listing: SourceListing) -> str | None:
+        facts = {k: v for k, v in asdict(listing).items() if v is not None and k != "description"}
+        if facts.get("property_type") == "land":
+            facts["property_type"] = "landparcel"
+        fixed = f"{facts_block(facts)}\n{listing.title}\nСсылка: {listing.url}"
+        if len(fixed) > self.config.max_post_chars:
+            return None
+        description = listing.description[:max(0, self.config.max_post_chars - len(fixed) - 1)]
+        return f"{fixed}\n{description}" if description else fixed
+
+    async def _import_source(self, campaign: Campaign, source: ListingSource, run: SourceRun) -> bool:
+        """True keeps HTML waiting when a provider row is busy or the per-tick import quota is used."""
+        cid, task = campaign.id, query_task(campaign)
+        blocked = task.blocked_hosts | self.config.blocked_hosts
+        done = 0
+        for offset in range(run.import_offset, len(run.listings)):
+            listing = run.listings[offset]
+            host = host_of(listing.url)
+            text = self._source_text(listing)
+            if (not fetchable(listing.url, blocked) or host not in source.hosts
+                    or classify_url(listing.url) != "listing" or text is None
+                    or deal_conflict(listing.url, campaign_deal(campaign))
+                    or (listing.deal and campaign_deal(campaign) and listing.deal != campaign_deal(campaign))
+                    or geo.foreign_tld(host, task.country)
+                    or geo.foreign_markers_hit(task.country, f"{listing.title} {listing.address or ''}")):
+                await costs.skip("api", "apify_invalid_listing", item=source.name)
+                await self.store.advance_source_import(cid, source.name, offset + 1)
+                continue
+            if not await self._source_limit(campaign, source) or await costs.over_budget(cid):
+                await costs.skip("api", "apify_import_limits", item=source.name)
+                await self.store.finish_source(cid, source.name, error_code="apify_import_limits")
+                return False
+            key = url_key(listing.url)
+            await self.store.enqueue(cid, [Candidate(listing.url, key, host, kind="listing")],
+                                     index_ttl_days=self.config.index_ttl_days, layer="api")
+            queued = QueuedUrl(listing.url, key, host, 0, "listing", listing.title)
+            ticket = await self.store.begin_fetch(cid, queued, vertical=campaign.plan.vertical,
+                                                  lease_seconds=self.config.lease_seconds,
+                                                  max_runtime_seconds=self.config.page_runtime_seconds,
+                                                  contact_site=False, index_ttl_days=self.config.index_ttl_days,
+                                                  layer="api")
+            if ticket == BUSY:
+                return True
+            if isinstance(ticket, FetchTicket):
+                await self._track(cid, host, "api", url=listing.url)
+                await self.store.finish_fetch(ticket, PageResult(ok=True, final_url=listing.url,
+                                                                title=listing.title, text=text,
+                                                                via="api", layer="api"))
+                await self._track(cid, host, "api", url=listing.url)
+            else:
+                await costs.skip("api", "apify_import_skipped", item=source.name, campaign_id=cid)
+            await self.store.advance_source_import(cid, source.name, offset + 1)
+            done += 1
+            if done >= self.config.pages_per_tick:
+                if offset + 1 == len(run.listings):
+                    await self.store.finish_source(cid, source.name)
+                return offset + 1 < len(run.listings)
+        await self.store.finish_source(cid, source.name)
+        return False
 
     async def _with_search_plan(self, campaign: Campaign) -> Campaign:
         """The campaign with its model-written search plan: asked once (idempotent), stored, never required."""
@@ -342,8 +603,9 @@ class WebSearchWorker:
         task = query_task(campaign)
         blocked = self.config.blocked_hosts | task.blocked_hosts
         # The kind is what the URL looks like (an index page is expected; a concrete listing URL is never queued here).
+        deal = campaign_deal(campaign)
         candidates = [Candidate(u, url_key(u), host_of(u), 0, classify_url(u)) for u in plan_portal_urls(task.search_plan)
-                      if fetchable(u, blocked) and classify_url(u) != "listing"]
+                      if fetchable(u, blocked) and classify_url(u) != "listing" and not deal_conflict(u, deal)]
         if candidates:
             await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
 
@@ -351,6 +613,7 @@ class WebSearchWorker:
         task = query_task(campaign)
         blocked = self.config.blocked_hosts | task.blocked_hosts
         deal, known, real_estate = campaign_deal(campaign), known_hosts_of(campaign), campaign.plan.vertical == "real_estate"
+        allowed = self._allowed_hosts(campaign, known)
         for query in await self.store.pending_queries(campaign.id, self.config.queries_per_tick):
             await self.store.set_progress(campaign.id, None, self._line(query_count, pages, "поиск"))
             try:
@@ -360,18 +623,19 @@ class WebSearchWorker:
                 log.warning("web_search.search_failed %s", exc.code, extra={"campaign_id": campaign.id})
                 await self.store.query_done(query.id, ok=False, results=0, new_urls=0, error=exc.code)
                 continue
+            if self.config.query_cost_usd:
+                await costs.record("search", provider="search_api", item="query", cost_usd=self.config.query_cost_usd)
             candidates: list[Candidate] = []
             dropped = 0
             for hit in hits[: self.config.results_per_query]:
                 if not fetchable(hit.url, blocked):
                     continue
                 host = host_of(hit.url)
-                if deal and known_portal(host, known) and deal_conflict(hit.url, deal):
-                    dropped += 1  # a rent page for a sale campaign (and vice versa)
+                if deal and (deal_conflict(hit.url, deal) or deal_of(hit.title) not in (None, deal)):
+                    dropped += 1  # a rent page for a sale campaign (and vice versa): its path or its title says so
                     continue
-                if (real_estate and not known_portal(host, known)
-                        and not listing_evidence(hit.title, hit.snippet)):
-                    dropped += 1  # an unknown site whose hit shows no property and no figures: news, a dictionary ...
+                if real_estate and not self._host_allowed(host, known, allowed, hit.title, hit.snippet):
+                    dropped += 1  # not a client portal (strict), or a hit without a listing's figures: a dictionary ...
                     continue
                 if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
                     continue
@@ -384,6 +648,41 @@ class WebSearchWorker:
                                                            "dropped": dropped, "hits": len(hits)})
             new = await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
             await self.store.query_done(query.id, ok=True, results=len(hits), new_urls=new)
+
+    def _allowed_hosts(self, campaign: Campaign, known: frozenset[str]) -> frozenset[str]:
+        """The sites a strict campaign may read: the country's portals plus the plan's and the person's (empty: the
+        country has no portal list, so a site the person named must not become the only one -- the campaign is soft)."""
+        portals = country_portals(campaign.plan.country)
+        return frozenset((*portals, *known)) if portals else frozenset()
+
+    def _host_allowed(self, host: str, known: frozenset[str], allowed: frozenset[str], title: str,
+                      snippet: str) -> bool:
+        """Whether a search hit on ``host`` may be queued under ``domain_policy`` (see ``WebSearchConfig``)."""
+        policy = self.config.domain_policy
+        if policy == "strict" and allowed:
+            return any(host == h or host.endswith("." + h) for h in allowed)
+        if known_portal(host, known):
+            return True
+        if policy == "off":
+            return listing_evidence(title, snippet)
+        return listing_evidence(title, snippet) and listing_figures(title, snippet)
+
+    def _note_read(self, campaign_id: str, host: str, result: PageResult) -> bool:
+        """Count a refused page of ``host`` (a page read resets the count); True when the site trips the breaker now."""
+        limit, key = self.config.host_breaker_refusals, (campaign_id, host)
+        if not limit or key in self._tripped:
+            return False
+        if result.ok and result.via == "page":
+            self._refused.pop(key, None)
+            return False
+        error = result.error or ""
+        if error not in BREAKER_ERRORS and not error.startswith("scrape_http_4"):
+            return False
+        self._refused[key] = self._refused.get(key, 0) + 1
+        if self._refused[key] < limit:
+            return False
+        self._tripped.add(key)
+        return True
 
     # -- pages --
 
@@ -398,6 +697,10 @@ class WebSearchWorker:
             if budget <= 0:
                 break
             if url.host in waiting:  # a challenge met earlier in this very tick
+                continue
+            if (campaign.id, url.host) in self._tripped:  # the site kept refusing us: its search result is all we keep
+                await self.store.mark_url(campaign.id, url.url_key, "skipped", HOST_BREAKER)
+                await self._keep_search_result(campaign, url, None)
                 continue
             attempts = await self.store.host_attempts(campaign.id, url.host)
             if attempts >= cfg.max_pages_per_host:
@@ -457,10 +760,14 @@ class WebSearchWorker:
                 pages -= 1
                 await self._track(campaign.id, url.host, None, url=url.url)
                 continue
+            tripped = self._note_read(campaign.id, url.host, result)
             if not result.ok:  # refused (403, a captcha page ...): the listing as the search engine showed it
                 card = search_result(url, result.error)
                 result = replace(card, layer=result.layer) if card else result
             await self.store.finish_fetch(ticket, result)
+            if tripped:  # its queued URLs are dropped one by one above, each keeping its search-result card
+                log.warning("web_search.host_breaker", extra={"campaign_id": campaign.id, "host": url.host,
+                                                              "refusals": self.config.host_breaker_refusals})
             deal = campaign_deal(campaign)
             children = [c for c in children if fetchable(c.url, cfg.blocked_hosts | query_task(campaign).blocked_hosts)
                         and not deal_conflict(c.url, deal)]
@@ -508,7 +815,8 @@ class WebSearchWorker:
         render = (may_render and self._render_layer() and layers.get("render", True)
                   and await self.store.renders_used(campaign_id) < cfg.max_renders_per_campaign)
         scrape = (may_scrape and self.scraper is not None
-                  and await self.store.scrapes_used(campaign_id) < cfg.max_scrape_api_per_campaign)
+                  and await self.store.scrapes_used(campaign_id) < cfg.max_scrape_api_per_campaign
+                  and not await costs.over_budget(campaign_id))
         return render, scrape
 
     async def _read(self, campaign: Campaign, url: QueuedUrl,
@@ -582,7 +890,8 @@ class WebSearchWorker:
             await self._leave(url, http_result)
             if current.ok:
                 return current, children
-        if may_scrape and self.scraper is not None and await self.store.scrapes_used(cid) < cfg.max_scrape_api_per_campaign:
+        if (may_scrape and self.scraper is not None and await self.store.scrapes_used(cid) < cfg.max_scrape_api_per_campaign
+                and not await costs.over_budget(cid)):
             await self._leave(url, current)
             current, children = await self._scrape(cid, url)
             if current.ok:
@@ -626,14 +935,42 @@ class WebSearchWorker:
 
     async def _scrape(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
         cfg = self.config
-        self._set_layer(campaign_id, "api")
+        self._set_layer(campaign_id, "unlocker")
         await self.store.mark_scraped(campaign_id, url.url_key)
+        from .scrape_api import ScrapeBillingError
+
+        scrape_do = getattr(self.scraper, "auth_mode", "") == "query_token"
+        if scrape_do:
+            from uuid import uuid4
+
+            key = f"scrape:{campaign_id}:{uuid4()}"
+            unit = self.scraper.credit_usd
+            estimate = max(self.scraper.estimated_credits, 25 if url.host.endswith("idealista.com") else 0) * unit
+            await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                      cost_usd=estimate, code="estimated_pending")
+        else:
+            # Generic unlockers retain the configured fixed price, even for refusals.
+            await costs.record("scrape", provider="scrape_api", item=url.host, cost_usd=cfg.scrape_cost_usd)
         try:
             page = await asyncio.wait_for(self.scraper.fetch(url.url), timeout=cfg.page_runtime_seconds * 2)
+        except ScrapeBillingError as exc:
+            if scrape_do and exc.credits is not None:
+                await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                          cost_usd=exc.credits * unit, units=exc.credits)
+            elif scrape_do:
+                await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                          cost_usd=estimate, code="estimated_missing_header")
+            return PageResult(False, url.kind, url.url, error=exc.code, layer="scrape"), []
         except FetchError as exc:
             return PageResult(False, url.kind, url.url, error=exc.code, layer="scrape"), []
         except TimeoutError:
             return PageResult(False, url.kind, url.url, error="scrape_timeout", layer="scrape"), []
+        if scrape_do and page.scrape_credits is not None:
+            await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                      cost_usd=page.scrape_credits * unit, units=page.scrape_credits)
+        elif scrape_do:
+            await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                      cost_usd=estimate, code="estimated_missing_header")
         parsed = parse_html(page.html, page.url)
         if looks_blocked(parsed.title, post_text(parsed, limit=cfg.max_post_chars)):
             return PageResult(False, url.kind, url.url, parsed.title, error="captcha", layer="scrape"), []
@@ -768,6 +1105,8 @@ BLOCK_MARKERS = ("captcha", "datadome", "are you a robot", "access denied")
 MAX_BLOCK_PAGE_CHARS = 400
 REFUSALS = _REFUSALS
 RENDER_ON = ("http_403", "http_429", "http_503", "captcha")   # HTTP refusals that send the page to the next layer
+# A page's final error that counts toward the site's breaker: a refusal or an anti-bot page on any layer.
+BREAKER_ERRORS = frozenset({*_REFUSALS, "render_blocked"})
 
 
 def looks_blocked(title: str, text: str) -> bool:

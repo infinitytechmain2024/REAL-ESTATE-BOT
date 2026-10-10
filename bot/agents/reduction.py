@@ -507,6 +507,10 @@ async def main() -> None:
         log.warning("reduction.disabled", extra={"missing": missing})
         await asyncio.Event().wait()
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=settings.concurrency + 2)
+    from bot.utils import costs
+
+    # Booked (without a campaign: the agents work post by post) so the Opus + Jev spend shows in campaign_costs.
+    costs.install(costs.PostgresLedger(pool))
     llm = OpenRouterJSON(settings.openrouter_api_key, timeout_seconds=settings.timeout_seconds)
     models = {"claude": settings.claude_model, "jev": settings.jev_model}
     try:

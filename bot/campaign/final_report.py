@@ -24,6 +24,7 @@ from typing import Any, Protocol
 import httpx
 
 from bot.agents.llm import LLMError, OpenRouterJSON
+from bot.utils.costs import CostSummary
 from bot.web_search.urls import PORTALS, SPAIN_BANK_PORTALS, SPAIN_PORTALS_BY_KIND, UKRAINE_PORTALS
 
 from .runs import OutcomeCount, SentFinding, SourceCount
@@ -49,8 +50,17 @@ REASONS: dict[str, str] = {
     "criteria": "не выполнены обязательные условия",
     "kind": "не объявление (каталог, статистика, поиск жилья)",
     "unverified": "не удалось подтвердить",
+    "area_unknown": "площадь не указана",
+    "ai_failed": "ИИ-проверка не сработала",
+    "cost_cap": "бюджет прогона исчерпан",
     "ai": "не подходит по смыслу",
 }
+# Held findings that are not «a little off the request» but «not checked»: the data had no area, the reviewer could
+# not confirm a criterion, the AI check failed or the run's budget was spent.
+UNCHECKED = ("unverified", "area_unknown", "ai_failed", "cost_cap")
+# A skip reason of the cost ledger (``bot.utils.costs``) -> what the report calls it.
+SKIPS = {"prefilter_deal": "другой тип сделки", "prefilter_area": "участок меньше нужного", "budget_cap": "бюджет исчерпан"}
+STAGE_NAMES = {"llm": "ИИ", "fetch": "страницы", "scrape": "Scrape API", "api": "API порталов", "search": "поиск"}
 _CYRILLIC = re.compile(r"[а-яёіїєґ]", re.IGNORECASE)
 # A recommendation never asks the person to change what they asked for: the deal, the kind of property, the city or country.
 _FORBIDDEN_ADVICE = re.compile(
@@ -75,9 +85,10 @@ class Tally:
     sent_approved: int = 0   # similar / other cards sent after the person said «Одобрить»
     held_similar: int = 0
     held_other: int = 0
-    held_unverified: int = 0  # of the held ones: the check could not confirm them
+    held_unverified: int = 0  # of the held ones: the check could not confirm them (every ``UNCHECKED`` reason)
     duplicates: int = 0
     excluded: dict[str, int] = field(default_factory=dict)  # reason category -> count
+    unchecked: dict[str, int] = field(default_factory=dict)  # of ``held_unverified``: ``UNCHECKED`` reason -> count
 
     @property
     def sent(self) -> int:
@@ -92,10 +103,16 @@ class Tally:
         return sum(self.excluded.values())
 
     @property
+    def ai_failed(self) -> int:
+        """Findings the AI check never judged: it failed, or the run's budget was spent."""
+        return self.unchecked.get("ai_failed", 0) + self.unchecked.get("cost_cap", 0)
+
+    @property
     def unverified_majority(self) -> bool:
-        """More than 80 % of the sent and held findings could not be checked: the check itself is probably broken."""
+        """More than 80 % of the sent and held findings were never judged by the AI check: it is broken (a missing
+        area or a criterion the reviewer could not confirm is a fact about the listings, not about the check)."""
         base = self.sent + self.held
-        return base > 0 and self.held_unverified > UNVERIFIED_ALARM_SHARE * base
+        return base > 0 and self.ai_failed > UNVERIFIED_ALARM_SHARE * base
 
     @property
     def total(self) -> int:
@@ -106,6 +123,7 @@ def tally(outcomes: Sequence[OutcomeCount]) -> Tally:
     """``RunStore.outcome_counts`` rows -> a ``Tally``; a finding still being sent counts as sent."""
     sent_exact = sent_approved = similar = other = unverified = duplicates = 0
     excluded: Counter[str] = Counter()
+    unchecked: Counter[str] = Counter()
     for row in outcomes:
         if row.state == "duplicate":
             duplicates += row.count
@@ -116,13 +134,13 @@ def tally(outcomes: Sequence[OutcomeCount]) -> Tally:
                 sent_approved += row.count
         elif row.bucket == "excluded":
             excluded[row.why or "ai"] += row.count
-        elif row.bucket == "similar":
-            similar += row.count
-            unverified += row.count if row.why == "unverified" else 0
-        elif row.bucket == "other":
-            other += row.count
-            unverified += row.count if row.why == "unverified" else 0
-    return Tally(sent_exact, sent_approved, similar, other, unverified, duplicates, dict(excluded))
+        elif row.bucket in ("similar", "other"):
+            similar += row.count if row.bucket == "similar" else 0
+            other += row.count if row.bucket == "other" else 0
+            if row.why in UNCHECKED:
+                unverified += row.count
+                unchecked[row.why] += row.count
+    return Tally(sent_exact, sent_approved, similar, other, unverified, duplicates, dict(excluded), dict(unchecked))
 
 
 # --- the ranking -------------------------------------------------------------------------------------------------------
@@ -415,9 +433,44 @@ def task_facts(request: Request) -> dict[str, Any]:
     return {k: v for k, v in facts.items() if v is not None}
 
 
+def _usd(value: float) -> str:
+    return f"${value:.2f}" if value >= 0.01 or value == 0 else "<$0.01"
+
+
+def cost_lines(spent: CostSummary | None, budget: float = 0.0) -> list[str]:
+    """«💶 Расход: $3.20 из $5.00 (ИИ $2.90 · страницы $0.30)», what was dropped before the model, and the model's
+    errors by code: the money and the failures of the run, never hidden behind «не удалось подтвердить»."""
+    if spent is None:
+        return []
+    lines: list[str] = []
+    stages = " · ".join(f"{STAGE_NAMES.get(k, k)} {_usd(v)}" for k, v in sorted(spent.by_stage.items(), key=lambda kv: -kv[1])
+                        if v > 0)
+    limit = f" из {_usd(budget)}" if budget > 0 else ""
+    lines.append(f"💶 Расход: {_usd(spent.total)}{limit}" + (f" ({stages})" if stages else ""))
+    if spent.estimates:
+        estimate = sum(spent.estimates.values())
+        lines.append(f"Из них оценка без подтверждения провайдера: {_usd(estimate)}")
+    if budget > 0 and spent.total >= budget:
+        lines.append("⛔ Бюджет прогона исчерпан: поиск и проверки остановлены, часть находок не проверена")
+    skips: Counter[str] = Counter()
+    for key, n in spent.skips.items():
+        skips[SKIPS.get(key.split(":", 1)[-1], key.split(":", 1)[-1])] += n
+    if skips:
+        lines.append(f"Отсеяно до ИИ (без вызовов ИИ): {sum(skips.values())} — "
+                     + ", ".join(f"{name} {n}" for name, n in skips.most_common()))
+    errors = Counter({key.split(":", 1)[-1]: n for key, n in spent.errors.items() if key.startswith("llm:")})
+    if errors:
+        lines.append("⚠️ Ошибки ИИ: " + ", ".join(f"{code} ×{n}" for code, n in errors.most_common(4)))
+    api_errors = Counter({key.split(":", 1)[-1]: n for key, n in spent.errors.items() if key.startswith("api:")})
+    if api_errors:
+        lines.append("⚠️ Ошибки API порталов: " + ", ".join(f"{code} ×{n}" for code, n in api_errors.most_common(4)))
+    return lines
+
+
 def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequence[str], unreadable: Sequence[Site],
-                recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None) -> str:
-    """The Russian report (see the module notes), fitted to one Telegram message."""
+                recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None,
+                costs: Sequence[str] = ()) -> str:
+    """The Russian report (see the module notes), fitted to one Telegram message. ``costs``: ``cost_lines``."""
     head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
     if counts.total == 0:
         summary = ["Подходящих объявлений не нашлось."]
@@ -425,7 +478,8 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
         summary = [f"Отправлено вам: {counts.sent}"
                    + (f" (из них {counts.sent_approved} похожих — по вашему согласию)" if counts.sent_approved else "")]
         if counts.held:
-            extra = f", не удалось подтвердить: {counts.held_unverified}" if counts.held_unverified else ""
+            parts = [f"{REASONS[k]}: {counts.unchecked[k]}" for k in UNCHECKED if counts.unchecked.get(k)]
+            extra = f", {', '.join(parts)}" if parts else ""
             summary.append(f"Похожие, не показаны: {counts.held} (чуть не подошли{extra})")
             if similar_note and counts.sent == 0:
                 summary.append(similar_note)
@@ -434,9 +488,10 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
         if counts.duplicates:
             summary.append(f"Повторы одного объекта на разных сайтах: {counts.duplicates}")
         if counts.unverified_majority:
-            log.warning("campaign.unverified_majority %s/%s", counts.held_unverified, counts.sent + counts.held)
-            summary.append(f"⚠️ Большинство находок не удалось проверить автоматически "
-                           f"({counts.held_unverified} из {counts.sent + counts.held}): проверьте ключ ИИ и лимиты")
+            log.warning("campaign.unverified_majority %s/%s", counts.ai_failed, counts.sent + counts.held)
+            summary.append(f"⚠️ ИИ-проверка не сработала для большинства находок "
+                           f"({counts.ai_failed} из {counts.sent + counts.held}): см. ошибки ИИ ниже")
+    summary += list(costs)
     reasons: list[str] = []
     if counts.excluded:
         order = [r for r in REASONS if r in counts.excluded] + sorted(set(counts.excluded) - set(REASONS))
@@ -482,9 +537,11 @@ class FinalReporter:
 
     async def build(self, goal: str, request: Request, outcomes: Sequence[OutcomeCount], sent: Sequence[SentFinding],
                     sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = (),
-                    tolerance_pct: float | None = None, offers: Mapping[str, str | None] | None = None) -> str:
+                    tolerance_pct: float | None = None, offers: Mapping[str, str | None] | None = None,
+                    costs: CostSummary | None = None, budget: float = 0.0) -> str:
         """``offers``: the state of each bucket's question (``offer_state``: None, asked, approved, declined); with it
-        a report that sent nothing but holds similar variants says how to get them."""
+        a report that sent nothing but holds similar variants says how to get them. ``costs``: the run's ledger
+        (``bot.utils.costs``) and ``budget`` its limit: the money, what was dropped before the model, its errors."""
         counts = tally(outcomes)
         sources, reports, other_sites = real_estate_sources(sources, reports, portals)
         stats = site_stats(sources, reports, portals)
@@ -493,7 +550,7 @@ class FinalReporter:
         facts = facts_for_model(task_facts(request), counts, sorted(
             stats.values(), key=lambda s: (-s.sent, -s.links, s.host)), unreadable, tolerance_pct)
         return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, await self._advice(facts, counts),
-                           other_sites, similar_note(counts, offers))
+                           other_sites, similar_note(counts, offers), cost_lines(costs, budget))
 
     async def _advice(self, facts: dict[str, Any], counts: Tally) -> list[str]:
         if self.recommender is not None and counts.total + len(facts["unreadable_sites"]) > 0:

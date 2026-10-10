@@ -65,6 +65,14 @@ def test_idealista_and_fotocasa_always_say_why_they_gave_nothing() -> None:
     assert "Idealista — 3 ссылки в поиске · сайт не дал прочитать страницы → 0 объявлений" in refused
 
 
+def test_idealista_api_label_only_when_api_pages_were_read() -> None:
+    reports = [SiteReport("idealista.com", links=3, read=2, read_api=1), SiteReport("fotocasa.es", links=2, read=2)]
+    text = summary_text("Участок", [], reports, portals=PORTALS)
+    assert "Idealista (API) — 3 ссылки в поиске · прочитано 2 (API 1)" in text
+    assert "Fotocasa — 2 ссылки в поиске · прочитано 2" in text
+    assert "Fotocasa (API)" not in text
+
+
 def test_many_small_sites_are_summed_and_without_a_web_stage_no_portals_are_listed() -> None:
     reports = [SiteReport(f"site{n}.es", links=1, read=1) for n in range(12)]
     lines = summary_text("Квартира", [SourceCount("website", "site3.es", posts=1, sent=1)], reports,
