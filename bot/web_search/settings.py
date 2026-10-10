@@ -108,6 +108,13 @@ class WebSearchSettings(BaseSettings):
     # "Authorization: Bearer <key>" (a Zyte / ScraperAPI / Bright Data style unlocker). Empty: off. Never logged.
     scrape_api_url: str = Field(default="", validation_alias="WEB_SEARCH_SCRAPE_API_URL")
     scrape_api_key: str = Field(default="", repr=False, validation_alias="WEB_SEARCH_SCRAPE_API_KEY")
+    scrape_api_auth_mode: Literal["bearer", "query_token"] = Field(
+        default="bearer", validation_alias="WEB_SEARCH_SCRAPE_API_AUTH_MODE")
+    scrape_do_geo_code: Literal["es"] = Field(default="es", validation_alias="WEB_SEARCH_SCRAPE_DO_GEO_CODE")
+    scrape_do_render: bool = Field(default=False, validation_alias="WEB_SEARCH_SCRAPE_DO_RENDER")
+    scrape_do_super: bool = Field(default=False, validation_alias="WEB_SEARCH_SCRAPE_DO_SUPER")
+    scrape_do_credit_usd: float = Field(default=0.000116, gt=0, le=1,
+                                        validation_alias="WEB_SEARCH_SCRAPE_DO_CREDIT_USD")
     scrape_api_timeout_seconds: float = Field(default=60, ge=5, le=180, validation_alias="WEB_SEARCH_SCRAPE_API_TIMEOUT_SECONDS")
     max_scrape_api_per_campaign: int = Field(default=40, ge=0, le=500, validation_alias="WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN")
     # USD one scrape-API read costs (booked per call, refused ones too), for CAMPAIGN_BUDGET_USD.
@@ -158,7 +165,9 @@ class WebSearchSettings(BaseSettings):
         if not self.scrape_api_url:
             return None
         return ScrapeApiClient(self.scrape_api_url, self.scrape_api_key, timeout_seconds=self.scrape_api_timeout_seconds,
-                               max_bytes=self.max_content_bytes)
+                               max_bytes=self.max_content_bytes, auth_mode=self.scrape_api_auth_mode,
+                               geo_code=self.scrape_do_geo_code, render=self.scrape_do_render,
+                               super_proxy=self.scrape_do_super, credit_usd=self.scrape_do_credit_usd)
 
     def sources(self) -> tuple[ListingSource, ...]:
         """Default-off providers: disabling the source does not construct an HTTP client."""

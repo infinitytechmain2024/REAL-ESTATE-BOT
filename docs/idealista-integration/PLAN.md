@@ -40,7 +40,10 @@
 Проверки фазы 3: **1508 passed, 0 skipped**, Ruff чисто; [REVIEW_PHASE_3.md](REVIEW_PHASE_3.md). Контрольная остановка перед фазой 4.
 
 ## Phase 4 — Scrape.do
-- [ ] Integration Agent настраивает Scrape.do через существующий ScrapeApiClient
+- [x] Integration Agent настраивает Scrape.do через существующий ScrapeApiClient; query token/ES/render/super,
+  фактические credits с заголовка и предзаписанная оценка. [SCRAPE_DO_CONFIGURATION.md](SCRAPE_DO_CONFIGURATION.md)
+
+Проверки фазы 4: **1510 passed, 0 skipped** (PostgreSQL и golden включены), Ruff чисто.
 
 ## Phase 5 — Reporting & Polish
 - [ ] Учёт layer="api" в отчётах и метриках

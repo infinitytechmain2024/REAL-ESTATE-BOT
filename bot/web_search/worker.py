@@ -937,14 +937,40 @@ class WebSearchWorker:
         cfg = self.config
         self._set_layer(campaign_id, "unlocker")
         await self.store.mark_scraped(campaign_id, url.url_key)
-        # Booked before the call: a provider may bill a refused or timed-out request too (the safe side of a budget).
-        await costs.record("scrape", provider="scrape_api", item=url.host, cost_usd=cfg.scrape_cost_usd)
+        from .scrape_api import ScrapeBillingError
+
+        scrape_do = getattr(self.scraper, "auth_mode", "") == "query_token"
+        if scrape_do:
+            from uuid import uuid4
+
+            key = f"scrape:{campaign_id}:{uuid4()}"
+            unit = self.scraper.credit_usd
+            estimate = max(self.scraper.estimated_credits, 25 if url.host.endswith("idealista.com") else 0) * unit
+            await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                      cost_usd=estimate, code="estimated_pending")
+        else:
+            # Generic unlockers retain the configured fixed price, even for refusals.
+            await costs.record("scrape", provider="scrape_api", item=url.host, cost_usd=cfg.scrape_cost_usd)
         try:
             page = await asyncio.wait_for(self.scraper.fetch(url.url), timeout=cfg.page_runtime_seconds * 2)
+        except ScrapeBillingError as exc:
+            if scrape_do and exc.credits is not None:
+                await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                          cost_usd=exc.credits * unit, units=exc.credits)
+            elif scrape_do:
+                await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                          cost_usd=estimate, code="estimated_missing_header")
+            return PageResult(False, url.kind, url.url, error=exc.code, layer="scrape"), []
         except FetchError as exc:
             return PageResult(False, url.kind, url.url, error=exc.code, layer="scrape"), []
         except TimeoutError:
             return PageResult(False, url.kind, url.url, error="scrape_timeout", layer="scrape"), []
+        if scrape_do and page.scrape_credits is not None:
+            await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                      cost_usd=page.scrape_credits * unit, units=page.scrape_credits)
+        elif scrape_do:
+            await costs.record_unique("scrape", key=key, provider="scrape_do", item=url.host,
+                                      cost_usd=estimate, code="estimated_missing_header")
         parsed = parse_html(page.html, page.url)
         if looks_blocked(parsed.title, post_text(parsed, limit=cfg.max_post_chars)):
             return PageResult(False, url.kind, url.url, parsed.title, error="captcha", layer="scrape"), []
