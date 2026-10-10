@@ -313,6 +313,7 @@ async def test_enabled_settings_construct_source_with_all_configured_limits():
     try:
         assert source.max_items == 7 and source.max_charge_usd == .03 and source.timeout_seconds == 90
         assert source.location_id == "verified-id" and "secret-token" not in repr(source)
+        assert source.dynamic_actor_id == "axlymxp~idealista-api-actor"
     finally:
         await source.aclose()
 

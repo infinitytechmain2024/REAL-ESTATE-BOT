@@ -70,6 +70,7 @@ class ApifyIdealistaSource:
     hosts = frozenset({"idealista.com"})
 
     def __init__(self, token: str, *, actor_id: str = "axlymxp/idealista-scraper",
+                 dynamic_actor_id: str = "",
                  location_name: str = "Madrid", location_id: str = "", max_items: int = 50,
                  timeout_seconds: float = 120, max_charge_usd: float = .10,
                  client: httpx.AsyncClient | None = None,
@@ -77,11 +78,14 @@ class ApifyIdealistaSource:
                  max_response_bytes: int = 2_000_000) -> None:
         if not re.fullmatch(r"[\w-]+(?:[/~][\w-]+)?", actor_id):
             raise ValueError("invalid actor id")
+        if dynamic_actor_id and not re.fullmatch(r"[\w-]+(?:[/~][\w-]+)?", dynamic_actor_id):
+            raise ValueError("invalid dynamic actor id")
         if not 1 <= max_items <= 50 or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("invalid apify limits")
         if not math.isfinite(max_charge_usd) or max_charge_usd <= 0:
             raise ValueError("invalid apify charge cap")
         self._token, self.actor_id = token, actor_id.replace("/", "~")
+        self.dynamic_actor_id = dynamic_actor_id.replace("/", "~")
         self.location_name, self.location_id = location_name.strip(), location_id.strip()
         self.max_items, self.timeout_seconds, self.max_charge_usd = max_items, timeout_seconds, max_charge_usd
         self._sleep, self.max_response_bytes = sleep, max_response_bytes
@@ -109,13 +113,17 @@ class ApifyIdealistaSource:
             raise
 
     def supports(self, task: QueryTask) -> bool:
-        return bool(self._token and self.location_id and self.location_name
+        return bool(self._token and task.location.strip()
                     and task.country == "ES" and task.vertical == "real_estate"
                     and task.place_level == "city" and task_kind(task) == "land"
                     and task.constraints.get("deal") == "sale"
-                    and _fold(task.location) == _fold(self.location_name)
+                    and (self._static_for(task) or self.dynamic_actor_id)
                     and not any(h == "idealista.com" or "idealista.com".endswith("." + h)
                                 for h in task.blocked_hosts))
+
+    def _static_for(self, task: QueryTask) -> bool:
+        return bool(self.location_id and self.location_name
+                    and _fold(task.location) == _fold(self.location_name))
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
@@ -158,6 +166,19 @@ class ApifyIdealistaSource:
             raise PermanentApifyError("apify_budget_cap")
         run_id = context.run_id
         amount = min(limit, self.max_items)
+        if self._static_for(task):
+            actor = self.actor_id
+            actor_input = {"country": "es", "locationName": self.location_name,
+                           "locationId": self.location_id, "propertyType": "lands",
+                           "operation": "sale", "maxItems": amount, "numPage": 1}
+        else:
+            actor = self.dynamic_actor_id
+            # This actor resolves the user's place name through Idealista autocomplete.
+            # Its published input schema requires maxProperties >= 10; importing is still
+            # bounded by amount and the provider-side maximum charge.
+            actor_input = {"country": "es", "searchType": "auto", "locationPrefix": task.location,
+                           "propertyType": "lands", "operation": "sale",
+                           "maxProperties": max(10, amount)}
         if not run_id:
             if not context.launch_allowed:
                 raise PermanentApifyError("apify_launch_uncertain")
@@ -165,12 +186,10 @@ class ApifyIdealistaSource:
                 raise PermanentApifyError("apify_budget_cap")
             try:
                 run = await self._run(
-                    "POST", f"acts/{self.actor_id}/runs",
+                    "POST", f"acts/{actor}/runs",
                     params={"maxTotalChargeUsd": cap, "maxItems": amount,
                             "timeout": self.timeout_seconds, "restartOnError": "false"},
-                    json={"country": "es", "locationName": self.location_name,
-                          "locationId": self.location_id, "propertyType": "lands",
-                          "operation": "sale", "maxItems": amount, "numPage": 1})
+                    json=actor_input)
                 run_id = _text(run.get("id"))
                 if not re.fullmatch(r"[A-Za-z0-9]+", run_id):
                     raise PermanentApifyError("apify_run_schema")
@@ -239,12 +258,12 @@ class ApifyIdealistaSource:
             raise PermanentApifyError("apify_dataset_schema")
         overflow = max(0, len(items) - amount)
         if overflow:
-            await costs.record("api", kind="skip", provider="apify", item=self.actor_id,
+            await costs.record("api", kind="skip", provider="apify", item=actor,
                                code="apify_result_limit", units=overflow, campaign_id=context.campaign_id)
-        rows = [normalize_listing(item, task, municipality=self.location_name) for item in items[:amount]]
+        rows = [normalize_listing(item, task, municipality=task.location) for item in items[:amount]]
         invalid = sum(row is None for row in rows)
         if invalid:
-            await costs.record("api", kind="skip", provider="apify", item=self.actor_id,
+            await costs.record("api", kind="skip", provider="apify", item=actor,
                                code="apify_invalid_listing", units=invalid, campaign_id=context.campaign_id)
         return [row for row in rows if row is not None]
 

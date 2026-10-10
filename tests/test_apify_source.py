@@ -62,6 +62,39 @@ def test_no_location_id_no_support_and_repr_no_token():
     assert "secret" not in repr(adapter)
 
 
+async def test_user_selected_city_uses_name_resolving_actor_and_rejects_other_municipalities():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.method == "POST":
+            assert request.url.path.endswith("/acts/axlymxp~idealista-api-actor/runs")
+            assert json.loads(request.content) == {
+                "country": "es", "searchType": "auto", "locationPrefix": "Barcelona",
+                "propertyType": "lands", "operation": "sale", "maxProperties": 10,
+            }
+            assert request.url.params["maxTotalChargeUsd"] == "0.05"
+            return httpx.Response(201, json={"data": {"id": "run2", "status": "SUCCEEDED",
+                                                      "defaultDatasetId": "data2", "usageTotalUsd": .03}})
+        if "actor-runs" in request.url.path:
+            return httpx.Response(200, json={"data": {"usageTotalUsd": .03}})
+        return httpx.Response(200, json=[row(municipality="Barcelona", province="Barcelona"),
+                                         row(municipality="Madrid")])
+
+    adapter = source(handler, dynamic_actor_id="axlymxp/idealista-api-actor")
+    city = task(location="Barcelona")
+    assert adapter.supports(city)
+    assert not adapter.supports(task(location="Barcelona", place_level="province"))
+    no_static_id = ApifyIdealistaSource("secret-token", dynamic_actor_id="axlymxp/idealista-api-actor")
+    assert no_static_id.supports(city)
+    with source_run_scope(context()):
+        listings = await adapter.search(city, limit=2)
+    assert len(listings) == 1 and "Barcelona" in listings[0].address
+    assert len(requests) == 3
+    await no_static_id.aclose()
+    await adapter.aclose()
+
+
 async def test_settlement_aborts_existing_run_and_never_starts_an_actor():
     checkpoint = context(run_id="run1", launch_allowed=False)
     requests, aborted = [], False

@@ -2,6 +2,9 @@
 
 - [x] ListingSource protocol реализован — `bot/web_search/sources/base.py:28`; SourceListing с отдельным plot_m2, экспорт в sources/__init__.py.
 - [x] ApifyIdealistaSource написан и покрыт обработкой ошибок — tests/test_apify_source.py, HTTPX mocks; default-off, live fixture не получен.
+- [x] Город из задачи пользователя выбирает fixed-ID actor при совпадении настройки,
+  иначе name-resolving actor; запрос динамического актора и отбрасывание чужого
+  муниципалитета проверены HTTPX mocks. Live fixture обоих акторов ещё открыт.
 - [x] _from_sources создаёт claim/POST только в первом раунде; _resume_sources обрабатывает existing run/cache без нового запуска — tests/test_listing_source_worker.py.
 - [x] via/layer=api, pages_api и полная отчётность проверены Memory/реальным PostgreSQL —
   `test_web_search.py`, `test_web_search_postgres.py`, `test_campaign_metrics.py`.
@@ -10,7 +13,8 @@
 - [x] В отчётах видно «Idealista (API)» только при API-чтении — `test_campaign_summary.py`,
   `SiteReport.read_api` в обоих stores; общий `site_lines` используют summary и final_report.
 - [x] APIFY/Scrape.do Settings/.env.example/compose/docs синхронны; `test_deployment.py` в полном прогоне.
-- [x] Базовые тесты проходят — фаза 5: полный pytest **1512 passed, 0 skipped**, Postgres/golden включены; Ruff чисто.
+- [x] Базовые тесты проходят — после поддержки города пользователя полный pytest
+  **1513 passed, 0 skipped**, Postgres/golden включены; Ruff чисто.
 - [x] Mock/system регрессии других порталов прошли в полном pytest фазы 5; live-доступность 20 порталов не утверждается.
 - [x] Токены `repr=False`; Scrape.do требует HTTPS, query-token скрыт из info-лога, ошибки без секрета —
   `test_apify_source.py`, `test_web_layers.py`, deployment tests; `.env.example` без ключей.

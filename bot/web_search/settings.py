@@ -42,6 +42,8 @@ class WebSearchSettings(BaseSettings):
     apify_idealista_enabled: bool = Field(default=False, validation_alias="APIFY_IDEALISTA_ENABLED")
     apify_token: str = Field(default="", repr=False, validation_alias="APIFY_TOKEN")
     apify_idealista_actor: str = Field(default="axlymxp/idealista-scraper", validation_alias="APIFY_IDEALISTA_ACTOR")
+    apify_idealista_dynamic_actor: str = Field(default="axlymxp/idealista-api-actor",
+                                              validation_alias="APIFY_IDEALISTA_DYNAMIC_ACTOR")
     apify_idealista_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_IDEALISTA_MAX_RESULTS")
     apify_idealista_location_name: str = Field(default="Madrid", validation_alias="APIFY_IDEALISTA_LOCATION_NAME")
     apify_idealista_location_id: str = Field(default="", validation_alias="APIFY_IDEALISTA_LOCATION_ID")
@@ -179,6 +181,7 @@ class WebSearchSettings(BaseSettings):
         from .sources.apify import ApifyIdealistaSource
 
         return (ApifyIdealistaSource(token=self.apify_token, actor_id=self.apify_idealista_actor,
+                                    dynamic_actor_id=self.apify_idealista_dynamic_actor,
                                     location_name=self.apify_idealista_location_name,
                                     location_id=self.apify_idealista_location_id,
                                     max_items=self.apify_idealista_max_results,

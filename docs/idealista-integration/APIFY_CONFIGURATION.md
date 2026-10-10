@@ -8,13 +8,14 @@
 | APIFY_IDEALISTA_ENABLED | false | Включение источника |
 | APIFY_TOKEN | пусто | Секрет аккаунта; пустое значение отключает источник |
 | APIFY_IDEALISTA_ACTOR | axlymxp/idealista-scraper | Утверждённый актор |
+| APIFY_IDEALISTA_DYNAMIC_ACTOR | axlymxp/idealista-api-actor | Актор того же разработчика: `searchType=auto` разрешает город пользователя по имени, когда нет точного настроенного ID; пустое значение отключает этот fallback |
 | APIFY_IDEALISTA_MAX_RESULTS | 20 | До 50 импортируемых строк, дополнительно ограничено page/day/host caps |
-| APIFY_IDEALISTA_LOCATION_NAME | Madrid | Проверенное имя муниципалитета, не провинции |
-| APIFY_IDEALISTA_LOCATION_ID | пусто | Проверенный ID муниципалитета; без него supports отключён |
+| APIFY_IDEALISTA_LOCATION_NAME | Madrid | Имя муниципалитета для утверждённого fixed-ID актора; совпадающий город пользователя выбирает этот путь |
+| APIFY_IDEALISTA_LOCATION_ID | пусто | Проверенный ID муниципалитета для fixed-ID актора; с пустым ID любой город пользователя использует dynamic actor |
 | APIFY_IDEALISTA_TIMEOUT_SECONDS | 120 | До 120 секунд на получение; cleanup/billing имеют дополнительный bounded запас, общий worker timeout ≤ lease − 30 секунд |
 | APIFY_IDEALISTA_MAX_CHARGE_USD | 0.10 | Положительный provider-side предел запуска; уменьшается до остатка бюджета |
 
-До включения применить миграции 042–044 и проверить actor input/output/географию
+До включения применить миграции 042–045 и проверить actor input/output/географию
 на обезличенном fixture. После аварийного рестарта известный run_id возобновляется
 без повторного POST. Обработанная ошибка провайдера завершает попытку и возвращает
 кампанию к обычному поиску; metadata запуска сохраняется для проверки расхода.
@@ -28,6 +29,15 @@
 общие. Это не резервирование расходов всех сервисов: жёсткий smoke ≤ $1 требует
 отдельной бюджетной координации из DESIGN.md. Phase 3 добавляет повтор failed URL и
 корректный успех API в host-счётчиках; пауза/удаление сайта и ограничения очереди сохраняются. Scrape.do и итоговая отчётность остаются фазами 4–5.
+
+Dynamic actor опубликован с `locationPrefix` и `maxProperties` (минимум 10), а также
+полями результата `country`, `operation`, `propertyType`, `municipality`, `url`.
+Фактический выбор локации и семантику `size` нужно проверить на live fixture; актор
+может разрешить несколько совпадений, поэтому строка с другим муниципалитетом
+отбрасывается. В описании текущего прогона пригород указан отдельно, но структурное
+место — город Madrid: city-only выдача не доказывает покрытие пригородов.
+Первичный источник: [schema dynamic actor](https://apify.com/axlymxp/idealista-api-actor/input-schema),
+[README/output](https://apify.com/axlymxp/idealista-api-actor).
 
 При завершении кампании известный незавершённый run проходит bounded abort/billing без нового запуска. До получения факта в журнале остаётся явно помеченная оценка cap; неуспех сверки отражён как apify_settlement_failed.
 
