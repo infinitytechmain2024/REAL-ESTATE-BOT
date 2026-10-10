@@ -1200,3 +1200,92 @@ async def test_memory_store_persists_structured_api_listing() -> None:
     assert store.seen[key]["post_id"] == post_id
     assert await store.host_refusals("idealista.com") == {"http": 0, "render": 0}
     assert await store.layer_state("idealista.com") == {"http": True, "render": True}
+    assert store.hosts["idealista.com"]["fetched"] == 1
+    assert store.hosts["idealista.com"]["failed"] == 0
+
+
+@pytest.mark.parametrize("same_campaign", [True, False])
+@pytest.mark.parametrize("api_success", [True, False])
+async def test_memory_api_reclaims_failed_url_without_changing_html_refusals(same_campaign, api_success):
+    store = MemoryWebStore()
+    candidate = Candidate("https://www.idealista.com/inmueble/12345678/", "api-retry", "idealista.com", kind="listing")
+    await store.enqueue("old", [candidate])
+    queued, = await store.next_urls("old", 1)
+    ticket = await store.begin_fetch("old", queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.finish_fetch(ticket, PageResult(False, final_url=candidate.url, error="http_403"))
+    cid = "old" if same_campaign else "new"
+    assert await store.enqueue(cid, [candidate]) == 0
+    host = store.hosts[candidate.host]
+    until = datetime.now(UTC) + timedelta(hours=1)
+    host.update(http_refusals=3, render_refusals=4, refusals=3, http_blocked_until=until,
+                render_blocked_until=until, blocked_until=until)
+    before = {k: v for k, v in host.items() if k not in ("fetched", "failed")}
+    assert await store.enqueue(cid, [candidate], layer="api") == 1
+    queued, = await store.next_urls(cid, 1)
+    ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                     max_runtime_seconds=60, layer="api")
+    assert isinstance(ticket, FetchTicket)
+    post = await store.finish_fetch(ticket, PageResult(api_success, final_url=candidate.url,
+        text='JSON-LD: {"plot_m2": 2500}', error=None if api_success else "http_403", via="api", layer="api"))
+    assert bool(post) == api_success
+    assert {k: v for k, v in host.items() if k not in ("fetched", "failed")} == before
+    assert host["fetched"] == int(api_success) and host["failed"] == 1 + int(not api_success)
+    assert store.urls[cid][candidate.url_key].layer == "api"
+    assert store.seen[candidate.url_key]["state"] == ("fetched" if api_success else "failed")
+    if api_success:
+        assert await store.enqueue(cid, [candidate], layer="api") == 0
+        assert await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                       max_runtime_seconds=60, layer="api") == "duplicate"
+
+
+async def test_memory_api_does_not_steal_active_claim_upgrade_snippet_or_override_pause():
+    store = MemoryWebStore()
+    candidate = Candidate("https://www.idealista.com/inmueble/12345678/", "claim", "idealista.com", kind="listing")
+    await store.enqueue("old", [candidate])
+    queued, = await store.next_urls("old", 1)
+    ticket = await store.begin_fetch("old", queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.enqueue("new", [candidate], layer="api")
+    assert await store.begin_fetch("new", queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "busy"
+    assert store.seen[candidate.url_key]["campaign_id"] == "old"
+    await store.finish_fetch(ticket, PageResult(True, text="Search snippet", via="search", layer="none"))
+    assert await store.begin_fetch("new", queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "duplicate"
+    assert len(store.posts) == 1
+    store.seen[candidate.url_key]["state"] = "failed"
+    store.paused_hosts.add(candidate.host)
+    assert not await store.source_available(candidate.host)
+    assert await store.enqueue("new", [candidate], layer="api") == 1
+    assert await store.begin_fetch("new", queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "source_unavailable"
+    assert await store.enqueue("new", [candidate], layer="api") == 0
+
+
+async def test_memory_api_can_recover_stale_claim():
+    store = MemoryWebStore()
+    candidate = Candidate("https://www.idealista.com/inmueble/12345678/", "stale", "idealista.com", kind="listing")
+    await store.enqueue("old", [candidate])
+    queued, = await store.next_urls("old", 1)
+    await store.begin_fetch("old", queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    store.seen[candidate.url_key]["claimed_at"] = datetime.now(UTC) - timedelta(hours=1)
+    await store.enqueue("new", [candidate], layer="api")
+    assert isinstance(await store.begin_fetch("new", queued, vertical="real_estate", lease_seconds=300,
+                                              max_runtime_seconds=60, layer="api"), FetchTicket)
+
+
+async def test_memory_api_obeys_queue_policy_but_can_bypass_html_only_block():
+    store = MemoryWebStore()
+    candidate = Candidate("https://www.idealista.com/inmueble/12345678/", "policy", "idealista.com", kind="listing")
+    await store.enqueue("c", [candidate])
+    queued, = await store.next_urls("c", 1)
+    ticket = await store.begin_fetch("c", queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.finish_fetch(ticket, PageResult(False, error="http_403"))
+    store.urls["c"][candidate.url_key].state = "skipped"
+    store.urls["c"][candidate.url_key].detail = "page_cap"
+    assert await store.enqueue("c", [candidate], layer="api") == 0
+    assert await store.begin_fetch("c", queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "page_cap"
+    store.urls["c"][candidate.url_key].detail = "host_blocked"
+    assert await store.enqueue("c", [candidate], layer="api") == 1
+    assert isinstance(await store.begin_fetch("c", queued, vertical="real_estate", lease_seconds=300,
+                                               max_runtime_seconds=60, layer="api"), FetchTicket)

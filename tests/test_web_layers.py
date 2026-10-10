@@ -204,6 +204,27 @@ async def test_the_scrape_api_is_the_last_layer() -> None:
     assert host["http_refusals"] == 1 and host["render_refusals"] == 0  # a failed render is not a refusal
 
 
+async def test_scrape_status_is_unlocker_and_persistent_layer_stays_scrape():
+    observed = []
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+
+    class ObservedScraper(FakeScraper):
+        async def fetch(self, url):
+            observed.append(worker.progress(cid).layer)
+            return await super().fetch(url)
+
+    worker = WebSearchWorker(campaigns, store, FakeSearcher(default=[URLS[0]], texts={URLS[0]: HIT}),
+                             refused(URLS[0]), ListGenerator(["terreno Boadilla Madrid"]), scraper=ObservedScraper(),
+                             config=WebSearchConfig(cover_portals=False))
+    await run_until_done(worker, cid)
+    assert observed == ["unlocker"]
+    assert store.urls[cid][url_key(URLS[0])].layer == "scrape"
+    from bot.campaign.status_text import LAYER_NAMES
+    assert LAYER_NAMES["unlocker"] != LAYER_NAMES["api"]
+
+
 async def test_the_scrape_api_is_capped_and_a_failure_keeps_the_card() -> None:
     scraper = FakeScraper(fail=True)
     store, _ = await setup(*URLS[:3], fetcher=refused(*URLS[:3]), scraper=scraper, max_scrape_api_per_campaign=2)

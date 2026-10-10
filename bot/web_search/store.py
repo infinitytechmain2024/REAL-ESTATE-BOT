@@ -73,6 +73,7 @@ class WebStore(Protocol):
     async def source_ready(self, campaign_id: str, name: str, listings: list[SourceListing]) -> None: ...
     async def advance_source_import(self, campaign_id: str, name: str, offset: int) -> None: ...
     async def finish_source(self, campaign_id: str, name: str, error_code: str | None = None) -> None: ...
+    async def source_available(self, host: str) -> bool: ...
 
     async def recover(self, lease_seconds: int) -> int: ...
     async def campaign_ids(self) -> list[str]: ...
@@ -93,7 +94,7 @@ class WebStore(Protocol):
     async def query_done(self, query_id: str, *, ok: bool, results: int, new_urls: int,
                          error: str | None = None) -> None: ...
     async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
-                      index_ttl_days: int = INDEX_TTL_DAYS) -> int: ...
+                      index_ttl_days: int = INDEX_TTL_DAYS, layer: str = "http") -> int: ...
     async def next_urls(self, campaign_id: str, limit: int, skip_hosts: frozenset[str] = frozenset()) -> list[QueuedUrl]: ...
     async def host_attempts(self, campaign_id: str, host: str) -> int: ...
     async def mark_rendered(self, campaign_id: str, url_key: str) -> None: ...
@@ -106,7 +107,7 @@ class WebStore(Protocol):
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
                           index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False,
-                          scrape_layer: bool = False) -> FetchTicket | str: ...
+                          scrape_layer: bool = False, layer: str = "http") -> FetchTicket | str: ...
     async def finish_fetch(self, ticket: FetchTicket, result: PageResult) -> str | None: ...
     async def web_status(self, campaign_id: str) -> WebStatus | None: ...
     async def site_report(self, campaign_id: str) -> list[SiteReport]: ...
@@ -178,6 +179,10 @@ class _Duplicate(Exception):
     pass
 
 
+class _Busy(Exception):
+    pass
+
+
 class PostgresWebStore:
     def __init__(self, pool: asyncpg.Pool[asyncpg.Record], *, job_hours: int = 24,
                  human_verification: bool = True) -> None:
@@ -237,6 +242,11 @@ class PostgresWebStore:
 
     def note_progress(self, campaign_id: str, progress: WebProgress) -> None:
         self.live[campaign_id] = progress
+
+    async def source_available(self, host: str) -> bool:
+        return not await self.pool.fetchval(
+            """select exists(select 1 from monitoring_sources where platform='website' and canonical_url=$1
+                              and (state <> 'active' or deleted_at is not null))""", f"https://{host}/")
 
     async def funnel(self, campaign_id: str) -> list[tuple[str, int, int, int]]:
         """Per site: ``(host, links still queued, pages read from the site, listings found)``."""
@@ -396,10 +406,11 @@ class PostgresWebStore:
             query_id, "searched" if ok else "failed", results, new_urls, (error or None) and error[:80])
 
     async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
-                      index_ttl_days: int = INDEX_TTL_DAYS) -> int:
+                      index_ttl_days: int = INDEX_TTL_DAYS, layer: str = "http") -> int:
         """Queue new URLs; one already read by any campaign is recorded as ``duplicate`` and never queued.
 
-        An index page read more than ``index_ttl_days`` ago (0: never) is queued again; listings stay never-twice.
+        An expired index is queued again. Only API imports may requeue failed listings;
+        fetched results (including snippets) and operator-skipped URLs remain protected.
 
         A URL another worker is reading right now is queued: ``begin_fetch`` decides (duplicate, or a
         takeover when that worker's claim is older than the lease).
@@ -416,12 +427,21 @@ class PostgresWebStore:
                               nullif($8, ''), nullif($9, '')
                          from (select case when exists (select 1 from web_seen_urls
                                                          where url_key = $2 and state <> 'fetching'
+                                                           and not ($11::boolean and state = 'failed')
                                                            and not ($10::int > 0 and kind = 'index'
                                                                     and finished_at < now() - make_interval(days => $10::int)))
                                            then 'duplicate' else 'queued' end as state) s
-                       on conflict (campaign_id, url_key) do nothing returning state""",
+                       on conflict (campaign_id, url_key) do update set
+                           state='queued', detail=null, finished_at=null, layer=null,
+                           url=excluded.url, kind=excluded.kind, depth=excluded.depth,
+                           search_title=excluded.search_title, search_snippet=excluded.search_snippet
+                         where $11::boolean and (web_campaign_urls.state in ('failed', 'duplicate')
+                             or (web_campaign_urls.state='skipped' and web_campaign_urls.detail=any($12::text[])))
+                           and exists(select 1 from web_seen_urls where url_key=$2 and state='failed')
+                       returning state""",
                     campaign_id, c.url_key, c.url[:2048], c.host, c.depth, c.kind, c.query_id, c.title[:300],
-                    c.snippet[:500], index_ttl_days)
+                    c.snippet[:500], index_ttl_days, layer == "api",
+                    [HOST_BLOCKED, HOST_BREAKER, VERIFICATION_EXPIRED])
                 queued += state == "queued"
         return queued
 
@@ -485,7 +505,7 @@ class PostgresWebStore:
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
                           index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False,
-                          scrape_layer: bool = False) -> FetchTicket | str:
+                          scrape_layer: bool = False, layer: str = "http") -> FetchTicket | str:
         """Claim ``url`` for one read; ``contact_site`` False: only its search result is stored (a blocked site too).
 
         HOST_BLOCKED: every enabled layer (HTTP, the browser when ``render_layer``, the scrape API when
@@ -496,7 +516,15 @@ class PostgresWebStore:
         try:
             async with self.pool.acquire() as conn, conn.transaction():
                 await _set_actor(conn)
-                source, refusal = await _site_source(conn, url.host, vertical, contact_site=contact_site,
+                if layer == "api":
+                    queued = await conn.fetchrow(
+                        "select state,detail from web_campaign_urls where campaign_id=$1::uuid and url_key=$2",
+                        campaign_id, url.url_key)
+                    if queued and (queued["state"] == "robots" or
+                                   (queued["state"] == "skipped" and queued["detail"] not in
+                                    (HOST_BLOCKED, HOST_BREAKER, VERIFICATION_EXPIRED))):
+                        return queued["detail"] or queued["state"]
+                source, refusal = await _site_source(conn, url.host, vertical, contact_site=contact_site and layer != "api",
                                                      render_layer=render_layer, scrape_layer=scrape_layer)
                 if refusal is not None:
                     await _mark(conn, campaign_id, url.url_key, "skipped", refusal)
@@ -518,11 +546,19 @@ class PostgresWebStore:
                             or ($7::int > 0 and web_seen_urls.kind = 'index'
                                 and web_seen_urls.state in ('fetched', 'failed')
                                 and web_seen_urls.finished_at < now() - make_interval(days => $7::int))
+                            or ($8::boolean and web_seen_urls.state = 'failed')
                        returning 1""",
-                    url.url_key, url.url[:2048], url.host, url.kind, campaign_id, lease_seconds, index_ttl_days)
+                    url.url_key, url.url[:2048], url.host, url.kind, campaign_id, lease_seconds, index_ttl_days,
+                    layer == "api")
                 if not claimed:
+                    if layer == "api" and await conn.fetchval(
+                        "select state = 'fetching' from web_seen_urls where url_key=$1", url.url_key
+                    ):
+                        raise _Busy
                     raise _Duplicate
                 return FetchTicket(campaign_id, url, source, run_id, render_layer)
+        except _Busy:
+            return BUSY
         except _Duplicate:
             await self.mark_url(campaign_id, url.url_key, DUPLICATE, "seen_before")
             return DUPLICATE
@@ -542,8 +578,8 @@ class PostgresWebStore:
                        on conflict do nothing returning id::text""",
                     ticket.source_id, ticket.run_id, ticket.url.url_key, (result.final_url or ticket.url.url)[:2048],
                     result.text, _raw_payload(ticket, result), content_hash(result.text))
-            fetched = result.ok and result.via == "page"
-            contacted = result.layer != "none" and (result.via == "page" or result.error is not None)
+            fetched = result.ok and result.via in ("page", "api")
+            contacted = result.layer != "none" and (result.via in ("page", "api") or result.error is not None)
             if result.ok:
                 await conn.execute(
                     """update acquisition_runs set state = 'succeeded', finished_at = now()
@@ -570,7 +606,8 @@ class PostgresWebStore:
                 """update web_hosts set last_fetch_at = now(),
                           pages_fetched = pages_fetched + $2::int, pages_failed = pages_failed + (1 - $2::int)
                     where host = $1""", ticket.url.host, int(fetched))
-            await _count_refusal(conn, ticket.url.host, result.layer, refused, render_layer=ticket.render_layer)
+            if result.via != "api":
+                await _count_refusal(conn, ticket.url.host, result.layer, refused, render_layer=ticket.render_layer)
             await conn.execute(
                 f"update monitoring_sources set {'last_success_at' if fetched else 'last_failure_at'} = now() where id = $1::uuid",
                 ticket.source_id)
@@ -976,6 +1013,9 @@ class MemoryWebStore:
     def note_progress(self, campaign_id: str, progress: WebProgress) -> None:
         self.live[campaign_id] = progress
 
+    async def source_available(self, host: str) -> bool:
+        return host not in self.paused_hosts
+
     async def funnel(self, campaign_id: str) -> list[tuple[str, int, int, int]]:
         hosts: dict[str, list[int]] = {}
         for u in self.urls.get(campaign_id, {}).values():
@@ -1094,16 +1134,25 @@ class MemoryWebStore:
                     q.state, q.results, q.new_urls, q.searched_at = ("searched" if ok else "failed"), results, new_urls, self.now()
 
     async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
-                      index_ttl_days: int = INDEX_TTL_DAYS) -> int:
+                      index_ttl_days: int = INDEX_TTL_DAYS, layer: str = "http") -> int:
         rows = self.urls.setdefault(campaign_id, {})
         queued = 0
         for c in candidates:
+            seen = self.seen.get(c.url_key)
+            api_retry = layer == "api" and seen is not None and seen["state"] == "failed"
             if c.url_key in rows:
+                row = rows[c.url_key]
+                if api_retry and (row.state in ("failed", "duplicate") or
+                                  (row.state == "skipped" and row.detail in
+                                   (HOST_BLOCKED, HOST_BREAKER, VERIFICATION_EXPIRED))):
+                    row.state, row.detail, row.finished_at, row.layer = "queued", None, None, None
+                    row.url, row.kind, row.depth = c.url, c.kind, c.depth
+                    row.title, row.snippet = c.title, c.snippet
+                    queued += 1
                 continue
             self._order += 1
-            seen = self.seen.get(c.url_key)
             expired = seen is not None and self._index_expired(seen, index_ttl_days)
-            state = "duplicate" if seen is not None and seen["state"] != "fetching" and not expired else "queued"
+            state = "duplicate" if seen is not None and seen["state"] != "fetching" and not expired and not api_retry else "queued"
             rows[c.url_key] = _MemUrl(c.url, c.url_key, c.host, c.depth, c.kind, c.query_id, state, self._order,
                                       "seen_before" if state == "duplicate" else None, c.title, c.snippet)
             queued += state == "queued"
@@ -1184,9 +1233,13 @@ class MemoryWebStore:
     async def begin_fetch(self, campaign_id: str, url: QueuedUrl, *, vertical: str, lease_seconds: int,
                           max_runtime_seconds: int, contact_site: bool = True,
                           index_ttl_days: int = INDEX_TTL_DAYS, render_layer: bool = False,
-                          scrape_layer: bool = False) -> FetchTicket | str:
+                          scrape_layer: bool = False, layer: str = "http") -> FetchTicket | str:
+        queued = self.urls.get(campaign_id, {}).get(url.url_key)
+        if layer == "api" and queued is not None and (queued.state == "robots" or
+            (queued.state == "skipped" and queued.detail not in (HOST_BLOCKED, HOST_BREAKER, VERIFICATION_EXPIRED))):
+            return queued.detail or queued.state
         host = self._host(url.host)
-        if (contact_site and not scrape_layer and self._blocked(host, "http")
+        if (contact_site and layer != "api" and not scrape_layer and self._blocked(host, "http")
                 and (not render_layer or self._blocked(host, "render"))):
             await self.mark_url(campaign_id, url.url_key, "skipped", HOST_BLOCKED)
             return HOST_BLOCKED
@@ -1197,7 +1250,10 @@ class MemoryWebStore:
             return BUSY
         row = self.seen.get(url.url_key)
         stale = row is not None and row["state"] == "fetching" and row["claimed_at"] < self.now() - timedelta(seconds=lease_seconds)  # type: ignore[operator]
-        if row is not None and not (stale or self._index_expired(row, index_ttl_days)):
+        api_retry = layer == "api" and row is not None and row["state"] == "failed"
+        if layer == "api" and row is not None and row["state"] == "fetching" and not stale:
+            return BUSY
+        if row is not None and not (stale or self._index_expired(row, index_ttl_days) or api_retry):
             await self.mark_url(campaign_id, url.url_key, DUPLICATE, "seen_before")
             return DUPLICATE
         self.seen[url.url_key] = {"url": url.url, "host": url.host, "state": "fetching", "campaign_id": campaign_id,
@@ -1224,9 +1280,10 @@ class MemoryWebStore:
         if result.layer == "none" or (result.via == "search" and result.error is None):  # the site was never asked
             return post_id
         host = self._host(ticket.url.host)
-        host["fetched" if result.ok and result.via == "page" else "failed"] += 1  # type: ignore[operator]
-        self._count_refusal(ticket.url.host, result.layer, (result.error or "") in _REFUSALS,
-                            render_layer=ticket.render_layer)
+        host["fetched" if result.ok and result.via in ("page", "api") else "failed"] += 1  # type: ignore[operator]
+        if result.via != "api":
+            self._count_refusal(ticket.url.host, result.layer, (result.error or "") in _REFUSALS,
+                                render_layer=ticket.render_layer)
         return post_id
 
     async def site_report(self, campaign_id: str) -> list[SiteReport]:

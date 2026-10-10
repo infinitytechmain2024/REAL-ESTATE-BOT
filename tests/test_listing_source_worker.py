@@ -263,6 +263,38 @@ async def test_unreadable_budget_disables_provider_and_preserves_search(source_l
     assert (await store.source_runs(cid))[0].error_code == "apify_launch_limits"
 
 
+async def test_worker_imports_failed_url_via_api_and_reports_real_read(source_ledger):
+    from bot.web_search.models import Candidate, PageResult
+
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store, source = MemoryWebStore(campaigns), FakeSource(rows=1)
+    candidate = Candidate("https://www.idealista.com/inmueble/12345670/", "previous-failure", "idealista.com", kind="listing")
+    # Use the same canonical key the worker will generate.
+    from bot.web_search.urls import url_key
+    candidate = Candidate(candidate.url, url_key(candidate.url), candidate.host, kind="listing")
+    await store.enqueue(cid, [candidate])
+    queued, = await store.next_urls(cid, 1)
+    ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.finish_fetch(ticket, PageResult(False, error="http_403"))
+    worker = provider_worker(campaigns, store, source)
+    await run_until_done(worker, cid)
+    assert len(store.posts) == 1 and store.posts[0]["via"] == "api"
+    assert not worker.fetcher.fetched and source.launches == 1
+    assert store.hosts["idealista.com"]["fetched"] == 1
+    assert store.hosts["idealista.com"]["http_refusals"] == 1
+    assert worker.progress(cid).read == 1
+
+
+async def test_paused_portal_does_not_start_paid_source(source_ledger):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store, source = MemoryWebStore(campaigns), FakeSource()
+    store.paused_hosts.add("idealista.com")
+    await run_until_done(provider_worker(campaigns, store, source), cid)
+    assert source.launches == 0 and not store.posts
+
+
 def test_provider_settings_default_off_secret_hidden_and_limits_validated(monkeypatch):
     monkeypatch.delenv("APIFY_IDEALISTA_ENABLED", raising=False)
     settings = WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token")

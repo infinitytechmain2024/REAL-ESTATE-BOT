@@ -165,16 +165,19 @@ def test_the_report_shows_the_money_the_skips_and_the_model_errors() -> None:
     from bot.campaign.final_report import cost_lines
     from bot.utils.costs import CostSummary
 
-    spent = CostSummary({"llm": 0.9, "scrape": 0.15, "search": 0.0}, {}, {"llm:http_401": 3, "llm:model_request_refused_400": 1},
+    spent = CostSummary({"llm": 0.9, "scrape": 0.15, "search": 0.0}, {},
+                        {"llm:http_401": 3, "llm:model_request_refused_400": 1, "api:apify_http_429": 2},
                         {"llm:prefilter_deal": 14, "llm:prefilter_area": 40})
     lines = cost_lines(spent, budget=1.0)
     assert lines[0] == "💶 Расход: $1.05 из $1.00 (ИИ $0.90 · Scrape API $0.15)"
     assert lines[1].startswith("⛔ Бюджет прогона исчерпан")
-    assert lines[2] == "Отсеяно до ИИ (без затрат): 54 — участок меньше нужного 40, другой тип сделки 14"
+    assert lines[2] == "Отсеяно до ИИ (без вызовов ИИ): 54 — участок меньше нужного 40, другой тип сделки 14"
     assert lines[3] == "⚠️ Ошибки ИИ: http_401 ×3, model_request_refused_400 ×1"
+    assert lines[4] == "⚠️ Ошибки API порталов: apify_http_429 ×2"
     assert cost_lines(None) == [] and cost_lines(CostSummary(), 0) == ["💶 Расход: $0.00"]
     text = report_text("цель", tally([OutcomeCount("sent", "exact", None, 1)]), [], [], [], [], costs=lines)
     assert "💶 Расход: $1.05 из $1.00" in text and "⚠️ Ошибки ИИ: http_401 ×3" in text
+    assert "⚠️ Ошибки API порталов: apify_http_429 ×2" in text
     edge = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 4)])
     assert not edge.unverified_majority, "exactly 80 % is not more than 80 %"
 

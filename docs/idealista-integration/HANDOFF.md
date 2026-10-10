@@ -1,7 +1,7 @@
 # HANDOFF — состояние интеграции и что доделать
 
 Ветка: `claude/optimistic-feynman-y4ayed` (от `main` @ `06988dc`). Коммиты исходного handoff: `77f6cf8` (пакет + анализ), `c3b535c` (Phase −1), `aebff1e` (handoff).
-Тесты Phase −1: `1417 passed, 0 skipped` (вместе с Postgres-тестами), `ruff check bot tests` — чисто. Фаза 1: **1421 passed, 0 skipped**, ruff чисто, golden **70 passed**; подробности ниже.
+Тесты Phase −1: `1417 passed, 0 skipped` (вместе с Postgres-тестами), `ruff check bot tests` — чисто. Последняя проверка, фаза 3: **1508 passed, 0 skipped**, Ruff чисто (включая PostgreSQL и golden); подробности ниже.
 
 ## 1. Что сделано
 
@@ -45,7 +45,7 @@
 ## 2. Что осталось (шаги 4–7 исходной задачи)
 
 - **Шаг 4 выполнен 2026-10-10** — [PROVIDERS.md](PROVIDERS.md): пять акторов Apify, Scrape.do, официальный API и таблица 20 доменов с ценами/оценками часов/первичными ссылками. Владелец выбрал axlymxp + Scrape.do и разрешил фазы 0–1 ответом «yes» (2026-10-10).
-- **Шаг 5 частично выполнен** — фазы 0–1 завершены: DESIGN, ListingSource/SourceListing, Literal api, миграция 043. Остались фазы 2–5 (актор/worker, store retry/counters, Scrape.do, отчёты). ⛔ Остановка после фазы 1, ждать «ок».
+- **Шаг 5 частично выполнен** — фазы 0–3 завершены: дизайн, контракты, Apify/worker, durable launch и billing (044), API retry/counters. Остались фазы 4–5 (Scrape.do, API label/pages_api и полная отчётность). ⛔ Остановка после фазы 3, ждать «ок».
 - **Шаг 6** — живой smoke-тест с лимитом $1.
 - **Шаг 7** — CHECKLIST.md построчно и обновление этого файла.
 
@@ -88,6 +88,17 @@
 - Схема input сверена по публичным Apify input-schema/OpenAPI. Fixtures **синтетические**, не live. Неоднозначный size не переносится ни в area_m2, ни в plot_m2; достоверные цифры описания дальше проверяет обычный analysis. Полнота земельной выдачи/пагинация не подтверждены, импорт ограничен 50 строками.
 - Ревью выявило риск потерянного расхода при time_cap; исправлено booking+settlement, добавлены тесты сбоя после save_run и завершения кампании. Окончательный полный pytest **1491 passed, 0 skipped** за 273.22 s, 82 прежних warnings; Ruff чисто. Targeted adapter/worker **64 passed**, PostgreSQL+costs **27 passed**, проверка actual-vs-estimate отдельно пройдена.
 - На VPS ничего не применялось; платных запросов нет. 044 нужно применить штатным скриптом до деплоя. Успех API в host counters и retry failed URLs остаются фазой 3, она разрешена и выполняется следующей без дополнительного запроса владельцу.
+
+### Фаза 3 выполнена (2026-10-10)
+
+- `store.enqueue(..., layer="api")` и `begin_fetch(..., layer="api")`: global failed URL повторяется в той же/другой кампании; local failed/duplicate переходит в queued. HTML-only skip host_blocked/host_breaker/verification_expired можно возобновить только при global failed. Fetched/snippet, fresh claim, robots/cap/operator skip не перехватываются. Stale claim восстанавливается по существующей lease-политике.
+- API автоматически не использует HTML host block, но не снимает pause/deleted источника. source_available проверяет доступность до нового paid launch; очередь проверяется и в begin_fetch, чтобы persisted snapshot не обходил запреты enqueue.
+- Оба finish_fetch считают API success настоящим fetched, failure — failed; HTTP/render refusal/block и HTML breaker не меняются. Source import обновляет обычный progress/funnel. API→analysis→tolerance→dedup pipeline остаётся общим.
+- Status api означает structured source, unlocker — HTML provider; persistent layer scrape прежний. В cost_lines добавлены API ошибки: прежде api записи существовали в журнале, но отчёт показывал только llm ошибки. «Без затрат» исправлено на «без вызовов ИИ» для оплаченных данных, отсеянных до анализа.
+- Полный финальный pytest **1508 passed, 0 skipped** за 298.56 s; Ruff чисто, diff-check чисто. 83 warnings — прежние 82 и один такой же lxml warning в новом тесте unlocker. Golden включён в полный pytest. Адресно: Memory/worker/layers **115 passed**, PostgreSQL **27 passed**, reporting **20 passed**, fresh orphan claim отдельно **1 passed**.
+- Ревью и доказательства: [REVIEW_PHASE_3.md](REVIEW_PHASE_3.md). Новых миграций/настроек в фазе 3 нет. 044 (commit c27aaeb фазы 2) нужно применить на VPS **до** деплоя; на VPS не выполнялось. Платных вызовов нет, Apify default-off и location ID пустой.
+- Остались существенные gates: живой земельный fixture/семантика size и точная география; полнота выдачи/пагинация; резервирование общего бюджета перед smoke ≤$1. Unknown area не выдумывается из фильтра; source import/found counters не означают проверенную релевантность.
+- Следующий шаг после «ок»: фаза 4 Scrape.do через существующий клиент, затем фаза 5 Idealista(API)/pages_api/полное финальное ревью, следующая остановка. Схему metrics добавлять новой миграцией **045** (или следующий свободный номер, если понадобится другая аддитивная миграция); 043/044 не редактировать.
 
 ## 3. Как запустить тесты локально
 

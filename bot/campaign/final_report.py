@@ -453,11 +453,14 @@ def cost_lines(spent: CostSummary | None, budget: float = 0.0) -> list[str]:
     for key, n in spent.skips.items():
         skips[SKIPS.get(key.split(":", 1)[-1], key.split(":", 1)[-1])] += n
     if skips:
-        lines.append(f"Отсеяно до ИИ (без затрат): {sum(skips.values())} — "
+        lines.append(f"Отсеяно до ИИ (без вызовов ИИ): {sum(skips.values())} — "
                      + ", ".join(f"{name} {n}" for name, n in skips.most_common()))
     errors = Counter({key.split(":", 1)[-1]: n for key, n in spent.errors.items() if key.startswith("llm:")})
     if errors:
         lines.append("⚠️ Ошибки ИИ: " + ", ".join(f"{code} ×{n}" for code, n in errors.most_common(4)))
+    api_errors = Counter({key.split(":", 1)[-1]: n for key, n in spent.errors.items() if key.startswith("api:")})
+    if api_errors:
+        lines.append("⚠️ Ошибки API порталов: " + ", ".join(f"{code} ×{n}" for code, n in api_errors.most_common(4)))
     return lines
 
 

@@ -34,8 +34,10 @@
 Проверки фазы 2: **1491 passed, 0 skipped**, Ruff чисто. Схема input проверена публично; живой output и площадь участка не проверены.
 
 ## Phase 3 — Store & Worker
-- [ ] Database Agent + Implementation Agent обновляют `begin_fetch` / `finish_fetch`
-- [ ] Поддержка `layer="api"` и повторный захват failed URL
+- [x] Database Agent + Implementation Agent обновляют enqueue / begin_fetch / finish_fetch в Memory и Postgres
+- [x] Поддержка layer=api, повтор failed URL, корректные host counters, сохранение pause/queue policy и разделение статусов api/unlocker
+
+Проверки фазы 3: **1508 passed, 0 skipped**, Ruff чисто; [REVIEW_PHASE_3.md](REVIEW_PHASE_3.md). Контрольная остановка перед фазой 4.
 
 ## Phase 4 — Scrape.do
 - [ ] Integration Agent настраивает Scrape.do через существующий ScrapeApiClient

@@ -21,7 +21,8 @@ SEARCH_RESULT_NOTE = "(Страница сайта не прочитана: эт
 class WebProgress:
     """The web stage's live numbers for one campaign (in memory, kept by the worker; see ``WebSearchWorker.progress``).
 
-    ``layer``: ``http`` | ``browser`` | ``api`` (the one reading ``host`` now); ``read``: pages read from the sites;
+    ``layer``: ``http`` | ``browser`` | ``api`` (structured source) | ``unlocker`` (HTML provider);
+    ``read``: pages read from the sites;
     ``found``: pages that are listings (a search-result card counts); ``portals_done``/``portals_total``: sites with
     nothing left to read / sites known so far; ``refusals``: the current host's consecutive refusals per layer
     (owners only); ``finished``: the stage has ended; ``url``: the page being read now (the status line links to it).
@@ -157,8 +158,8 @@ class PageResult:
     contacted: robots.txt, a blocked site) and the post is the search engine's title and snippet.
     ``via`` "index": the same, but the post was built from the listing data (JSON-LD ``ItemList``) of the
     index page the link was found on.
-    ``via`` "api": structured listing facts from a listing provider. The literals are prepared here;
-    API retry claims and host accounting are implemented separately in Phase 3.
+    ``via`` "api": structured listing facts from a listing provider, counted as a real read.
+    API imports may reclaim failed URLs and leave HTML refusal counters unchanged.
     """
 
     ok: bool
@@ -171,7 +172,7 @@ class PageResult:
     via: Literal["page", "search", "index", "api"] = "page"
     # the layer that produced this result or its error: "http", "render" (browser), "scrape" (unlocker API),
     # "api" (structured listing provider), "none" (the site was never asked).
-    # Host refusal accounting for provider results is handled in Phase 3.
+    # Provider results do not count as HTTP/browser refusals.
     layer: Literal["http", "render", "scrape", "none", "api"] = "http"
 
 

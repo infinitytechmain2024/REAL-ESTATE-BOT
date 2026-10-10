@@ -309,3 +309,5 @@ APIFY_IDEALISTA_MAX_CHARGE_USD>0. Все передаются только campa
 синтетические и не объявляются проверенными данными Idealista.
 
 Уточнение lifecycle фазы 2: save_run callback предварительно записывает estimated_pending_run; это обеспечивает видимость расхода при crash/time_cap. При time_cap/cancel worker вызывает settle существующего run (GET/abort/billing, ≤90 s), не запускает actor и не импортирует новые данные. Недоступный/выключенный провайдер оставляет явную оценку и ошибку, а не обещание известного факта.
+
+Уточнение фазой 3: API также может возобновить local skipped только с HTML-only причиной host_blocked/host_breaker/verification_expired и global failed. Robots, cap и operator skips защищены и в begin_fetch (snapshot импорт не может обойти enqueue). Source availability проверяется до нового paid launch. API чтения обновляют host успех/ошибку, но не HTML refusals/blocks; progress API читается из обычного funnel.

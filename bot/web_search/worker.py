@@ -373,6 +373,9 @@ class WebSearchWorker:
         return bool(queries)
 
     async def _source_limit(self, campaign: Campaign, source: ListingSource) -> int:
+        for host in source.hosts:
+            if not await self.store.source_available(host):
+                return 0
         counts, usage = await self.store.counts(campaign.id), await self.store.usage()
         host_left = [self.config.max_pages_per_host - await self.store.host_attempts(campaign.id, host)
                      for host in source.hosts]
@@ -555,18 +558,23 @@ class WebSearchWorker:
                 return False
             key = url_key(listing.url)
             await self.store.enqueue(cid, [Candidate(listing.url, key, host, kind="listing")],
-                                     index_ttl_days=self.config.index_ttl_days)
+                                     index_ttl_days=self.config.index_ttl_days, layer="api")
             queued = QueuedUrl(listing.url, key, host, 0, "listing", listing.title)
             ticket = await self.store.begin_fetch(cid, queued, vertical=campaign.plan.vertical,
                                                   lease_seconds=self.config.lease_seconds,
                                                   max_runtime_seconds=self.config.page_runtime_seconds,
-                                                  contact_site=False, index_ttl_days=self.config.index_ttl_days)
+                                                  contact_site=False, index_ttl_days=self.config.index_ttl_days,
+                                                  layer="api")
             if ticket == BUSY:
                 return True
             if isinstance(ticket, FetchTicket):
+                await self._track(cid, host, "api", url=listing.url)
                 await self.store.finish_fetch(ticket, PageResult(ok=True, final_url=listing.url,
                                                                 title=listing.title, text=text,
                                                                 via="api", layer="api"))
+                await self._track(cid, host, "api", url=listing.url)
+            else:
+                await costs.skip("api", "apify_import_skipped", item=source.name, campaign_id=cid)
             await self.store.advance_source_import(cid, source.name, offset + 1)
             done += 1
             if done >= self.config.pages_per_tick:
@@ -927,7 +935,7 @@ class WebSearchWorker:
 
     async def _scrape(self, campaign_id: str, url: QueuedUrl) -> tuple[PageResult, list[Candidate]]:
         cfg = self.config
-        self._set_layer(campaign_id, "api")
+        self._set_layer(campaign_id, "unlocker")
         await self.store.mark_scraped(campaign_id, url.url_key)
         # Booked before the call: a provider may bill a refused or timed-out request too (the safe side of a budget).
         await costs.record("scrape", provider="scrape_api", item=url.host, cost_usd=cfg.scrape_cost_usd)

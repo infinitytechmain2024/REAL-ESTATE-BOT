@@ -26,7 +26,9 @@
 
 Бюджет читается fail-closed для нового платного запуска. Лимиты API-импорта и HTML
 общие. Это не резервирование расходов всех сервисов: жёсткий smoke ≤ $1 требует
-отдельной бюджетной координации из DESIGN.md. Phase 3 добавит повтор failed URL и
-корректный успех API в host-счётчиках. Scrape.do и итоговая отчётность остаются фазами 4–5.
+отдельной бюджетной координации из DESIGN.md. Phase 3 добавляет повтор failed URL и
+корректный успех API в host-счётчиках; пауза/удаление сайта и ограничения очереди сохраняются. Scrape.do и итоговая отчётность остаются фазами 4–5.
 
 При завершении кампании известный незавершённый run проходит bounded abort/billing без нового запуска. До получения факта в журнале остаётся явно помеченная оценка cap; неуспех сверки отражён как apify_settlement_failed.
+
+Первичные ссылки для реализации: [input schema](https://apify.com/axlymxp/idealista-scraper/input-schema), [actor OpenAPI с acts/run endpoint](https://apify.com/axlymxp/idealista-scraper/api/openapi), [общий API и Bearer auth](https://docs.apify.com/api/v2), [сверка run billing](https://docs.apify.com/api/v2/actor-run-get). Проверено 2026-10-10; HTTP-сеть тестов полностью заменена mocks.

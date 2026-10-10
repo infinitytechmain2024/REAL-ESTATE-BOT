@@ -156,6 +156,110 @@ async def test_listing_source_migration_upgrades_populated_039_and_is_idempotent
             await pool.execute("update web_campaign_urls set state = 'unknown'")
 
 
+@pytest.mark.parametrize("same_campaign", [True, False])
+@pytest.mark.parametrize("api_success", [True, False])
+async def test_postgres_api_reclaims_failure_preserving_html_blocks(pool, same_campaign, api_success):
+    store = PostgresWebStore(pool)
+    old = await new_campaign(pool)
+    candidate = Candidate(LISTING, url_key(LISTING), "idealista.com", kind="listing")
+    await store.enqueue(old, [candidate])
+    queued, = await store.next_urls(old, 1)
+    ticket = await store.begin_fetch(old, queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.finish_fetch(ticket, PageResult(False, error="http_403"))
+    cid = old if same_campaign else await new_campaign(pool)
+    assert await store.enqueue(cid, [candidate]) == 0
+    await pool.execute("""update web_hosts set http_refusals=3, render_refusals=4, consecutive_refusals=3,
+        http_blocked_until=now()+interval '1 hour', render_blocked_until=now()+interval '2 hours',
+        blocked_until=now()+interval '1 hour' where host='idealista.com'""")
+    sql = """select http_refusals, render_refusals, consecutive_refusals,
+             http_blocked_until, render_blocked_until, blocked_until from web_hosts where host='idealista.com'"""
+    before = await pool.fetchrow(sql)
+    assert await store.enqueue(cid, [candidate], layer="api") == 1
+    queued, = await store.next_urls(cid, 1)
+    ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                     max_runtime_seconds=60, layer="api")
+    assert isinstance(ticket, FetchTicket)
+    post_id = await store.finish_fetch(ticket, PageResult(api_success, final_url=LISTING,
+        text='JSON-LD: {"plot_m2": 2500}', error=None if api_success else "http_403", via="api", layer="api"))
+    assert bool(post_id) == api_success
+    assert await pool.fetchrow(sql) == before
+    assert tuple(await pool.fetchrow("select pages_fetched,pages_failed from web_hosts where host='idealista.com'")) == (
+        int(api_success), 1 + int(not api_success))
+    assert tuple(await pool.fetchrow("select state,layer from web_campaign_urls where campaign_id=$1::uuid", cid)) == (
+        "fetched" if api_success else "failed", "api")
+    if api_success:
+        assert await store.enqueue(cid, [candidate], layer="api") == 0
+        assert await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                       max_runtime_seconds=60, layer="api") == DUPLICATE
+        assert await pool.fetchval("select count(*) from collected_posts") == 1
+
+
+async def test_postgres_api_waits_for_active_claim_and_recovers_stale_claim(pool):
+    store = PostgresWebStore(pool)
+    old, new = await new_campaign(pool), await new_campaign(pool)
+    candidate = Candidate(LISTING, url_key(LISTING), "idealista.com", kind="listing")
+    await store.enqueue(old, [candidate])
+    queued, = await store.next_urls(old, 1)
+    ticket = await store.begin_fetch(old, queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.enqueue(new, [candidate], layer="api")
+    assert await store.begin_fetch(new, queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == BUSY
+    assert await pool.fetchval("select campaign_id::text from web_seen_urls") == old
+    # A recovered acquisition run does not make a still-fresh URL claim stealable.
+    # This exercises the URL-row BUSY path after the site's run lock has been released.
+    await store.recover(0)
+    assert await store.begin_fetch(new, queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == BUSY
+    assert await pool.fetchval("select state from web_campaign_urls where campaign_id=$1::uuid", new) == "queued"
+    await pool.execute("update web_seen_urls set claimed_at=now()-interval '1 hour'")
+    await store.recover(0)
+    retry = await store.begin_fetch(new, queued, vertical="real_estate", lease_seconds=300,
+                                    max_runtime_seconds=60, layer="api")
+    assert isinstance(retry, FetchTicket)
+    await store.finish_fetch(retry, PageResult(True, text="API recovered", via="api", layer="api"))
+    assert await pool.fetchval("select campaign_id::text from web_seen_urls") == new
+    assert await pool.fetchval("select state from acquisition_runs where id=$1::uuid", ticket.run_id) == "failed"
+
+
+async def test_postgres_api_preserves_fetched_snippet_and_operator_pause(pool):
+    store = PostgresWebStore(pool)
+    old, new = await new_campaign(pool), await new_campaign(pool)
+    candidate = Candidate(LISTING, url_key(LISTING), "idealista.com", kind="listing")
+    await store.enqueue(old, [candidate])
+    queued, = await store.next_urls(old, 1)
+    ticket = await store.begin_fetch(old, queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.finish_fetch(ticket, PageResult(True, text="Search snippet", via="search", layer="none"))
+    assert await store.enqueue(new, [candidate], layer="api") == 0
+    assert await store.begin_fetch(new, queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == DUPLICATE
+    assert await pool.fetchval("select count(*) from collected_posts") == 1
+    await pool.execute("update web_seen_urls set state='failed'")
+    await pool.execute("update monitoring_sources set state='paused' where id=$1::uuid", ticket.source_id)
+    assert not await store.source_available("idealista.com")
+    assert await store.enqueue(new, [candidate], layer="api") == 1
+    assert await store.begin_fetch(new, queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "source_unavailable"
+    assert await store.enqueue(new, [candidate], layer="api") == 0
+
+
+async def test_postgres_api_obeys_queue_policy_but_bypasses_html_only_block(pool):
+    store = PostgresWebStore(pool)
+    cid = await new_campaign(pool)
+    candidate = Candidate(LISTING, url_key(LISTING), "idealista.com", kind="listing")
+    await store.enqueue(cid, [candidate])
+    queued, = await store.next_urls(cid, 1)
+    ticket = await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300, max_runtime_seconds=60)
+    await store.finish_fetch(ticket, PageResult(False, error="http_403"))
+    await pool.execute("update web_campaign_urls set state='skipped',detail='page_cap'")
+    assert await store.enqueue(cid, [candidate], layer="api") == 0
+    assert await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                   max_runtime_seconds=60, layer="api") == "page_cap"
+    await pool.execute("update web_campaign_urls set detail='host_blocked'")
+    assert await store.enqueue(cid, [candidate], layer="api") == 1
+    assert isinstance(await store.begin_fetch(cid, queued, vertical="real_estate", lease_seconds=300,
+                                               max_runtime_seconds=60, layer="api"), FetchTicket)
+
+
 def web_worker(pool, fetcher: FakeFetcher, queries: list[str]) -> WebSearchWorker:
     searcher = FakeSearcher(default=[LISTING, LISTING + "?utm_source=bing", INDEX_URL])
     return WebSearchWorker(PostgresCampaignStore(pool), PostgresWebStore(pool), searcher, fetcher, ListGenerator(queries),
