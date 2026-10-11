@@ -1,10 +1,11 @@
 # Final Acceptance Checklist
 
 - [x] ListingSource protocol реализован — `bot/web_search/sources/base.py:28`; SourceListing с отдельным plot_m2, экспорт в sources/__init__.py.
-- [x] ApifyIdealistaSource написан и покрыт обработкой ошибок — tests/test_apify_source.py, HTTPX mocks; default-off, live fixture не получен.
+- [x] ApifyIdealistaSource написан и покрыт обработкой ошибок — tests/test_apify_source.py, HTTPX mocks; Madrid land/sale live run получен (SMOKE_TEST.md).
 - [x] Город из задачи пользователя выбирает fixed-ID actor при совпадении настройки,
   иначе name-resolving actor; запрос динамического актора и отбрасывание чужого
-  муниципалитета проверены HTTPX mocks. Live fixture обоих акторов ещё открыт.
+  муниципалитета проверены HTTPX mocks. Live подтверждены fixed-ID Madrid и
+  динамический Barcelona: 10/10 строк нормализованы, чужих муниципалитетов нет.
 - [x] _from_sources создаёт claim/POST только в первом раунде; _resume_sources обрабатывает existing run/cache без нового запуска — tests/test_listing_source_worker.py.
 - [x] via/layer=api, pages_api и полная отчётность проверены Memory/реальным PostgreSQL —
   `test_web_search.py`, `test_web_search_postgres.py`, `test_campaign_metrics.py`.
@@ -47,11 +48,15 @@
 
 - [x] Рабочий SSH-доступ к указанному владельцем VPS и проверка фактической конфигурации:
   `srv2000490`, `/opt/real-estate-bot`; до деплоя были `main` @ `e4ba36e`, миграции до 039.
-  APIFY_TOKEN/location ID отсутствуют; исходный OpenRouter-ключ ограничен $50 в день.
+  до подготовки smoke APIFY_TOKEN/location ID отсутствовали; исходный OpenRouter-ключ ограничен $50 в день.
 - [x] Миграции до 045 применены на VPS до перезапуска нового кода. Ветка @ `3476c7b`,
   сервисы running, health-check healthy, `/healthz` — HTTP 200. БД и `.env` сохранены;
   список DB-архива проверен, фактическое восстановление не выполнялось.
-- [ ] Перед платным вызовом подтверждён общий верхний предел $1, включая Apify и OpenRouter.
-- [ ] Land/sale/Madrid fixture проверяет муниципалитет, `plot_m2` и смысл `size` без подмены площади.
-- [ ] Живой smoke проведён и в SMOKE_TEST.md записаны расходы, отказы URL, воронка и сравнение с прошлым прогоном.
-- [ ] После результатов smoke повторно проверены строки этого чек-листа и обновлён HANDOFF.md.
+- [x] Перед платными вызовами подтверждён общий верхний предел $1: два Apify run
+  с cap $0.10 каждый,
+  выделенный OpenRouter key lifetime $0.50, дешёвая модель и отключённые сторонние платные пути.
+- [ ] Land/sale/Madrid live fixture проверяет муниципалитет и сделку, но сырой актор
+  возвращает только неоднозначный `size`, без `plot_m2`; семантика площади участка
+  остаётся непроверенной. Адаптер не подменяет площадь: `SMOKE_TEST.md`.
+- [x] Живой smoke проведён и в SMOKE_TEST.md записаны расходы, отказы URL, воронка и сравнение с прошлым прогоном.
+- [x] После результатов smoke строки чек-листа повторно проверены и HANDOFF.md обновлён.
