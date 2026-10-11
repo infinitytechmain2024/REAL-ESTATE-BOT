@@ -50,7 +50,7 @@ def plural(n: int, one: str, few: str, many: str) -> str:
 
 
 def _cards(sent: int, held: int) -> str:
-    text = f"→ {plural(sent, 'объявление', 'объявления', 'объявлений')}"
+    text = f"→ отправлено {plural(sent, 'объявление', 'объявления', 'объявлений')}"
     return text + (f" (похожих: {held})" if held else "")
 
 

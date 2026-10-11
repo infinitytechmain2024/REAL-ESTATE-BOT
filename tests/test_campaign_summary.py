@@ -42,14 +42,14 @@ def test_every_source_gets_its_line_with_what_it_gave() -> None:
     lines = text.splitlines()
     assert lines[:3] == ["📊 Итог поиска", "🎯 Участок под Мадридом",
                          "Отправлено объявлений: 9 · ещё похожих вариантов: 2"]
-    assert "Facebook — 12 групп, 340 постов → 5 объявлений (похожих: 2)" in lines
-    assert "Instagram — 20 постов → 0 объявлений" in lines
-    assert ("Idealista — 14 ссылок в поиске · по описанию из поиска 6 (сайт не пускает ботов) → 2 объявления"
+    assert "Facebook — 12 групп, 340 постов → отправлено 5 объявлений (похожих: 2)" in lines
+    assert "Instagram — 20 постов → отправлено 0 объявлений" in lines
+    assert ("Idealista — 14 ссылок в поиске · по описанию из поиска 6 (сайт не пускает ботов) → отправлено 2 объявления"
             in lines)
-    assert "Fotocasa — 9 ссылок в поиске · прочитано 7 → 1 объявление" in lines
-    assert "inmobiliaria-garcia.es — 3 ссылки в поиске · прочитано 3 → 1 объявление" in lines
-    assert lines.index("Idealista — 14 ссылок в поиске · по описанию из поиска 6 (сайт не пускает ботов) → 2 объявления") \
-        < lines.index("Fotocasa — 9 ссылок в поиске · прочитано 7 → 1 объявление")  # portals in priority order
+    assert "Fotocasa — 9 ссылок в поиске · прочитано 7 → отправлено 1 объявление" in lines
+    assert "inmobiliaria-garcia.es — 3 ссылки в поиске · прочитано 3 → отправлено 1 объявление" in lines
+    assert lines.index("Idealista — 14 ссылок в поиске · по описанию из поиска 6 (сайт не пускает ботов) → отправлено 2 объявления") \
+        < lines.index("Fotocasa — 9 ссылок в поиске · прочитано 7 → отправлено 1 объявление")  # portals in priority order
     nothing = lines[-1]
     assert nothing.startswith("Не нашлось в поиске: Yaencontre, Pisos.com, Habitaclia")
 
@@ -62,7 +62,7 @@ def test_idealista_and_fotocasa_always_say_why_they_gave_nothing() -> None:
     assert "Fotocasa — в поиске были только чужие или уже прочитанные ссылки" in lines
     refused = summary_text("Квартира", [], [SiteReport("idealista.com", queries=1, results=3, links=3, refused=3)],
                            portals=PORTALS).splitlines()
-    assert "Idealista — 3 ссылки в поиске · сайт не дал прочитать страницы → 0 объявлений" in refused
+    assert "Idealista — 3 ссылки в поиске · сайт не дал прочитать страницы → отправлено 0 объявлений" in refused
 
 
 def test_idealista_api_label_only_when_api_pages_were_read() -> None:
@@ -77,10 +77,10 @@ def test_many_small_sites_are_summed_and_without_a_web_stage_no_portals_are_list
     reports = [SiteReport(f"site{n}.es", links=1, read=1) for n in range(12)]
     lines = summary_text("Квартира", [SourceCount("website", "site3.es", posts=1, sent=1)], reports,
                          portals=PORTALS).splitlines()
-    assert lines[lines.index("site3.es — 1 ссылка в поиске · прочитано 1 → 1 объявление") + 1].startswith("site")
-    assert "Другие сайты (4) — прочитано 4 → 0 объявлений" in lines
+    assert lines[lines.index("site3.es — 1 ссылка в поиске · прочитано 1 → отправлено 1 объявление") + 1].startswith("site")
+    assert "Другие сайты (4) — прочитано 4 → отправлено 0 объявлений" in lines
     only_facebook = summary_text("Квартира", [SourceCount("facebook", "facebook", 3, 40, 2, 1)], [], portals=())
-    assert only_facebook.splitlines()[4:] == ["Facebook — 3 группы, 40 постов → 1 объявление"]
+    assert only_facebook.splitlines()[4:] == ["Facebook — 3 группы, 40 постов → отправлено 1 объявление"]
     assert summary_text("Квартира", [], [], portals=()).endswith("Источники ничего не дали.")
 
 
@@ -126,7 +126,7 @@ async def test_a_finished_campaign_gets_one_summary_above_its_final_status() -> 
     await runner.step(cid)
     [summary] = messenger.summaries()
     # The payload-less finding is held as «похожее» (the rules cannot place it): it counts as waiting.
-    assert "Facebook — 4 группы, 120 постов → 0 объявлений (похожих: 1)" in summary.splitlines()
+    assert "Facebook — 4 группы, 120 постов → отправлено 0 объявлений (похожих: 1)" in summary.splitlines()
     assert messenger.sent[-1][2] == messenger.statuses()[-1]  # the status message stays the last one
 
 

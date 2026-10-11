@@ -705,9 +705,9 @@ async def test_a_corrupted_spec_row_loads_as_a_fresh_draft(caplog: pytest.LogCap
 def test_the_prompt_describes_the_three_parts_and_the_examples_per_kind() -> None:
     from bot.control_plane.interviewer import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "interview-v2"
+    assert PROMPT_VERSION == "interview-v3"
     for words in ("THREE PARTS", "TASK-SPECIFIC ROUND", "ONE DEVIATION QUESTION", "Если точных вариантов не будет, что допустимо?",
-                  "buildable classification", "stage of the project", "equity or debt", "language of the listings",
+                  "legal buildability", "stage of the project", "equity or debt", "language of the listings",
                   "spec.deviations", "context.answers", "бюджет до +10 % (до 220 000 €)", "нет, только точные"):
         assert words in SYSTEM or words.replace("бюджет до +10 % (до 220 000 €)", "бюджет до +10 %") in SYSTEM, words
 

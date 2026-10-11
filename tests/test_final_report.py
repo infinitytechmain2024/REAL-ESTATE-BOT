@@ -26,10 +26,12 @@ from bot.campaign.final_report import (
     report_text,
     similar_note,
     tally,
+    task_facts,
 )
 from bot.campaign.relevance import Relevance, ReviewerJudge
 from bot.campaign.runner import CampaignRunner, RunnerConfig, campaign_request
 from bot.campaign.runs import MemoryRunStore, OutcomeCount, SourceCount
+from bot.campaign.tolerance import Request
 from bot.web_search.models import SiteReport
 from tests.test_campaign_relevance import _seed, needs_db, plot
 from tests.test_campaign_runner import SUMMARY, Clock, FakeMessenger
@@ -505,6 +507,33 @@ def test_recommendations_never_ask_to_change_the_deal_type_property_type_or_city
         re.search(r"сделк|покупк|тип объекта|другом город", t) for t in cleaned if "отсеяны" not in t)
     assert clean_recommendations(["Поднимите бюджет на 10 %: 5.", "Добавьте район: 3 варианта."], facts) == [
         "Поднимите бюджет на 10 %: 5.", "Добавьте район: 3 варианта."]
+
+
+def test_only_exact_search_does_not_recommend_relaxing_confirmed_requirements() -> None:
+    task = task_facts(Request(location="Madrid", min_area=2000, budget_pct=0, area_pct=0))
+    assert task["only_exact"] is True
+    facts = {"task": task, "counts": {"sent_exact": 0, "held_similar": 8},
+             "rejected_by_reason": {"area": 8, "place": 3, "budget": 2},
+             "unreadable_sites": [], "sites": []}
+    model = ["Снизьте площадь на 10 %: 8 вариантов меньше.",
+             "Рассмотрите соседние районы: 3 варианта вне Мадрида.",
+             "Повторите точный поиск через 3 дня: 0 вариантов отправлено."]
+    tips = clean_recommendations(model, facts)
+    assert "Повторите точный поиск через 3 дня: 0 вариантов отправлено." in tips
+    assert all("Снизьте" not in tip and "соседние районы" not in tip for tip in tips)
+    assert all("площадь на 10 %" not in tip for tip in fallback_recommendations(facts))
+
+
+async def test_only_exact_final_report_uses_safe_advice_and_does_not_invite_similar_variants() -> None:
+    model = Advice("Снизьте площадь на 10 %: 8 вариантов.")
+    text = await FinalReporter(model).build(
+        "участок · Мадрид · от 2000 м²", Request(location="Madrid", min_area=2000, budget_pct=0, area_pct=0),
+        [OutcomeCount("held", "similar", "unverified", 8)], [], [], [],
+        offers={"similar": "asked"})
+    assert model.facts == []
+    assert "Снизьте площадь" not in text
+    assert "Похожие можно открыть" not in text
+    assert "Похожих вариантов: 8" in text
 
 
 async def test_the_model_prompt_forbids_changing_the_deal_type_and_the_report_drops_such_advice() -> None:

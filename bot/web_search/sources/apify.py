@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from bot.utils import costs
-from bot.utils.listing_text import plot_area
+from bot.utils.listing_text import areas
 from bot.web_search.geocoding import CachedCityCenters
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.base import SourceListing
@@ -372,9 +372,12 @@ def normalize_listing(item: Any, task: QueryTask, *, municipality: str,
     # ``size`` alone is undocumented as plot versus built area. Accept a plot
     # only when the description labels one and the two independent values agree.
     reported_size = _number(item.get("size"), positive=True)
-    described_plot = plot_area(description)
-    confirmed_plot = (described_plot if reported_size is not None and described_plot is not None
-                      and abs(described_plot - reported_size) <= reported_size * .10 else None)
+    described_plots = [area.m2 for area in areas(description) if area.kind == "plot"]
+    # A second, materially different plot size may refer to a minimum lot or
+    # another property. In that case the actor's generic size cannot settle it.
+    confirmed_plot = (described_plots[0] if reported_size is not None and described_plots
+                      and all(abs(value - reported_size) <= reported_size * .10 for value in described_plots)
+                      else None)
     if task.radius_km is not None:
         description += "\nГеоданные: © OpenStreetMap contributors"
     return SourceListing(

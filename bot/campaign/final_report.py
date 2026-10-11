@@ -66,6 +66,10 @@ _CYRILLIC = re.compile(r"[а-яёіїєґ]", re.IGNORECASE)
 _FORBIDDEN_ADVICE = re.compile(
     r"сделк|аренд|покупк|продаж|тип\w*\s+(?:объект|недвижим|сделк)|вид\w*\s+(?:объект|недвижим)"
     r"|друг\w+\s+(?:город|стран)|смен\w+\s+(?:город|стран)|в\s+друг\w+\s+(?:город|стран)", re.IGNORECASE)
+_RELAX_ADVICE = re.compile(
+    r"(?:сниз|уменьш|ослаб|допуст|подним|повыс)\w*.{0,50}(?:бюджет|площад|комнат|радиус)"
+    r"|(?:бюджет|площад|комнат|радиус).{0,50}(?:сниз|уменьш|ослаб|допуст|подним|повыс)"
+    r"|соседн\w*.{0,40}(?:район|пригород)|расшир\w*.{0,40}(?:район|географ)", re.IGNORECASE)
 _DIGIT = re.compile(r"\d")
 MIN_RECOMMENDATIONS = 2
 DEAL_NOTE_MIN = 10  # rejected for the deal type: from this many the report explains where they came from
@@ -299,17 +303,18 @@ def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
     change those); a large deal-type count becomes one explanation instead.
     """
     counts, by_reason = facts.get("counts", {}), facts.get("rejected_by_reason", {})
+    only_exact = bool((facts.get("task") or {}).get("only_exact"))
     sent = counts.get("sent_exact", 0) + counts.get("sent_after_approval", 0)
     tips: list[str] = []
-    if by_reason.get("budget", 0) >= 2 and sent < 10:
+    if not only_exact and by_reason.get("budget", 0) >= 2 and sent < 10:
         tips.append(f"Часть вариантов отклонена из-за цены ({by_reason['budget']}): поднимите бюджет на 10 %, "
                     "и их станет больше.")
-    if by_reason.get("place", 0) >= 3:
+    if not only_exact and by_reason.get("place", 0) >= 3:
         tips.append(f"{by_reason['place']} вариантов оказались вне нужного района: добавьте соседние районы или "
                     "пригороды в запрос.")
-    if by_reason.get("rooms", 0) >= 2 and sent < 10:
+    if not only_exact and by_reason.get("rooms", 0) >= 2 and sent < 10:
         tips.append(f"{by_reason['rooms']} вариантов отклонены из-за числа комнат: допустите на одну комнату меньше.")
-    if by_reason.get("area", 0) >= 2 and sent < 10:
+    if not only_exact and by_reason.get("area", 0) >= 2 and sent < 10:
         tips.append(f"{by_reason['area']} вариантов отклонены из-за площади: уменьшите минимальную площадь на 10 %.")
     unreadable = facts.get("unreadable_sites", [])
     refused = {s.get("site"): s.get("refused", 0) for s in facts.get("sites", []) if isinstance(s, dict)}
@@ -318,11 +323,14 @@ def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
         tips.append(f"{site_name(host)} не читается (отказов: {refused.get(host) or 1}): сайт не пускает ботов. "
                     "Включите чтение через API или прокси, чтобы получать его объявления целиком.")
     held = counts.get("held_similar", 0) + counts.get("held_other", 0)
-    if held and sent < 5:
+    if held and sent < 5 and not only_exact:
         tips.append(f"Есть похожие варианты ({held}), которые ждут вашего решения: откройте их, если точных мало.")
+    if held and sent < 5 and only_exact:
+        tips.append(f"Похожих вариантов: {held}, но они не подтвердили все условия; уточните недостающие данные у продавцов.")
     if sent == 0 and not tips:
-        tips.append("Точных вариантов: 0 — ослабьте самое жёсткое условие (бюджет, площадь или район) и "
-                    "запустите поиск снова.")
+        tips.append("Точных вариантов: 0 — повторите поиск с дополнительными источниками без изменения требований."
+                    if only_exact else "Точных вариантов: 0 — ослабьте самое жёсткое условие "
+                    "(бюджет, площадь или район) и запустите поиск снова.")
     if sent < 3 and len(tips) < MIN_RECOMMENDATIONS:
         tips.append("Новые объявления появляются каждый день: повторите поиск через 2-3 дня.")
     deal, wrong = (facts.get("task") or {}).get("deal"), by_reason.get("deal", 0)
@@ -337,7 +345,9 @@ def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
 def clean_recommendations(items: Sequence[str], facts: dict[str, Any]) -> list[str]:
     """The model's recommendations without those that ask to change the deal, the kind of property or the city, and
     without those that cite no number; topped up from the rules to at least two when fewer are left."""
-    kept = [t for t in items if not _FORBIDDEN_ADVICE.search(t) and _DIGIT.search(t)][:MAX_RECOMMENDATIONS]
+    only_exact = bool((facts.get("task") or {}).get("only_exact"))
+    kept = [t for t in items if not _FORBIDDEN_ADVICE.search(t) and _DIGIT.search(t)
+            and not (only_exact and _RELAX_ADVICE.search(t))][:MAX_RECOMMENDATIONS]
     if len(kept) < MIN_RECOMMENDATIONS:
         have = {t.casefold() for t in kept}
         for tip in fallback_recommendations(facts):
@@ -354,6 +364,8 @@ by 10 % when many were rejected for price; relax the area or the rooms when many
 neighbouring district when many were rejected for place; a site that could not be read needs the API or a proxy
 switched on (name the site); search again in a few days when little was found.
 Allowed levers only: budget, area, rooms, neighbouring districts, more sources, proxy or the Idealista API, timing.
+When task.only_exact is true, NEVER suggest relaxing the budget, area, rooms, location or any other requirement,
+or opening similar variants; suggest checking missing evidence, more sources or repeating the exact search later.
 NEVER advise changing the deal type (buy / rent), the kind of property, or the city or country: the person cannot
 change those, so do not mention rejections for them in the advice at all; never use the words deal, rent, purchase,
 property type, another city.
@@ -429,7 +441,9 @@ def task_facts(request: Request) -> dict[str, Any]:
     facts = {"place": request.location, "deal": request.deal, "property_type": request.property_type,
              "budget": request.amount, "budget_is_maximum": request.is_max if request.amount else None,
              "currency": request.currency if request.amount else None, "rooms_min": request.rooms,
-             "area_min_m2": request.min_area, "area_max_m2": request.max_area}
+             "area_min_m2": request.min_area, "area_max_m2": request.max_area,
+             "only_exact": (True if request.budget_pct == 0 and request.area_pct == 0
+                            and request.rooms_delta in (None, 0) and not request.nearby else None)}
     return {k: v for k, v in facts.items() if v is not None}
 
 
@@ -549,10 +563,13 @@ class FinalReporter:
         funnel, _nothing = site_lines(sources, reports, portals)
         facts = facts_for_model(task_facts(request), counts, sorted(
             stats.values(), key=lambda s: (-s.sent, -s.links, s.host)), unreadable, tolerance_pct)
+        note = None if facts["task"].get("only_exact") else similar_note(counts, offers)
         return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, await self._advice(facts, counts),
-                           other_sites, similar_note(counts, offers), cost_lines(costs, budget))
+                           other_sites, note, cost_lines(costs, budget))
 
     async def _advice(self, facts: dict[str, Any], counts: Tally) -> list[str]:
+        if facts["task"].get("only_exact"):
+            return fallback_recommendations(facts)
         if self.recommender is not None and counts.total + len(facts["unreadable_sites"]) > 0:
             try:
                 advice = clean_recommendations(await self.recommender.recommend(facts), facts)

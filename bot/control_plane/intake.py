@@ -498,7 +498,8 @@ class TaskIntake:
         mode = draft.mode or "real_estate"
         spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
         turn = await self._turn(draft, mode, spec, message, editing)
-        draft.spec = _enrich(self._record_answer(draft, spec, turn.spec, message, editing), mode)
+        draft.spec = _enrich(self._record_answer(draft, spec, turn.spec, message, editing,
+                                                 next_question=turn.question), mode)
         if draft.asking == "place.districts" and _SUBURB.search(draft.task):
             if draft.spec.place.radius_km and draft.spec.place.radius_km != spec.place.radius_km:
                 turn.understood_ru = f"радиус {draft.spec.place.radius_km:g} км"
@@ -508,7 +509,8 @@ class TaskIntake:
         draft.editing = None
         return await self._carry_on(draft, turn, editing=editing)
 
-    def _record_answer(self, draft: Draft, before: TaskSpec, after: TaskSpec, message: str, editing: bool) -> TaskSpec:
+    def _record_answer(self, draft: Draft, before: TaskSpec, after: TaskSpec, message: str, editing: bool,
+                       *, next_question: str | None = None) -> TaskSpec:
         """Safety net: the answer to a task-specific or deviation question is kept even if the model dropped it."""
         if draft.asking == "place.districts" and _SUBURB.search(draft.task) and not editing:
             if match := _RADIUS.search(message):
@@ -525,9 +527,14 @@ class TaskIntake:
             return after
         if draft.asking == DEVIATION_PATH:
             return after if after.deviations.asked else read_deviations(after, message)
+        question = next((t["text"] for t in reversed(draft.dialogue) if t.get("role") == "assistant"), "")
+        if next_question and _norm(next_question) == _norm(question):
+            # The interviewer kept this question open. An unrelated answer may
+            # still add useful criteria, but it must not count as answering it.
+            after.context.answers = list(before.context.answers)
+            return after
         if len(after.context.answers) > len(before.context.answers):
             return after
-        question = next((t["text"] for t in reversed(draft.dialogue) if t.get("role") == "assistant"), "")
         return after.merged({"context": {"answers": [{"question": question, "answer": message}]}})
 
     async def _turn(self, draft: Draft, mode: str, spec: TaskSpec, message: str, editing: bool) -> InterviewTurn:

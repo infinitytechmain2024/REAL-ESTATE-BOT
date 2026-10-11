@@ -6,7 +6,8 @@ import re
 
 import pytest
 
-from bot.control_plane.intake import DRAFT_KEYBOARD, SEARCH_KEYBOARD, TASK_KEYBOARD
+from bot.campaign.spec import TaskSpec
+from bot.control_plane.intake import DRAFT_KEYBOARD, SEARCH_KEYBOARD, TASK_KEYBOARD, Draft
 from bot.control_plane.models import IncomingMessage, Reply
 from tests.test_user_intake import (
     OPERATOR,
@@ -43,6 +44,19 @@ async def test_suburb_request_asks_for_scope_before_launch(answer, radius, distr
     goal = draft.goal_text()
     assert ("Радиус поиска" in goal) == bool(radius)
     assert ("Районы или пригороды" in goal) == bool(districts)
+
+
+def test_unrelated_answer_does_not_close_a_repeated_task_question():
+    control, _, _ = plane()
+    question = "Какой правовой статус участка вам подходит?"
+    draft = Draft(USER, USER, asking="context.answers", dialogue=[{"role": "assistant", "text": question}])
+    before = TaskSpec(mode="real_estate")
+    after = before.merged({"must_have": ["коммуникации"],
+                           "context": {"answers": [{"question": question, "answer": "Нужны коммуникации"}]}})
+    result = control.intake._record_answer(draft, before, after, "Нужны коммуникации", False,
+                                           next_question=question)
+    assert result.must_have == ["коммуникации"]
+    assert result.context.answers == []
 
 SECRET = "фиолетовый жираф поёт"  # shown back once after a voice note, never after that
 VOICE_TASK = f"{SECRET}, снять квартиру в Мадриде до 1200 евро"

@@ -336,8 +336,8 @@ async def test_web_pages_become_campaign_findings_streamed_once_with_their_links
     assert (reports["idealista.com"].queries, reports["idealista.com"].links, reports["idealista.com"].read) == (1, 1, 1)
     assert (reports["fotocasa.es"].links, reports["fotocasa.es"].read) == (3, 3)  # the index page and its two ads
     [summary] = messenger.summaries()
-    assert "Idealista — 1 ссылка в поиске · прочитано 1 → 1 объявление" in summary.splitlines()
-    assert "Fotocasa — 3 ссылки в поиске · прочитано 3 → 2 объявления" in summary.splitlines()
+    assert "Idealista — 1 ссылка в поиске · прочитано 1 → отправлено 1 объявление" in summary.splitlines()
+    assert "Fotocasa — 3 ссылки в поиске · прочитано 3 → отправлено 2 объявления" in summary.splitlines()
     assert await pool.fetchval("select summary_sent_at is not null from campaign_runs where campaign_id = $1::uuid", cid)
 
     # another campaign meets the same pages: nothing is fetched again

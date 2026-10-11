@@ -24,7 +24,7 @@ _UNIT = (r"m²|m2|mts?2|mts?\.?\s*cuadrados|metros?\s+cuadrados|sq\.?\s*m|sqm"
          r"|hect[aá]reas?|hectares?|ha\b|has\b|га\b|гектар\w*|сот\w*|м²|м2|кв\.?\s*м")
 _AREA = re.compile(rf"(?<![\d.,])({_NUMBER})\s*({_UNIT})", re.IGNORECASE)
 _PLOT_WORDS = re.compile(r"(?<!\w)(?:parcela|terreno|solar|finca|suelo|plot|land|участ|земл|ділянк)\w*", re.IGNORECASE)
-_BUILT_WORDS = re.compile(r"(?<!\w)(?:construid|[uú]til|vivienda|edificad|habitable|built|living|дом|жил)\w*",
+_BUILT_WORDS = re.compile(r"(?<!\w)(?:construid|[uú]til|vivienda|edificad|habitable|built|living|house|home|chalet|casa|дом|жил)\w*",
                           re.IGNORECASE)
 WINDOW = 40  # characters before a number searched for whose area it is; the nearest word wins
 
@@ -75,6 +75,14 @@ def areas(text: str) -> list[Area]:
         plot = max((m.end() for m in _PLOT_WORDS.finditer(before)), default=-1)
         built = max((m.end() for m in _BUILT_WORDS.finditer(before)), default=-1)
         kind: AreaKind | None = None if plot == built == -1 else "plot" if plot > built else "built"
+        # English listings also put the noun immediately after the measure:
+        # "10,100m2 plot" or "180m2 built area". An immediate suffix is more
+        # specific than a preceding mention of the other area in the sentence.
+        after = text[found.end():found.end() + 20].lstrip()
+        if _PLOT_WORDS.match(after):
+            kind = "plot"
+        elif _BUILT_WORDS.match(after):
+            kind = "built"
         out.append(Area(round(m2, 1), kind))
     return out
 
