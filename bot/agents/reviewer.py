@@ -39,7 +39,7 @@ from bot.campaign.tolerance import BUDGET_TOLERANCE, min_area_of
 from .llm import LLMError, OpenRouterJSON
 
 log = logging.getLogger(__name__)
-PROMPT_VERSION = "reviewer-v2"
+PROMPT_VERSION = "reviewer-v3"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 MAX_QUOTE_CHARS = 200
 MAX_NOTE_CHARS = 200
@@ -106,6 +106,10 @@ How to compare:
   Rooms: "rooms.min" is a minimum count of rooms or bedrooms as the listing counts them; do not convert.
 - must_have:<item>: the listing must state it (a terrace, a lift, parking ...). exclude:<item>: the listing must
   not have it; "fail" only when the listing says it has it.
+  For legal buildability, zoning or a construction permit, marketing language such as "to build a house",
+  "buildable area" or floor-area ratios alone is not proof of the parcel's legal classification or permit status.
+  Mark such a criterion "unknown" unless the listing explicitly states the relevant zoning, permit or
+  planning document; never infer a granted permit from generic buildability claims.
 
 overall:
 - "match": every checked criterion is "pass".
