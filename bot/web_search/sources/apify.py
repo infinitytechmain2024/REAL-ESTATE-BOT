@@ -22,6 +22,8 @@ from urllib.parse import urlsplit
 import httpx
 
 from bot.utils import costs
+from bot.utils.listing_text import plot_area
+from bot.web_search.geocoding import CachedCityCenters
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.base import SourceListing
 from bot.web_search.urls import fetchable, host_of
@@ -74,6 +76,7 @@ class ApifyIdealistaSource:
                  location_name: str = "Madrid", location_id: str = "", max_items: int = 50,
                  timeout_seconds: float = 120, max_charge_usd: float = .10,
                  client: httpx.AsyncClient | None = None,
+                 geocoder: CachedCityCenters | None = None,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  max_response_bytes: int = 2_000_000) -> None:
         if not re.fullmatch(r"[\w-]+(?:[/~][\w-]+)?", actor_id):
@@ -89,6 +92,7 @@ class ApifyIdealistaSource:
         self.location_name, self.location_id = location_name.strip(), location_id.strip()
         self.max_items, self.timeout_seconds, self.max_charge_usd = max_items, timeout_seconds, max_charge_usd
         self._sleep, self.max_response_bytes = sleep, max_response_bytes
+        self._geocoder = geocoder
         self._client = client or httpx.AsyncClient(timeout=min(30, timeout_seconds), follow_redirects=False)
 
     def __repr__(self) -> str:
@@ -96,6 +100,8 @@ class ApifyIdealistaSource:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+        if self._geocoder is not None:
+            await self._geocoder.aclose()
 
     async def settle(self, context: SourceRunContext) -> None:
         """Cleanup an existing paid run after cancellation/expiry, without fetching listings."""
@@ -117,12 +123,14 @@ class ApifyIdealistaSource:
                     and task.country == "ES" and task.vertical == "real_estate"
                     and task.place_level == "city" and task_kind(task) == "land"
                     and task.constraints.get("deal") == "sale"
+                    and (task.radius_km is None or (0 < task.radius_km <= 100
+                         and self._geocoder is not None and self.dynamic_actor_id))
                     and (self._static_for(task) or self.dynamic_actor_id)
                     and not any(h == "idealista.com" or "idealista.com".endswith("." + h)
                                 for h in task.blocked_hosts))
 
     def _static_for(self, task: QueryTask) -> bool:
-        return bool(self.location_id and self.location_name
+        return bool(not task.suburbs_only and task.radius_km is None and self.location_id and self.location_name
                     and _fold(task.location) == _fold(self.location_name))
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -166,6 +174,7 @@ class ApifyIdealistaSource:
             raise PermanentApifyError("apify_budget_cap")
         run_id = context.run_id
         amount = min(limit, self.max_items)
+        center: tuple[float, float] | None = None
         if self._static_for(task):
             actor = self.actor_id
             actor_input = {"country": "es", "locationName": self.location_name,
@@ -179,6 +188,15 @@ class ApifyIdealistaSource:
             actor_input = {"country": "es", "searchType": "auto", "locationPrefix": task.location,
                            "propertyType": "lands", "operation": "sale",
                            "maxProperties": max(10, amount)}
+            if task.radius_km is not None and not run_id:
+                center = await self._geocoder.resolve(task.location) if self._geocoder else None
+                if center is None:
+                    raise PermanentApifyError("apify_geocode_unavailable")
+                actor_input = {"country": "es", "searchType": "center",
+                               "center": f"{center[0]:.6f},{center[1]:.6f}",
+                               "distance": max(100, min(100_000, round(task.radius_km * 1000))),
+                               "propertyType": "lands", "operation": "sale",
+                               "maxProperties": max(10, amount)}
         if not run_id:
             if not context.launch_allowed:
                 raise PermanentApifyError("apify_launch_uncertain")
@@ -260,7 +278,11 @@ class ApifyIdealistaSource:
         if overflow:
             await costs.record("api", kind="skip", provider="apify", item=actor,
                                code="apify_result_limit", units=overflow, campaign_id=context.campaign_id)
-        rows = [normalize_listing(item, task, municipality=task.location) for item in items[:amount]]
+        if task.radius_km is not None and center is None:
+            center = await self._geocoder.resolve(task.location) if self._geocoder else None
+            if center is None:
+                raise PermanentApifyError("apify_geocode_unavailable")
+        rows = [normalize_listing(item, task, municipality=task.location, center=center) for item in items[:amount]]
         invalid = sum(row is None for row in rows)
         if invalid:
             await costs.record("api", kind="skip", provider="apify", item=actor,
@@ -300,7 +322,23 @@ def _number(value: Any, *, positive: bool = False) -> float | None:
     return result if math.isfinite(result) and (result > 0 if positive else result >= 0) else None
 
 
-def normalize_listing(item: Any, task: QueryTask, *, municipality: str) -> SourceListing | None:
+def _distance_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    lat1, lon1, lat2, lon2 = (math.radians(x) for x in (*a, *b))
+    delta_lat, delta_lon = lat2 - lat1, lon2 - lon1
+    h = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    return 6371.0088 * 2 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _listing_point(item: dict[str, Any]) -> tuple[float, float] | None:
+    try:
+        lat, lon = float(item.get("latitude")), float(item.get("longitude"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return (lat, lon) if math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180 else None
+
+
+def normalize_listing(item: Any, task: QueryTask, *, municipality: str,
+                      center: tuple[float, float] | None = None) -> SourceListing | None:
     """Reject foreign/wrong-transaction rows; normalize only independently supplied facts."""
     if not isinstance(item, dict):
         return None
@@ -312,20 +350,37 @@ def normalize_listing(item: Any, task: QueryTask, *, municipality: str) -> Sourc
         r"/(?:en/|ca/)?inmueble/[0-9]+/?", parts.path
     ):
         return None
+    found_municipality = _fold(_text(item.get("municipality")))
     if (_text(item.get("country")).casefold() != "es"
             or _text(item.get("operation")).casefold() != "sale"
-            or _text(item.get("propertyType")).casefold() not in {"land", "lands"}
-            or _fold(_text(item.get("municipality"))) != _fold(municipality)):
+            or _text(item.get("propertyType")).casefold() not in {"land", "lands"}):
+        return None
+    if task.radius_km is not None:
+        point = _listing_point(item)
+        if center is None or point is None or _distance_km(center, point) > task.radius_km:
+            return None
+    elif found_municipality not in {_fold(municipality), *(_fold(p) for p in task.nearby_places)}:
+        return None
+    if task.suburbs_only and found_municipality == _fold(municipality):
         return None
     price = _number(item.get("price"), positive=True)  # documented as EUR, never inferred from the request
     rooms = _number(item.get("rooms"), positive=True)
     address = ", ".join(filter(None, (_text(item.get("address")),
                                      _text(item.get("municipality")),
                                      _text(item.get("province"))))) or None
+    description = _text(item.get("description"))[:1450 if task.radius_km is not None else 1500]
+    # ``size`` alone is undocumented as plot versus built area. Accept a plot
+    # only when the description labels one and the two independent values agree.
+    reported_size = _number(item.get("size"), positive=True)
+    described_plot = plot_area(description)
+    confirmed_plot = (described_plot if reported_size is not None and described_plot is not None
+                      and abs(described_plot - reported_size) <= reported_size * .10 else None)
+    if task.radius_km is not None:
+        description += "\nГеоданные: © OpenStreetMap contributors"
     return SourceListing(
         url=url, title=(_text(item.get("title")) or "Terreno en venta")[:300],
         price=price, currency="EUR" if price is not None else None,
         rooms=int(rooms) if rooms is not None and rooms.is_integer() and rooms <= 99 else None,
         address=address[:300] if address else None, property_type="landparcel", deal="sale",
-        description=_text(item.get("description"))[:1500],
+        description=description, plot_m2=confirmed_plot,
     )

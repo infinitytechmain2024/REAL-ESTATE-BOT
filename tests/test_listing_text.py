@@ -18,7 +18,7 @@ from bot.web_search.structured import _area, from_jsonld
 
 @pytest.mark.parametrize(("raw", "value"), [
     ("2.000", 2000), ("2.000,5", 2000.5), ("2,5", 2.5), ("1.5", 1.5), ("2 000", 2000), ("12.500", 12500),
-    ("1.250.000", 1_250_000), ("180", 180),
+    ("1.250.000", 1_250_000), ("5,000", 5000), ("1,000.5", 1000.5), ("180", 180),
 ])
 def test_spanish_numbers(raw: str, value: float) -> None:
     assert number(raw) == value
@@ -35,6 +35,7 @@ def test_spanish_numbers(raw: str, value: float) -> None:
     ("Участок 20 соток под Мадридом", 2000, 2000),
     ("Piso de 85 m² en Lavapiés, 3 habitaciones", None, 85),
     ("Se vende terreno en Arganda, 12.500 m2, 375.000 €", 12500, 12500),
+    ("The plot counts as 5,000 m²", 5000, 5000),
 ])
 def test_areas_from_spanish_listings(text: str, plot: float | None, largest: float) -> None:
     assert plot_area(text) == plot

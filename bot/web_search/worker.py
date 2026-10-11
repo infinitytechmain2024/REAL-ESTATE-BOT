@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -189,11 +190,21 @@ def known_hosts_of(campaign: Campaign) -> frozenset[str]:
 
 def query_task(campaign: Campaign) -> QueryTask:
     plan = campaign.plan
+    place = (campaign.spec or {}).get("place") if isinstance(campaign.spec, dict) else None
+    districts = place.get("districts") if isinstance(place, dict) else None
+    nearby = tuple(value.strip() for value in districts[:12] if isinstance(value, str) and value.strip()) if isinstance(districts, list) else ()
+    radius = place.get("radius_km") if isinstance(place, dict) else None
+    # Preserve an out-of-range radius so the provider rejects this task instead
+    # of silently searching only the city.
+    radius = float(radius) if isinstance(radius, int | float) and not isinstance(radius, bool) else None
+    suburbs_only = bool(re.search(r"пригород|передміст|окрестност|околиц|afueras|alrededores|suburb|outskirts",
+                                   campaign.source_text, re.IGNORECASE))
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
                      constraints=dict(plan.constraints), languages=tuple(plan.languages),
                      country_code=plan.country, place_level=place_level_of(campaign.source_text, plan.location),
-                     search_plan=plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country))
+                     search_plan=plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country),
+                     nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only)
 
 
 class WebSearchWorker:

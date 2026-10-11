@@ -52,6 +52,7 @@ from bot.control_plane.rules import (
     RuleInterviewer,
     gazetteer_place,
     geo_ru,
+    next_path,
     options_for,
     parse_budget,
     parse_deal,
@@ -76,6 +77,8 @@ CANCEL_WORDS = frozenset({"отмена", "отменить", "cancel", "ска�
 ENOUGH_WORDS = frozenset({"хватит", "хватит, ищи", "хватит ищи", "ищи", "достаточно", "хватит вопросов", "enough"})
 DEAL_TEXT = dict(DEAL_RU)
 EXAMPLES = {"real_estate": "«квартиры в аренду в Мадриде до 1200 €»", "investors": "«инвесторы для стартапа в Барселоне»"}
+_SUBURB = re.compile(r"пригород|передміст|окрестност|околиц|afueras|alrededores|suburb|outskirts", re.IGNORECASE)
+_RADIUS = re.compile(r"(?<!\d)(\d{1,3}(?:[.,]\d+)?)\s*(?:км|km|kilomet(?:er|re)s?)(?!\w)", re.IGNORECASE)
 # «Изменить»: callback code -> (button title, the TaskSpec field the interviewer is pointed at)
 FIELDS: dict[str, dict[str, tuple[str, str]]] = {
     "real_estate": {
@@ -133,6 +136,10 @@ class Draft:
             if spec.property_type not in (None, "any", "other"):
                 head.append(f"Тип: {PROPERTY_RU[spec.property_type]}.")  # type: ignore[index]
         tail: list[str] = []
+        if spec.place.districts:
+            tail.append("Районы или пригороды: " + ", ".join(spec.place.districts) + ".")
+        if spec.place.radius_km:
+            tail.append(f"Радиус поиска: {spec.place.radius_km:g} км.")
         if spec.must_have:
             tail.append("Главное: " + "; ".join(spec.must_have) + ".")
         if spec.wishes:
@@ -492,12 +499,28 @@ class TaskIntake:
         spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
         turn = await self._turn(draft, mode, spec, message, editing)
         draft.spec = _enrich(self._record_answer(draft, spec, turn.spec, message, editing), mode)
+        if draft.asking == "place.districts" and _SUBURB.search(draft.task):
+            if draft.spec.place.radius_km and draft.spec.place.radius_km != spec.place.radius_km:
+                turn.understood_ru = f"радиус {draft.spec.place.radius_km:g} км"
+            elif draft.spec.place.districts != spec.place.districts:
+                turn.understood_ru = "пригороды: " + ", ".join(draft.spec.place.districts)
         draft.dialogue = [*draft.dialogue, {"role": "user", "text": message[:600]}][-MAX_DIALOGUE:]
         draft.editing = None
         return await self._carry_on(draft, turn, editing=editing)
 
     def _record_answer(self, draft: Draft, before: TaskSpec, after: TaskSpec, message: str, editing: bool) -> TaskSpec:
         """Safety net: the answer to a task-specific or deviation question is kept even if the model dropped it."""
+        if draft.asking == "place.districts" and _SUBURB.search(draft.task) and not editing:
+            if match := _RADIUS.search(message):
+                radius = float(match.group(1).replace(",", "."))
+                if 0 < radius <= 1000:
+                    after.place = before.place.model_copy(update={"radius_km": radius})
+                    return after
+            if message.strip() and _norm(message) not in self._skip_words():
+                names = [p.strip(" .") for p in re.split(r"[,;\n]|\s+и\s+", message) if p.strip(" .")]
+                if names:
+                    after.place = before.place.model_copy(update={"districts": names[:12]})
+                    return after
         if editing or draft.asking not in (TASK_PATH, DEVIATION_PATH) or _norm(message) in self._skip_words():
             return after
         if draft.asking == DEVIATION_PATH:
@@ -534,7 +557,19 @@ class TaskIntake:
         asking = (turn.asking if turn else None) or (missing[0] if missing else None)
         options = turn.options if turn else ()
         choices = turn.choices if turn else ()
-        if question is None and missing and not capped:
+        if asking == "place.districts" and (spec.place.radius_km or spec.place.districts):
+            asking = next_path(spec, mode)
+            question = question_for(spec, asking) if asking else None
+            options = options_for(asking) if asking else ()
+            choices = ()
+        suburb_scope = (mode == "real_estate" and bool(_SUBURB.search(draft.task))
+                        and not spec.place.radius_km and not spec.place.districts
+                        and not spec.is_unspecified("place.districts"))
+        if not missing and not capped and suburb_scope:
+            asking = "place.districts"
+            question = "Какие пригороды или населённые пункты искать? Можно вместо названий указать радиус в км от города."
+            options, choices = (), ()
+        elif question is None and missing and not capped:
             asking, question = missing[0], question_for(spec, missing[0])
             options = options_for(missing[0])
         elif (question is None and not missing and not capped and not editing and mode == "real_estate"

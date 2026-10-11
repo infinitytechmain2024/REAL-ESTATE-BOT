@@ -182,6 +182,9 @@ class QueryTask:
     place_level: PlaceLevel = "city"  # what the task names: a city, or a province/region around it
     search_plan: dict[str, Any] | None = None  # the LLM-written ``SearchPlan`` (bot/campaign/search_plan.py), if any
     blocked_hosts: frozenset[str] = frozenset()  # ``spec.sources.blocked``: never searched or read for this campaign
+    nearby_places: tuple[str, ...] = ()  # districts/towns explicitly named by the requester
+    radius_km: float | None = None  # the user's explicit search radius; never inferred
+    suburbs_only: bool = False
 
     @property
     def text(self) -> str:
@@ -708,6 +711,8 @@ class TemplateQueryGenerator:
         first_term = _KIND_TERMS[kind].get(main, ("",))[0]
         deal_word = _DEAL_TERMS.get(deal, _DEAL_TERMS[None]).get(main, ("",))[0]
         extra = " ".join(budget_words(task, main, kind))
+        for nearby in task.nearby_places[:6]:
+            out.append(GeneratedQuery(" ".join(p for p in (first_term, deal_word, extra, nearby, city) if p), main))
         for portal in portals:
             out.append(GeneratedQuery(" ".join(p for p in (f"site:{portal}", first_term, deal_word, extra, city) if p),
                                       main))

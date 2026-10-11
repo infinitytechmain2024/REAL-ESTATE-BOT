@@ -426,6 +426,7 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL in .env}
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
       # Owners see technical campaign status; everyone else user-safe labels.
       TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}

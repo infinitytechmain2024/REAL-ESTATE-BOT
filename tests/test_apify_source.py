@@ -95,6 +95,46 @@ async def test_user_selected_city_uses_name_resolving_actor_and_rejects_other_mu
     await adapter.aclose()
 
 
+async def test_explicit_radius_uses_center_search_and_filters_results_by_distance():
+    geocoder = AsyncMock()
+    geocoder.resolve.return_value = (40.4168, -3.7038)
+
+    def handler(request):
+        if request.method == "POST":
+            assert request.url.path.endswith("/acts/axlymxp~idealista-api-actor/runs")
+            assert json.loads(request.content) == {
+                "country": "es", "searchType": "center", "center": "40.416800,-3.703800",
+                "distance": 25000, "propertyType": "lands", "operation": "sale", "maxProperties": 10,
+            }
+            return httpx.Response(201, json={"data": {"id": "run3", "status": "SUCCEEDED",
+                                                      "defaultDatasetId": "data3", "usageTotalUsd": .02}})
+        if "actor-runs" in request.url.path:
+            return httpx.Response(200, json={"data": {"usageTotalUsd": .02}})
+        return httpx.Response(200, json=[
+            row(municipality="Alcobendas", latitude=40.54, longitude=-3.64),
+            row(municipality="Madrid", latitude=40.42, longitude=-3.70),
+            row(municipality="Toledo", latitude=39.86, longitude=-4.02),
+            row(municipality="Pozuelo", latitude=None, longitude=None),
+        ])
+
+    adapter = source(handler, dynamic_actor_id="axlymxp/idealista-api-actor", geocoder=geocoder)
+    scope = task(radius_km=25, suburbs_only=True)
+    assert adapter.supports(scope)
+    with source_run_scope(context()):
+        listings = await adapter.search(scope, limit=4)
+    assert len(listings) == 1 and "Alcobendas" in listings[0].address
+    assert "© OpenStreetMap contributors" in listings[0].description
+    geocoder.resolve.assert_awaited_once_with("Madrid")
+    await adapter.aclose()
+
+
+def test_radius_requires_geocoder_and_provider_supported_distance():
+    adapter = source(lambda _: httpx.Response(200), dynamic_actor_id="axlymxp/idealista-api-actor")
+    assert not adapter.supports(task(radius_km=25))
+    adapter._geocoder = AsyncMock()
+    assert not adapter.supports(task(radius_km=125))
+
+
 async def test_settlement_aborts_existing_run_and_never_starts_an_actor():
     checkpoint = context(run_id="run1", launch_allowed=False)
     requests, aborted = [], False
@@ -134,12 +174,23 @@ def test_invalid_price_is_unknown(price):
     assert result.price is None and result.currency is None
 
 
-def test_ambiguous_size_omitted_and_description_preserved():
+def test_explicit_plot_area_corroborated_by_size_and_description_preserved():
     result = normalize_listing(row(plot_m2=2000, constructedArea=2000, rooms=2.5), task(), municipality="Madrid")
-    assert result.area_m2 is None and result.plot_m2 is None and result.rooms is None
+    assert result.area_m2 is None and result.plot_m2 == 2000 and result.rooms is None
     assert result.description == row()["description"]
     assert result.property_type == "landparcel" and result.deal == "sale"
     assert result.price == 100000 and result.currency == "EUR"
+
+
+@pytest.mark.parametrize(("description", "size", "expected"), [
+    ("A plot of 5,000 m² with a house of 180 m²", 4734, 5000),
+    ("Vivienda construida de 180 m²", 2000, None),
+    ("Parcela de 900 m²", 2000, None),
+    ("Plot of 2,500 m², minimum plot size 5,000 m²", 2500, None),
+])
+def test_plot_area_requires_agreement_with_actor_size(description, size, expected):
+    result = normalize_listing(row(description=description, size=size), task(), municipality="Madrid")
+    assert result.plot_m2 == expected
 
 
 async def test_launch_checkpoint_billing_dataset_bounded():

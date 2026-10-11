@@ -21,6 +21,29 @@ from tests.test_user_intake import (
     say,
 )
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("answer", "radius", "districts"), [
+    ("25 км", 25, []),
+    ("Позуэло-де-Аларкон, Алькобендас", None, ["Позуэло-де-Аларкон", "Алькобендас"]),
+])
+async def test_suburb_request_asks_for_scope_before_launch(answer, radius, districts):
+    control, _, _ = plane()
+    await press(control, USER, "mode:real_estate")
+    await say(control, USER, "Купить земельный участок от 2000 м² в пригороде Мадрида")
+    question = await press(control, USER, "task:skip")  # budget is optional
+    assert "Какие пригороды" in question.text
+    reply = await say(control, USER, answer)
+    assert "Какие пригороды" not in reply.text
+    draft = await control.intake.store.get(USER)
+    assert draft is not None and draft.spec is not None
+    assert draft.spec.place.name == "Madrid"
+    assert draft.spec.place.radius_km == radius
+    assert draft.spec.place.districts == districts
+    goal = draft.goal_text()
+    assert ("Радиус поиска" in goal) == bool(radius)
+    assert ("Районы или пригороды" in goal) == bool(districts)
+
 SECRET = "фиолетовый жираф поёт"  # shown back once after a voice note, never after that
 VOICE_TASK = f"{SECRET}, снять квартиру в Мадриде до 1200 евро"
 TECH_NOISE = re.compile(r"cmd-|Queue|queue|/campaign|cancel <id>|окнами|Языки поиска|Цель:|[A-Za-z]{3,}")

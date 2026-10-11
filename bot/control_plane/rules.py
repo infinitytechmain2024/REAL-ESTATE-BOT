@@ -234,7 +234,9 @@ def next_path(spec: TaskSpec, mode: str, *, soft: bool = True) -> str | None:
         return missing[0]
     if not soft:
         return None
-    if mode == "real_estate" and (found := next((p for p in SOFT_ORDER if not spec.answered(p)), None)):
+    if mode == "real_estate" and (found := next((p for p in SOFT_ORDER
+                                                  if not spec.answered(p)
+                                                  and not (p == "place.districts" and spec.place.radius_km)), None)):
         return found
     if not spec.answered(TASK_PATH):
         return TASK_PATH

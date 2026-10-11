@@ -19,7 +19,7 @@ from typing import Literal
 
 AreaKind = Literal["plot", "built"]
 
-_NUMBER = r"\d{1,3}(?:[.   ]\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?"
+_NUMBER = r"\d{1,3}(?:[.,   ]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?"
 _UNIT = (r"m²|m2|mts?2|mts?\.?\s*cuadrados|metros?\s+cuadrados|sq\.?\s*m|sqm"
          r"|hect[aá]reas?|hectares?|ha\b|has\b|га\b|гектар\w*|сот\w*|м²|м2|кв\.?\s*м")
 _AREA = re.compile(rf"(?<![\d.,])({_NUMBER})\s*({_UNIT})", re.IGNORECASE)
@@ -36,11 +36,13 @@ class Area:
 
 
 def number(raw: str) -> float | None:
-    """A Spanish-written number: «2.000» 2000, «2.000,5» 2000.5, «2,5» 2.5, «1.5» 1.5, «2 000» 2000."""
+    """An area number with Spanish dots or English commas as thousands separators."""
     text = raw.replace(" ", " ").replace(" ", " ").strip()
     if re.fullmatch(r"\d{1,3}(?:[. ]\d{3})+(?:,\d+)?", text):
         whole, _, frac = text.partition(",")
         text = re.sub(r"[. ]", "", whole) + (f".{frac}" if frac else "")
+    elif re.fullmatch(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?", text):
+        text = text.replace(",", "")
     elif re.fullmatch(r"\d+,\d+", text):
         text = text.replace(",", ".")
     try:

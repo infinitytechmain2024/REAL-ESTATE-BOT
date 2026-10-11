@@ -113,6 +113,15 @@ def test_template_generator_adds_one_suburb_query_and_the_country() -> None:
                for q in out) == 1
 
 
+def test_template_generator_searches_named_nearby_towns() -> None:
+    from dataclasses import replace
+
+    t = replace(task("terreno", deal="sale"), nearby_places=("Paterna", "Torrent"))
+    texts = [q.text for q in TemplateQueryGenerator().candidates(t)]
+    assert any("Paterna Valencia" in text for text in texts)
+    assert any("Torrent Valencia" in text for text in texts)
+
+
 def test_foreign_markers() -> None:
     assert geo.foreign_markers_hit("ES", "Apartamento en Valencia, Carabobo")
     assert geo.foreign_markers_hit("ES", "Houses in Valencia, CA for 300,000 USD")

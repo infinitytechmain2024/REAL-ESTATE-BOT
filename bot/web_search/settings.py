@@ -49,6 +49,7 @@ class WebSearchSettings(BaseSettings):
     apify_idealista_location_id: str = Field(default="", validation_alias="APIFY_IDEALISTA_LOCATION_ID")
     apify_idealista_timeout_seconds: float = Field(default=120, ge=1, le=120, validation_alias="APIFY_IDEALISTA_TIMEOUT_SECONDS")
     apify_idealista_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_IDEALISTA_MAX_CHARGE_USD")
+    redis_url: str = Field(default="", repr=False, validation_alias="REDIS_URL")
 
     # Query generation: OpenRouter with the analysis key; without it, deterministic templates.
     openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
@@ -178,6 +179,7 @@ class WebSearchSettings(BaseSettings):
         if not self.apify_token:
             log.warning("web_search.apify_disabled", extra={"code": "apify_token_missing"})
             return ()
+        from .geocoding import CachedCityCenters
         from .sources.apify import ApifyIdealistaSource
 
         return (ApifyIdealistaSource(token=self.apify_token, actor_id=self.apify_idealista_actor,
@@ -186,7 +188,8 @@ class WebSearchSettings(BaseSettings):
                                     location_id=self.apify_idealista_location_id,
                                     max_items=self.apify_idealista_max_results,
                                     timeout_seconds=self.apify_idealista_timeout_seconds,
-                                    max_charge_usd=self.apify_idealista_max_charge_usd),)
+                                    max_charge_usd=self.apify_idealista_max_charge_usd,
+                                    geocoder=CachedCityCenters(self.redis_url) if self.redis_url else None),)
 
     def backend_names(self) -> list[str]:
         names: list[str] = []
