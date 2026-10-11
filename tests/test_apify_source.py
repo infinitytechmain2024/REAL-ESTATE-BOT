@@ -188,6 +188,8 @@ def test_explicit_plot_area_corroborated_by_size_and_description_preserved():
     ("Parcela de 900 m²", 2000, None),
     ("Plot of 2,500 m², minimum plot size 5,000 m²", 2500, None),
     ("10,100m2 plot for sale. Residents have a minimum plot size of 10,000m2.", 10100, 10100),
+    ("10,100m2 plot for sale. Residents have a minimum plot size of 10,000m2. "
+     "The buildable area of this plot is: Ground floor: 500m2.", 10100, 10100),
 ])
 def test_plot_area_requires_agreement_with_actor_size(description, size, expected):
     result = normalize_listing(row(description=description, size=size), task(), municipality="Madrid")

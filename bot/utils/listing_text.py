@@ -24,7 +24,7 @@ _UNIT = (r"m²|m2|mts?2|mts?\.?\s*cuadrados|metros?\s+cuadrados|sq\.?\s*m|sqm"
          r"|hect[aá]reas?|hectares?|ha\b|has\b|га\b|гектар\w*|сот\w*|м²|м2|кв\.?\s*м")
 _AREA = re.compile(rf"(?<![\d.,])({_NUMBER})\s*({_UNIT})", re.IGNORECASE)
 _PLOT_WORDS = re.compile(r"(?<!\w)(?:parcela|terreno|solar|finca|suelo|plot|land|участ|земл|ділянк)\w*", re.IGNORECASE)
-_BUILT_WORDS = re.compile(r"(?<!\w)(?:construid|[uú]til|vivienda|edificad|habitable|built|living|house|home|chalet|casa|дом|жил)\w*",
+_BUILT_WORDS = re.compile(r"(?<!\w)(?:construid|[uú]til|vivienda|edificad|habitable|built|living|house|home|chalet|casa|floor|дом|жил)\w*",
                           re.IGNORECASE)
 WINDOW = 40  # characters before a number searched for whose area it is; the nearest word wins
 

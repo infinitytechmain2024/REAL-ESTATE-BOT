@@ -38,6 +38,8 @@ def test_spanish_numbers(raw: str, value: float) -> None:
     ("The plot counts as 5,000 m²", 5000, 5000),
     ("10,100m2 plot for sale. Residents have a minimum plot size of 10,000m2.", 10100, 10100),
     ("180m² built area and a 2,000m² plot", 2000, 2000),
+    ("10,100m2 plot for sale. Minimum plot size 10,000m2. The buildable area of this plot is: Ground floor: 500m2.",
+     10100, 10100),
 ])
 def test_areas_from_spanish_listings(text: str, plot: float | None, largest: float) -> None:
     assert plot_area(text) == plot
