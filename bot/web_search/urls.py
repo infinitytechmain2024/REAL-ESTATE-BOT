@@ -43,6 +43,14 @@ NON_LISTING_HOSTS = frozenset({
     "metrovalencia.es", "renfe.com", "emtvalencia.es",
     # travel and city guides
     "citiesinsider.com", "booking.com", "expedia.com", "lonelyplanet.com",
+    # more dictionaries and translators (a «terreno en venta» query finds their entries)
+    "cambridge.org", "pons.com", "ingles.com", "spanishdict.com", "collinsdictionary.com", "merriam-webster.com",
+    "dictionary.com", "oxfordlearnersdictionaries.com", "deepl.com", "glosbe.com", "bab.la", "larousse.fr",
+    "wordhippo.com", "thefreedictionary.com", "tureng.com", "linguee.es", "diccionario.reverso.net",
+    # science, statistics and land-use data
+    "fao.org", "mdpi.com", "copernicus.eu", "sciencedirect.com", "springer.com", "researchgate.net",
+    "academia.edu", "scielo.org", "dialnet.unirioja.es", "europa.eu", "ine.es", "catastro.minhap.es",
+    "worldbank.org", "statista.com", "jstor.org", "nature.com", "wiley.com", "tandfonline.com",
 })
 # Brand names that exist under many TLDs: ``web2.0calc.es``, ``tripadvisor.co.uk``, ``airbnb.com``.
 NON_LISTING_BRANDS = ("web2.0calc", "tripadvisor", "airbnb")
@@ -279,7 +287,8 @@ def known_portal(host: str, extra: Iterable[str] = ()) -> bool:
     return any(host == n or host.endswith("." + n) for n in names)
 
 
-_RENT_WORDS = frozenset({"alquiler", "alquilar", "rent", "to-rent", "оренда", "аренда", "arenda"})
+_RENT_WORDS = frozenset({"alquiler", "alquilar", "alquileres", "alquilo", "arrendamiento", "arrendar", "rent", "rental",
+                         "rentals", "lloguer", "оренда", "аренда", "arenda"})
 _SALE_WORDS = frozenset({"venta", "comprar", "compra", "sale", "prodazha", "продаж", "продажа"})
 
 
@@ -345,6 +354,12 @@ _SIGNAL_DEAL = re.compile(
 _SIGNAL_ROOM_WORDS = re.compile(
     r"(?<!\w)(?:uno|una|dos|tres|cuatro|cinco|one|two|three|four|five|одна|одну|две|два|три|четыре|пять|дві|чотири)"
     r"\s+(?:hab|dorm|bedroom|bed\b|комнат|кімнат)")
+
+
+def listing_figures(title: str, snippet: str) -> bool:
+    """A search hit that states a listing's figure: a price or an area with its unit (``domain_policy`` soft)."""
+    folded = fold_text(f"{title} {snippet}")
+    return bool(_SIGNAL_PRICE.search(folded) or _SIGNAL_AREA.search(folded))
 
 
 def listing_evidence(title: str, snippet: str) -> bool:

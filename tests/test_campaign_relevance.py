@@ -318,7 +318,7 @@ async def test_fail_closed_without_a_judge_holds_exact_as_unverified() -> None:
     assert store.buckets["a"][0] == "similar" and messenger.findings() == []
     assert (await reasons(store))["a"] == "Не проверено ИИ: сбой проверки"
     match = await judged(runner, cid, store, "a")
-    assert (match.bucket, match.why, match.note) == ("similar", "unverified", "Не проверено ИИ: сбой проверки")
+    assert (match.bucket, match.why, match.note) == ("similar", "ai_failed", "Не проверено ИИ: сбой проверки")
 
 
 async def test_a_paused_judge_leaves_the_finding_unstreamed_and_it_is_sent_once_the_judge_is_back() -> None:
@@ -504,7 +504,7 @@ async def test_every_web_query_for_madrid_names_the_place() -> None:
     # Russian/Ukrainian queries carry the Spanish name in Latin letters and stay a minority.
     cyrillic = [q for q in round_ if q.language in ("ru", "uk")]
     assert cyrillic and all("Madrid" in q.text for q in cyrillic) and len(cyrillic) <= 3 + 1
-    assert "terreno Comunidad de Madrid España" in [q.text for q in round_]
+    assert "terreno Comunidad de Madrid en venta España" in [q.text for q in round_]  # the deal word is added
     for _ in range(3):
         template = await TemplateQueryGenerator().generate(task, used=[], count=12)
         assert all(names_madrid(q.text) for q in template)

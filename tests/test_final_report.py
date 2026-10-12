@@ -14,22 +14,30 @@ from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.final_report import (
     SYSTEM,
     FinalReporter,
+    HeldEvidence,
     OpenRouterRecommender,
+    PlaceScope,
     Tally,
     card_score,
     clean_recommendations,
+    evidence_actions,
     facts_for_model,
     fallback_recommendations,
+    held_evidence_lines,
     parse_recommendations,
+    place_scope_of,
     rank_cards,
     real_estate_sources,
     report_text,
     similar_note,
     tally,
+    task_facts,
+    task_title,
 )
 from bot.campaign.relevance import Relevance, ReviewerJudge
 from bot.campaign.runner import CampaignRunner, RunnerConfig, campaign_request
-from bot.campaign.runs import MemoryRunStore, OutcomeCount, SourceCount
+from bot.campaign.runs import MemoryRunStore, OutcomeCount, SourceCount, StreamFinding
+from bot.campaign.tolerance import Request
 from bot.web_search.models import SiteReport
 from tests.test_campaign_relevance import _seed, needs_db, plot
 from tests.test_campaign_runner import SUMMARY, Clock, FakeMessenger
@@ -135,19 +143,118 @@ def test_outcome_rows_become_a_tally() -> None:
     assert (counts.sent, counts.held, counts.rejected, counts.total) == (6, 6, 3, 17)
 
 
-def test_a_report_warns_when_most_findings_could_not_be_checked(caplog: pytest.LogCaptureFixture) -> None:
-    few = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 9)])
-    assert few.unverified_majority is True  # 9 of 10
+def test_a_report_warns_when_the_ai_check_failed_for_most_findings(caplog: pytest.LogCaptureFixture) -> None:
+    few = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "ai_failed", 9)])
+    assert few.unverified_majority is True  # 9 of 10 never judged
     with caplog.at_level("WARNING"):
         text = report_text("цель", few, [], [], [], [])
-    assert "⚠️ Большинство находок не удалось проверить автоматически (9 из 10): проверьте ключ ИИ и лимиты" in text
+    assert "⚠️ ИИ-проверка не сработала для большинства находок (9 из 10)" in text
+    assert "ИИ-проверка не сработала: 9" in text
     assert "campaign.unverified_majority" in caplog.text
-    exactly = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 9),
+    exactly = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "cost_cap", 9),
                      OutcomeCount("held", "excluded", "place", 50)])  # the rejected do not dilute the share
-    assert exactly.unverified_majority
-    ok = tally([OutcomeCount("sent", "exact", None, 2), OutcomeCount("held", "similar", "unverified", 4),
+    assert exactly.unverified_majority and exactly.ai_failed == 9
+    ok = tally([OutcomeCount("sent", "exact", None, 2), OutcomeCount("held", "similar", "ai_failed", 4),
                 OutcomeCount("held", "similar", "budget", 4)])
-    assert not ok.unverified_majority and "Большинство находок" not in report_text("цель", ok, [], [], [], [])
+    assert not ok.unverified_majority and "большинства находок" not in report_text("цель", ok, [], [], [], [])
+
+
+def test_listings_without_an_area_are_not_blamed_on_the_ai_key() -> None:
+    """The Madrid land run: most held findings had no area (a ≥2000 m² task), which said «проверьте ключ ИИ»."""
+    run = tally([OutcomeCount("held", "similar", "area_unknown", 25), OutcomeCount("held", "similar", "unverified", 6),
+                 OutcomeCount("held", "similar", None, 6)])
+    assert run.held_unverified == 31 and not run.unverified_majority
+    text = report_text("участок · Мадрид · покупка · от 2000 м²", run, [], [], [], [])
+    assert "ключ ИИ" not in text and "большинства находок" not in text
+    assert "площадь не указана: 25" in text and "не удалось подтвердить: 6" in text
+
+
+def test_held_explanation_uses_the_requests_criteria_and_downgrades_old_legal_claims() -> None:
+    def item(n: int, area: str, legal: str) -> HeldEvidence:
+        payload = {"address": "Aravaca, Madrid, Madrid" if n < 7 else "Madrid, Madrid province, ES",
+                   "municipality": "Madrid" if n < 7 else None}
+        return HeldEvidence(StreamFinding(str(n), "Участок", payload=payload, url=f"https://example.com/{n}"), {
+            "prompt": "reviewer-v2", "criteria": [
+                {"name": "area", "verdict": area},
+                {"name": "must_have:под застройку", "verdict": legal},
+                {"name": "must_have:метро 5 минут на машине", "verdict": "unknown"},
+            ]})
+
+    held = [item(i, "pass" if i < 7 else "unknown", "pass" if i < 5 else "unknown") for i in range(8)]
+    lines = held_evidence_lines(held, total=8, task_text="Участок от 2000 м² в пригороде Мадрида, метро на машине",
+                                requested_place="Madrid", min_area=2000)
+    text = "\n".join(lines)
+    assert "У 8 из 8 не подтверждено: метро 5 минут на машине" in text
+    assert "У 8 из 8 не подтверждено: под застройку" in text
+    assert "У 7 из 8 по объявлению проходит условие: площадь от 2000 м²" in text
+    assert "У одного из 8 не подтверждено: площадь" in text
+    assert "У 7 из 8 явно указан муниципалитет Madrid" in text
+    assert "https://example.com" not in text  # held cards still need the person's approval
+    actions = evidence_actions(held)
+    assert any("маршрут" in action and "8 вариантов" in action for action in actions)
+    assert any("документы о разрешённой застройке" in action for action in actions)
+
+    flat = [HeldEvidence(StreamFinding("x", "Квартира"), {"prompt": "reviewer-v3", "criteria": [
+        {"name": "area", "verdict": "pass"}, {"name": "must_have:лифт", "verdict": "unknown"}]})]
+    flat_text = "\n".join(held_evidence_lines(flat, total=1, task_text="Квартира в Валенсии с лифтом"))
+    assert "лифт" in flat_text and "метро" not in flat_text and "муниципалитет" not in flat_text
+
+
+def test_suburb_scope_preserves_the_approved_boundary_without_guessing_from_address() -> None:
+    scope = place_scope_of({"place": {"radius_km": 25, "districts": []}},
+                           "Участок в пригороде Мадрида", "Madrid")
+    assert scope == PlaceScope("Madrid", True, 25, ())
+    assert "радиус 25 км" in task_title(Request(location="Madrid"), scope=scope)
+    unresolved = place_scope_of({}, "Участок в пригороде Мадрида", "Madrid")
+    assert unresolved.unresolved
+    assert "границы не уточнены" in task_title(Request(location="Madrid"), scope=unresolved)
+    held = [HeldEvidence(StreamFinding("x", "Участок", payload={"address": "Aravaca, Madrid, Madrid"}),
+                         {"criteria": [{"name": "place", "verdict": "unknown"}]})]
+    text = "\n".join(held_evidence_lines(held, total=1, scope=unresolved))
+    assert "Границы пригородного поиска не уточнены" in text
+    assert "явно указан муниципалитет" not in text
+    assert "адрес содержит Madrid" in text and "пригородность по такому адресу не доказана" in text
+
+
+def test_held_report_distinguishes_unknown_from_known_failure() -> None:
+    held = [HeldEvidence(StreamFinding("x", "Участок"), {"criteria": [
+        {"name": "area", "verdict": "fail"}, {"name": "must_have:метро", "verdict": "unknown"}]})]
+    text = "\n".join(held_evidence_lines(held, total=1))
+    assert "не подтверждено: метро" in text
+    assert "явно не выполнено: площадь" in text
+
+
+def test_held_explanation_marks_missing_legacy_matrices_and_partial_sample() -> None:
+    held = [HeldEvidence(StreamFinding("x", "Земля"), None)]
+    assert "Нет сохранённой проверки" in "\n".join(held_evidence_lines(held, total=1))
+    sample = [HeldEvidence(StreamFinding("x", "Земля"), {"criteria": [
+        {"name": "area", "verdict": "unknown"}]})]
+    text = "\n".join(held_evidence_lines(sample, total=5))
+    assert "Среди 1 предварительного варианта" in text and "Ещё 4 варианта" in text
+
+
+def test_the_report_shows_the_money_the_skips_and_the_model_errors() -> None:
+    from bot.campaign.final_report import cost_lines
+    from bot.utils.costs import CostSummary
+
+    spent = CostSummary({"llm": 0.9, "scrape": 0.15, "search": 0.0}, {},
+                        {"llm:http_401": 3, "llm:model_request_refused_400": 1, "api:apify_http_429": 2},
+                        {"llm:prefilter_deal": 14, "llm:prefilter_area": 40})
+    lines = cost_lines(spent, budget=1.0)
+    assert lines[0] == "💶 Расход: $1.05 из $1.00 (ИИ $0.90 · Scrape API $0.15)"
+    assert lines[1].startswith("⛔ Бюджет прогона исчерпан")
+    assert lines[2] == "Отсеяно до ИИ (без вызовов ИИ): 54 — участок меньше нужного 40, другой тип сделки 14"
+    assert lines[3] == "⚠️ Ошибки ИИ: http_401 ×3, model_request_refused_400 ×1"
+    assert lines[4] == "⚠️ Ошибки API порталов: apify_http_429 ×2"
+    assert cost_lines(None) == [] and cost_lines(CostSummary(), 0) == ["💶 Расход: $0.00"]
+    text = report_text("цель", tally([OutcomeCount("sent", "exact", None, 1)]), [], [], [], [], costs=lines)
+    assert "💶 Расход: $1.05 из $1.00" in text and "⚠️ Ошибки ИИ: http_401 ×3" in text
+    assert "⚠️ Ошибки API порталов: apify_http_429 ×2" in text
+    separate = cost_lines(CostSummary(by_stage={"api": 0.20, "scrape": 0.10}))
+    assert separate == ["💶 Расход: $0.30 (API порталов $0.20 · Scrape API $0.10)"]
+    estimated = cost_lines(CostSummary(by_stage={"scrape": 0.05}, estimates={"scrape": 0.05}))
+    assert estimated == ["💶 Расход: $0.05 (Scrape API $0.05)",
+                         "Из них оценка без подтверждения провайдера: $0.05"]
     edge = tally([OutcomeCount("sent", "exact", None, 1), OutcomeCount("held", "similar", "unverified", 4)])
     assert not edge.unverified_majority, "exactly 80 % is not more than 80 %"
 
@@ -196,7 +303,8 @@ async def test_the_user_gets_one_report_with_counts_reasons_top_sites_and_advice
     assert messenger.summaries() == []  # a normal user gets no technical summary
     lines = text.splitlines()
     assert lines[:2] == [REPORT, "🎯 Валенсия · покупка · до 200 000 € · от 2 комн."]
-    assert "Отправлено вам: 4" in lines and "Похожие, не показаны: 2 (чуть не подошли)" in lines
+    assert "Подтверждённых совпадений: 4." in lines
+    assert "Отправлено вам: 4" in lines and "Похожие, не показаны: 2 (соответствие всем условиям не подтверждено)" in lines
     assert "Отклонено: 3" in lines and "Повторы одного объекта на разных сайтах: 1" in lines
     assert "• другой тип сделки (аренда вместо покупки или наоборот) — 1" in lines
     assert "• не тот город или район — 1" in lines
@@ -314,7 +422,7 @@ async def test_an_empty_search_still_reports_what_could_not_be_read() -> None:
     await finish(campaigns, store, runner, clock, cid)
     await runner.step(cid)
     [text] = reports_of(messenger)
-    assert "Подходящих объявлений не нашлось." in text and "Не удалось прочитать:" in text
+    assert "Объявлений для оценки не получено." in text and "Не удалось прочитать:" in text
     assert "Лучшие варианты" not in text and "Почему отклонено" not in text
 
 
@@ -472,6 +580,33 @@ def test_recommendations_never_ask_to_change_the_deal_type_property_type_or_city
         "Поднимите бюджет на 10 %: 5.", "Добавьте район: 3 варианта."]
 
 
+def test_only_exact_search_does_not_recommend_relaxing_confirmed_requirements() -> None:
+    task = task_facts(Request(location="Madrid", min_area=2000, budget_pct=0, area_pct=0))
+    assert task["only_exact"] is True
+    facts = {"task": task, "counts": {"sent_exact": 0, "held_similar": 8},
+             "rejected_by_reason": {"area": 8, "place": 3, "budget": 2},
+             "unreadable_sites": [], "sites": []}
+    model = ["Снизьте площадь на 10 %: 8 вариантов меньше.",
+             "Рассмотрите соседние районы: 3 варианта вне Мадрида.",
+             "Повторите точный поиск через 3 дня: 0 вариантов отправлено."]
+    tips = clean_recommendations(model, facts)
+    assert "Повторите точный поиск через 3 дня: 0 вариантов отправлено." in tips
+    assert all("Снизьте" not in tip and "соседние районы" not in tip for tip in tips)
+    assert all("площадь на 10 %" not in tip for tip in fallback_recommendations(facts))
+
+
+async def test_only_exact_final_report_uses_safe_advice_and_does_not_invite_similar_variants() -> None:
+    model = Advice("Снизьте площадь на 10 %: 8 вариантов.")
+    text = await FinalReporter(model).build(
+        "участок · Мадрид · от 2000 м²", Request(location="Madrid", min_area=2000, budget_pct=0, area_pct=0),
+        [OutcomeCount("held", "similar", "unverified", 8)], [], [], [],
+        offers={"similar": "asked"})
+    assert model.facts == []
+    assert "Снизьте площадь" not in text
+    assert "Похожие можно открыть" not in text
+    assert "Похожих вариантов: 8" in text
+
+
 async def test_the_model_prompt_forbids_changing_the_deal_type_and_the_report_drops_such_advice() -> None:
     assert "NEVER advise changing the deal type" in SYSTEM
     advice = Advice("Смягчите требование по типу сделки: 33 варианта отклонены.", "Поднимите бюджет на 10 %: 2 дороже.",
@@ -525,6 +660,59 @@ def test_a_report_with_nothing_sent_says_how_to_get_the_similar_ones() -> None:
     assert similar_note(Tally(2, 0, 3, 0, 0, 0, {}), asked) is None and similar_note(Tally(), asked) is None
     text = report_text("Цель", counts, [], [], [], [], 0, similar_note(counts, asked))
     lines = text.splitlines()
-    held = lines.index("Похожие, не показаны: 3 (чуть не подошли)")
+    held = lines.index("Похожие, не показаны: 3 (соответствие всем условиям не подтверждено)")
     assert lines[held - 1] == "Отправлено вам: 0" and lines[held + 1] == "Похожие можно открыть кнопкой «Одобрить» выше"
     assert "кнопкой" not in report_text("Цель", Tally(2, 0, 3, 0, 0, 0, {}), [], [], [], [], 0, None)
+
+
+QUALITY_CRITERIA = (
+    ("area", "площадь", "площадь от 2000 м²"),
+    ("budget", "цена", "цена"),
+    ("must_have:под застройку", "под застройку", "под застройку"),
+    ("must_have:метро 5 минут на машине", "метро 5 минут на машине", "метро 5 минут на машине"),
+    ("must_have:лифт", "лифт", "лифт"),
+)
+
+
+@pytest.mark.parametrize("criterion,unknown_label,pass_label", QUALITY_CRITERIA)
+@pytest.mark.parametrize("verdict", ("pass", "fail", "unknown"))
+@pytest.mark.parametrize("suburb", (False, True))
+async def test_report_uses_the_actual_criterion_verdict_and_geographic_scope(
+    criterion: str, unknown_label: str, pass_label: str, verdict: str, suburb: bool,
+) -> None:
+    """Thirty task/status/scope cases: a claim follows the saved matrix and geographic boundary."""
+    is_flat = criterion == "must_have:лифт"
+    request = Request(location="Madrid", min_area=None if is_flat else 2000,
+                      amount=200000 if criterion == "budget" else None,
+                      property_type="apartment" if is_flat else "land")
+    scope = PlaceScope("Madrid", suburb, 25 if suburb else None)
+    requested_detail = {
+        "area": "от 2000 м²", "budget": "до 200000 €", "must_have:под застройку": "под застройку",
+        "must_have:метро 5 минут на машине": "в 5 минутах от метро на машине", "must_have:лифт": "с лифтом",
+    }[criterion]
+    task = (f"Купить {'квартиру' if is_flat else 'участок'} {requested_detail} "
+            f"{'в пригороде' if suburb else 'в'} Мадрида")
+    finding = StreamFinding("held-1", "Участок", payload={"address": "Aravaca, Madrid, Madrid"},
+                            url="https://example.com/private-card")
+    held = [HeldEvidence(finding, {"prompt": "reviewer-v3", "criteria": [
+        {"name": criterion, "verdict": verdict}]})]
+    text = await FinalReporter().build(
+        task_title(request, scope=scope), request, [OutcomeCount("held", "similar", "unverified", 1)],
+        [], [], [], task_text=task, held=held, scope=scope,
+    )
+
+    assert "Подтверждённых совпадений нет" in text
+    assert "https://example.com/private-card" not in text
+    if suburb:
+        assert "радиус 25 км" in text
+        assert "пригородность по такому адресу не доказана" in text
+    else:
+        assert "радиус 25 км" not in text
+        assert "пригородность по такому адресу не доказана" not in text
+    if verdict == "pass":
+        assert f"проходит условие: {pass_label}" in text
+    elif verdict == "fail":
+        assert f"явно не выполнено: {unknown_label}" in text
+    else:
+        assert f"не подтверждено: {unknown_label}" in text
+    assert len(text) <= 3900

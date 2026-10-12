@@ -6,7 +6,8 @@ import re
 
 import pytest
 
-from bot.control_plane.intake import DRAFT_KEYBOARD, SEARCH_KEYBOARD, TASK_KEYBOARD
+from bot.campaign.spec import TaskSpec
+from bot.control_plane.intake import DRAFT_KEYBOARD, SEARCH_KEYBOARD, TASK_KEYBOARD, Draft
 from bot.control_plane.models import IncomingMessage, Reply
 from tests.test_user_intake import (
     OPERATOR,
@@ -20,6 +21,42 @@ from tests.test_user_intake import (
     press,
     say,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("answer", "radius", "districts"), [
+    ("25 км", 25, []),
+    ("Позуэло-де-Аларкон, Алькобендас", None, ["Позуэло-де-Аларкон", "Алькобендас"]),
+])
+async def test_suburb_request_asks_for_scope_before_launch(answer, radius, districts):
+    control, _, _ = plane()
+    await press(control, USER, "mode:real_estate")
+    await say(control, USER, "Купить земельный участок от 2000 м² в пригороде Мадрида")
+    question = await press(control, USER, "task:skip")  # budget is optional
+    assert "Какие пригороды" in question.text
+    reply = await say(control, USER, answer)
+    assert "Какие пригороды" not in reply.text
+    draft = await control.intake.store.get(USER)
+    assert draft is not None and draft.spec is not None
+    assert draft.spec.place.name == "Madrid"
+    assert draft.spec.place.radius_km == radius
+    assert draft.spec.place.districts == districts
+    goal = draft.goal_text()
+    assert ("Радиус поиска" in goal) == bool(radius)
+    assert ("Районы или пригороды" in goal) == bool(districts)
+
+
+def test_unrelated_answer_does_not_close_a_repeated_task_question():
+    control, _, _ = plane()
+    question = "Какой правовой статус участка вам подходит?"
+    draft = Draft(USER, USER, asking="context.answers", dialogue=[{"role": "assistant", "text": question}])
+    before = TaskSpec(mode="real_estate")
+    after = before.merged({"must_have": ["коммуникации"],
+                           "context": {"answers": [{"question": question, "answer": "Нужны коммуникации"}]}})
+    result = control.intake._record_answer(draft, before, after, "Нужны коммуникации", False,
+                                           next_question=question)
+    assert result.must_have == ["коммуникации"]
+    assert result.context.answers == []
 
 SECRET = "фиолетовый жираф поёт"  # shown back once after a voice note, never after that
 VOICE_TASK = f"{SECRET}, снять квартиру в Мадриде до 1200 евро"

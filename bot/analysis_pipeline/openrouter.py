@@ -9,6 +9,8 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from bot.utils import costs
+
 from .models import AnalysisResult, Evidence
 
 log = logging.getLogger(__name__)
@@ -97,7 +99,10 @@ INSTRUCTIONS = (
     "location: the most precise place stated (town and district, e.g. 'Boadilla del Monte, Madrid'). "
     "country: the property's country; infer it only from a stated town, region or the site's country (an "
     "idealista.com/fotocasa.es page is in Spain). "
-    "area_m2: convert sotki (1 сотка = 100 m2) and hectares (1 ha = 10000 m2). "
+    "area_m2: convert sotki (1 сотка = 100 m2) and hectares (1 ha = 10000 m2). Spanish writes thousands with a dot "
+    "and decimals with a comma: '2.000 m²' is 2000, '2,5 ha' is 25000. When the text gives both a built area "
+    "(construida, útil, vivienda) and a plot area (parcela, terreno, solar), area_m2 is the PLOT area if the property "
+    "is land or the task_hint asks for land, else the built area; a JSON-LD plot_m2 is the plot area. "
     "price_amount: the price of this property only, never a price range of many ads. "
     "district, address, floor (integer, 0 = ground), listing_date (YYYY-MM-DD) and condition (new, good, needs_renovation) "
     "only when stated, else null; features: a lower-case canonical list such as terraza, ascensor, garaje, piscina, exterior, "
@@ -301,7 +306,8 @@ def _digit_text(text: str) -> str:
 
 
 def _number_present(value: float, text: str) -> bool:
-    return re.search(rf"(?<![\d]){int(value)}(?!\d)", text) is not None
+    """``value`` as a number of its own in ``text``: not the «2» of «m2», not a digit of a longer number."""
+    return re.search(rf"(?<![\w.,]){int(value)}(?![\d])", text) is not None
 
 
 def verify_facts(result: AnalysisResult, evidence: Evidence) -> AnalysisResult:
@@ -413,6 +419,7 @@ class OpenRouterAnalyzer:
             "model": self.model,
             "temperature": 0,
             "max_tokens": 1800,
+            "usage": costs.USAGE,
             "response_format": {"type": "json_schema", "json_schema": {"name": "analysis_result", "strict": True, "schema": RESULT_SCHEMA}},
             "messages": [
                 {"role": "system", "content": SYSTEM},
@@ -436,6 +443,7 @@ class OpenRouterAnalyzer:
                 log.warning("analysis.request_refused %s", response.status_code)
                 raise ValueError(f"model_request_refused_{response.status_code}")
             response.raise_for_status()
+        await costs.llm_response(self.model, response)
         try:
             content = response.json()["choices"][0]["message"]["content"]
             return verify_facts(parse_result(content), evidence)

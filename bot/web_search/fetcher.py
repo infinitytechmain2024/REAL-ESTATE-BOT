@@ -58,6 +58,7 @@ class FetchError(RuntimeError):
 class FetchedPage:
     url: str       # the final URL after redirects
     html: str
+    scrape_credits: int | None = None  # provider-reported cost, when the unlocker supplies it
 
 
 async def resolve_public_addresses(host: str) -> list[str]:

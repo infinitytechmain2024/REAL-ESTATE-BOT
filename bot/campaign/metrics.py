@@ -25,6 +25,7 @@ u as (
     select count(*) filter (where state = 'fetched' and layer = 'http' and coalesce(detail, '') <> 'search_snippet')::int as pages_http,
            count(*) filter (where state = 'fetched' and layer = 'render' and coalesce(detail, '') <> 'search_snippet')::int as pages_render,
            count(*) filter (where state = 'fetched' and layer = 'scrape' and coalesce(detail, '') <> 'search_snippet')::int as pages_scrape,
+           count(*) filter (where state = 'fetched' and layer = 'api' and coalesce(detail, '') <> 'search_snippet')::int as pages_api,
            count(*) filter (where state = 'failed')::int as pages_failed
       from web_campaign_urls where campaign_id = $1::uuid),
 f as (
@@ -38,14 +39,14 @@ x as (
     select coalesce(jsonb_object_agg(why, n), '{}'::jsonb) as excluded
       from (select coalesce(why, 'ai') as why, count(*)::int as n from campaign_findings
              where campaign_id = $1::uuid and bucket = 'excluded' and state <> 'duplicate' group by 1) e)
-insert into campaign_metrics (campaign_id, queries, results, pages_http, pages_render, pages_scrape, pages_failed,
+insert into campaign_metrics (campaign_id, queries, results, pages_http, pages_render, pages_scrape, pages_api, pages_failed,
                               findings, exact, "similar", other, excluded, duplicates, updated_at)
-select $1::uuid, q.queries, q.results, u.pages_http, u.pages_render, u.pages_scrape, u.pages_failed,
+select $1::uuid, q.queries, q.results, u.pages_http, u.pages_render, u.pages_scrape, u.pages_api, u.pages_failed,
        f.findings, f.exact, f."similar", f.other, x.excluded, f.duplicates, now()
   from q, u, f, x
 on conflict (campaign_id) do update
    set queries = excluded.queries, results = excluded.results, pages_http = excluded.pages_http,
-       pages_render = excluded.pages_render, pages_scrape = excluded.pages_scrape,
+       pages_render = excluded.pages_render, pages_scrape = excluded.pages_scrape, pages_api = excluded.pages_api,
        pages_failed = excluded.pages_failed, findings = excluded.findings, exact = excluded.exact,
        "similar" = excluded."similar", other = excluded.other, excluded = excluded.excluded,
        duplicates = excluded.duplicates, updated_at = now()
@@ -70,10 +71,11 @@ class CampaignMetrics:
     excluded: dict[str, int] = field(default_factory=dict)  # reason category -> count
     duplicates: int = 0
     updated_at: datetime | None = None
+    pages_api: int = 0
 
     @property
     def pages_read(self) -> int:
-        return self.pages_http + self.pages_render + self.pages_scrape
+        return self.pages_http + self.pages_render + self.pages_scrape + self.pages_api
 
     @property
     def rejected(self) -> int:
@@ -90,6 +92,7 @@ def metrics_of(row: Any) -> CampaignMetrics:
     return CampaignMetrics(
         campaign_id=str(row["campaign_id"]), queries=row["queries"], results=row["results"],
         pages_http=row["pages_http"], pages_render=row["pages_render"], pages_scrape=row["pages_scrape"],
+        pages_api=row["pages_api"],
         pages_failed=row["pages_failed"], findings=row["findings"], exact=row["exact"], similar=row["similar"],
         other=row["other"], excluded={str(k): int(v) for k, v in (excluded or {}).items()},
         duplicates=row["duplicates"], updated_at=row["updated_at"])
@@ -107,6 +110,9 @@ REASONS: dict[str, str] = {
     "criteria": "не выполнены обязательные условия",
     "kind": "не объявление (каталог, статистика, поиск жилья)",
     "unverified": "не удалось подтвердить",
+    "area_unknown": "площадь не указана",
+    "ai_failed": "ИИ-проверка не сработала",
+    "cost_cap": "бюджет прогона исчерпан",
     "ai": "не подходит по смыслу",
 }
 _SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "RUB": "₽", "UAH": "₴"}
@@ -154,7 +160,8 @@ def report_text(metrics: CampaignMetrics, title: str = "", *, technical: bool = 
         pages = f"Страниц прочитано: {metrics.pages_read}"
         if metrics.pages_read:
             layers = [f"{name} {n}" for name, n in (("HTTP", metrics.pages_http), ("браузер", metrics.pages_render),
-                                                    ("API", metrics.pages_scrape)) if n]
+                                                    ("Scrape API", metrics.pages_scrape),
+                                                    ("API порталов", metrics.pages_api)) if n]
             pages += f" ({' · '.join(layers)})"
         if metrics.pages_failed:
             pages += f" · не открылось: {metrics.pages_failed}"

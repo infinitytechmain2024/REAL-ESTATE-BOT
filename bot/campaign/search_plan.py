@@ -25,6 +25,8 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from bot.utils import costs
+
 from .models import CampaignPlan
 from .spec import TaskSpec
 
@@ -387,6 +389,7 @@ class OpenRouterSearchPlanner(SearchPlanner):
             "model": self.model,
             "temperature": 0.3,
             "max_tokens": 6000,
+            "usage": costs.USAGE,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": SYSTEM},
@@ -405,7 +408,9 @@ class OpenRouterSearchPlanner(SearchPlanner):
             response = await asyncio.wait_for(call(), timeout=self._deadline)
             if response.status_code != 200:
                 log.warning("search_plan.http_error %s", response.status_code)
+                await costs.error("llm", f"http_{response.status_code}", item=self.model)
                 return None
+            await costs.llm_response(self.model, response)
             parsed = parse_plan(response.json()["choices"][0]["message"]["content"])
         except (httpx.TimeoutException, TimeoutError):
             log.warning("search_plan.timeout")

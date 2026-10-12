@@ -59,7 +59,8 @@ _ACTIVE_STATES = {"planned": "discovery", "discovering": "discovery",
 _TERMINAL_STATES = frozenset({"completed", "cancelled", "failed"})
 
 
-LAYER_NAMES = {"http": "напрямую", "browser": "браузер", "api": "API"}  # owners' technical lines
+LAYER_NAMES = {"http": "напрямую", "browser": "браузер", "api": "API портала",
+               "unlocker": "Scrape API"}  # owners' technical lines
 
 
 def safe_url(url: str | None) -> str | None:

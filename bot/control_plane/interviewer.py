@@ -25,7 +25,7 @@ from bot.campaign.spec import ASKABLE_PATHS, TaskSpec
 
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-PROMPT_VERSION = "interview-v2"
+PROMPT_VERSION = "interview-v3"
 MAX_DIALOGUE_TURNS = 12
 MAX_TURN_CHARS = 600
 MAX_MESSAGE_CHARS = 2000
@@ -90,6 +90,9 @@ RULES
 5. If a word or name is unclear, looks garbled by voice recognition or could mean several things, do NOT guess
    and do not put it into the spec: ask to confirm, offering your best reading ("«в БУД» — это Убуд на Бали?").
    A word in Ukrainian, Spanish or English is translated, not transliterated: «вілли» = виллы.
+   If the answer does not address the question you just asked, preserve any useful new facts but ask the
+   unanswered question again. Do not store the off-topic answer as an answer to that question, and do not
+   advance to the deviation question until material task-specific questions are actually answered or skipped.
 6. The interview has THREE PARTS, in this order. A person who gave everything in one message is still interviewed:
    the questions below are the point of the interview. Never set done=true before part C is answered.
    A. HARD FIELDS (rule 3): one question at a time, as above.
@@ -98,7 +101,10 @@ RULES
       with asking="context.answers". Never ask what the spec or the dialogue already answers. Think like an agent:
       - flat or house for sale: floor, lift, terrace/balcony, condition, new build or resale, to live in or to rent out,
         mortgage, timeline, plot size / pool / parking (house);
-      - land: buildable classification, utilities, road access, what the person wants to build, size;
+      - land: legal buildability, utilities, road access, what the person wants to build, size;
+        distinguish Spanish suelo urbano, urbanizable and rústico correctly; urbanizable does not mean
+        already urbanized or automatically licensed to build. If the user already requires a buildable plot,
+        ask only what legal status or proof they would accept, if that distinction affects judging results.
       - rent: lease term, pets, furnished, move-in date, who will live there;
       - investors (the person looks for money): stage of the project, total raise, equity or debt, timeline, track
         record, what the investor gets; (the person invests): sectors, stage, ticket, how involved, geography;

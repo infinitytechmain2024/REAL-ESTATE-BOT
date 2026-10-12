@@ -190,7 +190,16 @@ def _listing(node: dict[str, Any], page_url: str) -> dict[str, Any] | None:
         currency = _get(parts, "priceCurrency") or spec.get("priceCurrency")
         if isinstance(currency, str) and 3 <= len(currency.strip()) <= 4:
             listing["currency"] = currency.strip().upper()
-    area = _area(_get(parts, "floorSize", "size", "area", "lotSize"))
+    # The building's area and the plot's are different facts: a house «180 m² on a 2 500 m² plot» must not be
+    # measured as 180 against a plot request. ``area_m2`` is the built area (or the plot when it is all there is,
+    # or when the listing is a plot of land); ``plot_m2`` is the plot whenever the page states one.
+    area = _area(_get(parts, "floorSize", "size", "area"))
+    plot = _area(_get(parts, "lotSize"))
+    land = any("landparcel" in _types(part) for part in parts)
+    if plot:
+        listing["plot_m2"] = plot
+    if plot and (land or not area):
+        area = plot
     if area:
         listing["area_m2"] = area
     rooms = _amount(_get(parts, "numberOfRooms", "numberOfBedrooms", "numberOfBedroomsTotal"))
@@ -210,7 +219,7 @@ def _listing(node: dict[str, Any], page_url: str) -> dict[str, Any] | None:
     if description:
         listing["description"] = description
     # A bare «Product: name» is a shop item, not a listing: keep only what carries a real-estate fact.
-    if not any(k in listing for k in ("price", "area_m2", "rooms", "address")):
+    if not any(k in listing for k in ("price", "area_m2", "plot_m2", "rooms", "address")):
         return None
     return listing
 
@@ -285,7 +294,7 @@ def _area(value: Any) -> float | None:
         return None
     if unit in ("ftk", "sqft", "ft2") or "ft" in unit:
         return round(number * 0.092903, 1)
-    if unit in ("har", "ha") or unit.endswith(" ha"):
+    if unit in ("har", "ha") or re.search(r"\dha$|\sha$|hect", unit):
         return round(number * 10_000, 1)
     return number
 

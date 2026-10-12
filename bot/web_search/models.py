@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .sources.base import SourceListing
 
 UrlKind = Literal["listing", "index", "unknown"]
 RunState = Literal["searching", "done", "stopped"]
@@ -18,7 +21,8 @@ SEARCH_RESULT_NOTE = "(Страница сайта не прочитана: эт
 class WebProgress:
     """The web stage's live numbers for one campaign (in memory, kept by the worker; see ``WebSearchWorker.progress``).
 
-    ``layer``: ``http`` | ``browser`` | ``api`` (the one reading ``host`` now); ``read``: pages read from the sites;
+    ``layer``: ``http`` | ``browser`` | ``api`` (structured source) | ``unlocker`` (HTML provider);
+    ``read``: pages read from the sites;
     ``found``: pages that are listings (a search-result card counts); ``portals_done``/``portals_total``: sites with
     nothing left to read / sites known so far; ``refusals``: the current host's consecutive refusals per layer
     (owners only); ``finished``: the stage has ended; ``url``: the page being read now (the status line links to it).
@@ -69,6 +73,7 @@ class SiteReport:
     from_search: int = 0
     refused: int = 0
     unverified: bool = False   # the site asked for a person's check and nobody passed it («проверку никто не прошёл»)
+    read_api: int = 0  # actual structured API reads, a subset of read
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +159,8 @@ class PageResult:
     contacted: robots.txt, a blocked site) and the post is the search engine's title and snippet.
     ``via`` "index": the same, but the post was built from the listing data (JSON-LD ``ItemList``) of the
     index page the link was found on.
+    ``via`` "api": structured listing facts from a listing provider, counted as a real read.
+    API imports may reclaim failed URLs and leave HTML refusal counters unchanged.
     """
 
     ok: bool
@@ -163,10 +170,11 @@ class PageResult:
     text: str = ""
     error: str | None = None
     query: str | None = None
-    via: Literal["page", "search", "index"] = "page"
+    via: Literal["page", "search", "index", "api"] = "page"
     # the layer that produced this result or its error: "http", "render" (browser), "scrape" (unlocker API),
-    # "none" (the site was never asked). A refusal counts against that layer's block of the host only.
-    layer: Literal["http", "render", "scrape", "none"] = "http"
+    # "api" (structured listing provider), "none" (the site was never asked).
+    # Provider results do not count as HTTP/browser refusals.
+    layer: Literal["http", "render", "scrape", "none", "api"] = "http"
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,3 +189,17 @@ class HostVerification:
     state: Literal["none", "open", "verified", "unsolved"] = "none"
     job_id: str | None = None
     solved_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRun:
+    """Durable source checkpoint: a claimed launch is never launched a second time."""
+
+    campaign_id: str
+    name: str
+    state: Literal["starting", "running", "ready", "completed", "failed"] = "starting"
+    run_id: str | None = None
+    dataset_id: str | None = None
+    listings: tuple[SourceListing, ...] = ()
+    import_offset: int = 0
+    error_code: str | None = None

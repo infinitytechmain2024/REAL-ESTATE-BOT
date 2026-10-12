@@ -191,7 +191,7 @@ async def test_round_uses_plan_queries_first_then_the_generators() -> None:
     again = await FallbackQueryGenerator(None).generate(task, used=[q.text for q in out[:3]], count=3)
     assert not {q.text for q in again} & {q.text for q in out[:3]}  # never repeats a used plan query
     plain = await FallbackQueryGenerator(ListGenerator(["casa Valencia centro"])).generate(task_with(None), used=[], count=1)
-    assert [q.text for q in plain] == ["casa Valencia centro España"]
+    assert [q.text for q in plain] == ["casa Valencia centro en venta España"]
 
 
 def test_portals_follow_the_plan_priority_then_the_kind_list_and_blocked_are_removed() -> None:
@@ -253,7 +253,7 @@ async def test_worker_falls_back_to_todays_behaviour_when_the_planner_fails_or_i
         w = web_worker(campaigns, store, FakeSearcher(), ListGenerator(["terreno Boadilla Valencia"]), maker)
         await run_until_done(w, cid)
         assert (await campaigns.get(cid)).plan.search_plan is None
-        assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Valencia España"]
+        assert [q.text for q in store.queries[cid]] == ["terreno Boadilla Valencia en venta España"]
         assert not store.urls.get(cid)
     campaigns = MemoryCampaignStore()  # a goal without a spec has nothing to plan from
     cid = await make_campaign(campaigns, spec())

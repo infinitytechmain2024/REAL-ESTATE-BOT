@@ -8,10 +8,11 @@ import httpx
 import pytest
 
 from bot.campaign import MemoryCampaignStore
+from bot.utils import costs
 from bot.web_search.fetcher import FetchedPage, FetchError
 from bot.web_search.models import WebProgress
 from bot.web_search.render import RenderedPage
-from bot.web_search.scrape_api import ScrapeApiClient
+from bot.web_search.scrape_api import ScrapeApiClient, ScrapeBillingError
 from bot.web_search.store import MemoryWebStore
 from bot.web_search.urls import url_key
 from bot.web_search.worker import WebSearchConfig, WebSearchWorker, looks_blocked
@@ -204,6 +205,27 @@ async def test_the_scrape_api_is_the_last_layer() -> None:
     assert host["http_refusals"] == 1 and host["render_refusals"] == 0  # a failed render is not a refusal
 
 
+async def test_scrape_status_is_unlocker_and_persistent_layer_stays_scrape():
+    observed = []
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+
+    class ObservedScraper(FakeScraper):
+        async def fetch(self, url):
+            observed.append(worker.progress(cid).layer)
+            return await super().fetch(url)
+
+    worker = WebSearchWorker(campaigns, store, FakeSearcher(default=[URLS[0]], texts={URLS[0]: HIT}),
+                             refused(URLS[0]), ListGenerator(["terreno Boadilla Madrid"]), scraper=ObservedScraper(),
+                             config=WebSearchConfig(cover_portals=False))
+    await run_until_done(worker, cid)
+    assert observed == ["unlocker"]
+    assert store.urls[cid][url_key(URLS[0])].layer == "scrape"
+    from bot.campaign.status_text import LAYER_NAMES
+    assert LAYER_NAMES["unlocker"] != LAYER_NAMES["api"]
+
+
 async def test_the_scrape_api_is_capped_and_a_failure_keeps_the_card() -> None:
     scraper = FakeScraper(fail=True)
     store, _ = await setup(*URLS[:3], fetcher=refused(*URLS[:3]), scraper=scraper, max_scrape_api_per_campaign=2)
@@ -225,6 +247,51 @@ async def test_scrape_api_client_sends_the_key_and_the_encoded_url_and_hides_the
     assert seen[0].headers["authorization"] == "Bearer s3cret"
     assert seen[0].url.params["url"] == "https://www.idealista.com/inmueble/1/?a=b&c=d"
     assert "s3cret" not in repr(client)
+
+
+async def test_scrape_do_query_auth_and_billed_error_have_no_secret(caplog) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(400, headers={"Scrape.do-Request-Cost": "25"}, content=b"error")
+
+    client = ScrapeApiClient("https://api.scrape.do/", "topsecret", auth_mode="query_token", render=True,
+                             super_proxy=True, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    caplog.set_level("INFO", logger="httpx")
+    with pytest.raises(ScrapeBillingError) as caught:
+        await client.fetch(URLS[0])
+    assert caught.value.code == "scrape_http_400" and caught.value.credits == 25
+    assert seen[0].url.params["token"] == "topsecret"
+    assert seen[0].url.params["geoCode"] == "es"
+    assert seen[0].url.params["render"] == "true" and seen[0].url.params["super"] == "true"
+    assert "authorization" not in seen[0].headers
+    assert "topsecret" not in repr(client) + str(caught.value) + caplog.text
+    await client.aclose()
+
+
+def test_scrape_do_rejects_an_unencrypted_endpoint() -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        ScrapeApiClient("http://api.scrape.do/", "topsecret", auth_mode="query_token")
+
+
+async def test_scrape_do_response_credits_replace_the_prebooked_estimate() -> None:
+    previous, budget = costs.ledger(), costs.budget()
+    sink = costs.MemoryLedger()
+    costs.install(sink, 1)
+    try:
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200, headers={"content-type": "text/html", "Scrape.do-Request-Cost": "10"},
+            text=listing_page("Terreno por Scrape.do")))
+        client = ScrapeApiClient("https://api.scrape.do/", "test-key", auth_mode="query_token",
+                                 client=httpx.AsyncClient(transport=transport))
+        store, cid = await setup(URLS[0], fetcher=refused(URLS[0]), scraper=client)
+        entries = [entry for entry in sink.entries if entry.campaign_id == cid and entry.stage == "scrape"]
+        assert len(entries) == 1 and entries[0].cost_usd == pytest.approx(10 * 0.000116)
+        assert entries[0].code == "" and entries[0].units == 10
+        assert store.urls[cid][url_key(URLS[0])].layer == "scrape"
+    finally:
+        costs.install(previous, budget)
 
 
 @pytest.mark.parametrize(("status", "ctype", "body", "code"), [

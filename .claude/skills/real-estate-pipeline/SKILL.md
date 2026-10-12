@@ -21,7 +21,7 @@ description: Разработка и доводка REAL-ESTATE-BOT по PLAN.md
    - фильтр и карточки: `bot/campaign/{tolerance,relevance,runner}.py`, `bot/analysis_pipeline/`
    - агенты: `bot/agents/{extraction,jev,gate,reduction,recorder}.py`
    - инвесторы: `bot/campaign/{reach,leads}.py`
-   - миграции: `bot/services/db/migrations/` (нумерация сквозная, следующая — 031)
+   - миграции: `bot/services/db/migrations/` (нумерация сквозная: следующая — последняя в папке + 1)
 3. Проверь, нет ли уже теста на это поведение в `tests/` — расширяй его, а не дублируй.
 
 ## Четыре роли при выполнении задачи

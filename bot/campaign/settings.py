@@ -88,6 +88,10 @@ class CampaignRunnerSettings(BaseSettings):
     review_timeout_seconds: int = Field(default=45, ge=5, le=300, validation_alias="OPENROUTER_REVIEW_TIMEOUT_SECONDS")
     # Reviewer attempts per campaign (failed calls count): past it the finding is held as unverified.
     review_max_calls: int = Field(default=300, ge=1, le=10_000, validation_alias="CAMPAIGN_REVIEW_MAX_CALLS")
+    # The most one campaign may spend in USD (LLM, scrape API, paid search, listing APIs), summed over every service
+    # from the campaign_costs ledger (bot/utils/costs.py). Reached: the web stage stops (budget_cap), the analysis
+    # worker and the AI check skip the campaign's findings, the report says so. 0: no limit.
+    budget_usd: float = Field(default=5.0, ge=0, le=10_000, validation_alias="CAMPAIGN_BUDGET_USD")
     # The user's final report when a search ends (bot/campaign/final_report.py); the recommendations come from this model.
     final_report_enabled: bool = Field(default=True, validation_alias="CAMPAIGN_FINAL_REPORT")
     final_model: str = Field(default="anthropic/claude-sonnet-4.5", validation_alias="OPENROUTER_FINAL_MODEL")

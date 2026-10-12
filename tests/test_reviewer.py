@@ -300,7 +300,7 @@ async def test_a_reviewer_that_fails_is_handled_like_a_failed_judge() -> None:
     assert "a" not in store.buckets and messenger.findings() == [] and "a" in runner._relevance_misses  # retried later
     campaign = await runner.campaigns.get(cid)
     assert await runner._stream(campaign, final=True) == 0  # ending: held as unverified, never lost
-    assert store.buckets["a"][0] == "similar" and store.whys["a"] == "unverified"
+    assert store.buckets["a"][0] == "similar" and store.whys["a"] == "ai_failed"  # the check failed, counted apart
 
 
 # --- CAMPAIGN_JUDGE ---------------------------------------------------------------------------------------------------------------
