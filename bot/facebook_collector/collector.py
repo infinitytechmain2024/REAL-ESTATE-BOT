@@ -10,6 +10,7 @@ from typing import Protocol
 
 from .browser import BrowserLease, BrowserSessionClient
 from .models import BatchCancelled, BatchItem, BatchPlan, ChallengeDetected, GroupState
+from .provider import ProviderHealth
 from .reader import FacebookGroupReader
 
 log = logging.getLogger(__name__)
@@ -26,12 +27,22 @@ class CollectorStore(Protocol):
 
 
 class FacebookBatchCollector:
+    provider = "local"
+
     def __init__(self, store: CollectorStore, browser: BrowserSessionClient, reader: FacebookGroupReader, *, max_groups: int = 20, max_posts: int, item_timeout_seconds: int, pause_min_seconds: float, pause_max_seconds: float, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         if not 1 <= max_groups <= 20 or not 1 <= max_posts <= 20 or item_timeout_seconds < 10 or pause_min_seconds < 0 or pause_max_seconds < pause_min_seconds:
             raise ValueError("unsafe collector limits")
         self.store, self.browser, self.reader = store, browser, reader
         self.max_groups, self.max_posts, self.item_timeout_seconds = max_groups, max_posts, item_timeout_seconds
         self.pause_min_seconds, self.pause_max_seconds, self.sleep = pause_min_seconds, pause_max_seconds, sleep
+
+    async def health(self) -> ProviderHealth:
+        available = await self.browser.health()
+        return ProviderHealth(
+            self.provider,
+            available,
+            None if available else "browser_unavailable",
+        )
 
     async def _screenshot(self, lease: BrowserLease) -> str | None:
         """Best effort: a missing screenshot must never fail the group or batch."""

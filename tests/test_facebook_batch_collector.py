@@ -27,6 +27,7 @@ from bot.facebook_collector.models import (
     GroupRead,
     GroupState,
 )
+from bot.facebook_collector.provider import AcquisitionProvider, ProviderHealth
 from bot.facebook_collector.reader import (
     FacebookGroupReader,
     canonical_post_url,
@@ -71,9 +72,13 @@ class FakeStore:
 
 
 class FakeBrowser:
-    def __init__(self, *, screenshot_error: Exception | None = None) -> None:
+    def __init__(self, *, screenshot_error: Exception | None = None, healthy: bool = True) -> None:
         self.events: list[tuple] = []
         self.screenshot_error = screenshot_error
+        self.healthy = healthy
+
+    async def health(self) -> bool:
+        return self.healthy
 
     async def capture_screenshot(self, lease: BrowserLease) -> str:
         self.events.append(("screenshot", lease.profile_id))
@@ -107,6 +112,30 @@ def plan(count: int = 3) -> BatchPlan:
 
 def posts(count: int) -> GroupRead:
     return GroupRead(GroupState.ACTIVE, tuple(CollectedPost(str(i), f"https://www.facebook.com/groups/a/posts/{i}", f"post {i}") for i in range(count)), {})
+
+
+@pytest.mark.asyncio
+async def test_local_collector_implements_provider_contract_without_changing_run() -> None:
+    store, browser, reader = FakeStore(plan(1)), FakeBrowser(), FakeReader([posts(1)])
+    collector = FacebookBatchCollector(
+        store, browser, reader, max_posts=10, item_timeout_seconds=10,
+        pause_min_seconds=0, pause_max_seconds=0,
+    )
+
+    assert isinstance(collector, AcquisitionProvider)
+    assert await collector.health() == ProviderHealth("local", True)
+    assert await collector.run("batch") == "succeeded"
+    assert len(store.posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_provider_health_reports_browser_unavailable() -> None:
+    collector = FacebookBatchCollector(
+        FakeStore(plan(1)), FakeBrowser(healthy=False), FakeReader([posts(1)]),
+        max_posts=10, item_timeout_seconds=10, pause_min_seconds=0, pause_max_seconds=0,
+    )
+
+    assert await collector.health() == ProviderHealth("local", False, "browser_unavailable")
 
 
 @pytest.mark.asyncio
