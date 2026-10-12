@@ -14,23 +14,29 @@ from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.final_report import (
     SYSTEM,
     FinalReporter,
+    HeldEvidence,
     OpenRouterRecommender,
+    PlaceScope,
     Tally,
     card_score,
     clean_recommendations,
+    evidence_actions,
     facts_for_model,
     fallback_recommendations,
+    held_evidence_lines,
     parse_recommendations,
+    place_scope_of,
     rank_cards,
     real_estate_sources,
     report_text,
     similar_note,
     tally,
     task_facts,
+    task_title,
 )
 from bot.campaign.relevance import Relevance, ReviewerJudge
 from bot.campaign.runner import CampaignRunner, RunnerConfig, campaign_request
-from bot.campaign.runs import MemoryRunStore, OutcomeCount, SourceCount
+from bot.campaign.runs import MemoryRunStore, OutcomeCount, SourceCount, StreamFinding
 from bot.campaign.tolerance import Request
 from bot.web_search.models import SiteReport
 from tests.test_campaign_relevance import _seed, needs_db, plot
@@ -163,6 +169,70 @@ def test_listings_without_an_area_are_not_blamed_on_the_ai_key() -> None:
     assert "площадь не указана: 25" in text and "не удалось подтвердить: 6" in text
 
 
+def test_held_explanation_uses_the_requests_criteria_and_downgrades_old_legal_claims() -> None:
+    def item(n: int, area: str, legal: str) -> HeldEvidence:
+        payload = {"address": "Aravaca, Madrid, Madrid" if n < 7 else "Madrid, Madrid province, ES",
+                   "municipality": "Madrid" if n < 7 else None}
+        return HeldEvidence(StreamFinding(str(n), "Участок", payload=payload, url=f"https://example.com/{n}"), {
+            "prompt": "reviewer-v2", "criteria": [
+                {"name": "area", "verdict": area},
+                {"name": "must_have:под застройку", "verdict": legal},
+                {"name": "must_have:метро 5 минут на машине", "verdict": "unknown"},
+            ]})
+
+    held = [item(i, "pass" if i < 7 else "unknown", "pass" if i < 5 else "unknown") for i in range(8)]
+    lines = held_evidence_lines(held, total=8, task_text="Участок от 2000 м² в пригороде Мадрида, метро на машине",
+                                requested_place="Madrid", min_area=2000)
+    text = "\n".join(lines)
+    assert "У 8 из 8 не подтверждено: метро 5 минут на машине" in text
+    assert "У 8 из 8 не подтверждено: под застройку" in text
+    assert "У 7 из 8 по объявлению проходит условие: площадь от 2000 м²" in text
+    assert "У одного из 8 не подтверждено: площадь" in text
+    assert "У 7 из 8 явно указан муниципалитет Madrid" in text
+    assert "https://example.com" not in text  # held cards still need the person's approval
+    actions = evidence_actions(held)
+    assert any("маршрут" in action and "8 вариантов" in action for action in actions)
+    assert any("документы о разрешённой застройке" in action for action in actions)
+
+    flat = [HeldEvidence(StreamFinding("x", "Квартира"), {"prompt": "reviewer-v3", "criteria": [
+        {"name": "area", "verdict": "pass"}, {"name": "must_have:лифт", "verdict": "unknown"}]})]
+    flat_text = "\n".join(held_evidence_lines(flat, total=1, task_text="Квартира в Валенсии с лифтом"))
+    assert "лифт" in flat_text and "метро" not in flat_text and "муниципалитет" not in flat_text
+
+
+def test_suburb_scope_preserves_the_approved_boundary_without_guessing_from_address() -> None:
+    scope = place_scope_of({"place": {"radius_km": 25, "districts": []}},
+                           "Участок в пригороде Мадрида", "Madrid")
+    assert scope == PlaceScope("Madrid", True, 25, ())
+    assert "радиус 25 км" in task_title(Request(location="Madrid"), scope=scope)
+    unresolved = place_scope_of({}, "Участок в пригороде Мадрида", "Madrid")
+    assert unresolved.unresolved
+    assert "границы не уточнены" in task_title(Request(location="Madrid"), scope=unresolved)
+    held = [HeldEvidence(StreamFinding("x", "Участок", payload={"address": "Aravaca, Madrid, Madrid"}),
+                         {"criteria": [{"name": "place", "verdict": "unknown"}]})]
+    text = "\n".join(held_evidence_lines(held, total=1, scope=unresolved))
+    assert "Границы пригородного поиска не уточнены" in text
+    assert "явно указан муниципалитет" not in text
+    assert "адрес содержит Madrid" in text and "пригородность по такому адресу не доказана" in text
+
+
+def test_held_report_distinguishes_unknown_from_known_failure() -> None:
+    held = [HeldEvidence(StreamFinding("x", "Участок"), {"criteria": [
+        {"name": "area", "verdict": "fail"}, {"name": "must_have:метро", "verdict": "unknown"}]})]
+    text = "\n".join(held_evidence_lines(held, total=1))
+    assert "не подтверждено: метро" in text
+    assert "явно не выполнено: площадь" in text
+
+
+def test_held_explanation_marks_missing_legacy_matrices_and_partial_sample() -> None:
+    held = [HeldEvidence(StreamFinding("x", "Земля"), None)]
+    assert "Нет сохранённой проверки" in "\n".join(held_evidence_lines(held, total=1))
+    sample = [HeldEvidence(StreamFinding("x", "Земля"), {"criteria": [
+        {"name": "area", "verdict": "unknown"}]})]
+    text = "\n".join(held_evidence_lines(sample, total=5))
+    assert "Среди 1 предварительного варианта" in text and "Ещё 4 варианта" in text
+
+
 def test_the_report_shows_the_money_the_skips_and_the_model_errors() -> None:
     from bot.campaign.final_report import cost_lines
     from bot.utils.costs import CostSummary
@@ -233,7 +303,8 @@ async def test_the_user_gets_one_report_with_counts_reasons_top_sites_and_advice
     assert messenger.summaries() == []  # a normal user gets no technical summary
     lines = text.splitlines()
     assert lines[:2] == [REPORT, "🎯 Валенсия · покупка · до 200 000 € · от 2 комн."]
-    assert "Отправлено вам: 4" in lines and "Похожие, не показаны: 2 (чуть не подошли)" in lines
+    assert "Подтверждённых совпадений: 4." in lines
+    assert "Отправлено вам: 4" in lines and "Похожие, не показаны: 2 (соответствие всем условиям не подтверждено)" in lines
     assert "Отклонено: 3" in lines and "Повторы одного объекта на разных сайтах: 1" in lines
     assert "• другой тип сделки (аренда вместо покупки или наоборот) — 1" in lines
     assert "• не тот город или район — 1" in lines
@@ -351,7 +422,7 @@ async def test_an_empty_search_still_reports_what_could_not_be_read() -> None:
     await finish(campaigns, store, runner, clock, cid)
     await runner.step(cid)
     [text] = reports_of(messenger)
-    assert "Подходящих объявлений не нашлось." in text and "Не удалось прочитать:" in text
+    assert "Объявлений для оценки не получено." in text and "Не удалось прочитать:" in text
     assert "Лучшие варианты" not in text and "Почему отклонено" not in text
 
 
@@ -589,6 +660,6 @@ def test_a_report_with_nothing_sent_says_how_to_get_the_similar_ones() -> None:
     assert similar_note(Tally(2, 0, 3, 0, 0, 0, {}), asked) is None and similar_note(Tally(), asked) is None
     text = report_text("Цель", counts, [], [], [], [], 0, similar_note(counts, asked))
     lines = text.splitlines()
-    held = lines.index("Похожие, не показаны: 3 (чуть не подошли)")
+    held = lines.index("Похожие, не показаны: 3 (соответствие всем условиям не подтверждено)")
     assert lines[held - 1] == "Отправлено вам: 0" and lines[held + 1] == "Похожие можно открыть кнопкой «Одобрить» выше"
     assert "кнопкой" not in report_text("Цель", Tally(2, 0, 3, 0, 0, 0, {}), [], [], [], [], 0, None)

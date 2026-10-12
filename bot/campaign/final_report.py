@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -27,7 +28,7 @@ from bot.agents.llm import LLMError, OpenRouterJSON
 from bot.utils.costs import CostSummary
 from bot.web_search.urls import PORTALS, SPAIN_BANK_PORTALS, SPAIN_PORTALS_BY_KIND, UKRAINE_PORTALS
 
-from .runs import OutcomeCount, SentFinding, SourceCount
+from .runs import OutcomeCount, SentFinding, SourceCount, StreamFinding
 from .summary import Site, plural, site_lines, site_name, site_stats
 from .tolerance import BUDGET_TOLERANCE, Request, currency_code, price_of
 
@@ -154,6 +155,44 @@ def tally(outcomes: Sequence[OutcomeCount]) -> Tally:
 class Ranked:
     card: SentFinding
     score: float
+
+
+@dataclass(frozen=True, slots=True)
+class HeldEvidence:
+    """A held finding and the criterion matrix already saved by the reviewer."""
+
+    finding: StreamFinding
+    review: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class PlaceScope:
+    """The geographic boundary the person actually approved in the interview."""
+
+    city: str | None = None
+    suburb: bool = False
+    radius_km: float | None = None
+    districts: tuple[str, ...] = ()
+
+    @property
+    def unresolved(self) -> bool:
+        return self.suburb and not self.radius_km and not self.districts
+
+
+_SUBURB = re.compile(r"пригород|передміст|окрестност|околиц|suburb|surround|outskirts|afueras|alrededores", re.IGNORECASE)
+
+
+def place_scope_of(spec: Mapping[str, Any] | None, task_text: str, city: str | None) -> PlaceScope:
+    """Use the saved interview scope; a city name alone does not resolve a suburb request."""
+    place = spec.get("place") if isinstance(spec, Mapping) else None
+    place = place if isinstance(place, Mapping) else {}
+    raw_radius = place.get("radius_km")
+    radius = (float(raw_radius) if isinstance(raw_radius, (int, float)) and not isinstance(raw_radius, bool)
+              and math.isfinite(raw_radius) and 0 < raw_radius <= 1000 else None)
+    raw_districts = place.get("districts")
+    districts = (tuple(" ".join(x.split())[:80] for x in raw_districts[:8] if isinstance(x, str) and x.strip())
+                 if isinstance(raw_districts, list) else ())
+    return PlaceScope(city, bool(_SUBURB.search(task_text)), radius, districts)
 
 
 def _num(value: Any) -> float | None:
@@ -423,10 +462,19 @@ DEALS = {"sale": "покупка", "rent": "аренда"}
 KINDS = {"apartment": "квартира", "house": "дом", "land": "участок", "commercial": "коммерческая недвижимость"}
 
 
-def task_title(request: Request, place: str | None = None, fallback: str = "") -> str:
+def task_title(request: Request, place: str | None = None, fallback: str = "",
+               scope: PlaceScope | None = None) -> str:
     """The task in the person's words, from what the search was bucketed by: «квартира · Валенсия · покупка ·
     до 200 000 € · от 2 комн.» (the plan's own goal line is technical English)."""
-    parts = [KINDS.get(request.property_type or ""), place or request.location, DEALS.get(request.deal or "")]
+    location = place or request.location
+    if scope and location:
+        if scope.radius_km:
+            location = f"окрестности {location}, радиус {scope.radius_km:g} км"
+        elif scope.suburb and scope.districts:
+            location = f"окрестности {location}: {', '.join(scope.districts[:3])}"
+        elif scope.suburb:
+            location = f"пригород {location} (границы не уточнены)"
+    parts = [KINDS.get(request.property_type or ""), location, DEALS.get(request.deal or "")]
     if request.amount:
         parts.append(("до " if request.is_max else "") + _amount(request.amount, request.currency))
     if request.rooms:
@@ -445,6 +493,138 @@ def task_facts(request: Request) -> dict[str, Any]:
              "only_exact": (True if request.budget_pct == 0 and request.area_pct == 0
                             and request.rooms_delta in (None, 0) and not request.nearby else None)}
     return {k: v for k, v in facts.items() if v is not None}
+
+
+_CRITERION_LABELS = {"place": "местоположение", "deal": "тип сделки", "type": "тип объекта",
+                     "budget": "цена", "rooms": "число комнат", "area": "площадь"}
+_LEGAL = re.compile(r"застрой|строительств|разрешен|разрешён|зонир|urbaniz|suelo|permit", re.IGNORECASE)
+
+
+def _criterion_label(name: str) -> str:
+    if name.startswith("must_have:") or name.startswith("exclude:"):
+        return name.split(":", 1)[1][:90]
+    return _CRITERION_LABELS.get(name, name.replace("_", " ")[:90])
+
+
+def _among(count: int, total: int) -> str:
+    if count == total == 1:
+        return "У единственного варианта"
+    return f"У одного из {total}" if count == 1 else f"У {count} из {total}"
+
+
+def held_evidence_lines(held: Sequence[HeldEvidence], *, total: int, task_text: str = "",
+                        requested_place: str | None = None, min_area: float | None = None,
+                        scope: PlaceScope | None = None) -> list[str]:
+    """Explain held results using reviewer evidence, without exposing cards before approval.
+
+    A legacy matrix may call marketing language proof of legal buildability. Treat that old pass as unknown.
+    Counts describe only the inspected sample when the campaign has more held findings than we loaded.
+    """
+    if not held:
+        return []
+    inspected = len(held)
+    matrices: list[dict[str, str]] = []
+    for item in held:
+        review = item.review if isinstance(item.review, dict) else {}
+        entries = review.get("criteria") if isinstance(review.get("criteria"), list) else []
+        states: dict[str, str] = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            name, verdict = entry["name"], entry.get("verdict")
+            if verdict not in ("pass", "fail", "unknown"):
+                continue
+            if verdict == "pass" and name.startswith("must_have:") and _LEGAL.search(name) and review.get("prompt") != "reviewer-v3":
+                verdict = "unknown"
+            states[name] = verdict
+        matrices.append(states)
+    names = list(dict.fromkeys(name for states in matrices for name in states))
+    prefix = "Среди " + plural(inspected, "предварительного варианта", "предварительных вариантов",
+                              "предварительных вариантов")
+    lines = [prefix + ":"]
+    if not names:
+        lines.append("• Нет сохранённой проверки условий по каждому объекту — степень соответствия неизвестна.")
+        return lines
+    by_name = {name: Counter(states.get(name, "unknown") for states in matrices) for name in names}
+    # Start with decisive gaps in the user's own must-haves, then other missing facts.
+    gaps = sorted(((name, counts["unknown"]) for name, counts in by_name.items() if counts["unknown"]),
+                  key=lambda pair: (not pair[0].startswith("must_have:"), -pair[1], pair[0]))
+    for name, count in gaps[:3]:
+        lines.append(f"• {_among(count, inspected)} не подтверждено: {_criterion_label(name)}.")
+    failures = sorted(((name, counts["fail"]) for name, counts in by_name.items() if counts["fail"]),
+                      key=lambda pair: (-pair[1], pair[0]))
+    for name, count in failures[:2]:
+        lines.append(f"• {_among(count, inspected)} явно не выполнено: {_criterion_label(name)}.")
+    passes = sorted(((name, counts["pass"]) for name, counts in by_name.items() if counts["pass"]),
+                    key=lambda pair: (-pair[1], pair[0]))
+    for name, count in passes:
+        if name in ("place", "deal", "type"):
+            continue  # the report should prioritise discriminating facts, not broad category matches
+        label = f"площадь от {min_area:g} м²" if name == "area" and min_area else _criterion_label(name)
+        lines.append(f"• {_among(count, inspected)} по объявлению проходит условие: {label}.")
+        break
+    scope = scope or PlaceScope(requested_place, bool(_SUBURB.search(task_text)))
+    if scope.suburb or scope.radius_km:
+        if scope.unresolved:
+            lines.append("• Границы пригородного поиска не уточнены: нужен радиус или названия населённых пунктов.")
+        city_addresses = sum(str((item.finding.payload or {}).get("municipality") or "").casefold() ==
+                             str(scope.city or "").casefold() for item in held if scope.city)
+        if city_addresses:
+            lines.append(f"• {_among(city_addresses, inspected)} явно указан муниципалитет {scope.city}; "
+                         "соответствие заданному географическому охвату не подтверждено.")
+        else:
+            suffix = f", {scope.city.strip()}, {scope.city.strip()}".casefold() if scope.city else ""
+            city_mentions = sum(suffix in str((item.finding.payload or {}).get("address") or "").casefold()
+                                for item in held) if suffix else 0
+            if city_mentions:
+                uncertainty = ("пригородность по такому адресу не доказана" if scope.suburb else
+                               "попадание в заданный радиус по такому адресу не доказано")
+                lines.append(f"• {_among(city_mentions, inspected)} адрес содержит {scope.city}; "
+                             f"{uncertainty}.")
+            else:
+                lines.append("• Муниципалитет и попадание в заданный географический охват нужно проверить по точному адресу.")
+    if inspected < total:
+        remaining = total - inspected
+        lines.append(f"Ещё {plural(remaining, 'вариант', 'варианта', 'вариантов')} "
+                     + ("в этом разборе не проверен." if remaining == 1 else "в этом разборе не проверены."))
+    return lines
+
+
+def evidence_actions(held: Sequence[HeldEvidence]) -> list[str]:
+    """Actions tied to unanswered hard criteria, rather than generic advice to broaden a search."""
+    if not held:
+        return []
+    counts: Counter[str] = Counter()
+    for item in held:
+        review = item.review if isinstance(item.review, dict) else {}
+        entries = review.get("criteria") if isinstance(review.get("criteria"), list) else []
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            name = entry["name"]
+            unknown = entry.get("verdict") == "unknown" or (
+                entry.get("verdict") == "pass" and name.startswith("must_have:")
+                and _LEGAL.search(name) and review.get("prompt") != "reviewer-v3")
+            if unknown:
+                counts[name] += 1
+    actions: list[str] = []
+    for name, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])):
+        quantity = plural(count, "варианта", "вариантов", "вариантов")
+        if _LEGAL.search(name):
+            action = f"Запросите документы о разрешённой застройке для {quantity}."
+        elif re.search(r"метро|станц|транспорт|пешком|машин", name, re.IGNORECASE):
+            action = f"Уточните адрес и проверьте маршрут по условию «{_criterion_label(name)}» для {quantity}."
+        elif name == "place":
+            action = f"Уточните точный адрес и муниципалитет для {quantity}."
+        elif name == "area":
+            action = f"Уточните площадь объекта для {quantity}."
+        else:
+            action = f"Уточните у продавца условие «{_criterion_label(name)}» для {quantity}."
+        if action not in actions:
+            actions.append(action)
+        if len(actions) == 2:
+            break
+    return actions
 
 
 def _usd(value: float) -> str:
@@ -483,18 +663,28 @@ def cost_lines(spent: CostSummary | None, budget: float = 0.0) -> list[str]:
 
 def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequence[str], unreadable: Sequence[Site],
                 recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None,
-                costs: Sequence[str] = ()) -> str:
+                costs: Sequence[str] = (), evidence: Sequence[str] = (), task_text: str = "") -> str:
     """The Russian report (see the module notes), fitted to one Telegram message. ``costs``: ``cost_lines``."""
     head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
+    if task_text and task_text.casefold() not in goal.casefold():
+        head = f"📋 Отчёт по поиску\n🎯 {goal}\nВаш запрос: {' '.join(task_text.split())[:220]}\n\n"
     if counts.total == 0:
-        summary = ["Подходящих объявлений не нашлось."]
+        summary = ["Объявлений для оценки не получено. Подтверждённых совпадений нет."]
     else:
-        summary = [f"Отправлено вам: {counts.sent}"
+        if counts.sent_exact:
+            conclusion = f"Подтверждённых совпадений: {counts.sent_exact}."
+        elif counts.held:
+            conclusion = "Подтверждённых совпадений нет. Ни один предварительный вариант не прошёл все условия."
+        else:
+            conclusion = "Подтверждённых совпадений нет."
+        summary = [conclusion, f"Отправлено вам: {counts.sent}"
                    + (f" (из них {counts.sent_approved} похожих — по вашему согласию)" if counts.sent_approved else "")]
         if counts.held:
             parts = [f"{REASONS[k]}: {counts.unchecked[k]}" for k in UNCHECKED if counts.unchecked.get(k)]
             extra = f", {', '.join(parts)}" if parts else ""
-            summary.append(f"Похожие, не показаны: {counts.held} (чуть не подошли{extra})")
+            summary.append(f"Похожие, не показаны: {counts.held} (условия требуют проверки{extra})"
+                           if counts.held_unverified else
+                           f"Похожие, не показаны: {counts.held} (соответствие всем условиям не подтверждено)")
             if similar_note and counts.sent == 0:
                 summary.append(similar_note)
         if counts.rejected:
@@ -519,7 +709,7 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
         by_site = ["По источникам:"] + [f"• {line}" for line in funnel[:shown_funnel]] if shown_funnel else []
         if by_site and other_sites:
             by_site.append(f"Прочие сайты из поиска: {other_sites} (не относятся к недвижимости или без объявлений)")
-        parts = [part for part in (summary, reasons, best, broken, by_site, advice) if part]
+        parts = [part for part in (summary, list(evidence), reasons, best, broken, by_site, advice) if part]
         text = head + "\n\n".join("\n".join(part) for part in parts)
         if len(text) <= MAX_REPORT_CHARS:
             return text
@@ -552,7 +742,8 @@ class FinalReporter:
     async def build(self, goal: str, request: Request, outcomes: Sequence[OutcomeCount], sent: Sequence[SentFinding],
                     sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = (),
                     tolerance_pct: float | None = None, offers: Mapping[str, str | None] | None = None,
-                    costs: CostSummary | None = None, budget: float = 0.0) -> str:
+                    costs: CostSummary | None = None, budget: float = 0.0, task_text: str = "",
+                    held: Sequence[HeldEvidence] = (), scope: PlaceScope | None = None) -> str:
         """``offers``: the state of each bucket's question (``offer_state``: None, asked, approved, declined); with it
         a report that sent nothing but holds similar variants says how to get them. ``costs``: the run's ledger
         (``bot.utils.costs``) and ``budget`` its limit: the money, what was dropped before the model, its errors."""
@@ -564,8 +755,12 @@ class FinalReporter:
         facts = facts_for_model(task_facts(request), counts, sorted(
             stats.values(), key=lambda s: (-s.sent, -s.links, s.host)), unreadable, tolerance_pct)
         note = None if facts["task"].get("only_exact") else similar_note(counts, offers)
-        return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, await self._advice(facts, counts),
-                           other_sites, note, cost_lines(costs, budget))
+        evidence = held_evidence_lines(held, total=counts.held, task_text=task_text,
+                                       requested_place=request.location, min_area=request.min_area, scope=scope)
+        advice = evidence_actions(held)
+        advice.extend(tip for tip in await self._advice(facts, counts) if tip not in advice)
+        return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
+                           other_sites, note, cost_lines(costs, budget), evidence, task_text)
 
     async def _advice(self, facts: dict[str, Any], counts: Tally) -> list[str]:
         if facts["task"].get("only_exact"):

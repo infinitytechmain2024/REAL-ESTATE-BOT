@@ -62,7 +62,7 @@ from bot.utils import costs
 
 from . import offers, people
 from .dedup import Listing, listing_of, same_object, site_of
-from .final_report import FinalReporter, task_title
+from .final_report import FinalReporter, HeldEvidence, place_scope_of, task_title
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
@@ -997,12 +997,19 @@ class CampaignRunner:
             reports = await site_report(campaign.id) if site_report is not None else []
             portals = campaign_portals(campaign) if reports else ()
             request = campaign_request(campaign)
-            title = task_title(request, campaign.plan.location_aliases.get("ru"), campaign.plan.goal)
+            scope = place_scope_of(campaign.spec, campaign.source_text, request.location)
+            title = task_title(request, campaign.plan.location_aliases.get("ru"), campaign.plan.goal, scope)
             offers = {bucket: await self.store.offer_state(campaign.id, bucket) for bucket in ("similar", "other")}
+            held: list[HeldEvidence] = []
+            for bucket in ("similar", "other"):
+                for finding in await self.store.held_findings(campaign.id, bucket, 30):
+                    verdict = await self.store.relevance(campaign.id, finding.id)
+                    held.append(HeldEvidence(finding, verdict.review if verdict else None))
             sink = costs.ledger()
             spent = await sink.summary(campaign.id) if sink is not None else None
             text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals,
-                                                 offers=offers, costs=spent, budget=costs.budget())
+                                                 offers=offers, costs=spent, budget=costs.budget(),
+                                                 task_text=campaign.source_text, held=held, scope=scope)
             await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
             log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})
