@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from bot.campaign.final_report import FinalReporter, HeldEvidence, PlaceScope, task_title
+from bot.campaign.final_report import (
+    FinalReporter,
+    HeldEvidence,
+    PlaceScope,
+    task_title,
+)
 from bot.campaign.runs import OutcomeCount, StreamFinding
 from bot.campaign.tolerance import Request
 
