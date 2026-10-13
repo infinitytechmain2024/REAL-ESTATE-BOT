@@ -160,3 +160,88 @@ class ApifyFotocasaSource(_PortalSource):
             address=[_text(item.get("street")), neighbourhood, municipality, province],
             description=_text(item.get("description")), phone=item.get("phone"), advertiser=agency.get("name"),
             property_type=self._TYPES.get(kind))
+
+
+_YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,
+                      650, 700, 750, 800, 850, 900, 950, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900,
+                      2000, 2300, 2500, 2600, 2900, 3000, 3500, 4000, 4500, 5000, 6000, 7000, 8000, 9000, 10000,
+                      11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000, 20000, 25000, 30000, 50000,
+                      75000, 80000, 100000, 125000, 150000, 175000, 200000, 225000, 250000, 275000, 300000, 350000,
+                      400000, 450000, 500000, 600000, 700000, 800000, 900000, 1000000, 2000000, 3000000, 4000000,
+                      5000000, 6000000, 7000000, 8000000)
+_YAENCONTRE_AREAS = (50, 80, 100, 120, 150, 200, 300, 500, 700, 1000, 3000, 5000, 7000, 10000)
+
+
+def _floor(value: int | None, allowed: tuple[int, ...]) -> str | None:
+    """The largest allowed filter value not above ``value``: a lower bound that never drops a matching listing."""
+    below = [a for a in allowed if value is not None and a <= value]
+    return str(below[-1]) if below else None
+
+
+def _ceil(value: int | None, allowed: tuple[int, ...]) -> str | None:
+    """The smallest allowed filter value not below ``value``: an upper bound that never drops a matching listing."""
+    above = [a for a in allowed if value is not None and a >= value]
+    return str(above[0]) if above else None
+
+
+class ApifyYaencontreSource(_PortalSource):
+    """``igolaizola/yaencontre-scraper``; rows follow the output schema the Store infers from its recent runs
+    (``url``, ``title``, ``price``, ``area``, ``rooms``, ``operation``, ``address.{qualifiedName,geoLocation}``,
+    ``owner.{name,phoneAvailable,virtualPhoneNumber}``, ``description``), not a run of ours."""
+
+    name = "apify_yaencontre"
+    hosts = frozenset({"yaencontre.com"})
+    kinds: ClassVar[dict[str, str]] = {"land": "land", "house": "house", "apartment": "flat",
+                                       "commercial": "premises"}
+    _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "house": "house", "apartment": "apartment",
+                                        "commercial": "commercial"}
+    _OPERATIONS: ClassVar[dict[str, frozenset[str]]] = {"sale": frozenset({"sale", "venta", "buy"}),
+                                                        "rent": frozenset({"rent", "alquiler"})}
+
+    def __init__(self, token: str, *, actor_id: str = "igolaizola/yaencontre-scraper", **kwargs: Any) -> None:
+        super().__init__(token, actor_id=actor_id, **kwargs)
+
+    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
+                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
+        constraints = task.constraints
+        actor_input: dict[str, Any] = {"maxItems": amount, "operation": self._deal(task),
+                                       "propertyType": self.kinds[task_kind(task)], "sortBy": "newest"}
+        center = None
+        if task.radius_km is not None:
+            center = await self._center(task) if not run_id else None
+            if center is not None:
+                actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
+                                "radiusKm": max(1, min(100, round(task.radius_km)))}
+        else:
+            actor_input |= {"location": task.location.strip()[:120],
+                            "locationType": "province" if task.place_level == "province" else "municipality"}
+        filters = {"minPrice": _floor(_whole(constraints.get("min_price")), _YAENCONTRE_PRICES),
+                   "maxPrice": _ceil(_whole(constraints.get("max_price")), _YAENCONTRE_PRICES),
+                   "minArea": _floor(_whole(constraints.get("min_area")), _YAENCONTRE_AREAS)}
+        actor_input |= {key: value for key, value in filters.items() if value}
+        return self.actor_id, actor_input, center
+
+    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+        if not isinstance(item, dict):
+            return None
+        url = self._url(item.get("url"), task)
+        operation = _fold(_text(item.get("operation")))
+        if url is None or (operation and operation not in self._OPERATIONS[self._deal(task)]):
+            return None
+        address = item.get("address") if isinstance(item.get("address"), dict) else {}
+        place = _text(address.get("qualifiedName"))
+        geo = address.get("geoLocation") if isinstance(address.get("geoLocation"), dict) else {}
+        if task.radius_km is not None:
+            if not self._place_ok(task, center, _point(geo.get("lat"), geo.get("lon")), "", ""):
+                return None
+        elif task.place_level == "city":
+            parts = {_fold(p) for p in place.split(",")}
+            if not parts & {_fold(task.location), *(_fold(p) for p in task.nearby_places)}:
+                return None
+        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+        phone = owner.get("virtualPhoneNumber") if owner.get("phoneAvailable") is not False else None
+        kind = task_kind(task)
+        return self._listing(
+            task, url=url, title=_text(item.get("title")) or place, price=item.get("price"), area=item.get("area"),
+            rooms=item.get("rooms"), address=[place], description=_text(item.get("description")), phone=phone,
+            advertiser=owner.get("name"), property_type=self._TYPES.get(kind))

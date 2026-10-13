@@ -1,7 +1,8 @@
 """Portal adapters on ``ApifyListingSource`` against a mocked Apify API (no live calls in CI).
 
 Fotocasa rows copy the shape of a live ``igolaizola/fotocasa-scraper`` run (5 plots in Madrid, 2026-10-13); phone
-numbers and agency names are replaced.
+numbers and agency names are replaced. Yaencontre rows follow the output schema the Apify Store infers for
+``igolaizola/yaencontre-scraper`` (no run of ours).
 """
 
 import json
@@ -13,7 +14,7 @@ import pytest
 
 from bot.web_search.queries import QueryTask
 from bot.web_search.sources.apify import SourceRunContext, source_run_scope
-from bot.web_search.sources.portals import ApifyFotocasaSource, plot_area
+from bot.web_search.sources.portals import ApifyFotocasaSource, ApifyYaencontreSource, plot_area
 
 
 def task(**kwargs):
@@ -145,7 +146,7 @@ async def test_fotocasa_explicit_radius_searches_around_the_geocoded_centre():
 async def test_settings_build_only_the_enabled_portals(monkeypatch):
     from bot.web_search.settings import WebSearchSettings
 
-    for name in ("APIFY_IDEALISTA_ENABLED", "APIFY_FOTOCASA_ENABLED"):
+    for name in ("APIFY_IDEALISTA_ENABLED", "APIFY_FOTOCASA_ENABLED", "APIFY_YAENCONTRE_ENABLED"):
         monkeypatch.delenv(name, raising=False)
     assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").sources() == ()
     assert WebSearchSettings(_env_file=None, APIFY_FOTOCASA_ENABLED=True).sources() == ()  # no token
@@ -158,3 +159,60 @@ async def test_settings_build_only_the_enabled_portals(monkeypatch):
         assert source.max_items == 7 and source.max_charge_usd == .03 and source.timeout_seconds == 90
     finally:
         await source.aclose()
+    both = WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token", APIFY_FOTOCASA_ENABLED=True,
+                             APIFY_YAENCONTRE_ENABLED=True).sources()
+    try:
+        assert [s.name for s in both] == ["apify_fotocasa", "apify_yaencontre"]
+        assert both[1].actor_id == "igolaizola~yaencontre-scraper"
+    finally:
+        for source in both:
+            await source.aclose()
+
+
+def yaencontre_row(**kwargs):
+    row = {"id": "41123456", "url": "https://www.yaencontre.com/venta/terreno/inmueble-41123456",
+           "title": "Terreno en venta en Aravaca", "price": 1200000, "area": 2400, "rooms": 0,
+           "operation": "sale", "family": "land", "description": "Parcela urbana de 2.400 m² en Aravaca.",
+           "address": {"qualifiedName": "Aravaca, Madrid", "geoLocation": {"lat": 40.46, "lon": -3.78}},
+           "owner": {"name": "Agencia Dos", "phoneAvailable": True, "virtualPhoneNumber": "910000002"}}
+    return {**row, **kwargs}
+
+
+def yaencontre(rows, requests, **kwargs):
+    return ApifyYaencontreSource("secret-token", client=api(rows, requests), sleep=AsyncMock(), **kwargs)
+
+
+async def test_yaencontre_launches_with_safe_filter_bounds_and_maps_rows():
+    requests = []
+    adapter = yaencontre([yaencontre_row(), yaencontre_row(address={"qualifiedName": "Getafe"})], requests)
+    with source_run_scope(context("apify_yaencontre")):
+        listings = await adapter.search(task(), limit=5)
+    launch = next(r for r in requests if r.method == "POST")
+    assert launch.url.path.endswith("/acts/igolaizola~yaencontre-scraper/runs")
+    # min_area 2000 -> 1000 and max_price 3000000 -> 3000000: bounds never drop a matching listing
+    assert json.loads(launch.content) == {"maxItems": 5, "operation": "sale", "propertyType": "land",
+                                          "sortBy": "newest", "location": "Madrid", "locationType": "municipality",
+                                          "maxPrice": "3000000", "minArea": "1000"}
+    assert len(listings) == 1  # Getafe is not Madrid
+    listing = listings[0]
+    assert listing.plot_m2 == 2400 and listing.price == 1200000 and listing.currency == "EUR"
+    assert listing.phone == "910000002" and listing.advertiser == "Agencia Dos"
+    assert listing.title == "Terreno en venta en Aravaca" and listing.property_type == "landparcel"
+    await adapter.aclose()
+
+
+@pytest.mark.parametrize("change", [
+    {"operation": "rent"}, {"url": "https://www.yaencontre.com/venta/terrenos/madrid"},
+    {"url": "https://www.fotocasa.es/es/comprar/terreno/x/191059959/d"},
+])
+def test_yaencontre_rejects_wrong_deal_and_non_listing_urls(change):
+    assert yaencontre([], [])._normalize(yaencontre_row(**change), task(), None) is None
+
+
+def test_yaencontre_relative_url_hidden_phone_and_unknown_operation():
+    adapter = yaencontre([], [])
+    listing = adapter._normalize(yaencontre_row(url="/venta/terreno/inmueble-41123456", operation=None,
+                                                owner={"name": "Particular", "phoneAvailable": False,
+                                                       "virtualPhoneNumber": "910000003"}), task(), None)
+    assert listing.url == "https://www.yaencontre.com/venta/terreno/inmueble-41123456"
+    assert listing.phone is None and listing.advertiser == "Particular"

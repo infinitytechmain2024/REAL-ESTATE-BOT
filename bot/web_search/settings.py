@@ -54,6 +54,11 @@ class WebSearchSettings(BaseSettings):
     apify_fotocasa_actor: str = Field(default="igolaizola/fotocasa-scraper", validation_alias="APIFY_FOTOCASA_ACTOR")
     apify_fotocasa_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_FOTOCASA_MAX_RESULTS")
     apify_fotocasa_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_FOTOCASA_MAX_CHARGE_USD")
+    apify_yaencontre_enabled: bool = Field(default=False, validation_alias="APIFY_YAENCONTRE_ENABLED")
+    apify_yaencontre_actor: str = Field(default="igolaizola/yaencontre-scraper", validation_alias="APIFY_YAENCONTRE_ACTOR")
+    apify_yaencontre_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_YAENCONTRE_MAX_RESULTS")
+    apify_yaencontre_max_charge_usd: float = Field(default=0.10, gt=0, le=10,
+                                                   validation_alias="APIFY_YAENCONTRE_MAX_CHARGE_USD")
     apify_portals_timeout_seconds: float = Field(default=120, ge=1, le=120, validation_alias="APIFY_PORTALS_TIMEOUT_SECONDS")
     redis_url: str = Field(default="", repr=False, validation_alias="REDIS_URL")
 
@@ -180,7 +185,7 @@ class WebSearchSettings(BaseSettings):
 
     def sources(self) -> tuple[ListingSource, ...]:
         """Default-off providers: disabling the source does not construct an HTTP client."""
-        if not (self.apify_idealista_enabled or self.apify_fotocasa_enabled):
+        if not (self.apify_idealista_enabled or self.apify_fotocasa_enabled or self.apify_yaencontre_enabled):
             return ()
         if not self.apify_token:
             log.warning("web_search.apify_disabled", extra={"code": "apify_token_missing"})
@@ -209,6 +214,14 @@ class WebSearchSettings(BaseSettings):
                                              max_items=self.apify_fotocasa_max_results,
                                              timeout_seconds=self.apify_portals_timeout_seconds,
                                              max_charge_usd=self.apify_fotocasa_max_charge_usd, geocoder=geocoder()))
+        if self.apify_yaencontre_enabled:
+            from .sources.portals import ApifyYaencontreSource
+
+            found.append(ApifyYaencontreSource(self.apify_token, actor_id=self.apify_yaencontre_actor,
+                                               max_items=self.apify_yaencontre_max_results,
+                                               timeout_seconds=self.apify_portals_timeout_seconds,
+                                               max_charge_usd=self.apify_yaencontre_max_charge_usd,
+                                               geocoder=geocoder()))
         return tuple(found)
 
     def backend_names(self) -> list[str]:
