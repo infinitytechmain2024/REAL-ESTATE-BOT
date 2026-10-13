@@ -7,7 +7,6 @@ remain available to the ordinary analysis/verification pipeline.
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 import re
 import time
@@ -21,26 +20,18 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from bot.acquisition.apify_client import (
+    ApifyError,
+    ApifyHttp,
+    PermanentApifyError,
+    TemporaryApifyError,
+)
 from bot.utils import costs
 from bot.utils.listing_text import areas
 from bot.web_search.geocoding import CachedCityCenters
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.base import SourceListing
 from bot.web_search.urls import fetchable, host_of
-
-
-class ApifyError(RuntimeError):
-    def __init__(self, code: str) -> None:
-        self.code = code
-        super().__init__(code)
-
-
-class TemporaryApifyError(ApifyError):
-    """Resume a known run later; never repeat an uncertain launch."""
-
-
-class PermanentApifyError(ApifyError):
-    """This source attempt cannot produce listings; ordinary search continues."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +85,10 @@ class ApifyIdealistaSource:
         self._sleep, self.max_response_bytes = sleep, max_response_bytes
         self._geocoder = geocoder
         self._client = client or httpx.AsyncClient(timeout=min(30, timeout_seconds), follow_redirects=False)
+        # The shared Apify HTTP core (bot/acquisition/apify_client.py), one attempt per call as before: this source's
+        # callers decide on retries (a known run is resumed on the next step, a launch is never repeated).
+        self._http = ApifyHttp(token, client=self._client, timeout_seconds=min(30, timeout_seconds), retries=0,
+                               max_rate_limited=0, sleep=sleep, max_response_bytes=max_response_bytes)
 
     def __repr__(self) -> str:
         return "ApifyIdealistaSource(...)"
@@ -134,33 +129,10 @@ class ApifyIdealistaSource:
                     and _fold(task.location) == _fold(self.location_name))
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        try:
-            async with self._client.stream(
-                    method, "https://api.apify.com/v2/" + path,
-                    headers={"Authorization": f"Bearer {self._token}"},
-                    timeout=min(30, self.timeout_seconds), follow_redirects=False, **kwargs) as response:
-                if response.status_code >= 300:
-                    cls = TemporaryApifyError if response.status_code == 429 or response.status_code >= 500 else PermanentApifyError
-                    raise cls(f"apify_http_{response.status_code}")
-                chunks: list[bytes] = []
-                received = 0
-                async for chunk in response.aiter_bytes():
-                    received += len(chunk)
-                    if received > self.max_response_bytes:
-                        raise PermanentApifyError("apify_response_too_large")
-                    chunks.append(chunk)
-        except httpx.HTTPError:
-            raise TemporaryApifyError("apify_transport") from None
-        try:
-            return json.loads(b"".join(chunks))
-        except ValueError:
-            raise PermanentApifyError("apify_invalid_json") from None
+        return await self._http.request(method, path, retry=False, **kwargs)
 
     async def _run(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        body = await self._request(method, path, **kwargs)
-        if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
-            raise PermanentApifyError("apify_run_schema")
-        return body["data"]
+        return await self._http.data(method, path, retry=False, **kwargs)
 
     async def search(self, task: QueryTask, *, limit: int) -> list[SourceListing]:
         started = time.monotonic()
