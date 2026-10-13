@@ -10,21 +10,26 @@ import asyncpg
 
 from .browser import BrowserSessionClient
 from .collector import FacebookBatchCollector
+from .provider import AcquisitionProvider
 from .reader import FacebookGroupReader
 from .settings import FacebookCollectorSettings
 from .store import PostgresCollectorStore
 
 
-async def run_batch_with(pool: asyncpg.Pool[asyncpg.Record], settings: FacebookCollectorSettings, batch_id: str) -> str:
+def build_provider(pool: asyncpg.Pool[asyncpg.Record], settings: FacebookCollectorSettings) -> AcquisitionProvider:
+    """The provider that executes Facebook batches: the local browser collector."""
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token)
     reader = FacebookGroupReader(browser, max_posts=settings.max_posts_per_group, timeout_seconds=settings.group_timeout_seconds)
-    collector = FacebookBatchCollector(
+    return FacebookBatchCollector(
         PostgresCollectorStore(pool), browser, reader, max_posts=settings.max_posts_per_group,
         max_groups=settings.max_groups,
         item_timeout_seconds=settings.group_timeout_seconds, pause_min_seconds=settings.pause_min_seconds,
         pause_max_seconds=settings.pause_max_seconds,
     )
-    return await collector.run(batch_id)
+
+
+async def run_batch_with(pool: asyncpg.Pool[asyncpg.Record], settings: FacebookCollectorSettings, batch_id: str) -> str:
+    return await build_provider(pool, settings).run(batch_id)
 
 
 async def run_batch(batch_id: str) -> str:
