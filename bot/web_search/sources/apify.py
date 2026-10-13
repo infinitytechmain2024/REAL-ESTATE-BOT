@@ -1,5 +1,6 @@
-"""Default-off Idealista adapter; fixtures reflect documentation, not a live validation.
+"""Default-off Apify portal adapters (``ApifyListingSource`` and one subclass per portal).
 
+Idealista: fixtures reflect documentation, not a live validation.
 The actor's ambiguous ``size`` is deliberately omitted for land. Description facts
 remain available to the ordinary analysis/verification pipeline.
 """
@@ -58,29 +59,30 @@ def source_run_scope(context: SourceRunContext) -> Iterator[None]:
         _execution.reset(token)
 
 
-class ApifyIdealistaSource:
-    name = "apify_idealista"
-    hosts = frozenset({"idealista.com"})
+class ApifyListingSource:
+    """One paid Apify actor run per campaign: launch once, checkpoint the run id, bill once, import the dataset.
 
-    def __init__(self, token: str, *, actor_id: str = "axlymxp/idealista-scraper",
-                 dynamic_actor_id: str = "",
-                 location_name: str = "Madrid", location_id: str = "", max_items: int = 50,
+    Subclasses name the portal (``name``, ``hosts``), say which tasks they serve (``supports``), build the actor's
+    input (``_plan``) and turn one dataset row into a ``SourceListing`` (``_normalize``); the run lifecycle, the
+    budget checks and the cost booking are shared.
+    """
+
+    name = "apify"
+    hosts: frozenset[str] = frozenset()
+
+    def __init__(self, token: str, *, actor_id: str, max_items: int = 50,
                  timeout_seconds: float = 120, max_charge_usd: float = .10,
                  client: httpx.AsyncClient | None = None,
                  geocoder: CachedCityCenters | None = None,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  max_response_bytes: int = 2_000_000) -> None:
-        if not re.fullmatch(r"[\w-]+(?:[/~][\w-]+)?", actor_id):
+        if not re.fullmatch(r"[\w.-]+(?:[/~][\w.-]+)?", actor_id):
             raise ValueError("invalid actor id")
-        if dynamic_actor_id and not re.fullmatch(r"[\w-]+(?:[/~][\w-]+)?", dynamic_actor_id):
-            raise ValueError("invalid dynamic actor id")
         if not 1 <= max_items <= 50 or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("invalid apify limits")
         if not math.isfinite(max_charge_usd) or max_charge_usd <= 0:
             raise ValueError("invalid apify charge cap")
         self._token, self.actor_id = token, actor_id.replace("/", "~")
-        self.dynamic_actor_id = dynamic_actor_id.replace("/", "~")
-        self.location_name, self.location_id = location_name.strip(), location_id.strip()
         self.max_items, self.timeout_seconds, self.max_charge_usd = max_items, timeout_seconds, max_charge_usd
         self._sleep, self.max_response_bytes = sleep, max_response_bytes
         self._geocoder = geocoder
@@ -91,7 +93,7 @@ class ApifyIdealistaSource:
                                max_rate_limited=0, sleep=sleep, max_response_bytes=max_response_bytes)
 
     def __repr__(self) -> str:
-        return "ApifyIdealistaSource(...)"
+        return f"{type(self).__name__}(...)"
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -114,19 +116,24 @@ class ApifyIdealistaSource:
             raise
 
     def supports(self, task: QueryTask) -> bool:
-        return bool(self._token and task.location.strip()
-                    and task.country == "ES" and task.vertical == "real_estate"
-                    and task.place_level == "city" and task_kind(task) == "land"
-                    and task.constraints.get("deal") == "sale"
-                    and (task.radius_km is None or (0 < task.radius_km <= 100
-                         and self._geocoder is not None and self.dynamic_actor_id))
-                    and (self._static_for(task) or self.dynamic_actor_id)
-                    and not any(h == "idealista.com" or "idealista.com".endswith("." + h)
-                                for h in task.blocked_hosts))
+        raise NotImplementedError
 
-    def _static_for(self, task: QueryTask) -> bool:
-        return bool(not task.suburbs_only and task.radius_km is None and self.location_id and self.location_name
-                    and _fold(task.location) == _fold(self.location_name))
+    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
+                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
+        """(actor path, actor input, search centre when it was already resolved) for this task."""
+        raise NotImplementedError
+
+    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+        raise NotImplementedError
+
+    async def _center(self, task: QueryTask) -> tuple[float, float]:
+        center = await self._geocoder.resolve(task.location) if self._geocoder else None
+        if center is None:
+            raise PermanentApifyError("apify_geocode_unavailable")
+        return center
+
+    def _blocked(self, task: QueryTask) -> bool:
+        return any(h == host or host.endswith("." + h) for host in self.hosts for h in task.blocked_hosts)
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         return await self._http.request(method, path, retry=False, **kwargs)
@@ -146,29 +153,7 @@ class ApifyIdealistaSource:
             raise PermanentApifyError("apify_budget_cap")
         run_id = context.run_id
         amount = min(limit, self.max_items)
-        center: tuple[float, float] | None = None
-        if self._static_for(task):
-            actor = self.actor_id
-            actor_input = {"country": "es", "locationName": self.location_name,
-                           "locationId": self.location_id, "propertyType": "lands",
-                           "operation": "sale", "maxItems": amount, "numPage": 1}
-        else:
-            actor = self.dynamic_actor_id
-            # This actor resolves the user's place name through Idealista autocomplete.
-            # Its published input schema requires maxProperties >= 10; importing is still
-            # bounded by amount and the provider-side maximum charge.
-            actor_input = {"country": "es", "searchType": "auto", "locationPrefix": task.location,
-                           "propertyType": "lands", "operation": "sale",
-                           "maxProperties": max(10, amount)}
-            if task.radius_km is not None and not run_id:
-                center = await self._geocoder.resolve(task.location) if self._geocoder else None
-                if center is None:
-                    raise PermanentApifyError("apify_geocode_unavailable")
-                actor_input = {"country": "es", "searchType": "center",
-                               "center": f"{center[0]:.6f},{center[1]:.6f}",
-                               "distance": max(100, min(100_000, round(task.radius_km * 1000))),
-                               "propertyType": "lands", "operation": "sale",
-                               "maxProperties": max(10, amount)}
+        actor, actor_input, center = await self._plan(task, amount, run_id)
         if not run_id:
             if not context.launch_allowed:
                 raise PermanentApifyError("apify_launch_uncertain")
@@ -251,10 +236,8 @@ class ApifyIdealistaSource:
             await costs.record("api", kind="skip", provider="apify", item=actor,
                                code="apify_result_limit", units=overflow, campaign_id=context.campaign_id)
         if task.radius_km is not None and center is None:
-            center = await self._geocoder.resolve(task.location) if self._geocoder else None
-            if center is None:
-                raise PermanentApifyError("apify_geocode_unavailable")
-        rows = [normalize_listing(item, task, municipality=task.location, center=center) for item in items[:amount]]
+            center = await self._center(task)
+        rows = [self._normalize(item, task, center) for item in items[:amount]]
         invalid = sum(row is None for row in rows)
         if invalid:
             await costs.record("api", kind="skip", provider="apify", item=actor,
@@ -273,6 +256,62 @@ class ApifyIdealistaSource:
         usage = _number(final.get("usageTotalUsd"))
         await context.reconcile_usage(run_id, usage if usage is not None else cap,
                                       estimated=usage is None)
+
+
+class ApifyIdealistaSource(ApifyListingSource):
+    name = "apify_idealista"
+    hosts = frozenset({"idealista.com"})
+
+    def __init__(self, token: str, *, actor_id: str = "axlymxp/idealista-scraper",
+                 dynamic_actor_id: str = "",
+                 location_name: str = "Madrid", location_id: str = "", **kwargs: Any) -> None:
+        if dynamic_actor_id and not re.fullmatch(r"[\w-]+(?:[/~][\w-]+)?", dynamic_actor_id):
+            raise ValueError("invalid dynamic actor id")
+        super().__init__(token, actor_id=actor_id, **kwargs)
+        self.dynamic_actor_id = dynamic_actor_id.replace("/", "~")
+        self.location_name, self.location_id = location_name.strip(), location_id.strip()
+
+    def supports(self, task: QueryTask) -> bool:
+        return bool(self._token and task.location.strip()
+                    and task.country == "ES" and task.vertical == "real_estate"
+                    and task.place_level == "city" and task_kind(task) == "land"
+                    and task.constraints.get("deal") == "sale"
+                    and (task.radius_km is None or (0 < task.radius_km <= 100
+                         and self._geocoder is not None and self.dynamic_actor_id))
+                    and (self._static_for(task) or self.dynamic_actor_id)
+                    and not self._blocked(task))
+
+    def _static_for(self, task: QueryTask) -> bool:
+        return bool(not task.suburbs_only and task.radius_km is None and self.location_id and self.location_name
+                    and _fold(task.location) == _fold(self.location_name))
+
+    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
+                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
+        center: tuple[float, float] | None = None
+        if self._static_for(task):
+            actor = self.actor_id
+            actor_input = {"country": "es", "locationName": self.location_name,
+                           "locationId": self.location_id, "propertyType": "lands",
+                           "operation": "sale", "maxItems": amount, "numPage": 1}
+        else:
+            actor = self.dynamic_actor_id
+            # This actor resolves the user's place name through Idealista autocomplete.
+            # Its published input schema requires maxProperties >= 10; importing is still
+            # bounded by amount and the provider-side maximum charge.
+            actor_input = {"country": "es", "searchType": "auto", "locationPrefix": task.location,
+                           "propertyType": "lands", "operation": "sale",
+                           "maxProperties": max(10, amount)}
+            if task.radius_km is not None and not run_id:
+                center = await self._center(task)
+                actor_input = {"country": "es", "searchType": "center",
+                               "center": f"{center[0]:.6f},{center[1]:.6f}",
+                               "distance": max(100, min(100_000, round(task.radius_km * 1000))),
+                               "propertyType": "lands", "operation": "sale",
+                               "maxProperties": max(10, amount)}
+        return actor, actor_input, center
+
+    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+        return normalize_listing(item, task, municipality=task.location, center=center)
 
 
 def _text(value: Any) -> str:
