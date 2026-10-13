@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, PositiveInt, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,6 +37,8 @@ class FacebookCollectorSettings(BaseSettings):
     apify_max_usd_per_campaign: float = Field(default=10.0, gt=0, le=1000, validation_alias="APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN")
     apify_max_usd_per_run: float = Field(default=2.0, gt=0, le=1000, validation_alias="APIFY_FACEBOOK_MAX_USD_PER_RUN")
     apify_timeout_seconds: int = Field(default=600, ge=30, le=3600, validation_alias="APIFY_FACEBOOK_TIMEOUT_SECONDS")
+    # campaign: only campaigns with acquisition_provider='apify' (migration 046); all: every campaign's batches.
+    apify_scope: Literal["campaign", "all"] = Field(default="campaign", validation_alias="APIFY_FACEBOOK_SCOPE")
     apify_raw_retention_days: int = Field(default=7, ge=1, le=365, validation_alias="APIFY_FACEBOOK_RAW_RETENTION_DAYS")
     # The campaign budget every service books against (bot/utils/costs.py); 0: no limit.
     campaign_budget_usd: float = Field(default=5.0, ge=0, le=10_000, validation_alias="CAMPAIGN_BUDGET_USD")

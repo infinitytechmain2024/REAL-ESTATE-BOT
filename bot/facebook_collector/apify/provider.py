@@ -115,6 +115,9 @@ class ApifyFacebookProvider:
     def __repr__(self) -> str:
         return f"ApifyFacebookProvider(actor={self.config.actor_id})"
 
+    async def aclose(self) -> None:
+        await self.http.aclose()
+
     async def health(self) -> ProviderHealth:
         """The token works and the actor exists (one GET; nothing is launched)."""
         try:

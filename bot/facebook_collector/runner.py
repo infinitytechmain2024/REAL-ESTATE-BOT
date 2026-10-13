@@ -107,11 +107,12 @@ class CollectorRunner:
 async def main() -> None:
     import asyncpg
 
-    from .main import run_batch_with
+    from .main import install_ledger, run_batch_with
     from .settings import FacebookCollectorSettings
 
     settings = FacebookCollectorSettings()
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
+    install_ledger(pool, settings)
     try:
         runner = CollectorRunner(PostgresLaunchStore(pool), lambda batch_id: run_batch_with(pool, settings, batch_id),
                                  poll_seconds=settings.runner_poll_seconds)

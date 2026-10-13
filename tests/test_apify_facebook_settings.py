@@ -12,7 +12,7 @@ BASE = {"DATABASE_URL": "postgresql://x/y", "BROWSER_SESSION_API_TOKEN": "t" * 2
 
 def settings(monkeypatch: pytest.MonkeyPatch, **env: str) -> FacebookCollectorSettings:
     for key in ("FEATURE_APIFY_FACEBOOK", "APIFY_TOKEN", "APIFY_FACEBOOK_ACTOR_BUILD", "APIFY_FACEBOOK_MAX_USD_PER_RUN",
-                "APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN"):
+                "APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN", "APIFY_FACEBOOK_SCOPE", "CAMPAIGN_BUDGET_USD"):
         monkeypatch.delenv(key, raising=False)
     for key, value in {**BASE, **env}.items():
         monkeypatch.setenv(key, value)
