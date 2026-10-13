@@ -6,6 +6,9 @@ RUN useradd --create-home --uid 10003 collector
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot/facebook_collector/ ./bot/facebook_collector/
+# The Apify provider (FEATURE_APIFY_FACEBOOK): the shared Apify client and post contract, the cost ledger.
+COPY bot/acquisition/ ./bot/acquisition/
+COPY bot/utils/ ./bot/utils/
 RUN chown -R collector:collector /app
 USER collector
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
