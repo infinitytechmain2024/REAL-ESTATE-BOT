@@ -58,6 +58,8 @@ import httpx
 
 from bot.agents.recorder import PostgresRecorder, Recorder, record_of
 from bot.analysis_pipeline.cards import CardTask, also_on, render_card
+from bot.facebook_collector.apify.client import ApifyClientError
+from bot.facebook_collector.provider import AcquisitionProvider
 from bot.utils import costs
 
 from . import offers, people
@@ -318,6 +320,8 @@ class CampaignRunner:
         relevance: RelevanceJudge | None = None,
         recorder: Recorder | None = None,
         final_report: FinalReporter | None = None,
+        apify_provider: AcquisitionProvider | None = None,
+        apify_max_usd: float = 0,
     ) -> None:
         """``owner_ids`` (TELEGRAM_OPERATOR_IDS): campaigns they requested show the technical
         status; everyone else sees only the user-safe labels of ``status_text``. ``web``: the
@@ -331,6 +335,8 @@ class CampaignRunner:
         self.relevance = relevance
         self.final_report = final_report  # the user's «Отчёт по поиску» (None: not sent)
         self.recorder = recorder
+        self.apify_provider = apify_provider
+        self.apify_max_usd = max(0.0, apify_max_usd)
         # After a failed relevance call the model is left alone for a minute: one slow or broken
         # provider must not hold a step for 20 findings x the timeout (the rules decide meanwhile).
         self._relevance_paused_until: datetime | None = None
@@ -421,6 +427,15 @@ class CampaignRunner:
     # -- phases --
 
     async def _advance(self, campaign: Campaign) -> str:
+        if campaign.acquisition_provider is None:
+            provider = "apify" if self.apify_provider is not None else "local"
+            await self.campaigns.set_acquisition_provider(campaign.id, provider)
+            campaign = replace(campaign, acquisition_provider=provider)
+        if campaign.state == "paused_budget":
+            if self._uses_apify(campaign) and await self.store.apify_spent(campaign.id) >= self.apify_max_usd:
+                return "Пауза: бюджет Apify исчерпан"
+            await self.campaigns.set_state(campaign.id, "running", ACTOR)
+            campaign = replace(campaign, state="running")
         if campaign.state in ("planned", "discovering"):
             return await self._discover(campaign)
         window = await self.store.open_window(campaign.id)
@@ -464,6 +479,19 @@ class CampaignRunner:
                                                reason=f"batch_verification:{window.batch_id}")
             return VERIFY
         if window.batch_state not in TERMINAL_BATCH_STATES:
+            if window.acquisition_provider == "apify":
+                if self.apify_provider is None:
+                    return "Пауза: Apify отключён"
+                try:
+                    await self.apify_provider.run(window.batch_id)
+                except ApifyClientError as exc:
+                    log.warning("campaign.apify_unavailable", extra={"campaign_id": campaign.id,
+                                                                      "code": exc.code})
+                    return "Пауза: Apify временно недоступен"
+                window = await self.store.open_window(campaign.id) or window
+                if window.batch_state in TERMINAL_BATCH_STATES:
+                    return await self._follow_window(campaign, window)
+                return f"Сейчас: Facebook · окно {window.window_no} собирает Apify"
             if campaign.state == "paused_verification":  # the verification flow requeued it
                 await self.campaigns.set_state(campaign.id, "running", ACTOR)
             if await self.store.profile_state() == "human_verification_required":
@@ -484,6 +512,7 @@ class CampaignRunner:
 
     async def _next_window(self, campaign: Campaign) -> str:
         limits, now = campaign.plan.limits, self.now()
+        use_apify = self._uses_apify(campaign)
         run = await self.store.get_run(campaign.id)
         started = await self.store.windows_started(campaign.id)
         groups = await self.store.next_groups(campaign.id, min(limits.window_size, WINDOW_SIZE))
@@ -493,12 +522,20 @@ class CampaignRunner:
             return await self._drain(campaign, run, "max_windows")
         if run.next_window_at is not None and run.next_window_at > now:
             return ANALYSIS
-        if (waiting := await self._facebook_wait()) is not None:
+        if use_apify:
+            if await self.store.apify_spent(campaign.id) >= self.apify_max_usd:
+                await self.campaigns.set_state(campaign.id, "paused_budget", ACTOR,
+                                               reason="apify_budget_exceeded")
+                return "Пауза: бюджет Apify исчерпан"
+        elif (waiting := await self._facebook_wait()) is not None:
             return waiting
         if await self.store.busy_elsewhere(campaign.id):
             return QUEUE_BUSY
         try:
-            start = await self.store.start_window(campaign.id, groups[:WINDOW_SIZE], vertical=campaign.plan.vertical, actor=ACTOR)
+            start = await self.store.start_window(
+                campaign.id, groups[:WINDOW_SIZE], vertical=campaign.plan.vertical, actor=ACTOR,
+                provider="apify" if use_apify else "local",
+            )
         except ValueError as exc:
             # Quota, breaker or profile refusal: nothing was planned; try again later.
             retry = timedelta(seconds=self.config.refusal_retry_seconds)
@@ -512,8 +549,19 @@ class CampaignRunner:
         if start is None:  # every group's source is paused or blocked; they were skipped
             return ANALYSIS
         log.info("campaign.window_started", extra={"campaign_id": campaign.id, "window": start.window_no,
-                                                   "batch_id": start.batch_id, "groups": start.groups})
+                                                   "batch_id": start.batch_id, "groups": start.groups,
+                                                   "provider": "apify" if use_apify else "local"})
+        if use_apify and self.apify_provider is not None:
+            try:
+                await self.apify_provider.run(start.batch_id)
+            except ApifyClientError as exc:
+                log.warning("campaign.apify_unavailable", extra={"campaign_id": campaign.id,
+                                                                  "code": exc.code})
+                return "Пауза: Apify временно недоступен"
         return f"Сейчас: Facebook · окно {start.window_no} ждёт запуска"
+
+    def _uses_apify(self, campaign: Campaign) -> bool:
+        return self.apify_provider is not None and campaign.acquisition_provider == "apify"
 
     async def _drain(self, campaign: Campaign, run: RunState, reason: str) -> str:
         """Wait for the web stage, give the analysis worker a bounded chance to finish, then complete."""
@@ -1283,6 +1331,9 @@ def finding_card(campaign: Campaign, finding: StreamFinding, *,
 async def main() -> None:
     import asyncpg
 
+    from bot.facebook_collector.apify.client import ApifyClient
+    from bot.facebook_collector.apify.provider import ApifyFacebookProvider
+    from bot.facebook_collector.apify.store import PostgresApifyRunStore
     from bot.facebook_collector.browser import BrowserSessionClient
     from bot.facebook_collector.reader import FacebookGroupReader
 
@@ -1314,15 +1365,27 @@ async def main() -> None:
     if comments is None:
         config = replace(config, comment_leads="off")
     store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
+    apify_client = None
+    apify_provider = None
+    if settings.feature_apify_facebook:
+        apify_config = settings.apify_facebook_config()
+        apify_client = ApifyClient(
+            settings.apify_token, timeout_seconds=min(30, apify_config.timeout_seconds)
+        )
+        apify_provider = ApifyFacebookProvider(
+            PostgresApifyRunStore(pool, apify_config), apify_client, apify_config
+        )
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool),
-                            final_report=final_reporter)
+                            final_report=final_reporter, apify_provider=apify_provider,
+                            apify_max_usd=settings.apify_facebook_max_usd_per_campaign)
     social, generator = _social_worker(settings, pool, campaigns)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
                                              "comment_leads": settings.comment_leads if comments else "off",
-                                             "investor_reach": reach is not None})
+                                             "investor_reach": reach is not None,
+                                             "acquisition_provider": "apify" if apify_provider else "local"})
     stop = asyncio.Event()
     try:
         # Each stage is its own loop: a slow site or network never delays Facebook work, and the reverse.
@@ -1352,6 +1415,8 @@ async def main() -> None:
             await judge.aclose()
         if final_reporter is not None:
             await final_reporter.aclose()
+        if apify_client is not None:
+            await apify_client.aclose()
         await messenger.aclose()
         await pool.close()
 

@@ -82,6 +82,7 @@ class Window:
     batch_state: str
     current_group: str | None = None  # name of the group being read right now
     current_group_url: str | None = None  # its Facebook address
+    acquisition_provider: str = "local"
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +186,8 @@ class RunStore(Protocol):
     async def windows_started(self, campaign_id: str) -> int: ...
     async def next_groups(self, campaign_id: str, limit: int) -> list[QueuedGroup]: ...
     async def start_window(self, campaign_id: str, groups: list[QueuedGroup], *, vertical: str,
-                           actor: str) -> WindowStart | None: ...
+                           actor: str, provider: str = "local") -> WindowStart | None: ...
+    async def apify_spent(self, campaign_id: str) -> float: ...
     async def cancel_window_batch(self, batch_id: str, actor: str) -> None: ...
     async def pending_analysis(self, campaign_id: str) -> int: ...
     async def analysis_progress(self, campaign_id: str) -> tuple[int, int]:
@@ -341,7 +343,7 @@ class PostgresRunStore:
 
     async def open_window(self, campaign_id: str) -> Window | None:
         row = await self.pool.fetchrow(
-            """select w.window_no, w.batch_id::text as batch_id, b.state,
+            """select w.window_no, w.batch_id::text as batch_id, b.state, b.acquisition_method,
                       (select coalesce(g.name, g.group_key)
                          from acquisition_batch_items i
                          join monitoring_sources s on s.id = i.source_id
@@ -357,7 +359,8 @@ class PostgresRunStore:
             campaign_id,
         )
         return (Window(row["window_no"], row["batch_id"], row["state"], row["current_group"],
-                       row["current_group_url"]) if row else None)
+                       row["current_group_url"],
+                       "apify" if row["acquisition_method"] == "apify" else "local") if row else None)
 
     async def close_window(self, campaign_id: str, window: Window, actor: str) -> None:
         """Groups read by the batch become collected, the rest skipped; the window finishes."""
@@ -423,14 +426,18 @@ class PostgresRunStore:
         return [QueuedGroup(r["group_key"], r["canonical_url"], r["name"]) for r in rows]
 
     async def start_window(self, campaign_id: str, groups: list[QueuedGroup], *, vertical: str,
-                           actor: str) -> WindowStart | None:
+                           actor: str, provider: str = "local") -> WindowStart | None:
         """Plan the window's batch in one transaction; ``ValueError`` (quota, breaker, profile) plans nothing."""
         from bot.orchestra.models import AcquisitionMethod, RunRequest
         from bot.orchestra.store import plan_facebook_batch
 
         if not 1 <= len(groups) <= WINDOW_SIZE:
             raise ValueError(f"a campaign window holds 1..{WINDOW_SIZE} groups")
+        if provider not in {"local", "apify"}:
+            raise ValueError("unknown acquisition provider")
         urls = [g.canonical_url for g in groups]
+        if provider == "apify":
+            return await self._start_apify_window(campaign_id, urls, vertical=vertical, actor=actor)
         request = RunRequest(platform="facebook", source_kind="group", targets=tuple(urls), vertical=vertical,
                              method=AcquisitionMethod.FACEBOOK_CONNECTOR)
         async with self.pool.acquire() as conn, conn.transaction():
@@ -463,6 +470,60 @@ class PostgresRunStore:
                 campaign_id, window_no, planned.batch_id, len(included),
             )
             return WindowStart(window_no, planned.batch_id, len(included), tuple(skipped))
+
+    async def _start_apify_window(self, campaign_id: str, urls: list[str], *, vertical: str,
+                                  actor: str) -> WindowStart | None:
+        batch_id = str(uuid.uuid4())
+        async with self.pool.acquire() as conn, conn.transaction():
+            await _set_actor(conn, actor)
+            window_no = await conn.fetchval(
+                "select count(*) + 1 from campaign_windows where campaign_id = $1::uuid", campaign_id)
+            rows = await conn.fetch(
+                """select id::text, canonical_url from monitoring_sources
+                     where platform = 'facebook' and state = 'active' and canonical_url = any($1::text[])""",
+                urls,
+            )
+            source_by_url = {row["canonical_url"]: row["id"] for row in rows}
+            included = [url for url in urls if url in source_by_url]
+            skipped = [url for url in urls if url not in source_by_url]
+            if skipped:
+                await conn.execute(
+                    """update campaign_groups set state = 'skipped', reject_reason = 'source_unavailable'
+                        where campaign_id = $1::uuid and canonical_url = any($2::text[]) and state = 'queued'""",
+                    campaign_id, skipped,
+                )
+            if not included:
+                return None
+            await conn.execute(
+                """insert into acquisition_batches
+                       (id, campaign_id, platform, acquisition_method, vertical, state, max_items, requested_by)
+                   values ($1::uuid, $2::uuid, 'facebook', 'apify', $3, 'queued', $4, $5)""",
+                batch_id, campaign_id, vertical, len(included), actor,
+            )
+            for sequence_no, url in enumerate(included, 1):
+                await conn.execute(
+                    """insert into acquisition_batch_items (batch_id, source_id, sequence_no)
+                       values ($1::uuid, $2::uuid, $3)""",
+                    batch_id, source_by_url[url], sequence_no,
+                )
+            await conn.execute(
+                """update campaign_groups set batch_id = $3::uuid
+                    where campaign_id = $1::uuid and canonical_url = any($2::text[]) and state = 'queued'""",
+                campaign_id, included, batch_id,
+            )
+            await conn.execute(
+                """insert into campaign_windows (campaign_id, window_no, batch_id, group_count)
+                   values ($1::uuid, $2, $3::uuid, $4)""",
+                campaign_id, window_no, batch_id, len(included),
+            )
+        return WindowStart(window_no, batch_id, len(included), tuple(skipped))
+
+    async def apify_spent(self, campaign_id: str) -> float:
+        value = await self.pool.fetchval(
+            "select coalesce(sum(billed_usd), 0) from apify_runs where campaign_id = $1::uuid",
+            campaign_id,
+        )
+        return float(value or 0)
 
     async def cancel_window_batch(self, batch_id: str, actor: str) -> None:
         from bot.orchestra.store import cancel_batches
@@ -941,6 +1002,7 @@ class _MemBatch:
     urls: list[str]
     state: str = "queued"
     items: dict[str, str] = field(default_factory=dict)  # url -> item state
+    provider: str = "local"
 
 
 class MemoryRunStore:
@@ -968,6 +1030,7 @@ class MemoryRunStore:
         self.cancelled_batches: list[str] = []
         self.collector_running = False  # a batch run / acquisition run / launch holds the profile
         self.recovered: list[str] = []  # actors that freed the profile
+        self.apify_costs: dict[str, float] = {}
         self.buckets: dict[str, tuple[str, float | None]] = {}  # finding -> (bucket, distance)
         self.hold_reasons: dict[str, str | None] = {}  # finding -> why it was held unverified
         self.whys: dict[str, str | None] = {}  # finding -> its reason category (held / excluded ones)
@@ -1047,7 +1110,7 @@ class MemoryRunStore:
                 batch = self.batches[batch_id]
                 running = next((u for u, s in batch.items.items() if s == "running"), None)
                 name = next((g.name for g in self.groups.get(campaign_id, []) if g.canonical_url == running), None)
-                return Window(window_no, batch_id, batch.state, name, running if name else None)
+                return Window(window_no, batch_id, batch.state, name, running if name else None, batch.provider)
         return None
 
     async def close_window(self, campaign_id: str, window: Window, actor: str) -> None:
@@ -1073,12 +1136,14 @@ class MemoryRunStore:
         return [QueuedGroup(g.group_key, g.canonical_url, g.name) for g in waiting[:_window_size(limit)]]
 
     async def start_window(self, campaign_id: str, groups: list[QueuedGroup], *, vertical: str,
-                           actor: str) -> WindowStart | None:
+                           actor: str, provider: str = "local") -> WindowStart | None:
         if not 1 <= len(groups) <= WINDOW_SIZE:
             raise ValueError(f"a campaign window holds 1..{WINDOW_SIZE} groups")
         if self.refusal:
             raise ValueError(self.refusal)
-        if self.profile != "ready":
+        if provider not in {"local", "apify"}:
+            raise ValueError("unknown acquisition provider")
+        if provider == "local" and self.profile != "ready":
             raise ValueError("no ready facebook browser profile is provisioned")
         rows = {g.canonical_url: g for g in self.groups.get(campaign_id, [])}
         skipped = tuple(g.canonical_url for g in groups if g.canonical_url in self.unavailable)
@@ -1088,12 +1153,17 @@ class MemoryRunStore:
         if not included:
             return None
         batch_id = str(uuid.uuid4())
-        self.batches[batch_id] = _MemBatch(batch_id, campaign_id, included, items=dict.fromkeys(included, "queued"))
+        self.batches[batch_id] = _MemBatch(
+            batch_id, campaign_id, included, items=dict.fromkeys(included, "queued"), provider=provider
+        )
         for url in included:
             rows[url].batch_id = batch_id
         windows = self.windows.setdefault(campaign_id, [])
         windows.append((len(windows) + 1, batch_id, "active"))
         return WindowStart(len(windows), batch_id, len(included), skipped)
+
+    async def apify_spent(self, campaign_id: str) -> float:
+        return self.apify_costs.get(campaign_id, 0.0)
 
     async def cancel_window_batch(self, batch_id: str, actor: str) -> None:
         batch = self.batches[batch_id]

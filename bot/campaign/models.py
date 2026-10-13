@@ -23,7 +23,7 @@ Language = Literal["es", "en", "ru", "uk"]
 LANGUAGES: tuple[Language, ...] = ("es", "en", "ru", "uk")
 Vertical = Literal["real_estate", "investors", "both"]
 CampaignState = Literal[
-    "planned", "discovering", "running", "paused_verification", "completed", "cancelled", "failed",
+    "planned", "discovering", "running", "paused_verification", "paused_budget", "completed", "cancelled", "failed",
 ]
 
 TERMINAL_STATES: frozenset[str] = frozenset({"completed", "cancelled", "failed"})
@@ -31,8 +31,9 @@ TERMINAL_STATES: frozenset[str] = frozenset({"completed", "cancelled", "failed"}
 TRANSITIONS: dict[str, frozenset[str]] = {
     "planned": frozenset({"discovering", "running", "cancelled", "failed"}),
     "discovering": frozenset({"running", "paused_verification", "completed", "cancelled", "failed"}),
-    "running": frozenset({"paused_verification", "completed", "cancelled", "failed"}),
+    "running": frozenset({"paused_verification", "paused_budget", "completed", "cancelled", "failed"}),
     "paused_verification": frozenset({"discovering", "running", "cancelled", "failed"}),
+    "paused_budget": frozenset({"running", "cancelled", "failed"}),
     "completed": frozenset(),
     "cancelled": frozenset(),
     "failed": frozenset(),
@@ -150,3 +151,4 @@ class Campaign:
     finished_at: datetime | None = None
     # The TaskSpec (bot/campaign/spec.py) as JSON; None for a goal given as free text.
     spec: dict[str, Any] | None = None
+    acquisition_provider: str | None = None
