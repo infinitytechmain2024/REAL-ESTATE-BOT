@@ -19,7 +19,7 @@ from typing import Any
 import asyncpg
 
 from ..models import BatchItem, BatchPlan, GroupState
-from .provider import LAUNCH_UNKNOWN, ApifyRun
+from .provider import FALLBACK, LAUNCH_UNKNOWN, ApifyRun
 
 ACTOR = "facebook_apify"
 _TERMINAL = ("SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED", LAUNCH_UNKNOWN)
@@ -162,6 +162,35 @@ class PostgresApifyFacebookStore:
                 """update acquisition_batches set state = $2, finished_at = now()
                     where id = $1::uuid and state = 'running'""",
                 plan.id, state if state in {"succeeded", "cancelled"} else "failed")
+
+    async def queue_browser_fallback(self, plan: BatchPlan, items: list[BatchItem],
+                                     campaign_id: str | None) -> str | None:
+        """A browser batch (and its launch request for facebook-runner) for the closed groups of an Apify batch.
+
+        Once per Apify batch (``requested_by`` = ``apify_fallback:<batch>``); the facebook-runner picks it up like a
+        resumed batch and the provider choice always gives it to the browser. Same groups as the window that was
+        already planned under the Facebook quotas, at most 20, read one at a time by the single profile.
+        """
+        marker = f"{FALLBACK}:{plan.id}"
+        async with self.pool.acquire() as conn, conn.transaction():
+            await _actor(conn)
+            if await conn.fetchval("select 1 from acquisition_batches where requested_by = $1", marker):
+                return None
+            vertical = await conn.fetchval("select vertical from acquisition_batches where id = $1::uuid", plan.id)
+            batch = await conn.fetchval(
+                """insert into acquisition_batches (platform, acquisition_method, vertical, state, max_items, requested_by,
+                                                    campaign_id)
+                   values ('facebook', 'facebook_connector', $1, 'planned', $2, $3, $4::uuid) returning id""",
+                vertical or "real_estate", len(items[:20]), marker, campaign_id)
+            for sequence_no, item in enumerate(items[:20], start=1):
+                await conn.execute(
+                    "insert into acquisition_batch_items (batch_id, source_id, sequence_no) values ($1, $2::uuid, $3)",
+                    batch, item.source_id, sequence_no)
+            await conn.execute("update acquisition_batches set state = 'queued' where id = $1", batch)
+            await conn.execute(
+                """insert into collector_launch_requests (batch_id, requested_by) values ($1, $2)
+                   on conflict do nothing""", batch, marker)
+            return str(batch)
 
 
 async def _actor(conn: asyncpg.Connection[asyncpg.Record]) -> None:

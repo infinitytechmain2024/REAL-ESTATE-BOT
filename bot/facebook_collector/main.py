@@ -22,7 +22,7 @@ from .store import PostgresCollectorStore
 def choose_provider(settings: FacebookCollectorSettings, campaign_provider: str | None) -> str:
     """``apify`` only with FEATURE_APIFY_FACEBOOK on and the campaign set to it (or APIFY_FACEBOOK_SCOPE=all); else
     ``local``, the browser collector -- also for a batch that belongs to no campaign."""
-    if not settings.apify_enabled:
+    if not settings.apify_enabled or campaign_provider == "fallback":  # a closed groups' batch: always the browser
         return "local"
     if settings.apify_scope == "all":
         return "apify"
@@ -30,9 +30,11 @@ def choose_provider(settings: FacebookCollectorSettings, campaign_provider: str 
 
 
 async def campaign_provider(pool: asyncpg.Pool[asyncpg.Record], batch_id: str) -> str | None:
-    """The ``campaigns.acquisition_provider`` of the batch's campaign (migration 046), None without a campaign."""
+    """The ``campaigns.acquisition_provider`` of the batch's campaign (migration 046), None without a campaign;
+    ``fallback`` for the browser batch of an Apify batch's closed groups."""
     value = await pool.fetchval(
-        """select c.acquisition_provider from acquisition_batches b join campaigns c on c.id = b.campaign_id
+        """select case when b.requested_by like 'apify_fallback:%' then 'fallback' else c.acquisition_provider end
+             from acquisition_batches b left join campaigns c on c.id = b.campaign_id
             where b.id = $1::uuid""", batch_id)
     return str(value) if value else None
 

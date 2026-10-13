@@ -86,6 +86,10 @@ class Store:
     async def finish_batch(self, plan, batch_run_id, state, reason=None):
         self.batch = (state, reason)
 
+    async def queue_browser_fallback(self, plan, items, campaign_id):
+        self.fallbacks = [*getattr(self, "fallbacks", []), [i.id for i in items]]
+        return "fallback-batch"
+
 
 class Api:
     """A scripted Apify API: launch answers, run states and dataset pages; every request is recorded."""
@@ -264,3 +268,16 @@ def test_the_config_requires_a_pinned_build() -> None:
         ApifyFacebookConfig(build="latest")
     with pytest.raises(ValueError, match="unsafe"):
         ApifyFacebookConfig(build="1.0", max_usd_per_run=20, max_usd_per_campaign=10)
+
+
+async def test_closed_groups_go_to_the_browser_collector_once(ledger) -> None:
+    store = Store()
+    api = Api(dataset=[item(1), {"facebookUrl": G2, "error": "This group is private. Join the group to see posts."}])
+    await provider(api, store).run("batch-1")
+    assert store.fallbacks == [["item-2"]]  # only the closed group, not the one Apify read
+    gone, quiet = Store(), Store()
+    await provider(Api(dataset=[{"facebookUrl": G2, "error": "Page not found"}]), gone).run("batch-1")
+    assert not hasattr(gone, "fallbacks")  # a removed group is not retried in the browser
+    off = ApifyFacebookConfig(build="1.2.3", browser_fallback=False)
+    await provider(Api(dataset=[{"facebookUrl": G2, "error": "private group"}]), quiet, off).run("batch-1")
+    assert not hasattr(quiet, "fallbacks")

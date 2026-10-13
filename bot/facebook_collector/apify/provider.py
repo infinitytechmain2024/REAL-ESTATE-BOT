@@ -52,6 +52,7 @@ from .metrics import emit
 
 log = logging.getLogger(__name__)
 LAUNCH_UNKNOWN = "LAUNCH_UNKNOWN"
+FALLBACK = "apify_fallback"  # acquisition_batches.requested_by prefix of a closed groups' browser batch
 DEFAULT_ACTOR = "apify/facebook-groups-scraper"
 
 
@@ -65,6 +66,8 @@ class ApifyFacebookConfig:
     timeout_seconds: float = 600
     page_size: int = 200
     checkpoint_every: int = 50
+    # Closed groups the actor could not read go to the browser collector as their own batch (once per batch).
+    browser_fallback: bool = True
 
     def __post_init__(self) -> None:
         actor_path(self.actor_id)
@@ -102,6 +105,8 @@ class ApifyFacebookStore(Protocol):
     async def finish_item(self, item: BatchItem, run_id: str, state: str, group_state: GroupState,
                           detail: str | None = None) -> None: ...
     async def finish_batch(self, plan: BatchPlan, batch_run_id: str, state: str, reason: str | None = None) -> None: ...
+    async def queue_browser_fallback(self, plan: BatchPlan, items: list[BatchItem],
+                                     campaign_id: str | None) -> str | None: ...
 
 
 _SECRET_KEY = re.compile(r"cookie|session|token|password|secret|auth", re.IGNORECASE)
@@ -192,6 +197,13 @@ class ApifyFacebookProvider:
                 await self.store.finish_item(item, runs[item.id], "succeeded", GroupState.ACTIVE,
                                              None if posts[item.id] else "no_posts")
         await self.store.finish_batch(plan, batch_run, "succeeded")
+        closed = [item for item in plan.items if errors.get(_norm(item.canonical_url)) == "group_private"]
+        if closed and cfg.browser_fallback:
+            # Public groups only through Apify: a closed group is read by the operator's browser profile, where
+            # the account already is a member -- nothing joins a group.
+            fallback = await self.store.queue_browser_fallback(plan, closed, campaign_id)
+            log.info("apify.browser_fallback", extra={"batch_id": plan.id, "campaign_id": campaign_id,
+                                                      "fallback_batch_id": fallback, "groups": len(closed)})
         return "succeeded"
 
     async def _budget(self, campaign_id: str | None) -> str | None:

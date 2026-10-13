@@ -39,6 +39,8 @@ class FacebookCollectorSettings(BaseSettings):
     apify_timeout_seconds: int = Field(default=600, ge=30, le=3600, validation_alias="APIFY_FACEBOOK_TIMEOUT_SECONDS")
     # campaign: only campaigns with acquisition_provider='apify' (migration 046); all: every campaign's batches.
     apify_scope: Literal["campaign", "all"] = Field(default="campaign", validation_alias="APIFY_FACEBOOK_SCOPE")
+    # A closed group Apify could not read is queued for the browser collector (the operator's member account).
+    apify_browser_fallback: bool = Field(default=True, validation_alias="APIFY_FACEBOOK_BROWSER_FALLBACK")
     apify_raw_retention_days: int = Field(default=7, ge=1, le=365, validation_alias="APIFY_FACEBOOK_RAW_RETENTION_DAYS")
     # The campaign budget every service books against (bot/utils/costs.py); 0: no limit.
     campaign_budget_usd: float = Field(default=5.0, ge=0, le=10_000, validation_alias="CAMPAIGN_BUDGET_USD")
@@ -63,5 +65,6 @@ class FacebookCollectorSettings(BaseSettings):
         return ApifyFacebookConfig(actor_id=self.apify_actor_id, build=self.apify_actor_build.strip(),
                                    max_posts_per_run=self.apify_max_posts_per_run,
                                    max_usd_per_campaign=self.apify_max_usd_per_campaign,
-                                   max_usd_per_run=self.apify_max_usd_per_run, timeout_seconds=self.apify_timeout_seconds)
+                                   max_usd_per_run=self.apify_max_usd_per_run, timeout_seconds=self.apify_timeout_seconds,
+                                   browser_fallback=self.apify_browser_fallback)
 

@@ -27,6 +27,7 @@ def test_choose_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [choose_provider(on, p) for p in ("apify", "local", None)] == ["apify", "local", "local"]
     everyone = settings(monkeypatch, APIFY_FACEBOOK_SCOPE="all", **ON)
     assert choose_provider(everyone, None) == "apify"
+    assert choose_provider(everyone, "fallback") == "local" and choose_provider(on, "fallback") == "local"
 
 
 async def test_runner_uses_local_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,3 +121,35 @@ async def test_runner_pauses_on_budget_exceeded(pool, monkeypatch: pytest.Monkey
     assert await pool.fetchval("select state from campaigns where id = $1::uuid", cid) == "planned"  # not paused
     summary = await costs.ledger().summary(cid)
     assert summary.skips == {"api:budget_cap": 1}
+
+
+@needs_db
+async def test_closed_groups_get_one_browser_batch_that_never_goes_back_to_apify(pool, monkeypatch) -> None:
+    from bot.facebook_collector.main import campaign_provider
+    from tests.test_apify_facebook import G2
+    from tests.test_apify_facebook_postgres import _batch
+
+    cid, batch = await _batch(pool)
+    await pool.execute("update campaigns set acquisition_provider = 'apify'")
+    s = settings(monkeypatch, APIFY_FACEBOOK_SCOPE="all", **ON)
+    api = Api(dataset=[item(1), {"facebookUrl": G2, "error": "This group is private"}])
+    assert await run_batch_with(pool, s, batch, apify_http=_http(api)) == "succeeded"
+    fallback = await pool.fetchrow(
+        """select id::text, state, requested_by, campaign_id::text, max_items from acquisition_batches
+            where requested_by like 'apify_fallback:%'""")
+    assert fallback["requested_by"] == f"apify_fallback:{batch}" and fallback["state"] == "queued"
+    assert fallback["campaign_id"] == cid and fallback["max_items"] == 1
+    urls = await pool.fetch("""select s.canonical_url from acquisition_batch_items i join monitoring_sources s
+                                on s.id = i.source_id where i.batch_id = $1::uuid""", fallback["id"])
+    assert [r["canonical_url"] for r in urls] == [G2]
+    assert await pool.fetchval("select state from collector_launch_requests where batch_id = $1::uuid",
+                               fallback["id"]) == "pending"  # facebook-runner starts it
+    assert await campaign_provider(pool, fallback["id"]) == "fallback"
+    assert choose_provider(s, await campaign_provider(pool, fallback["id"])) == "local"  # even with scope=all
+    from bot.facebook_collector.apify.store import PostgresApifyFacebookStore
+    from bot.facebook_collector.models import BatchItem, BatchPlan
+
+    again = await PostgresApifyFacebookStore(pool).queue_browser_fallback(
+        BatchPlan(batch, "", "", "", 20, ()), [BatchItem("x", str(await pool.fetchval(
+            "select id from monitoring_sources where canonical_url = $1", G2)), G2, 1)], cid)
+    assert again is None  # once per Apify batch
