@@ -1,8 +1,8 @@
 """Portal adapters on ``ApifyListingSource`` against a mocked Apify API (no live calls in CI).
 
 Fotocasa rows copy the shape of a live ``igolaizola/fotocasa-scraper`` run (5 plots in Madrid, 2026-10-13); phone
-numbers and agency names are replaced. Yaencontre rows follow the output schema the Apify Store infers for
-``igolaizola/yaencontre-scraper`` (no run of ours).
+numbers and agency names are replaced. Yaencontre and Idealista rows follow the output schemas the Apify Store infers
+for ``igolaizola/yaencontre-scraper`` and ``igolaizola/idealista-scraper`` (no run of ours).
 """
 
 import json
@@ -14,7 +14,12 @@ import pytest
 
 from bot.web_search.queries import QueryTask
 from bot.web_search.sources.apify import SourceRunContext, source_run_scope
-from bot.web_search.sources.portals import ApifyFotocasaSource, ApifyYaencontreSource, plot_area
+from bot.web_search.sources.portals import (
+    ApifyFotocasaSource,
+    ApifyIdealistaPortalSource,
+    ApifyYaencontreSource,
+    plot_area,
+)
 
 
 def task(**kwargs):
@@ -216,3 +221,60 @@ def test_yaencontre_relative_url_hidden_phone_and_unknown_operation():
                                                        "virtualPhoneNumber": "910000003"}), task(), None)
     assert listing.url == "https://www.yaencontre.com/venta/terreno/inmueble-41123456"
     assert listing.phone is None and listing.advertiser == "Particular"
+
+
+def idealista_row(**kwargs):
+    row = {"propertyCode": "109876543", "url": "https://www.idealista.com/inmueble/109876543/",
+           "operation": "sale", "propertyType": "land", "country": "es", "municipality": "Madrid",
+           "province": "Madrid", "address": "Aravaca", "price": 2100000.0, "size": 2600.0,
+           "latitude": 40.46, "longitude": -3.78, "description": "Parcela de 2.600 m² edificable.",
+           "contactInfo": {"commercialName": "Agencia Tres", "userType": "professional",
+                           "phone1": {"phoneNumberForMobileDialing": "+34910000004", "formattedPhone": "910 000 004"}},
+           "suggestedTexts": {"title": "Terreno en Aravaca"}}
+    return {**row, **kwargs}
+
+
+async def test_idealista_igolaizola_searches_any_city_and_maps_rows():
+    requests = []
+    rows = [idealista_row(), idealista_row(url="https://www.idealista.com/inmueble/109876544/", municipality="Getafe")]
+    adapter = ApifyIdealistaPortalSource("secret-token", client=api(rows, requests), sleep=AsyncMock())
+    assert adapter.supports(task(location="Valencia")) and adapter.name == "apify_idealista"
+    with source_run_scope(context("apify_idealista")):
+        listings = await adapter.search(task(), limit=5)
+    launch = next(r for r in requests if r.method == "POST")
+    assert launch.url.path.endswith("/acts/igolaizola~idealista-scraper/runs")
+    assert json.loads(launch.content) == {"maxItems": 5, "operation": "sale", "propertyType": "lands", "country": "es",
+                                          "sortBy": "mostRecent", "location": "Madrid", "maxPrice": "3000000",
+                                          "minSize": "300"}
+    assert len(listings) == 1
+    listing = listings[0]
+    assert listing.plot_m2 == 2600 and listing.price == 2100000 and listing.title == "Terreno en Aravaca"
+    assert listing.phone == "+34910000004" and listing.advertiser == "Agencia Tres"
+    await adapter.aclose()
+
+
+@pytest.mark.parametrize("change", [
+    {"operation": "rent"}, {"country": "it"}, {"propertyType": "flat"},
+    {"url": "https://www.idealista.com/venta-terrenos/madrid-madrid/"},
+])
+def test_idealista_igolaizola_rejects_foreign_rows(change):
+    adapter = ApifyIdealistaPortalSource("secret-token")
+    assert adapter._normalize(idealista_row(**change), task(), None) is None
+
+
+async def test_idealista_provider_setting_picks_the_actor_family(monkeypatch):
+    from bot.web_search.settings import WebSearchSettings
+
+    monkeypatch.delenv("APIFY_IDEALISTA_PROVIDER", raising=False)
+    env = {"APIFY_TOKEN": "secret-token", "APIFY_IDEALISTA_ENABLED": True, "APIFY_IDEALISTA_MAX_RESULTS": 9}
+    old, = WebSearchSettings(_env_file=None, **env).sources()
+    new, = WebSearchSettings(_env_file=None, APIFY_IDEALISTA_PROVIDER="igolaizola", **env).sources()
+    try:
+        assert type(old).__name__ == "ApifyIdealistaSource" and old.actor_id == "axlymxp~idealista-scraper"
+        assert isinstance(new, ApifyIdealistaPortalSource) and new.actor_id == "igolaizola~idealista-scraper"
+        assert new.max_items == 9
+    finally:
+        await old.aclose()
+        await new.aclose()
+    with pytest.raises(ValueError):
+        WebSearchSettings(_env_file=None, APIFY_IDEALISTA_PROVIDER="other")

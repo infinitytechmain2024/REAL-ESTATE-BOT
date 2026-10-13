@@ -245,3 +245,74 @@ class ApifyYaencontreSource(_PortalSource):
             task, url=url, title=_text(item.get("title")) or place, price=item.get("price"), area=item.get("area"),
             rooms=item.get("rooms"), address=[place], description=_text(item.get("description")), phone=phone,
             advertiser=owner.get("name"), property_type=self._TYPES.get(kind))
+
+
+_IDEALISTA_PRICES = (500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700,
+                     1800, 1900, 2000, 2100, 2400, 2700, 3000, 50000, 75000, 100000, 125000, 150000, 175000, 200000,
+                     225000, 250000, 275000, 300000, 325000, 350000, 375000, 400000, 425000, 450000, 475000, 500000,
+                     550000, 600000, 650000, 700000, 750000, 800000, 850000, 900000, 950000, 1000000, 1100000,
+                     1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 1900000, 2000000, 2250000,
+                     2500000, 2750000, 3000000, 3500000, 4000000)
+_IDEALISTA_SIZES = (60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300)
+
+
+class ApifyIdealistaPortalSource(_PortalSource):
+    """Idealista through ``igolaizola/idealista-scraper`` (``APIFY_IDEALISTA_PROVIDER=igolaizola``), any city or
+    province by name; rows follow the output schema the Store infers from its recent runs (``url``, ``operation``,
+    ``propertyType``, ``municipality``, ``province``, ``price``, ``size``, ``rooms``, ``latitude``/``longitude``,
+    ``contactInfo.{phone1,commercialName}``, ``suggestedTexts.title``), not a run of ours."""
+
+    name = "apify_idealista"
+    hosts = frozenset({"idealista.com"})
+    kinds: ClassVar[dict[str, str]] = {"land": "lands", "house": "homes", "apartment": "homes",
+                                       "commercial": "premises"}
+    _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "commercial": "commercial"}
+
+    def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", **kwargs: Any) -> None:
+        super().__init__(token, actor_id=actor_id, **kwargs)
+
+    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
+                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
+        constraints = task.constraints
+        actor_input: dict[str, Any] = {"maxItems": amount, "operation": self._deal(task),
+                                       "propertyType": self.kinds[task_kind(task)], "country": "es",
+                                       "sortBy": "mostRecent"}
+        center = None
+        if task.radius_km is not None:
+            center = await self._center(task) if not run_id else None
+            if center is not None:
+                actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
+                                "distanceKm": max(1, min(100, round(task.radius_km)))}
+        else:
+            actor_input["location"] = task.location.strip()[:120]
+        filters = {"minPrice": _floor(_whole(constraints.get("min_price")), _IDEALISTA_PRICES),
+                   "maxPrice": _ceil(_whole(constraints.get("max_price")), _IDEALISTA_PRICES),
+                   "minSize": _floor(_whole(constraints.get("min_area")), _IDEALISTA_SIZES)}
+        actor_input |= {key: value for key, value in filters.items() if value}
+        return self.actor_id, actor_input, center
+
+    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+        if not isinstance(item, dict):
+            return None
+        url = self._url(item.get("url"), task)
+        operation = _text(item.get("operation")).casefold()
+        land = task_kind(task) == "land"
+        kind = _text(item.get("propertyType")).casefold()
+        if (url is None or (operation and operation != self._deal(task))
+                or _text(item.get("country")).casefold() not in ("", "es")
+                or (land and kind not in ("", "land", "lands"))):
+            return None
+        municipality, province = _text(item.get("municipality")), _text(item.get("province"))
+        if not self._place_ok(task, center, _point(item.get("latitude"), item.get("longitude")),
+                              municipality, province):
+            return None
+        contact = item.get("contactInfo") if isinstance(item.get("contactInfo"), dict) else {}
+        phone = contact.get("phone1") if isinstance(contact.get("phone1"), dict) else {}
+        texts = item.get("suggestedTexts") if isinstance(item.get("suggestedTexts"), dict) else {}
+        return self._listing(
+            task, url=url, title=_text(texts.get("title")) or f"Inmueble en {municipality}".strip(),
+            price=item.get("price"), area=item.get("size"), rooms=item.get("rooms"),
+            address=[_text(item.get("address")), municipality, province], description=_text(item.get("description")),
+            phone=phone.get("phoneNumberForMobileDialing") or phone.get("formattedPhone"),
+            advertiser=contact.get("commercialName") or contact.get("contactName"),
+            property_type=self._TYPES.get(task_kind(task)))
