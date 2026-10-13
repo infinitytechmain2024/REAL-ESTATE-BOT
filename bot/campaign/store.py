@@ -34,6 +34,8 @@ class CampaignStore(Protocol):
 
     async def set_search_plan(self, campaign_id: str, search_plan: dict[str, Any]) -> bool: ...
 
+    async def set_acquisition_provider(self, campaign_id: str, provider: str) -> bool: ...
+
     async def refresh_metrics(self, campaign_id: str) -> CampaignMetrics: ...
 
     async def campaign_metrics(self, campaign_id: str) -> CampaignMetrics | None: ...
@@ -78,7 +80,8 @@ class PostgresCampaignStore:
             return None
         row = await self.pool.fetchrow(
             """select id::text, plan::text, state, telegram_chat_id, requested_by, source_text,
-                      status_message_id, stop_reason, created_at, finished_at, spec::text as spec
+                      status_message_id, stop_reason, created_at, finished_at, spec::text as spec,
+                      acquisition_provider
                from campaigns where id = $1::uuid""",
             key,
         )
@@ -130,6 +133,20 @@ class PostgresCampaignStore:
             )
         return row is not None
 
+    async def set_acquisition_provider(self, campaign_id: str, provider: str) -> bool:
+        if provider not in {"local", "apify"}:
+            raise ValueError("unknown acquisition provider")
+        key = _uuid(campaign_id)
+        if key is None:
+            return False
+        row = await self.pool.fetchrow(
+            """update campaigns set acquisition_provider = $2
+                 where id = $1::uuid and acquisition_provider is null
+                 returning id""",
+            key, provider,
+        )
+        return row is not None
+
     async def refresh_metrics(self, campaign_id: str) -> CampaignMetrics:
         """Recompute the campaign's ``campaign_metrics`` row from the queries, pages and findings in one statement."""
         key = _uuid(campaign_id)
@@ -146,7 +163,8 @@ class PostgresCampaignStore:
     async def latest_for_chat(self, chat_id: int) -> Campaign | None:
         row = await self.pool.fetchrow(
             """select id::text, plan::text, state, telegram_chat_id, requested_by, source_text,
-                      status_message_id, stop_reason, created_at, finished_at, spec::text as spec
+                      status_message_id, stop_reason, created_at, finished_at, spec::text as spec,
+                      acquisition_provider
                from campaigns where telegram_chat_id = $1 order by created_at desc limit 1""",
             chat_id,
         )
@@ -207,6 +225,15 @@ class MemoryCampaignStore:
         self.campaigns[campaign_id] = replace(current, plan=plan)
         return True
 
+    async def set_acquisition_provider(self, campaign_id: str, provider: str) -> bool:
+        if provider not in {"local", "apify"}:
+            raise ValueError("unknown acquisition provider")
+        current = self.campaigns.get(campaign_id)
+        if current is None or current.acquisition_provider is not None:
+            return False
+        self.campaigns[campaign_id] = replace(current, acquisition_provider=provider)
+        return True
+
     async def refresh_metrics(self, campaign_id: str) -> CampaignMetrics:
         self.metric_refreshes.append(campaign_id)
         return self.metrics.setdefault(campaign_id, CampaignMetrics(campaign_id))
@@ -226,6 +253,7 @@ def _campaign(row: asyncpg.Record) -> Campaign:
         status_message_id=row["status_message_id"], stop_reason=row["stop_reason"],
         created_at=row["created_at"], finished_at=row["finished_at"],
         spec=json.loads(row["spec"]) if row["spec"] else None,
+        acquisition_provider=row["acquisition_provider"],
     )
 
 

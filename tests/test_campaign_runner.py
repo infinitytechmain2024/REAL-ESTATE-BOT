@@ -22,6 +22,7 @@ from bot.campaign.runner import (
     TelegramMessenger,
 )
 from bot.campaign.runs import MemoryRunStore
+from bot.facebook_collector.provider import ProviderHealth
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import CommandState
 from bot.orchestra.parser import CommandValidationError, parse_campaign
@@ -133,8 +134,70 @@ async def create(campaigns: MemoryCampaignStore, plan) -> str:
     return await campaigns.create(plan, chat_id=CHAT, requested_by=7, source_text=GOAL, actor="telegram:7")
 
 
+class FakeApifyProvider:
+    def __init__(self, store: MemoryRunStore) -> None:
+        self.store = store
+        self.calls: list[str] = []
+
+    async def run(self, batch_id: str) -> str:
+        self.calls.append(batch_id)
+        self.store.finish_batch(batch_id)
+        return "succeeded"
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth("apify_facebook", True)
+
+
 def only_batch(store: MemoryRunStore, cid: str) -> str:
     return next(b for _, b, s in store.windows[cid] if s == "active")
+
+
+async def test_runner_uses_local_by_default() -> None:
+    campaigns, store, _, _, _, runner, plan = make(groups=1)
+    cid = await create(campaigns, plan)
+
+    await runner.tick()
+
+    campaign = await campaigns.get(cid)
+    assert campaign is not None and campaign.acquisition_provider == "local"
+    assert store.batches[only_batch(store, cid)].provider == "local"
+
+
+async def test_runner_pauses_on_budget_exceeded() -> None:
+    campaigns, store, messenger, discovery, clock, _, plan = make(groups=1)
+    provider = FakeApifyProvider(store)
+    runner = CampaignRunner(
+        campaigns, store, messenger, discovery, now=clock, owner_ids={7},
+        config=RunnerConfig(relevance_fail_closed=False),
+        apify_provider=provider, apify_max_usd=10,
+    )
+    cid = await create(campaigns, plan)
+    store.apify_costs[cid] = 10
+
+    await runner.tick()
+
+    campaign = await campaigns.get(cid)
+    assert campaign is not None and campaign.acquisition_provider == "apify"
+    assert campaign.state == "paused_budget"
+    assert campaign.stop_reason == "apify_budget_exceeded"
+    assert provider.calls == []
+
+
+async def test_runner_executes_apify_window_when_enabled() -> None:
+    campaigns, store, messenger, discovery, clock, _, plan = make(groups=1)
+    provider = FakeApifyProvider(store)
+    runner = CampaignRunner(
+        campaigns, store, messenger, discovery, now=clock, owner_ids={7},
+        config=RunnerConfig(relevance_fail_closed=False),
+        apify_provider=provider, apify_max_usd=10,
+    )
+    cid = await create(campaigns, plan)
+
+    await runner.tick()
+
+    batch_id = only_batch(store, cid)
+    assert provider.calls == [batch_id]
+    assert store.batches[batch_id].provider == "apify"
 
 
 async def test_windows_hold_at_most_20_groups_chain_in_order_and_wait_for_the_cooldown() -> None:

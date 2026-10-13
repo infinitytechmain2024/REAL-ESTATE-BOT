@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field, PositiveInt
+from pydantic import Field, PositiveInt, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bot.orchestra.store import SafetyLimits
@@ -20,6 +20,51 @@ class CampaignRunnerSettings(BaseSettings):
     browser_token: str = Field(default="", validation_alias="BROWSER_SESSION_API_TOKEN")
     discovery_max_posts: PositiveInt = Field(default=15, ge=1, le=20, validation_alias="FACEBOOK_COLLECTOR_MAX_POSTS_PER_GROUP")
     discovery_group_timeout_seconds: PositiveInt = Field(default=90, ge=35, le=600, validation_alias="FACEBOOK_COLLECTOR_GROUP_TIMEOUT_SECONDS")
+
+    # Paid Facebook acquisition remains inert unless explicitly enabled. A pinned
+    # Actor build makes deployments reproducible and avoids an implicit "latest".
+    feature_apify_facebook: bool = Field(default=False, validation_alias="FEATURE_APIFY_FACEBOOK")
+    apify_token: str = Field(default="", repr=False, validation_alias="APIFY_TOKEN")
+    apify_facebook_actor_id: str = Field(
+        default="apify/facebook-groups-scraper",
+        min_length=1,
+        max_length=200,
+        validation_alias="APIFY_FACEBOOK_ACTOR_ID",
+    )
+    apify_facebook_actor_build: str = Field(
+        default="", max_length=100, validation_alias="APIFY_FACEBOOK_ACTOR_BUILD"
+    )
+    apify_facebook_max_posts_per_run: int = Field(
+        default=500, ge=1, le=10_000, validation_alias="APIFY_FACEBOOK_MAX_POSTS_PER_RUN"
+    )
+    apify_facebook_max_usd_per_campaign: float = Field(
+        default=10, gt=0, le=10_000, validation_alias="APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN"
+    )
+    apify_facebook_timeout_seconds: int = Field(
+        default=600, ge=30, le=3600, validation_alias="APIFY_FACEBOOK_TIMEOUT_SECONDS"
+    )
+    apify_facebook_raw_retention_days: int = Field(
+        default=7, ge=1, le=365, validation_alias="APIFY_FACEBOOK_RAW_RETENTION_DAYS"
+    )
+
+    @model_validator(mode="after")
+    def require_enabled_apify_configuration(self) -> CampaignRunnerSettings:
+        if self.feature_apify_facebook and not self.apify_token:
+            raise ValueError("APIFY_TOKEN is required when FEATURE_APIFY_FACEBOOK=true")
+        if self.feature_apify_facebook and not self.apify_facebook_actor_build:
+            raise ValueError("APIFY_FACEBOOK_ACTOR_BUILD is required when FEATURE_APIFY_FACEBOOK=true")
+        return self
+
+    def apify_facebook_config(self):  # -> bot.facebook_collector.apify.ApifyFacebookConfig
+        from bot.facebook_collector.apify import ApifyFacebookConfig
+
+        return ApifyFacebookConfig(
+            actor_id=self.apify_facebook_actor_id,
+            actor_build=self.apify_facebook_actor_build,
+            max_posts_per_run=self.apify_facebook_max_posts_per_run,
+            timeout_seconds=float(self.apify_facebook_timeout_seconds),
+            max_usd_per_run=self.apify_facebook_max_usd_per_campaign,
+        )
 
     # Owners see the technical campaign status; everyone else only user-safe labels.
     operator_ids_raw: str = Field(default="", validation_alias="TELEGRAM_OPERATOR_IDS")
