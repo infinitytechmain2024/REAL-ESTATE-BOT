@@ -23,6 +23,8 @@ class SourceListing:
     deal: str | None = None
     description: str = ""
     plot_m2: float | None = None
+    phone: str | None = None  # the advertiser's phone as the portal lists it
+    advertiser: str | None = None  # agency or owner name as the portal lists it
 
 
 class ListingSource(Protocol):
