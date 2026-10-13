@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from bot.acquisition.evidence import Evidence
+from bot.campaign.settings import CampaignRunnerSettings
 from bot.facebook_collector.apify.client import ApifyClient, RunHandle, RunStatus
 from bot.facebook_collector.apify.mapper import apify_item_to_evidence
 from bot.facebook_collector.apify.provider import (
@@ -17,6 +18,40 @@ from bot.facebook_collector.apify.provider import (
     ApifyFacebookConfig,
     ApifyFacebookProvider,
 )
+
+
+def campaign_settings(**values: Any) -> CampaignRunnerSettings:
+    return CampaignRunnerSettings(
+        _env_file=None,
+        DATABASE_URL="postgresql://example",
+        TELEGRAM_TOKEN="telegram-token",
+        **values,
+    )
+
+
+def test_apify_facebook_feature_is_off_by_default() -> None:
+    settings = campaign_settings()
+
+    assert settings.feature_apify_facebook is False
+    assert settings.apify_token == ""
+
+
+def test_enabled_apify_facebook_requires_token_and_pinned_build() -> None:
+    with pytest.raises(ValidationError, match="APIFY_TOKEN"):
+        campaign_settings(FEATURE_APIFY_FACEBOOK=True, APIFY_FACEBOOK_ACTOR_BUILD="build123")
+    with pytest.raises(ValidationError, match="APIFY_FACEBOOK_ACTOR_BUILD"):
+        campaign_settings(FEATURE_APIFY_FACEBOOK=True, APIFY_TOKEN="token")
+
+    settings = campaign_settings(
+        FEATURE_APIFY_FACEBOOK=True,
+        APIFY_TOKEN="token",
+        APIFY_FACEBOOK_ACTOR_BUILD="build123",
+        APIFY_FACEBOOK_MAX_POSTS_PER_RUN=25,
+    )
+    config = settings.apify_facebook_config()
+    assert settings.feature_apify_facebook is True
+    assert config.actor_build == "build123"
+    assert config.max_posts_per_run == 25
 
 
 @pytest.mark.asyncio
