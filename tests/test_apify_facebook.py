@@ -1,7 +1,7 @@
 """T3: the Apify Facebook adapter against a mocked Apify API (no live calls).
 
-The dataset items below follow the public-group actors' documentation (``url``, ``text``, ``time``,
-``facebookUrl``), not a live run.
+The dataset items below follow the output schema of ``apify/facebook-groups-scraper`` (``url``, ``text``, ``time``,
+``facebookUrl``, ``inputUrl``), not a live run.
 """
 
 from __future__ import annotations
@@ -152,6 +152,15 @@ async def test_adapter_imports_a_run_into_collected_posts(ledger) -> None:
     assert json.loads(launch.content)["startUrls"] == [{"url": G1}, {"url": G2}]
     summary = await ledger.summary("c1")
     assert summary.by_stage == {"api": pytest.approx(0.4)}
+
+
+async def test_posts_match_their_group_by_the_start_url(ledger) -> None:
+    # the actor's output schema: ``facebookUrl`` may carry the numeric group id, ``inputUrl`` is the URL we sent
+    by_id = "https://www.facebook.com/groups/874728723021553"
+    store = Store()
+    api = Api(dataset=[item(1, facebookUrl=by_id, inputUrl=G1), item(2, G2, facebookUrl=by_id, inputUrl=G2 + "/")])
+    assert await provider(api, store).run("batch-1") == "succeeded"
+    assert [s for s, _ in store.posts] == ["src-1", "src-2"]
 
 
 async def test_adapter_does_not_retry_on_launch_unknown(ledger) -> None:

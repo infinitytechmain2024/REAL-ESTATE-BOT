@@ -1,7 +1,7 @@
 """One dataset item of a public-groups actor (default ``apify/facebook-groups-scraper``) -> ``AcquiredPost``.
 
 The field names follow the actors' documentation, not a live run, so each fact is read from the few names the
-public-group actors use (``url``/``postUrl``, ``text``/``postText``, ``time``/``date``, ``facebookUrl``/``groupUrl``).
+public-group actors use (``url``/``postUrl``, ``text``/``postText``, ``time``/``date``, ``inputUrl``/``facebookUrl``).
 Nothing is guessed: no price, currency or period is taken from the post's text (the analysis worker reads the text
 and checks every number against a quote). A post whose text names several prices is marked ``needs_split``.
 
@@ -21,7 +21,8 @@ _PRICE = re.compile(r"\d[\d.\s]{2,}\s*(?:€|eur\b|euros?\b)|€\s*\d[\d.\s]{2,}
 _TEXT_KEYS = ("text", "postText", "message", "content")
 _URL_KEYS = ("url", "postUrl", "permalink", "link")
 _TIME_KEYS = ("time", "date", "timestamp", "publishedAt")
-_GROUP_KEYS = ("facebookUrl", "groupUrl", "inputUrl", "groupLink")
+# ``inputUrl`` is the start URL exactly as sent; ``facebookUrl`` may name the group by its numeric id instead.
+_GROUP_KEYS = ("inputUrl", "facebookUrl", "groupUrl", "groupLink")
 
 
 def _first(item: dict[str, Any], keys: tuple[str, ...]) -> Any:
