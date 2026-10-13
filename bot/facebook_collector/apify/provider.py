@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from bot.utils import costs
 from ..models import BatchItem, BatchPlan, GroupState
 from ..provider import ProviderHealth
 from .mapper import apify_item_to_post, group_error, group_of
+from .metrics import emit
 
 log = logging.getLogger(__name__)
 LAUNCH_UNKNOWN = "LAUNCH_UNKNOWN"
@@ -102,6 +104,18 @@ class ApifyFacebookStore(Protocol):
     async def finish_batch(self, plan: BatchPlan, batch_run_id: str, state: str, reason: str | None = None) -> None: ...
 
 
+_SECRET_KEY = re.compile(r"cookie|session|token|password|secret|auth", re.IGNORECASE)
+
+
+def scrub(value: Any) -> Any:
+    """The raw item without any key that could carry session data (cookies, tokens): never stored, never logged."""
+    if isinstance(value, dict):
+        return {k: scrub(v) for k, v in value.items() if not _SECRET_KEY.search(str(k))}
+    if isinstance(value, list):
+        return [scrub(v) for v in value]
+    return value
+
+
 def _norm(url: str | None) -> str:
     return (url or "").lower().split("?", 1)[0].rstrip("/").replace("://m.", "://www.").replace("://facebook.", "://www.facebook.")
 
@@ -136,6 +150,8 @@ class ApifyFacebookProvider:
                 return await self._run(plan, campaign_id, batch_run, runs)
             except ApifyError as exc:
                 log.warning("apify.run_failed %s", exc.code, extra={"batch_id": batch_id, "campaign_id": campaign_id})
+                emit("apify_run_failed_total", actor_id=self.config.actor_id, reason=exc.code, campaign_id=campaign_id,
+                     batch_id=batch_id)
                 await costs.error("api", exc.code, item=self.config.actor_id)
                 return await self._end(plan, batch_run, runs, "failed", exc.code)
 
@@ -143,10 +159,14 @@ class ApifyFacebookProvider:
         cfg, started = self.config, time.monotonic()
         known = await self.store.get_run(plan.id)
         if known is not None and known.status == LAUNCH_UNKNOWN:
+            emit("apify_run_failed_total", actor_id=cfg.actor_id, reason="apify_launch_unknown", campaign_id=campaign_id,
+                 batch_id=plan.id, run_id=known.run_id)
             return await self._end(plan, batch_run, runs, "failed", "apify_launch_unknown")
         if known is None:
             refusal = await self._budget(campaign_id)
             if refusal:
+                emit("apify_run_failed_total", actor_id=cfg.actor_id, reason=refusal, campaign_id=campaign_id,
+                     batch_id=plan.id)
                 await costs.skip("api", refusal, item=cfg.actor_id)
                 return await self._end(plan, batch_run, runs, "failed", refusal)
             known = await self._launch(plan, campaign_id)
@@ -156,6 +176,8 @@ class ApifyFacebookProvider:
         await self._bill(campaign_id, known.run_id, run)
         status = str(run.get("status"))
         if status != "SUCCEEDED":
+            emit("apify_run_failed_total", actor_id=cfg.actor_id, reason="apify_run_" + status.lower().replace("-", "_"),
+                 campaign_id=campaign_id, batch_id=plan.id, run_id=known.run_id)
             await self.store.update_run(known.run_id, status=status.replace("-", "_"))
             return await self._end(plan, batch_run, runs, "failed", "apify_run_" + status.lower().replace("-", "_"))
         dataset = str(run.get("defaultDatasetId") or known.dataset_id or "")
@@ -195,12 +217,13 @@ class ApifyFacebookProvider:
                                       item=cfg.actor_id, cost_usd=cfg.max_usd_per_run, code="estimate")
             await costs.error("api", "apify_launch_unknown", item=cfg.actor_id)
             log.warning("apify.launch_unknown", extra={"batch_id": plan.id, "campaign_id": campaign_id})
+            emit("apify_run_failed_total", actor_id=cfg.actor_id, reason="apify_launch_unknown", campaign_id=campaign_id,
+                 batch_id=plan.id)
             return None
         run_id, dataset = str(run["id"]), str(run.get("defaultDatasetId") or "") or None
         await self.store.save_run(plan.id, campaign_id, actor_id=cfg.actor_id, build=cfg.build, run_id=run_id,
                                   status="RUNNING", input_hash=digest, dataset_id=dataset)
-        log.info("apify.run_launched", extra={"batch_id": plan.id, "campaign_id": campaign_id, "run_id": run_id,
-                                              "actor_id": cfg.actor_id, "groups": len(plan.items)})
+        emit("apify_run_launched_total", actor_id=cfg.actor_id, campaign_id=campaign_id, batch_id=plan.id, run_id=run_id)
         return ApifyRun(plan.id, run_id, "RUNNING", dataset)
 
     async def _await(self, run_id: str, started: float) -> dict[str, Any]:
@@ -223,26 +246,31 @@ class ApifyFacebookProvider:
         await costs.record_unique("api", key=f"apify:{run_id}", provider="apify", item=self.config.actor_id,
                                   cost_usd=cost, code="" if known else "estimate", campaign_id=campaign_id)
         await self.store.update_run(run_id, billed_usd=cost)
+        emit("apify_billed_usd_total", cost, actor_id=self.config.actor_id, campaign_id=campaign_id, run_id=run_id,
+             estimate=None if known else "true")
 
     async def _import(self, plan: BatchPlan, campaign_id: str | None, run: ApifyRun, dataset: str,
                       runs: dict[str, str]) -> tuple[Counter[str], dict[str, str]]:
-        cfg = self.config
+        cfg, started = self.config, time.monotonic()
         by_group = {_norm(item.canonical_url): item for item in plan.items}
         posts: Counter[str] = Counter()
         errors: dict[str, str] = {}
         rejected: Counter[str] = Counter()
         offset, imported = run.import_checkpoint, run.items_imported
         if offset:
-            log.info("apify.checkpoint_resumed", extra={"run_id": run.run_id, "offset": offset})
+            emit("apify_checkpoint_resumed_total", actor_id=cfg.actor_id, campaign_id=campaign_id, run_id=run.run_id)
         since_checkpoint = 0
         while imported < cfg.max_posts_per_run:
             page = await self.http.dataset_page(dataset, offset=offset, limit=cfg.page_size) if dataset else []
             for index, raw in enumerate(page, start=offset):
+                raw = scrub(raw)
                 if not isinstance(raw, dict) or not await self.store.save_raw(run.run_id, index, raw):
                     continue
                 failed = group_error(raw)
                 if failed is not None:
                     errors[_norm(failed[0])] = failed[1]
+                    emit("apify_items_rejected_total", actor_id=cfg.actor_id, reason=failed[1], campaign_id=campaign_id,
+                         run_id=run.run_id, source_url=failed[0])
                     continue
                 item = by_group.get(_norm(group_of(raw))) or (plan.items[0] if len(plan.items) == 1 else None)
                 if item is None:
@@ -269,9 +297,12 @@ class ApifyFacebookProvider:
         await self.store.update_run(run.run_id, status="SUCCEEDED", import_checkpoint=offset, items_imported=imported)
         for code, n in rejected.items():
             await costs.record("api", kind="skip", provider="apify", item=cfg.actor_id, code=code, units=n)
-            log.info("apify.items_rejected", extra={"run_id": run.run_id, "reason": code, "count": n})
-        log.info("apify.items_imported", extra={"run_id": run.run_id, "campaign_id": campaign_id, "count": imported,
-                                                "groups_inaccessible": len(errors)})
+            emit("apify_items_rejected_total", n, actor_id=cfg.actor_id, reason=code, campaign_id=campaign_id,
+                 run_id=run.run_id)
+        emit("apify_items_imported_total", sum(posts.values()), actor_id=cfg.actor_id, campaign_id=campaign_id,
+             run_id=run.run_id)
+        emit("apify_import_duration_seconds", time.monotonic() - started, actor_id=cfg.actor_id,
+             campaign_id=campaign_id, run_id=run.run_id)
         return posts, errors
 
     async def _end(self, plan: BatchPlan, batch_run: str, runs: dict[str, str], state: str, reason: str) -> str:
