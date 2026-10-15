@@ -72,3 +72,23 @@ async def test_the_local_provider_still_runs_a_batch_as_before() -> None:
     collector, store = local(HealthyBrowser(True))
     assert await collector.run("batch") == "succeeded"
     assert store.events[-1] == ("batch_finish", "succeeded", None) and len(store.posts) == 2
+
+
+async def test_join_confirmed_batch_goes_to_the_browser_without_a_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``apify_fallback:join:<group id>`` matches the same prefix as the closed groups' batch -> ``fallback`` -> local."""
+    from bot.facebook_collector.main import campaign_provider, choose_provider
+    from tests.test_apify_facebook_runner import ON
+    from tests.test_apify_facebook_settings import settings
+
+    class Pool:
+        sql = ""
+
+        async def fetchval(self, sql: str, batch_id: str):
+            Pool.sql = sql
+            marker = "apify_fallback:join:5b1f"
+            prefix = sql.split("like '")[1].split("%'")[0]
+            return "fallback" if marker.startswith(prefix) else "apify"
+
+    assert await campaign_provider(Pool(), "b") == "fallback"  # type: ignore[arg-type]
+    s = settings(monkeypatch, APIFY_FACEBOOK_SCOPE="all", **ON)
+    assert choose_provider(s, "fallback") == "local"

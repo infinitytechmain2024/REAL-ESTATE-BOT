@@ -85,6 +85,7 @@ from .runs import (
     Window,
 )
 from .status_text import (
+    JOIN_BUTTON,
     LAYER_NAMES,
     LIMIT_REASONS,
     campaign_label,
@@ -92,6 +93,8 @@ from .status_text import (
     group_line,
     is_checking_line,
     is_live_line,
+    join_notice,
+    join_notice_ended,
     reach_line,
     site_line,
     social_line,
@@ -268,6 +271,8 @@ class RunnerConfig:
     lead_days: int = 90
     # The campaign's metrics row (``campaign_metrics``) is recomputed at most this often while it runs.
     metrics_seconds: float = 30
+    # Tell the chat once about each closed Facebook group (Apify ``group_private``) with a «Вступил» button.
+    join_notices: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -409,6 +414,8 @@ class CampaignRunner:
             if campaign.state not in TERMINAL_STATES:
                 await self._metrics(campaign)
         if campaign.state in TERMINAL_STATES:
+            if self.config.join_notices:  # a closed group is never lost silently, whatever ended the search
+                await self._notify_joins(campaign)
             await self._close(campaign)
             # Final: a finding whose AI check is still missing is held as unverified, never lost.
             await self._stream(campaign, final=True)
@@ -482,14 +489,31 @@ class CampaignRunner:
                                                     "batch_state": window.batch_state})
         return ANALYSIS
 
+    async def _notify_joins(self, campaign: Campaign) -> None:
+        """One message per closed group, then the mark: a repeated tick sends nothing (CAMPAIGN_JOIN_NOTICES)."""
+        for group in await self.store.groups_needing_join(campaign.id):
+            try:
+                if campaign.state in TERMINAL_STATES:  # nothing will read it: no button, only the news
+                    await self.messenger.send(campaign.chat_id, join_notice_ended(group.name, group.url))
+                else:
+                    await self.messenger.send_buttons(campaign.chat_id, join_notice(group.name, group.url),
+                                                      [(JOIN_BUTTON, f"group:joined:{group.id}")])
+            except Exception:  # noqa: BLE001 - Telegram down: the notice is tried again next tick
+                log.warning("campaign.join_notice_failed", extra={"campaign_id": campaign.id, "group_id": group.id})
+                continue
+            await self.store.mark_join_notice(group.id)
+            log.info("campaign.join_notice", extra={"campaign_id": campaign.id, "group_id": group.id})
+
     async def _next_window(self, campaign: Campaign) -> str:
+        if self.config.join_notices:
+            await self._notify_joins(campaign)
         limits, now = campaign.plan.limits, self.now()
         run = await self.store.get_run(campaign.id)
         started = await self.store.windows_started(campaign.id)
         groups = await self.store.next_groups(campaign.id, min(limits.window_size, WINDOW_SIZE))
         if not groups:
             return await self._drain(campaign, run, "queue_exhausted")
-        if started >= limits.max_windows:
+        if started >= limits.max_windows and not groups[0].joined:  # a window of joined groups is over the limit
             return await self._drain(campaign, run, "max_windows")
         if run.next_window_at is not None and run.next_window_at > now:
             return ANALYSIS
@@ -532,6 +556,10 @@ class CampaignRunner:
             return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
+        fallback_grace = max(self.config.social_grace_seconds, self.config.window_cooldown_seconds * 2)
+        if (self.config.join_notices and waited < fallback_grace
+                and await self.store.fallback_pending(campaign.id)):
+            return ANALYSIS  # the browser still re-reads the closed groups: their «вступите» notice may follow
         final = waited >= self.config.analysis_grace_seconds
         if await self._stream(campaign, final=final, skip_misses=False) and not final:
             return ANALYSIS  # findings still wait for the AI check: do not complete (and lose them) yet
@@ -1313,7 +1341,8 @@ async def main() -> None:
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
-    store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
+    store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days,
+                             join_notices=settings.join_notices)
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool),
@@ -1418,6 +1447,9 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
 
 def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[Any, Any]:
     """The social search worker when SOCIAL_SEARCH_PLATFORMS lists a platform (and the browser is reachable)."""
+    if getattr(settings, "acquisition_mode", "legacy") == "apify":
+        log.info("campaign.runner.social_disabled_apify")
+        return None, None
     config = settings.social_config()
     if not config.platforms:
         return None, None
