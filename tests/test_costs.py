@@ -32,6 +32,18 @@ def test_llm_cost_is_openrouters_own_else_an_estimate() -> None:
     assert costs.llm_cost("some/unknown", None) == (0.0, 0)
 
 
+def test_v2_stage_models_have_their_own_price_not_the_default() -> None:
+    for model, expected in (("anthropic/claude-sonnet-5.5", (3.0, 15.0)), ("anthropic/claude-haiku-5.5", (1.0, 5.0)),
+                            ("anthropic/claude-opus-5.5", (15.0, 75.0))):
+        assert model in costs.PRICES and costs.price(model) == expected
+        cost, tokens = costs.llm_cost(model, {"usage": {"prompt_tokens": 1_000_000, "completion_tokens": 100_000}})
+        assert tokens == 1_100_000 and cost == pytest.approx(expected[0] + expected[1] / 10)
+    # the longest prefix wins: a dated variant keeps the version's price, gpt-4o-mini is not gpt-4o
+    assert costs.price("anthropic/claude-haiku-5.5-20260101") == (1.0, 5.0)
+    assert costs.price("openai/gpt-4o-mini") == (0.15, 0.60)
+    assert costs.price("some/unknown") == costs.DEFAULT_PRICE
+
+
 async def test_nothing_is_booked_or_capped_without_a_ledger() -> None:
     costs.install(None)
     await costs.record("llm", cost_usd=99)
