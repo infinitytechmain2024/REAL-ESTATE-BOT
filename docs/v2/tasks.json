@@ -146,7 +146,7 @@
       "stream": "acquisition",
       "agent": "builder+db",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Пт",
       "hours": 5
     },
