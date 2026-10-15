@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 
 from aiogram import Bot, Dispatcher, Router
@@ -21,6 +22,7 @@ from aiogram.types import (
 )
 from aiohttp import web
 
+from bot.campaign.join import confirm_group_join
 from bot.campaign.offers import PostgresOfferDesk
 from bot.campaign.store import PostgresCampaignStore
 from bot.control_plane import menu
@@ -162,7 +164,9 @@ async def run() -> None:
                            offers=PostgresOfferDesk(orchestra_store.pool) if orchestra_store.pool else None,
                            # «стоп»: finds the person's running campaign; the Orchestra cancels it.
                            campaigns=PostgresCampaignStore(orchestra_store.pool) if orchestra_store.pool else None,
-                           interviewer=interviewer)
+                           interviewer=interviewer,
+                           confirm_join=(functools.partial(confirm_group_join, orchestra_store.pool)
+                                         if settings.campaign_join_notices and orchestra_store.pool else None))
     for user_id in sorted(settings.auto_operator_user_ids):
         if not operators.can_control(user_id):
             # Not refused at startup (approvals change at runtime), but never auto-eligible meanwhile.

@@ -27,6 +27,16 @@ _CHECKING_HEAD = "🔎 Поиск завершён. Проверяю найде�
 DONE = "Поиск завершён."
 NOTHING = "Пока ничего подходящего не нашёл."
 
+# A closed group the Apify read could not open: the person joins it, then presses the button (group:joined:<id>).
+JOIN_BUTTON = "Вступил ✅"
+JOIN_JOINED = "Проверю группу через браузер"
+
+
+def join_notice(name: str | None, url: str) -> str:
+    """One message per closed group; plain text (the runner sends it without parse mode)."""
+    return f"Группа «{(name or url)[:MAX_GROUP_CHARS]}» закрыта. Вступите в неё: {url}\nПосле вступления нажмите кнопку, и я прочитаю её."
+
+
 # A search ended early because Facebook's daily limit (or its safety breaker) stopped new group reads.
 LIMIT_NOTE = "Лимит Facebook на сегодня исчерпан, часть групп не проверена. Запустите поиск завтра, чтобы проверить остальные."
 LIMIT_REASONS = frozenset({"facebook_daily_limit", "facebook_breaker"})

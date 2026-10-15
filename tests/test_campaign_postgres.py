@@ -97,3 +97,44 @@ async def test_db_guard_and_checks(pool) -> None:
         await pool.execute("insert into campaigns(telegram_chat_id, requested_by, source_text, plan, state) values (1, 2, 'x', '{}', 'bogus')")
     with pytest.raises(ValueError):
         await store.create(plan_campaign(TEXT), chat_id=1, requested_by=2, source_text="", actor="t")
+
+
+async def test_migration_047_group_join_flow(pool) -> None:
+    """047: closed (group_private) groups are found once, confirmed once, and queued again for the browser."""
+    import uuid
+
+    from bot.campaign.runs import PostgresRunStore
+    from bot.facebook_collector.apify.store import PostgresApifyFacebookStore
+    from bot.facebook_collector.models import BatchItem, GroupState
+    from bot.orchestra.store import SafetyLimits
+
+    cols = {r["column_name"] for r in await pool.fetch(
+        "select column_name from information_schema.columns where table_name = 'campaign_groups'")}
+    assert {"join_notice_at", "join_confirmed_at"} <= cols
+    cid = await PostgresCampaignStore(pool).create(plan_campaign(TEXT), chat_id=1, requested_by=2, source_text=TEXT, actor="t")
+    url = "https://www.facebook.com/groups/closed/"
+    source = await pool.fetchval(
+        """insert into monitoring_sources (platform, source_kind, vertical, canonical_url, display_name, acquisition_method,
+                                           state) values ('facebook', 'group', 'real_estate', $1, $1, 'facebook_connector',
+                                           'active') returning id""", url)
+    batch = await pool.fetchval(
+        """insert into acquisition_batches (platform, acquisition_method, vertical, state, max_items, campaign_id)
+           values ('facebook', 'facebook_connector', 'real_estate', 'queued', 20, $1::uuid) returning id""", cid)
+    item = await pool.fetchval("insert into acquisition_batch_items (batch_id, source_id, sequence_no) values ($1, $2, 1) returning id",
+                               batch, source)
+    group = await pool.fetchval(
+        """insert into campaign_groups (campaign_id, group_key, canonical_url, name, state, batch_id)
+           values ($1::uuid, 'closed', $2, 'Closed', 'queued', $3) returning id::text""", cid, url, batch)
+    store = PostgresRunStore(pool, SafetyLimits())
+    assert await store.groups_needing_join(cid) == []  # nothing read yet
+    await PostgresApifyFacebookStore(pool).finish_item(BatchItem(str(item), str(source), url, 1), str(uuid.uuid4()), "failed",
+                                                       GroupState.INACCESSIBLE, "group_private")
+    found = await store.groups_needing_join(cid)
+    assert [(g.id, g.name, g.url) for g in found] == [(group, "Closed", url)]
+    assert not await store.confirm_join(group)  # no notice yet: the button is not valid
+    await store.mark_join_notice(group)
+    assert await store.groups_needing_join(cid) == []  # one notice per group
+    assert await store.confirm_join(group) and not await store.confirm_join(group)
+    row = await pool.fetchrow("select state, activity, batch_id, join_confirmed_at from campaign_groups where id = $1::uuid", group)
+    assert (row["state"], row["activity"], row["batch_id"]) == ("queued", "UNKNOWN", None) and row["join_confirmed_at"]
+    assert await store.groups_needing_join(cid) == []

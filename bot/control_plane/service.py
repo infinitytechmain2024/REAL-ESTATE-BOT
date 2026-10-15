@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from bot.campaign import offers as near
 from bot.campaign.architect import InvalidGoal, plan_campaign
 from bot.campaign.models import TERMINAL_STATES
+from bot.campaign.status_text import JOIN_JOINED
 from bot.control_plane.access import LOGIN_BUTTON, SETTINGS_BUTTON, AccessDesk, label
 from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
 from bot.control_plane.intake import (
@@ -122,11 +123,14 @@ class ControlPlane:
         offers: near.OfferDesk | None = None,
         campaigns: CampaignStore | None = None,
         interviewer: Interviewer | None = None,
+        confirm_join: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
         # «Одобрить» / «Нет» under the runner's «show similar options?» question (bot/campaign/offers.py).
         self.offers = offers
+        # «Вступил ✅» under a closed-group notice (CAMPAIGN_JOIN_NOTICES): queues the group for a browser read.
+        self.confirm_join = confirm_join
         # Read-only here: finds the person's running campaign for «стоп»; the Orchestra cancels it.
         self.campaigns = campaigns
         # Owners from .env plus operators they approved; shared and live.
@@ -245,6 +249,8 @@ class ControlPlane:
                 return Reply(STALE_BUTTON)
             chat = chat_id if chat_id is not None else user_id
             return await self._stop_search(IncomingMessage(chat_id=chat, user_id=user_id, message_id=0), button=True)
+        if kind == "group" and action == "joined" and self.confirm_join is not None:
+            return await self._group_joined(user_id, target)
         if kind == near.CALLBACK_KIND:
             return await self._near_match_answer(user_id, action, target)
         if kind in {"mode", "task"}:
@@ -277,6 +283,19 @@ class ControlPlane:
             return await self.live.finish(session_id, user_id, done=action == "done")
         except LiveViewUnavailable as exc:
             return Reply(f"Could not close the browser: {exc}.")
+
+    async def _group_joined(self, user_id: int | None, group_id: str) -> Reply:
+        """``group:joined:<campaign group id>``: operators and owners only; the group is read by the browser next."""
+        assert self.confirm_join is not None
+        if user_id is None or not self._can_control(user_id):
+            return Reply(STALE_BUTTON)
+        try:
+            queued = await self.confirm_join(group_id)
+        except Exception:  # noqa: BLE001 - a bad id or a database hiccup must not break the bot; the button stays
+            log.warning("telegram.control.join_failed", extra={"user_id": user_id})
+            return Reply("Не получилось сохранить ответ. Попробуйте ещё раз.")
+        log.info("telegram.control.group_joined", extra={"user_id": user_id, "queued": queued})
+        return Reply(JOIN_JOINED if queued else STALE_BUTTON)
 
     async def _login_button(self, user_id: int | None, chat_id: int | None, action: str, platform: str) -> Reply:
         """Settings «🔐 Вход в соцсети» (owners only): ``login:list``, ``login:go:<platform>`` = /login <platform>."""

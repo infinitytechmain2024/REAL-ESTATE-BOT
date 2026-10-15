@@ -131,6 +131,8 @@ class CampaignRunnerSettings(BaseSettings):
 
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
+    # Tell the chat about closed Facebook groups (Apify group_private) and read them after «Вступил».
+    join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
     comment_max_posts: int = Field(default=15, ge=0, le=100, validation_alias="CAMPAIGN_COMMENT_MAX_POSTS")
     # An investor search sends the people stored from comments in its city (at most, seen within days).
@@ -170,7 +172,8 @@ class CampaignRunnerSettings(BaseSettings):
                             relevance_fail_closed=self.relevance_fail_closed,
                             relevance_retry_limit=self.relevance_retry_limit,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
-                            max_people=self.lead_people_max, lead_days=self.lead_days)
+                            max_people=self.lead_people_max, lead_days=self.lead_days,
+                            join_notices=self.join_notices)
 
     # Investor reach across platforms through the search engines (bot/campaign/reach.py).
     reach_enabled: bool = Field(default=True, validation_alias="INVESTOR_REACH_ENABLED")

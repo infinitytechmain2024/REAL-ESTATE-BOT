@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit
 
+from .join import confirm_group_join
 from .leads import Person, Sighting
 from .models import WINDOW_SIZE
 from .offers import MemoryOffer, MemoryOfferDesk
@@ -73,6 +74,15 @@ class QueuedGroup:
     group_key: str
     canonical_url: str
     name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JoinGroup:
+    """A closed group the Apify read could not open (``group_private``): the person has to join it first."""
+
+    id: str
+    name: str | None
+    url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +197,9 @@ class RunStore(Protocol):
     async def start_window(self, campaign_id: str, groups: list[QueuedGroup], *, vertical: str,
                            actor: str) -> WindowStart | None: ...
     async def cancel_window_batch(self, batch_id: str, actor: str) -> None: ...
+    async def groups_needing_join(self, campaign_id: str) -> list[JoinGroup]: ...
+    async def mark_join_notice(self, group_id: str) -> None: ...
+    async def confirm_join(self, group_id: str) -> bool: ...
     async def pending_analysis(self, campaign_id: str) -> int: ...
     async def analysis_progress(self, campaign_id: str) -> tuple[int, int]:
         """(done, total): the campaign's collected posts already analysed or rejected, and all of them."""
@@ -457,6 +470,12 @@ class PostgresRunStore:
                     where campaign_id = $1::uuid and canonical_url = any($2::text[]) and state = 'queued'""",
                 campaign_id, included, planned.batch_id,
             )
+            joined = await conn.fetchval(
+                """select id::text from campaign_groups where campaign_id = $1::uuid and canonical_url = any($2::text[])
+                      and join_confirmed_at is not null order by group_key limit 1""", campaign_id, included)
+            if joined:  # a group the person joined: the window is read by the browser (choose_provider)
+                await conn.execute("update acquisition_batches set requested_by = $2 where id = $1::uuid",
+                                   planned.batch_id, f"apify_fallback:join:{joined}")
             await conn.execute(
                 """insert into campaign_windows (campaign_id, window_no, batch_id, group_count)
                    values ($1::uuid, $2, $3::uuid, $4)""",
@@ -471,6 +490,36 @@ class PostgresRunStore:
             await _set_actor(conn, actor)
             await cancel_batches(
                 conn, "id = $1::uuid and state in ('planned', 'queued', 'running', 'human_verification_required')", batch_id)
+
+    async def groups_needing_join(self, campaign_id: str) -> list[JoinGroup]:
+        """Closed groups to tell the person about, once each (``join_notice_at``, migration 047).
+
+        The Apify provider leaves ``group_private`` only in the batch item's ``last_error_code`` and the source's
+        ``facebook_group_state`` (``campaign_groups.activity`` is set by discovery alone). A group whose browser
+        re-read is still queued is not yet known to be closed for the browser account: it waits.
+        """
+        rows = await self.pool.fetch(
+            """select g.id::text as id, g.name, g.canonical_url
+                 from campaign_groups g join monitoring_sources s on s.canonical_url = g.canonical_url
+                where g.campaign_id = $1::uuid and g.join_notice_at is null and g.join_confirmed_at is null
+                  and s.configuration->>'facebook_group_state' = 'INACCESSIBLE'
+                  and exists (select 1 from acquisition_batch_items i
+                               where i.batch_id = g.batch_id and i.source_id = s.id
+                                 and i.last_error_code = 'group_private')
+                  and not exists (select 1 from acquisition_batch_items f
+                                    join acquisition_batches fb on fb.id = f.batch_id
+                                   where f.source_id = s.id and fb.requested_by like 'apify_fallback:%'
+                                     and fb.state not in ('succeeded', 'failed', 'cancelled'))
+                order by g.group_key""", campaign_id)
+        return [JoinGroup(r["id"], r["name"], r["canonical_url"]) for r in rows]
+
+    async def mark_join_notice(self, group_id: str) -> None:
+        await self.pool.execute(
+            "update campaign_groups set join_notice_at = now() where id = $1::uuid and join_notice_at is null",
+            group_id)
+
+    async def confirm_join(self, group_id: str) -> bool:
+        return await confirm_group_join(self.pool, group_id)
 
     async def pending_analysis(self, campaign_id: str) -> int:
         return int(await self.pool.fetchval(
@@ -932,6 +981,8 @@ class _MemGroup:
     score: float
     state: str = "queued"
     batch_id: str | None = None
+    notice: bool = False
+    confirmed: bool = False
 
 
 @dataclass
@@ -941,6 +992,7 @@ class _MemBatch:
     urls: list[str]
     state: str = "queued"
     items: dict[str, str] = field(default_factory=dict)  # url -> item state
+    requested_by: str = "campaign:runner"
 
 
 class MemoryRunStore:
@@ -962,6 +1014,7 @@ class MemoryRunStore:
         self.empty_groups: set[str] = set()  # canonical URLs read lately with nothing found: skipped
         self.live_groups: set[str] = set()   # canonical URLs with recent findings: read first
         self.unavailable: set[str] = set()
+        self.private_groups: set[str] = set()  # canonical URLs the Apify read found closed (group_private)
         self.normalised: dict[str, int] = {}
         self.progress: dict[str, tuple[int, int]] = {}  # cid -> (analysed or rejected posts, all collected posts)
         self.busy = False
@@ -1091,6 +1144,9 @@ class MemoryRunStore:
         self.batches[batch_id] = _MemBatch(batch_id, campaign_id, included, items=dict.fromkeys(included, "queued"))
         for url in included:
             rows[url].batch_id = batch_id
+        joined = next((rows[u] for u in included if rows[u].confirmed), None)
+        if joined is not None:
+            self.batches[batch_id].requested_by = f"apify_fallback:join:{campaign_id}:{joined.group_key}"
         windows = self.windows.setdefault(campaign_id, [])
         windows.append((len(windows) + 1, batch_id, "active"))
         return WindowStart(len(windows), batch_id, len(included), skipped)
@@ -1100,6 +1156,26 @@ class MemoryRunStore:
         if batch.state not in TERMINAL_BATCH_STATES:
             self.finish_batch(batch_id, "cancelled")
             self.cancelled_batches.append(batch_id)
+
+    async def groups_needing_join(self, campaign_id: str) -> list[JoinGroup]:
+        return [JoinGroup(f"{campaign_id}:{g.group_key}", g.name, g.canonical_url)
+                for g in self.groups.get(campaign_id, [])
+                if g.canonical_url in self.private_groups and not g.notice and not g.confirmed]
+
+    def _join_group(self, group_id: str) -> _MemGroup | None:
+        campaign_id, _, key = group_id.partition(":")
+        return next((g for g in self.groups.get(campaign_id, []) if g.group_key == key), None)
+
+    async def mark_join_notice(self, group_id: str) -> None:
+        if (group := self._join_group(group_id)) is not None:
+            group.notice = True
+
+    async def confirm_join(self, group_id: str) -> bool:
+        group = self._join_group(group_id)
+        if group is None or not group.notice or group.confirmed:
+            return False
+        group.confirmed, group.state, group.batch_id = True, "queued", None
+        return True
 
     async def pending_analysis(self, campaign_id: str) -> int:
         return self.normalised.get(campaign_id, 0)

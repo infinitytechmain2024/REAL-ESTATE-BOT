@@ -525,3 +525,64 @@ async def test_the_status_moves_below_the_cards_after_every_fifth_one_and_the_ol
     assert kinds[-2:] == ["card", "status"]  # the status is the last message in the chat
     assert messenger.deleted == [(CHAT, first_status)] and after_fifth != first_status
     assert (await campaigns.get(cid)).status_message_id == messenger.sent[-1][1]
+
+
+# --- closed groups: «вступите» (CAMPAIGN_JOIN_NOTICES) ---------------------------------
+
+
+class ButtonMessenger(FakeMessenger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.buttons: list[tuple[int, str, list[tuple[str, str]]]] = []
+
+    async def send_buttons(self, chat_id: int, text: str, buttons) -> int:
+        self.buttons.append((chat_id, text, list(buttons)))
+        return 900 + len(self.buttons)
+
+
+async def _closed_group_run(join_notices: bool):
+    campaigns, store, _, discovery, clock, _, plan = make(groups=3)
+    messenger = ButtonMessenger()
+    runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids={7},
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=120,
+                                                join_notices=join_notices))
+    cid = await create(campaigns, plan)
+    await runner.step(cid)  # discovery
+    await runner.step(cid)  # window 1 planned
+    store.private_groups.add("https://www.facebook.com/groups/g002/")
+    store.finish_batch(only_batch(store, cid))
+    return store, messenger, runner, cid
+
+
+async def test_a_closed_group_gets_one_message_with_a_join_button_and_a_repeated_tick_none() -> None:
+    store, messenger, runner, cid = await _closed_group_run(True)
+    await runner.step(cid)  # window closed
+    await runner.step(cid)
+    await runner.step(cid)
+    assert len(messenger.buttons) == 1
+    chat, text, buttons = messenger.buttons[0]
+    assert await store.groups_needing_join(cid) == [] and chat == CHAT
+    assert "https://www.facebook.com/groups/g002/" in text
+    assert buttons == [("Вступил ✅", f"group:joined:{cid}:g002")]
+
+
+async def test_join_notices_off_sends_nothing() -> None:
+    store, messenger, runner, cid = await _closed_group_run(False)
+    for _ in range(3):
+        await runner.step(cid)
+    assert messenger.buttons == [] and len(await store.groups_needing_join(cid)) == 1
+
+
+async def test_confirmed_group_is_queued_again_and_its_window_is_a_browser_batch() -> None:
+    store, messenger, runner, cid = await _closed_group_run(True)
+    await runner.step(cid)  # window closed
+    await runner.step(cid)  # the notice
+    group_id = messenger.buttons[0][2][0][1].removeprefix("group:joined:")
+    assert not await store.confirm_join(f"{cid}:g001")  # never noticed: refused
+    assert await store.confirm_join(group_id)
+    row = next(g for g in store.groups[cid] if g.group_key == "g002")
+    assert (row.state, row.batch_id) == ("queued", None)
+    nxt = await store.next_groups(cid, 20)
+    assert "g002" in [g.group_key for g in nxt]
+    start = await store.start_window(cid, [g for g in nxt if g.group_key == "g002"], vertical="real_estate", actor="t")
+    assert start is not None and store.batches[start.batch_id].requested_by == f"apify_fallback:join:{group_id}"

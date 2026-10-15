@@ -206,3 +206,25 @@ def test_operator_ids_are_parsed_strictly(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("TELEGRAM_OPERATOR_IDS", "@owner")
     with pytest.raises(ValueError, match="numeric"):
         ControlPlaneSettings.from_env()
+
+
+@pytest.mark.asyncio
+async def test_group_joined_button_confirms_for_operators_only_and_needs_the_flag() -> None:
+    seen: list[str] = []
+
+    async def confirm(group_id: str) -> bool:
+        seen.append(group_id)
+        return len(seen) == 1
+
+    async def sink(command: CommandEnvelope) -> None:
+        return None
+
+    make = lambda **kw: ControlPlane(settings(), MemoryControlPlaneStore(), FakeTranscriber(TranscriptResult("", None, None, "small")), sink, **kw)  # noqa: E731
+    control = make(confirm_join=confirm)
+    reply = await control.handle_callback(11, "group:joined:abc:g1")
+    assert reply.text == "Проверю группу через браузер" and seen == ["abc:g1"]
+    assert (await control.handle_callback(11, "group:joined:abc:g1")).text == "Эта кнопка устарела."  # already queued
+    assert (await control.handle_callback(999, "group:joined:abc:g2")).text == "Эта кнопка устарела."
+    assert (await control.handle_callback(None, "group:joined:abc:g2")).text == "Эта кнопка устарела."
+    assert seen == ["abc:g1", "abc:g1"]
+    assert (await make().handle_callback(11, "group:joined:abc:g1")).text != "Проверю группу через браузер"  # flag off
