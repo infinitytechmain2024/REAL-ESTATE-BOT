@@ -463,3 +463,19 @@ class ApifyHabitacliaSource(_TolerantPortal):
 
     def __init__(self, token: str, *, actor_id: str = "trev0n/habitaclia-com-spain-scraper", **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
+
+
+class ApifyMilanunciosSource(_TolerantPortal):
+    """Milanuncios through ``rastriq/milanuncios-scraper``.
+
+    Same status as ``ApifyPisosSource``: README unread, price unconfirmed, input and output names assumed. Milanuncios
+    mixes private sellers, agencies and unrelated ads: only rows whose URL is a concrete listing of the portal and
+    whose deal and municipality are confirmed by the row are kept. The seller name is passed as given. Not run live.
+    """
+
+    name = "apify_milanuncios"
+    hosts = frozenset({"milanuncios.com"})
+    kinds: ClassVar[dict[str, str]] = {"land": "land", "house": "house", "apartment": "flat", "commercial": "premises"}
+
+    def __init__(self, token: str, *, actor_id: str = "rastriq/milanuncios-scraper", **kwargs: Any) -> None:
+        super().__init__(token, actor_id=actor_id, **kwargs)

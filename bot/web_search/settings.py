@@ -73,6 +73,10 @@ class WebSearchSettings(BaseSettings):
     apify_habitaclia_actor: str = Field(default="trev0n/habitaclia-com-spain-scraper", validation_alias="APIFY_HABITACLIA_ACTOR")
     apify_habitaclia_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_HABITACLIA_MAX_RESULTS")
     apify_habitaclia_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_HABITACLIA_MAX_CHARGE_USD")
+    apify_milanuncios_enabled: bool = Field(default=False, validation_alias="APIFY_MILANUNCIOS_ENABLED")
+    apify_milanuncios_actor: str = Field(default="rastriq/milanuncios-scraper", validation_alias="APIFY_MILANUNCIOS_ACTOR")
+    apify_milanuncios_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_MILANUNCIOS_MAX_RESULTS")
+    apify_milanuncios_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_MILANUNCIOS_MAX_CHARGE_USD")
     apify_portals_timeout_seconds: float = Field(default=120, ge=1, le=120, validation_alias="APIFY_PORTALS_TIMEOUT_SECONDS")
     redis_url: str = Field(default="", repr=False, validation_alias="REDIS_URL")
 
@@ -201,7 +205,8 @@ class WebSearchSettings(BaseSettings):
         """Default-off providers: disabling the source does not construct an HTTP client."""
         if not (self.apify_idealista_enabled or self.apify_fotocasa_enabled or self.apify_yaencontre_enabled
                 or self.apify_pisos_enabled
-                or self.apify_habitaclia_enabled):
+                or self.apify_habitaclia_enabled
+                or self.apify_milanuncios_enabled):
             return ()
         if not self.apify_token:
             log.warning("web_search.apify_disabled", extra={"code": "apify_token_missing"})
@@ -260,6 +265,13 @@ class WebSearchSettings(BaseSettings):
                                     max_items=self.apify_habitaclia_max_results,
                                                timeout_seconds=self.apify_portals_timeout_seconds,
                                                max_charge_usd=self.apify_habitaclia_max_charge_usd, geocoder=geocoder()))
+        if self.apify_milanuncios_enabled:
+            from .sources.portals import ApifyMilanunciosSource
+
+            found.append(ApifyMilanunciosSource(self.apify_token, actor_id=self.apify_milanuncios_actor,
+                                    max_items=self.apify_milanuncios_max_results,
+                                                timeout_seconds=self.apify_portals_timeout_seconds,
+                                                max_charge_usd=self.apify_milanuncios_max_charge_usd, geocoder=geocoder()))
         return tuple(found)
 
     def backend_names(self) -> list[str]:

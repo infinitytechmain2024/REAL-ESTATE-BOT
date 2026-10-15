@@ -18,6 +18,7 @@ from bot.web_search.sources.portals import (
     ApifyFotocasaSource,
     ApifyHabitacliaSource,
     ApifyIdealistaPortalSource,
+    ApifyMilanunciosSource,
     ApifyPisosSource,
     ApifyYaencontreSource,
     plot_area,
@@ -530,3 +531,128 @@ async def test_habitaclia_setting_builds_the_source_only_when_enabled(monkeypatc
         await source.aclose()
     with pytest.raises(ValueError):
         WebSearchSettings(_env_file=None, APIFY_HABITACLIA_MAX_RESULTS=51)
+
+
+# --- Milanuncios (B5): rows follow assumed field names, no live run yet --------------------------------------------
+
+
+def milanuncios_row(**kwargs):
+    row = {
+        "url": "https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm", "operation": "venta", "title": "Parcela urbana en Milanuncios", "price": 250000,
+        "currency": "EUR", "surface": 3200, "rooms": None, "municipality": "Madrid", "province": "Madrid",
+        "neighbourhood": "Barajas", "street": "Calle Ejemplo", "phone": "+34910000002",
+        "agency": {"name": "Inmobiliaria Ejemplo S.L."},
+        "description": "Parcela de 3.200 m2 de suelo urbano.",
+    }
+    return {**row, **kwargs}
+
+
+def milanuncios(rows, requests, **kwargs):
+    return ApifyMilanunciosSource("secret-token", client=api(rows, requests), sleep=AsyncMock(), **kwargs)
+
+
+@pytest.mark.parametrize("change", [
+    {"country_code": "IT"}, {"vertical": "investors"}, {"constraints": {"deal": "both"}}, {"location": " "},
+    {"task_text": "habitación", "goal": "habitación"}, {"blocked_hosts": frozenset({"milanuncios.com"})},
+    {"suburbs_only": True}, {"radius_km": 25.0},
+])
+def test_milanuncios_supports_spanish_sale_or_rent_without_radius(change):
+    adapter = milanuncios([], [])
+    assert adapter.supports(task()) and adapter.supports(task(place_level="province"))
+    assert not adapter.supports(task(**change))
+    assert not ApifyMilanunciosSource("").supports(task())
+    assert "secret" not in repr(adapter)
+
+
+def test_milanuncios_url_classification_matches_the_portal_regexes():
+    from bot.web_search.urls import classify_url
+
+    assert classify_url("https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm") == "listing"
+    assert classify_url("https://www.milanuncios.com/alquiler-de-pisos-en-madrid/piso-centro-123456790.htm") == "listing"
+    assert classify_url("https://www.milanuncios.com/venta-de-terrenos-en-madrid/") != "listing"
+
+
+async def test_milanuncios_launch_body_is_capped_pinned_and_rows_are_mapped():
+    requests = []
+    adapter = milanuncios([milanuncios_row(), milanuncios_row(municipality="Alcorcón")], requests)
+    with source_run_scope(context("apify_milanuncios")):
+        listings = await adapter.search(task(), limit=5)
+    launch = next(r for r in requests if r.method == "POST")
+    assert launch.url.path.endswith("/acts/rastriq~milanuncios-scraper/runs")
+    assert launch.url.params["maxTotalChargeUsd"] == "0.05" and launch.url.params["maxItems"] == "5"
+    assert json.loads(launch.content) == {"maxItems": 5, "operation": "sale", "propertyType": "land",
+                                          "location": "Madrid", "locationType": "municipality",
+                                          "minSize": 2000, "maxPrice": 3000000}
+    assert len(listings) == 1  # Alcorcón is another municipality
+    listing = listings[0]
+    assert listing.url == "https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm" and listing.title == "Parcela urbana en Milanuncios"
+    assert listing.price == 250000 and listing.currency == "EUR" and listing.deal == "sale"
+    assert listing.plot_m2 == 3200 and listing.area_m2 is None and listing.property_type == "landparcel"
+    assert listing.phone == "+34910000002" and listing.advertiser == "Inmobiliaria Ejemplo S.L."
+    assert listing.address == "Calle Ejemplo, Barajas, Madrid"
+    await adapter.aclose()
+
+
+def test_milanuncios_house_area_is_built_area_not_plot():
+    adapter = milanuncios([], [])
+    house = task(task_text="casa", goal="casa", constraints={"deal": "sale"})
+    listing = adapter._normalize(milanuncios_row(surface=140, rooms=3), house, None)
+    assert listing.area_m2 == 140 and listing.plot_m2 is None and listing.rooms == 3
+    assert listing.property_type == "house"
+
+
+@pytest.mark.parametrize("change", [
+    {"operation": "alquiler"}, {"operation": "rent"}, {"operation": "unknown"},
+    {"url": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid/piso-centro-123456790.htm", "operation": None},
+    {"url": "https://www.idealista.com/inmueble/123456/"}, {"url": "https://www.milanuncios.com/venta-de-terrenos-en-madrid/"},
+    {"url": "/not-a-listing"}, {"url": "javascript:alert(1)"},
+    {"municipality": "Alcorcón"}, {"municipality": None, "city": None}, {"country": "FR"},
+])
+def test_milanuncios_rejects_foreign_deal_place_and_non_listing_rows(change):
+    adapter = milanuncios([], [])
+    assert adapter._normalize(milanuncios_row(**change), task(), None) is None
+    assert adapter._normalize("not a row", task(), None) is None
+
+
+def test_milanuncios_never_guesses_missing_facts():
+    adapter = milanuncios([], [])
+    listing = adapter._normalize(milanuncios_row(price=None, surface=None, phone="", agency=None, street=None,
+                                         neighbourhood=None), task(), None)
+    assert listing.price is None and listing.currency is None and listing.plot_m2 is None
+    assert listing.phone is None and listing.advertiser is None and listing.rooms is None
+    # a price text, a price in another currency and a price without a number are not prices
+    for price, currency in (("250.000 €", None), (250000, "USD"), (0, "EUR"), ("consultar", None)):
+        row = milanuncios_row(price=price, currency=currency)
+        assert adapter._normalize(row, task(), None).price is None
+    # a surface that the description contradicts is not a plot
+    other = milanuncios_row(description="Parcela de 900 m2 de suelo.")
+    assert adapter._normalize(other, task(), None).plot_m2 is None
+
+
+def test_milanuncios_reads_field_synonyms_and_an_explicit_plot_area():
+    adapter = milanuncios([], [])
+    row = {"link": "https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm", "transactionType": "SALE", "price": {"amount": 99000}, "plotArea": 1500,
+           "surface": 80, "city": "Madrid", "phones": ["+34910000003"], "advertiser": "Particular", "text": "Solar."}
+    listing = adapter._normalize(row, task(), None)
+    assert listing.plot_m2 == 1500 and listing.area_m2 is None and listing.phone == "+34910000003"
+    assert listing.advertiser == "Particular" and listing.description == "Solar."
+    assert listing.price == 99000 and listing.currency == "EUR"
+
+
+async def test_milanuncios_setting_builds_the_source_only_when_enabled(monkeypatch):
+    from bot.web_search.settings import WebSearchSettings
+
+    monkeypatch.delenv("APIFY_MILANUNCIOS_ENABLED", raising=False)
+    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").apify_milanuncios_enabled is False
+    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").sources() == ()
+    assert WebSearchSettings(_env_file=None, APIFY_MILANUNCIOS_ENABLED=True).sources() == ()  # no token
+    settings = WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token", APIFY_MILANUNCIOS_ENABLED=True,
+                                 APIFY_MILANUNCIOS_MAX_RESULTS=7, APIFY_MILANUNCIOS_MAX_CHARGE_USD=.03)
+    source, = settings.sources()
+    try:
+        assert isinstance(source, ApifyMilanunciosSource) and source.actor_id == "rastriq~milanuncios-scraper"
+        assert source.max_items == 7 and source.max_charge_usd == .03
+    finally:
+        await source.aclose()
+    with pytest.raises(ValueError):
+        WebSearchSettings(_env_file=None, APIFY_MILANUNCIOS_MAX_RESULTS=51)
