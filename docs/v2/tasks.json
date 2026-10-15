@@ -239,7 +239,7 @@
       "deps": [
         "B1"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": "Пт-Вс",
       "hours": 5
     },
@@ -249,7 +249,7 @@
       "stream": "portals",
       "agent": "sources",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "Пт-Сб",
       "hours": 6
     },
@@ -295,7 +295,7 @@
       "stream": "ops",
       "agent": "deployer+builder",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "Сб",
       "hours": 6
     },
@@ -305,7 +305,7 @@
       "stream": "ops",
       "agent": "deployer",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "Сб",
       "hours": 2
     },
