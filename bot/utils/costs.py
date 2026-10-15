@@ -41,9 +41,17 @@ KINDS = ("cost", "error", "skip")
 # USD per million tokens (input, output) when OpenRouter's answer carries no ``usage.cost``; a model is matched by
 # the longest key it starts with. Deliberately on the high side: an estimate must not let a run overspend.
 PRICES: dict[str, tuple[float, float]] = {
+    # v2 stage models (docs/v2/MODELS.md); prices from memory -- check openrouter.ai/pricing before D2.
+    "anthropic/claude-opus-5.5": (15.0, 75.0),
+    "anthropic/claude-sonnet-5.5": (3.0, 15.0),
+    "anthropic/claude-haiku-5.5": (1.0, 5.0),
     "anthropic/claude-opus": (15.0, 75.0),
     "anthropic/claude-sonnet": (3.0, 15.0),
     "anthropic/claude-haiku": (1.0, 5.0),
+    # The Claude API's own ids (ARCHITECT_PROVIDER=anthropic); same prices as the OpenRouter ids until checked.
+    "claude-opus": (15.0, 75.0),
+    "claude-sonnet": (3.0, 15.0),
+    "claude-haiku": (1.0, 5.0),
     "openai/gpt-4o-mini": (0.15, 0.60),
     "openai/gpt-4o": (2.5, 10.0),
     "openai/whisper": (0.0, 0.0),

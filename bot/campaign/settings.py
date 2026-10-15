@@ -129,6 +129,8 @@ class CampaignRunnerSettings(BaseSettings):
                        if self.openrouter_api_key else None)
         return FinalReporter(recommender)
 
+    # Tell the chat about closed Facebook groups (Apify group_private) and read them after «Вступил».
+    join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -210,7 +212,8 @@ class CampaignRunnerSettings(BaseSettings):
                             relevance_retry_limit=self.relevance_retry_limit,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
                             max_people=self.lead_people_max, lead_days=self.lead_days,
-                            investor_report=self.investor_report)
+                            investor_report=self.investor_report,
+                            join_notices=self.join_notices)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

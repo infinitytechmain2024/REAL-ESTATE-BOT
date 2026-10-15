@@ -77,6 +77,7 @@ _SERVICE_SETTINGS = {
     "agent-reach-worker": ["bot/agent_reach/settings.py"],
     "scrapling-worker": ["bot/scrapling_connector/settings.py"],
     "verification": ["bot/verification/settings.py"],
+    "watchdog": ["bot/ops/settings.py"],
 }
 
 
@@ -138,3 +139,80 @@ def test_compose_has_no_duplicate_keys() -> None:
 
     with pytest.raises(AssertionError, match="duplicate keys"):
         yaml.load(bad, Loader=Strict)
+
+
+def test_every_service_has_healthcheck_and_restart() -> None:
+    """A service that dies or hangs silently is the 24/7 failure; one-shot (profile) services are exempt."""
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    services = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+    long_running = {name: spec for name, spec in services.items() if "restart" in spec or not spec.get("profiles")}
+
+    no_healthcheck = [n for n, spec in long_running.items() if not (spec.get("healthcheck") or {}).get("test")]
+    no_restart = [n for n, spec in long_running.items() if spec.get("restart") != "unless-stopped"]
+    assert no_healthcheck == [], f"services without a healthcheck: {no_healthcheck}"
+    assert no_restart == [], f"services without restart: unless-stopped: {no_restart}"
+
+
+def test_compose_healthcheck_modules_exist() -> None:
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    services = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+    missing: list[str] = []
+    for name, spec in services.items():
+        test = (spec.get("healthcheck") or {}).get("test") or []
+        if test[:3] == ["CMD", "python", "-m"] and not (repo / (test[3].replace(".", "/") + ".py")).exists():
+            missing.append(f"{name}: {test[3]}")
+    assert missing == [], missing
+
+
+def _script(name: str) -> str:
+    repo = Path(__file__).resolve().parent.parent
+    return (repo / "scripts" / name).read_text(encoding="utf-8")
+
+
+def test_backup_script_is_strict_and_deletes_only_inside_backup_dir() -> None:
+    import re
+
+    text = _script("backup.sh")
+    lowered = text.lower()
+
+    assert "set -euo pipefail" in text
+    assert "10240" in text and "exit 1" in text
+    assert "/root/backups" in text and "BACKUP_DIR" in text and "BACKUP_KEEP_DAYS" in text
+    assert "exec -T postgres" in text and "pg_dump" in text
+    for forbidden in ("drop ", "truncate", "rm -rf", "rm -r "):
+        assert forbidden not in lowered
+    # Every delete is scoped to the backup directory or to our own temp file.
+    for line in text.splitlines():
+        if re.search(r"\brm\b|-delete", line) and not line.lstrip().startswith("#"):
+            assert '"$backup_dir"' in line or '"$tmp"' in line, line
+
+
+def test_restore_check_never_writes_to_the_working_database() -> None:
+    text = _script("restore_check.sh")
+
+    assert "set -euo pipefail" in text
+    assert "real-estate-restore-check" in text and "postgres:16" in text
+    assert "trap" in text and "docker rm -f" in text
+    assert "--tmpfs" in text
+    assert "compose" not in text
+    assert "exec -T postgres" not in text
+    assert "select count(*) from campaigns" in text and "OK, campaigns=" in text
+
+
+def test_every_compose_service_rotates_its_logs() -> None:
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    compose = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert compose["x-logging"] == {
+        "driver": "json-file",
+        "options": {"max-size": "20m", "max-file": "5"},
+    }
+    missing = [
+        n for n, spec in compose["services"].items() if spec.get("logging") != compose["x-logging"]
+    ]
+    assert missing == [], f"services without log rotation: {missing}"

@@ -119,3 +119,25 @@ def test_migration_script_lists_every_migration_by_its_real_path_in_order() -> N
     assert required == on_disk
     assert applied == [f"bot/services/db/migrations/{name}" for name in on_disk]
     assert all((ROOT / path).is_file() for path in applied)
+
+
+def test_campaign_evaluation_sql_is_read_only_and_parses() -> None:
+    import re
+
+    import pytest
+
+    sql_path = ROOT / "scripts/eval_campaign.sql"
+    assert sql_path.exists()
+    sql = sql_path.read_text(encoding="utf-8")
+    code = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+    assert re.search(r"\b(insert|update|delete|drop|truncate|alter|create|grant)\b", code, re.IGNORECASE) is None
+    assert re.search(r"\b(insert|update|delete|drop|truncate)\b", sql, re.IGNORECASE) is None, "even in comments"
+    assert ":'cid'" in code
+    script = ROOT / "scripts/eval_campaign.sh"
+    text = script.read_text(encoding="utf-8")
+    assert script.stat().st_mode & 0o111 and "pipefail" in text and "-v cid=" in text and "-f -" in text
+
+    pglast = pytest.importorskip("pglast")
+    statements = pglast.parse_sql(code.replace(":'cid'", "'00000000-0000-0000-0000-000000000000'"))
+    assert len(statements) >= 8
+    assert all(type(s.stmt).__name__ == "SelectStmt" for s in statements)

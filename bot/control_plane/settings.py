@@ -10,6 +10,7 @@ from bot.orchestra.store import SafetyLimits
 # Telegram's Bot API will not hand a bot a file larger than 20 MB.
 TELEGRAM_DOWNLOAD_LIMIT_BYTES = 20 * 1_048_576
 SUPPORTED_STT_PROVIDERS = frozenset({"openrouter"})
+ARCHITECT_PROVIDERS = frozenset({"openrouter", "anthropic"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,12 @@ class ControlPlaneSettings:
     interview_max_rounds: int = 14
     # A Facebook post link as the task (v2 B1, needs the same flag as the campaign-runner's post reader): off = plain text.
     apify_comments_enabled: bool = False
+    # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
+    # OpenRouter stays its fallback. The key is never logged or echoed.
+    architect_provider: str = "openrouter"
+    anthropic_api_key: str = field(default="", repr=False)
+    anthropic_interview_model: str = "claude-sonnet-5-5"
+    anthropic_timeout_seconds: float = 90.0
     # Live browser for logins and checkpoints. Empty public URL disables it.
     live_view_public_url: str = ""
     live_view_open_minutes: int = 20
@@ -54,6 +61,8 @@ class ControlPlaneSettings:
     # row exists, and who besides owners may skip confirmation.
     auto_mode: bool = False
     auto_operator_user_ids: frozenset[int] = frozenset()
+    # «Вступил ✅» under a closed-group notice of the campaign runner (CAMPAIGN_JOIN_NOTICES).
+    campaign_join_notices: bool = False
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
@@ -63,6 +72,9 @@ class ControlPlaneSettings:
         database_url = os.environ.get("DATABASE_URL", "").strip()
         if not database_url:
             raise ValueError("DATABASE_URL is required")
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if _architect_provider(os.environ.get("ARCHITECT_PROVIDER", "openrouter")) == "anthropic" and not anthropic_key:
+            raise ValueError("ARCHITECT_PROVIDER=anthropic needs ANTHROPIC_API_KEY")
         return cls(
             telegram_token=token,
             database_url=database_url,
@@ -78,6 +90,10 @@ class ControlPlaneSettings:
             interview_timeout_seconds=float(_bounded_int("OPENROUTER_INTERVIEW_TIMEOUT_SECONDS", 30, 1, 180)),
             interview_max_rounds=_bounded_int("INTERVIEW_MAX_ROUNDS", 14, 1, 30),
             apify_comments_enabled=os.environ.get("APIFY_FACEBOOK_COMMENTS_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"},
+            architect_provider=_architect_provider(os.environ.get("ARCHITECT_PROVIDER", "openrouter")),
+            anthropic_api_key=anthropic_key,
+            anthropic_interview_model=os.environ.get("ANTHROPIC_INTERVIEW_MODEL", "").strip() or "claude-sonnet-5-5",
+            anthropic_timeout_seconds=float(_bounded_int("ANTHROPIC_TIMEOUT_SECONDS", 90, 1, 300)),
             live_view_public_url=_public_url(os.environ.get("LIVE_VIEW_PUBLIC_URL", "")),
             live_view_open_minutes=_bounded_int("LIVE_VIEW_OPEN_MINUTES", 20, 5, 60),
             live_view_request_minutes=_bounded_int("LIVE_VIEW_REQUEST_MINUTES", 60, 10, 1440),
@@ -98,6 +114,7 @@ class ControlPlaneSettings:
             ),
             operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_OPERATOR_IDS", "")),
             auto_mode=_on_off("AUTO_MODE"),
+            campaign_join_notices=os.environ.get("CAMPAIGN_JOIN_NOTICES", "").strip().lower() in {"1", "true", "yes", "on"},
             auto_operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_AUTO_OPERATOR_IDS", ""), "TELEGRAM_AUTO_OPERATOR_IDS"),
         )
 
@@ -123,6 +140,13 @@ def _stt_provider(raw: str) -> str:
     provider = raw.strip().lower() or "openrouter"
     if provider not in SUPPORTED_STT_PROVIDERS:
         raise ValueError(f"STT_PROVIDER must be one of {sorted(SUPPORTED_STT_PROVIDERS)}, got {raw!r}")
+    return provider
+
+
+def _architect_provider(raw: str) -> str:
+    provider = raw.strip().lower() or "openrouter"
+    if provider not in ARCHITECT_PROVIDERS:
+        raise ValueError(f"ARCHITECT_PROVIDER must be one of {sorted(ARCHITECT_PROVIDERS)}, got {raw!r}")
     return provider
 
 

@@ -39,6 +39,10 @@ class WebSearchSettings(BaseSettings):
     serpapi_daily_cap: int = Field(default=90, ge=0, le=100_000, validation_alias="WEB_SEARCH_SERPAPI_DAILY_CAP")
     poll_seconds: float = Field(default=15, ge=2, le=600, validation_alias="WEB_SEARCH_POLL_SECONDS")
 
+    # apify: portals first, the search engine only when they gave fewer than APIFY_MIN_LISTINGS; legacy: as before.
+    acquisition_mode: Literal["legacy", "apify"] = Field(default="legacy", validation_alias="ACQUISITION_MODE")
+    apify_min_listings: int = Field(default=5, ge=1, le=200, validation_alias="APIFY_MIN_LISTINGS")
+
     apify_idealista_enabled: bool = Field(default=False, validation_alias="APIFY_IDEALISTA_ENABLED")
     apify_token: str = Field(default="", repr=False, validation_alias="APIFY_TOKEN")
     apify_idealista_actor: str = Field(default="axlymxp/idealista-scraper", validation_alias="APIFY_IDEALISTA_ACTOR")
@@ -65,6 +69,18 @@ class WebSearchSettings(BaseSettings):
     apify_yaencontre_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_YAENCONTRE_MAX_RESULTS")
     apify_yaencontre_max_charge_usd: float = Field(default=0.10, gt=0, le=10,
                                                    validation_alias="APIFY_YAENCONTRE_MAX_CHARGE_USD")
+    apify_pisos_enabled: bool = Field(default=False, validation_alias="APIFY_PISOS_ENABLED")
+    apify_pisos_actor: str = Field(default="logiover/pisos-com-property-scraper", validation_alias="APIFY_PISOS_ACTOR")
+    apify_pisos_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_PISOS_MAX_RESULTS")
+    apify_pisos_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_PISOS_MAX_CHARGE_USD")
+    apify_habitaclia_enabled: bool = Field(default=False, validation_alias="APIFY_HABITACLIA_ENABLED")
+    apify_habitaclia_actor: str = Field(default="trev0n/habitaclia-com-spain-scraper", validation_alias="APIFY_HABITACLIA_ACTOR")
+    apify_habitaclia_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_HABITACLIA_MAX_RESULTS")
+    apify_habitaclia_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_HABITACLIA_MAX_CHARGE_USD")
+    apify_milanuncios_enabled: bool = Field(default=False, validation_alias="APIFY_MILANUNCIOS_ENABLED")
+    apify_milanuncios_actor: str = Field(default="rastriq/milanuncios-scraper", validation_alias="APIFY_MILANUNCIOS_ACTOR")
+    apify_milanuncios_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_MILANUNCIOS_MAX_RESULTS")
+    apify_milanuncios_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_MILANUNCIOS_MAX_CHARGE_USD")
     apify_portals_timeout_seconds: float = Field(default=120, ge=1, le=120, validation_alias="APIFY_PORTALS_TIMEOUT_SECONDS")
     redis_url: str = Field(default="", repr=False, validation_alias="REDIS_URL")
 
@@ -173,6 +189,7 @@ class WebSearchSettings(BaseSettings):
             verified_host_interval_seconds=self.verified_host_interval_seconds,
             pages_per_verification=self.pages_per_verification,
             max_scrape_api_per_campaign=self.max_scrape_api_per_campaign if self.scrape_api_url else 0,
+            acquisition_mode=self.acquisition_mode, apify_min_listings=self.apify_min_listings,
             domain_policy=self.domain_policy, host_breaker_refusals=self.host_breaker_refusals,
             scrape_cost_usd=self.scrape_api_cost_usd,
             query_cost_usd=self.paid_query_cost_usd * sum(
@@ -191,7 +208,10 @@ class WebSearchSettings(BaseSettings):
 
     def sources(self) -> tuple[ListingSource, ...]:
         """Default-off providers: disabling the source does not construct an HTTP client."""
-        if not (self.apify_idealista_enabled or self.apify_fotocasa_enabled or self.apify_yaencontre_enabled):
+        if not (self.apify_idealista_enabled or self.apify_fotocasa_enabled or self.apify_yaencontre_enabled
+                or self.apify_pisos_enabled
+                or self.apify_habitaclia_enabled
+                or self.apify_milanuncios_enabled):
             return ()
         if not self.apify_token:
             log.warning("web_search.apify_disabled", extra={"code": "apify_token_missing"})
@@ -236,6 +256,27 @@ class WebSearchSettings(BaseSettings):
                                                timeout_seconds=self.apify_portals_timeout_seconds,
                                                max_charge_usd=self.apify_yaencontre_max_charge_usd,
                                                geocoder=geocoder()))
+        if self.apify_pisos_enabled:
+            from .sources.portals import ApifyPisosSource
+
+            found.append(ApifyPisosSource(self.apify_token, actor_id=self.apify_pisos_actor,
+                                          max_items=self.apify_pisos_max_results,
+                                          timeout_seconds=self.apify_portals_timeout_seconds,
+                                          max_charge_usd=self.apify_pisos_max_charge_usd, geocoder=geocoder()))
+        if self.apify_habitaclia_enabled:
+            from .sources.portals import ApifyHabitacliaSource
+
+            found.append(ApifyHabitacliaSource(self.apify_token, actor_id=self.apify_habitaclia_actor,
+                                    max_items=self.apify_habitaclia_max_results,
+                                               timeout_seconds=self.apify_portals_timeout_seconds,
+                                               max_charge_usd=self.apify_habitaclia_max_charge_usd, geocoder=geocoder()))
+        if self.apify_milanuncios_enabled:
+            from .sources.portals import ApifyMilanunciosSource
+
+            found.append(ApifyMilanunciosSource(self.apify_token, actor_id=self.apify_milanuncios_actor,
+                                    max_items=self.apify_milanuncios_max_results,
+                                                timeout_seconds=self.apify_portals_timeout_seconds,
+                                                max_charge_usd=self.apify_milanuncios_max_charge_usd, geocoder=geocoder()))
         return tuple(found)
 
     def backend_names(self) -> list[str]:

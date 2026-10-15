@@ -111,6 +111,7 @@ MIN_SNIPPET_CHARS = 60  # title + snippet: less than this says nothing about the
 
 
 DOMAIN_POLICIES = ("strict", "soft", "off")
+ACQUISITION_MODES = ("legacy", "apify")
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,10 @@ class WebSearchConfig:
     host_breaker_refusals: int = 3               # 0: off
     scrape_cost_usd: float = 0.0                 # what one scrape-API read costs (the ledger, CAMPAIGN_BUDGET_USD)
     query_cost_usd: float = 0.0                  # what one search query costs (paid backends; SearXNG is free)
+    # apify: the portal sources run first and the search engine is only the fallback when they gave fewer than
+    # ``apify_min_listings`` listings; legacy: the search engine runs next to the sources, as before.
+    acquisition_mode: str = "legacy"
+    apify_min_listings: int = 5
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -169,7 +174,8 @@ class WebSearchConfig:
                 and 0 <= self.max_renders_per_campaign <= 200 and 0 <= self.max_scrape_api_per_campaign <= 500
                 and 0 <= self.verified_host_interval_seconds <= 300 and 1 <= self.pages_per_verification <= 200
                 and self.domain_policy in DOMAIN_POLICIES and 0 <= self.host_breaker_refusals <= 100
-                and 0 <= self.scrape_cost_usd <= 10 and 0 <= self.query_cost_usd <= 10):
+                and 0 <= self.scrape_cost_usd <= 10 and 0 <= self.query_cost_usd <= 10
+                and self.acquisition_mode in ACQUISITION_MODES and 1 <= self.apify_min_listings <= 200):
             raise ValueError("unsafe web search limits")
 
 
@@ -356,6 +362,9 @@ class WebSearchWorker:
             if not waiting:  # a site's check is still pending: the stage waits for it (or for its expiry)
                 await self._done(campaign, "queries_done")
             return
+        if (cfg.acquisition_mode == "apify" and counts.queries == 0 and await self.store.source_runs(cid)
+                and await self._apify_gate(campaign)):
+            return
         if not await self._new_round(campaign, counts.queries) and not waiting:
             await self._done(campaign, "queries_exhausted")
 
@@ -366,6 +375,9 @@ class WebSearchWorker:
         if used_count == 0:  # the first round: the search plan (once), then its direct portal pages
             campaign = await self._with_search_plan(campaign)
             await self._from_sources(campaign)
+            # apify: the direct portal pages wait for the gate; they are queued only when it falls back to search
+            if cfg.acquisition_mode == "apify" and await self._apify_gate(campaign):
+                return True
             await self._enqueue_portal_urls(campaign)
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
@@ -383,6 +395,21 @@ class WebSearchWorker:
         log.info("web_search.round", extra={"campaign_id": campaign.id, "round": round_no, "generated": len(queries),
                                             "added": added})
         return bool(queries)
+
+    async def _apify_gate(self, campaign: Campaign) -> bool:
+        """apify mode, before any search query: True when the stage waits for the portals or is already done."""
+        runs = await self.store.source_runs(campaign.id)
+        if any(r.state in ("starting", "running", "ready") for r in runs):
+            await self.store.set_progress(campaign.id, None, self._line(0, None, "порталы через Apify…"))
+            return True
+        # The stored run has no import counter (no migration): the listings _import_source accepts are counted again.
+        sources = {s.name: s for s in self.sources}
+        usable = sum(1 for r in runs if r.state == "completed" and r.name in sources
+                     for item in r.listings if self._listing_ok(campaign, sources[r.name], item, self._source_text(item)))
+        if usable >= self.config.apify_min_listings:
+            await self._done(campaign, "apify_enough")
+            return True
+        return False  # too few listings (or no portal source at all): the search engine takes over
 
     async def _source_limit(self, campaign: Campaign, source: ListingSource) -> int:
         for host in source.hosts:
@@ -546,21 +573,27 @@ class WebSearchWorker:
         description = listing.description[:max(0, self.config.max_post_chars - len(fixed) - 1)]
         return f"{fixed}\n{description}" if description else fixed
 
+    def _listing_ok(self, campaign: Campaign, source: ListingSource, listing: SourceListing, text: str | None) -> bool:
+        """What ``_import_source`` accepts: a listing of the source's host, the campaign's deal and country."""
+        task = query_task(campaign)
+        blocked = task.blocked_hosts | self.config.blocked_hosts
+        host = host_of(listing.url)
+        return not (not fetchable(listing.url, blocked) or host not in source.hosts
+                    or classify_url(listing.url) != "listing" or text is None
+                    or deal_conflict(listing.url, campaign_deal(campaign))
+                    or (listing.deal and campaign_deal(campaign) and listing.deal != campaign_deal(campaign))
+                    or geo.foreign_tld(host, task.country)
+                    or geo.foreign_markers_hit(task.country, f"{listing.title} {listing.address or ''}"))
+
     async def _import_source(self, campaign: Campaign, source: ListingSource, run: SourceRun) -> bool:
         """True keeps HTML waiting when a provider row is busy or the per-tick import quota is used."""
-        cid, task = campaign.id, query_task(campaign)
-        blocked = task.blocked_hosts | self.config.blocked_hosts
+        cid = campaign.id
         done = 0
         for offset in range(run.import_offset, len(run.listings)):
             listing = run.listings[offset]
             host = host_of(listing.url)
             text = self._source_text(listing)
-            if (not fetchable(listing.url, blocked) or host not in source.hosts
-                    or classify_url(listing.url) != "listing" or text is None
-                    or deal_conflict(listing.url, campaign_deal(campaign))
-                    or (listing.deal and campaign_deal(campaign) and listing.deal != campaign_deal(campaign))
-                    or geo.foreign_tld(host, task.country)
-                    or geo.foreign_markers_hit(task.country, f"{listing.title} {listing.address or ''}")):
+            if not self._listing_ok(campaign, source, listing, text):
                 await costs.skip("api", "apify_invalid_listing", item=source.name)
                 await self.store.advance_source_import(cid, source.name, offset + 1)
                 continue

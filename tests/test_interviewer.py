@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,6 +17,12 @@ import pytest
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.models import CampaignPlan
 from bot.campaign.spec import Rooms, TaskSpec, parse_number
+from bot.control_plane.anthropic_interviewer import (
+    AnthropicInterviewer,
+    FallbackInterviewer,
+    system_prompt,
+    task_prompt,
+)
 from bot.control_plane.intake import (
     DRAFT_KEYBOARD,
     TASK_KEYBOARD,
@@ -36,6 +43,7 @@ from bot.control_plane.rules import RuleInterviewer
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
 from bot.orchestra.parser import CommandValidationError, parse_campaign_goal, parse_campaign_spec
+from bot.utils import costs
 from tests.test_user_intake import (
     OWNER,
     USER,
@@ -797,3 +805,181 @@ async def test_the_rules_fallback_asks_the_deviation_question_and_reads_the_butt
         await press(control, USER, "task:skip")
     strict = await press(control, USER, "task:dev:0")
     assert "Допустимые отступления: нет, только точные" in strict.text
+
+
+# --- the Claude API client and the fallback chain ---------------------------------------------------
+
+KEY = "sk-ant-test-secret"
+GOOD_TURN = {"spec": {"place": {"name": "Valencia", "country": "ES"}, "deal": "rent"},
+             "question": "Сколько комнат? Например: 1, 2, 3.", "done": False, "understood_ru": "Валенсия, аренда",
+             "asking": "rooms.min"}
+
+
+def _tool_use(turn: Any, usage: dict[str, int] | None = None) -> httpx.Response:
+    return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"},
+                                                 {"type": "tool_use", "id": "t1", "name": "submit_turn", "input": turn}],
+                                     "usage": usage or {"input_tokens": 1000, "output_tokens": 200}})
+
+
+def _claude(*responses: httpx.Response | Exception) -> tuple[AnthropicInterviewer, list[httpx.Request]]:
+    seen: list[httpx.Request] = []
+    queue = list(responses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return AnthropicInterviewer(api_key=KEY, model="claude-sonnet-5-5", client=client), seen
+
+
+@pytest.mark.asyncio
+async def test_anthropic_returns_the_turn_from_the_forced_tool_call() -> None:
+    claude, seen = _claude(_tool_use(GOOD_TURN))
+    turn = await claude.interview(mode="real_estate", spec=TaskSpec(mode="real_estate"), dialogue=[], message="Валенсия")
+    assert turn.question == "Сколько комнат? Например: 1, 2, 3." and turn.asking == "rooms.min"
+    assert turn.spec.place.country == "ES" and turn.spec.deal == "rent"
+    request = seen[0]
+    assert str(request.url) == "https://api.anthropic.com/v1/messages"
+    assert request.headers["x-api-key"] == KEY and request.headers["anthropic-version"] == "2023-06-01"
+    body = json.loads(request.content)
+    assert body["model"] == "claude-sonnet-5-5" and body["tool_choice"] == {"type": "tool", "name": "submit_turn"}
+    assert body["tools"][0]["input_schema"]["required"] == ["spec", "question", "done"]
+    assert body["system"].startswith(SYSTEM) and "TASK SKILL (real_estate)" in body["system"]
+    assert json.loads(body["messages"][0]["content"].split("\n", 1)[1])["message"] == "Валенсия"
+    await claude.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("response", "code"), [
+    (httpx.ReadTimeout("slow"), "ai_failed"),
+    (httpx.ConnectError("down"), "ai_failed"),
+    (httpx.Response(401, json={"error": "bad key"}), "model_unavailable"),
+    (httpx.Response(402, json={}), "model_unavailable"),
+    (httpx.Response(404, json={}), "model_unavailable"),
+    (httpx.Response(429, json={}), "ai_failed"),
+    (httpx.Response(529, json={}), "ai_failed"),
+    (httpx.Response(200, json={"content": [{"type": "text", "text": "{}"}]}), "schema_mismatch"),
+    (_tool_use({"spec": {}}), "schema_mismatch"),
+    (_tool_use({"spec": {}, "question": "What is your budget?", "done": False}), "schema_mismatch"),
+    (httpx.Response(200, content=b"not json"), "schema_mismatch"),
+    (httpx.Response(200, json={"content": []}), "schema_mismatch"),
+    (httpx.Response(200, json={}), "schema_mismatch"),
+    (httpx.Response(200, json={"stop_reason": "max_tokens", "content": [
+        {"type": "tool_use", "name": "submit_turn", "input": GOOD_TURN}]}), "schema_mismatch"),
+])
+async def test_anthropic_failures_raise_a_safe_code_without_retrying(response: httpx.Response | Exception, code: str) -> None:
+    claude, seen = _claude(response)
+    with pytest.raises(InterviewError) as caught:
+        await claude.interview(mode="real_estate", spec=TaskSpec(), dialogue=[], message="x")
+    assert caught.value.code == code and KEY not in str(caught.value) and len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_anthropic_books_the_cost_with_provider_anthropic() -> None:
+    ledger = costs.MemoryLedger()
+    costs.install(ledger)
+    try:
+        claude, _ = _claude(_tool_use(GOOD_TURN, {"input_tokens": 1_000_000, "output_tokens": 100_000}))
+        await claude.interview(mode="real_estate", spec=TaskSpec(), dialogue=[], message="x")
+    finally:
+        costs.install(None)
+    (entry,) = ledger.entries
+    assert (entry.stage, entry.provider, entry.item, entry.units) == ("llm", "anthropic", "claude-sonnet-5-5", 1_100_000)
+    assert entry.cost_usd == pytest.approx(3.0 + 1.5)
+    assert costs.price("claude-sonnet-5-5") == (3.0, 15.0) and costs.price("anthropic/claude-sonnet-5.5") == (3.0, 15.0)
+
+
+def test_the_key_is_not_in_repr_or_logs(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude, _ = _claude()
+    assert KEY not in repr(claude) and KEY not in repr(vars(claude).get("_client"))
+    monkeypatch.setenv("TELEGRAM_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("ARCHITECT_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    assert KEY not in repr(ControlPlaneSettings.from_env())
+    with pytest.raises(ValueError):
+        AnthropicInterviewer(api_key="", model="m")
+
+
+def test_architect_settings_default_to_openrouter_and_anthropic_needs_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_TOKEN", "t")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    for name in ("ARCHITECT_PROVIDER", "ANTHROPIC_API_KEY", "ANTHROPIC_INTERVIEW_MODEL", "ANTHROPIC_TIMEOUT_SECONDS"):
+        monkeypatch.delenv(name, raising=False)
+    settings = ControlPlaneSettings.from_env()
+    assert (settings.architect_provider, settings.anthropic_api_key, settings.anthropic_interview_model,
+            settings.anthropic_timeout_seconds) == ("openrouter", "", "claude-sonnet-5-5", 90.0)
+    monkeypatch.setenv("ARCHITECT_PROVIDER", "anthropic")
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+        ControlPlaneSettings.from_env()
+    monkeypatch.setenv("ARCHITECT_PROVIDER", "gemini")
+    with pytest.raises(ValueError, match="ARCHITECT_PROVIDER"):
+        ControlPlaneSettings.from_env()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    _tool_use({"spec": {}}),  # outside the schema
+    httpx.Response(401, json={}),
+    httpx.ReadTimeout("slow"),
+])
+async def test_a_failing_claude_hands_the_same_call_to_openrouter(failure: httpx.Response | Exception,
+                                                                  caplog: pytest.LogCaptureFixture) -> None:
+    claude, _ = _claude(failure)
+    router, sent = await _client(_completion(json.dumps(GOOD_TURN)))
+    chain = FallbackInterviewer(claude, router)
+    assert chain.model == "claude-sonnet-5-5"
+    with caplog.at_level(logging.DEBUG):
+        turn = await chain.interview(mode="real_estate", spec=TaskSpec(), dialogue=[], message="Валенсия")
+    assert turn.question == GOOD_TURN["question"] and len(sent) == 1
+    assert chain.model == "anthropic/claude-sonnet-4.5"  # the card shows the model that really answered
+    assert KEY not in caplog.text and "sk-test-secret" not in caplog.text
+    await chain.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_working_claude_never_calls_openrouter_and_both_failing_raise_for_the_rules() -> None:
+    claude, _ = _claude(_tool_use(GOOD_TURN), httpx.Response(500, json={}))
+    router, sent = await _client(httpx.Response(500, json={}))
+    chain = FallbackInterviewer(claude, router)
+    await chain.interview(mode="real_estate", spec=TaskSpec(), dialogue=[], message="x")
+    assert sent == [] and chain.model == "claude-sonnet-5-5"
+    with pytest.raises(InterviewError):  # the intake then falls back to RuleInterviewer
+        await chain.interview(mode="real_estate", spec=TaskSpec(), dialogue=[], message="x")
+
+
+def test_the_task_skills_exist_and_are_attached_by_mode() -> None:
+    for mode, marker in (("real_estate", "real estate"), ("investors", "investor"), ("post_link", "post link")):
+        assert marker in task_prompt(mode).lower() and task_prompt(mode) in system_prompt(mode)
+    assert system_prompt("unknown") == SYSTEM
+
+
+def test_openrouter_mode_never_builds_the_anthropic_client() -> None:
+    source = (Path(__file__).parents[1] / "bot/control_plane/main.py").read_text()
+    assert 'if settings.architect_provider == "anthropic":' in source
+    assert source.index("AnthropicInterviewer(") > source.index('settings.architect_provider == "anthropic"')
+
+
+@pytest.mark.asyncio
+async def test_main_installs_the_ledger_so_claude_costs_reach_campaign_costs() -> None:
+    from bot.control_plane.main import install_interview_costs
+
+    rows: list[tuple[Any, ...]] = []
+
+    class FakePool:
+        async def execute(self, sql: str, *args: Any) -> None:
+            rows.append(args)
+
+    install_interview_costs(FakePool())
+    try:
+        claude, _ = _claude(_tool_use(GOOD_TURN))
+        await claude.interview(mode="real_estate", spec=TaskSpec(), dialogue=[], message="x")
+    finally:
+        costs.install(None)
+    assert rows and rows[0][0] is None and rows[0][1] == "llm" and rows[0][3] == "anthropic"
+    install_interview_costs(None)
+    assert costs.ledger() is None
