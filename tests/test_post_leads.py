@@ -383,14 +383,55 @@ async def test_a_post_the_worker_has_not_queued_yet_is_waited_for_too() -> None:
     assert (await campaigns.get(cid)).state != "completed"
 
 
-async def test_without_the_flag_the_runner_does_not_look_at_posts() -> None:
-    campaigns, store, messenger, _, runner, cid = await _runner()
-    runner.config = RunnerConfig(relevance_fail_closed=False)  # post_reads off
-    store.post_read_rows[cid] = [PostReadSummary(POST, "reading")]
-    store.post_people[cid] = [_person(0)]
+async def test_with_the_flag_off_a_post_link_campaign_still_never_turns_into_a_discovery() -> None:
+    campaigns, _store, _messenger, _, runner, cid = await _runner(discovery=NoCall())
+    runner.config = RunnerConfig(relevance_fail_closed=False)  # post_reads off: no reader, nothing to wait for
     for _ in range(4):
         await runner.step(cid)
-    assert (await campaigns.get(cid)).state == "completed" and not any("Профиль:" in t for _, _, t in messenger.sent)
+    assert (await campaigns.get(cid)).state == "completed"
+
+
+async def test_a_post_link_campaign_ends_with_the_web_stage_on() -> None:
+    from bot.web_search.models import WebStatus
+
+    class Web:
+        async def web_status(self, _cid: str):
+            return WebStatus(True, None, "сайты: ждёт запуска")  # no web run is ever made for it
+
+        async def site_report(self, _cid: str) -> list:
+            return []
+
+    campaigns, store, messenger, clock, runner, cid = await _runner(discovery=NoCall())
+    runner.web = Web()
+    store.post_read_rows[cid] = [PostReadSummary(POST, "done", 30, 5, 0.09)]
+    for _ in range(4):
+        clock.advance(30)
+        await runner.step(cid)
+    assert (await campaigns.get(cid)).state == "completed"
+    assert "Комментариев: 30, лидов: 5, $0.09" in [t for _, _, t in messenger.sent]
+
+
+async def test_an_ordinary_campaign_with_a_post_link_among_its_sources_is_untouched() -> None:
+    campaigns, store, _messenger, _, runner, cid = await _runner(link=False)  # a link in sources.required, no marker
+    store.people["Spain"] = [_person(1)]
+    store.post_people[cid] = [_person(0)]
+    store.post_read_rows[cid] = [PostReadSummary(POST, "reading")]  # would block completion if it were consulted
+    await runner.step(cid)
+    assert set(store.deliveries) == {(cid, "fb:100000000001")}, "the people of the city, as before"
+    assert not await runner._post_read_pending(await campaigns.get(cid))
+
+
+async def test_a_lost_run_id_fails_the_read_instead_of_a_second_paid_run(ledger) -> None:
+    api = Api(items=thirty())
+    w, store, _ = worker(api)
+
+    async def broken(*_a: Any) -> None:
+        raise RuntimeError("database down")
+
+    store.save_run = broken  # type: ignore[method-assign]
+    await w.step()
+    assert store.rows[(CID, POST)]["state"] == "failed" and store.rows[(CID, POST)]["error"] == "run_id_not_saved"
+    assert await w.step() is False and len(api.launches()) == 1
 
 
 class NoCall:
@@ -510,6 +551,9 @@ async def test_migration_048_the_worker_and_the_runner_store_on_a_real_database(
     assert [c.id for c in await PostgresReachStore(pool).open_campaigns()] == [cid]  # an ordinary investor search
     await pool.execute("update campaigns set spec = jsonb_set(spec, '{post_link}', 'true') where id = $1::uuid", cid)
     assert await PostgresReachStore(pool).open_campaigns() == []  # a post link campaign sets no reach query
+    await PostgresCampaignStore(pool).create(  # an ordinary campaign with the same link: never a candidate
+        plan, chat_id=1, requested_by=1, source_text="x", actor="test",
+        spec=spec.model_copy(update={"post_link": False}).model_dump(mode="json"))
     assert set(await store.candidates()) == {(cid, POST), (cid, "https://example.com/x")}
     api = Api(items=thirty())
     w = PostLeadWorker(store, source(api, WITH_POSTS), PostgresLeadStore(pool, SafetyLimits()))

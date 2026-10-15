@@ -125,6 +125,16 @@ Prometheus в проекте нет. Метрики — строки логге�
   автоматически: тот же батч при новом запуске продолжит существующий run.
 - Команды Telegram для переключения кампании на Apify нет, только SQL или `APIFY_FACEBOOK_SCOPE=all`.
 
+## Комментарии под постом по ссылке (v2 B1)
+
+Флаг `APIFY_FACEBOOK_COMMENTS_ENABLED=false` (так же включает приём ссылки в telegram). Актор
+`apify/facebook-comments-scraper` (`APIFY_FACEBOOK_COMMENTS_ACTOR`, обязателен закреплённый
+`APIFY_FACEBOOK_COMMENTS_ACTOR_BUILD`), цена $0.0025 за комментарий + $0.001 за старт, запуск с `maxTotalChargeUsd`
+(`APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST`) и лимитом `APIFY_FACEBOOK_COMMENTS_MAX_PER_POST`. Текст поста берётся
+из `postTitle`; `APIFY_FACEBOOK_POSTS_ACTOR` (пусто = выключен, $0.005) нужен только если его нет. Код:
+`bot/acquisition/apify_facebook_comments.py`, `bot/campaign/post_leads.py`, таблица `campaign_post_reads` (048).
+Кампания-ссылка (`spec.post_link`) не ищет группы, сайты и контакты, только читает пост и присылает лиды.
+
 ## Тесты
 
 Только моки, live-запросов в CI нет:

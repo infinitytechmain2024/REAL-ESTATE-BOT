@@ -143,7 +143,14 @@ class PostLeadWorker:
                                           code="estimated")
                 await self.store.finish(read, "failed", cost_usd=cfg.max_usd_per_post, error="apify_launch_unknown")
                 return
-            await self.store.save_run(read, run_id)
+            try:
+                await self.store.save_run(read, run_id)
+            except Exception:  # noqa: BLE001 - the run exists but its id is lost: never queue a second paid one
+                await costs.record_unique("api", key=f"post-read:{read.campaign_id}:{url_key(read.post_url)}",
+                                          provider="apify", item=cfg.actor_id, cost_usd=cfg.max_usd_per_post,
+                                          code="estimated")
+                await self.store.finish(read, "failed", cost_usd=cfg.max_usd_per_post, error="run_id_not_saved")
+                return
         run = await self.source.wait(run_id)
         cost = await self._bill(read, run)
         status = str(run.get("status"))
@@ -238,6 +245,7 @@ class PostgresPostReadStore:
                            case when jsonb_typeof(c.spec #> '{{sources,required}}') = 'array'
                                 then c.spec #> '{{sources,required}}' else '[]'::jsonb end) as u(url)
                  where c.state not in {_STOPPED} and u.url like 'https://%'
+                   and c.plan->>'vertical' = 'investors' and c.spec->>'post_link' = 'true'
                    and not exists (select 1 from campaign_post_reads r
                                     where r.campaign_id = c.id and r.post_url = u.url)""")
         return [(r["campaign_id"], r["url"]) for r in rows]

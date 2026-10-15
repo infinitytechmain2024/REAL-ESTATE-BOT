@@ -65,6 +65,12 @@ their profile page is never opened. Comment text goes to OpenRouter for the role
 No retention job covers these tables yet; an investor search only uses rows of the last
 `CAMPAIGN_LEAD_DAYS` (90). §4.1 and §4.3 apply to exactly this data.
 
+A post the user sends by link (v2 B1, `APIFY_FACEBOOK_COMMENTS_ENABLED`, off by default) is read the same
+way through Apify (`bot/campaign/post_leads.py`, migration 048): Apify becomes a third-party processor of those
+public comments (§4.1 applies to the client's decision before it is switched on). Only the public name, profile
+link and comment quote reach `investor_leads`; the profile page is never opened and nothing is posted or sent to
+the person. `campaign_post_reads` holds the post link, the run id and the cost, no personal data.
+
 ### 2.3b Investor reach — built (bot/campaign/reach.py, migration 027)
 
 An investor search asks the search engines for investors, agents, agencies, funds and networks in

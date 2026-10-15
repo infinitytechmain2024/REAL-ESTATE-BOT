@@ -428,7 +428,7 @@ class CampaignRunner:
     # -- phases --
 
     async def _advance(self, campaign: Campaign) -> str:
-        if self.config.post_reads and post_link_only(campaign):
+        if post_link_only(campaign):  # by the marker alone: switching the flag off never turns it into a discovery
             # A post link: no Facebook discovery or windows, only the comment read, then it is over.
             if campaign.state in ("planned", "discovering"):
                 await self.campaigns.set_state(campaign.id, "running", ACTOR)
@@ -529,7 +529,7 @@ class CampaignRunner:
 
     async def _drain(self, campaign: Campaign, run: RunState, reason: str) -> str:
         """Wait for the web stage, give the analysis worker a bounded chance to finish, then complete."""
-        web = await self._web(campaign.id)
+        web = None if post_link_only(campaign) else await self._web(campaign.id)  # a post link has no web stage
         if web is not None and web.active:
             return web.line or "сайты: поиск"
         now = self.now()
@@ -554,7 +554,7 @@ class CampaignRunner:
 
     async def _post_read_pending(self, campaign: Campaign) -> bool:
         """A post sent by link whose comments are not read yet (or not even queued by the post worker)."""
-        if not self.config.post_reads:
+        if not self.config.post_reads or not post_link_only(campaign):
             return False
         reads = await self.store.post_reads(campaign.id)
         if reads:
@@ -847,7 +847,7 @@ class CampaignRunner:
         if room <= 0:
             return
         limit = min(room, self.config.max_stream_per_step)
-        if self.config.post_reads and await self.store.post_reads(campaign.id):
+        if post_link_only(campaign):
             # A post sent by link: the people who commented under it (no city, no reach).
             keyed: list[tuple[str, list[str], str | None, str]] = [
                 (p.profile_key, [p.profile_key], None, person_card(p, location=None, now=self.now()))
@@ -1011,8 +1011,7 @@ class CampaignRunner:
         Telegram failed. Investor-only searches have no property cards to report; a cancelled search that found and
         rejected nothing is not reported.
         """
-        if ((self.final_report is None or not self.config.investor_report) and self.config.post_reads
-                and campaign.plan.vertical == "investors"
+        if ((self.final_report is None or not self.config.investor_report) and post_link_only(campaign)
                 and campaign.state in SUMMARY_STATES and campaign.finished_at is not None
                 and await self.store.post_reads(campaign.id)):
             return await self._post_report(campaign)  # no reporter: a post sent by link gets a short count
@@ -1069,7 +1068,7 @@ class CampaignRunner:
 
     async def _leads_summary(self, campaign: Campaign) -> LeadsSummary:
         """The investor branch for the report: people and reach contacts sent, and (a post sent by link) its read."""
-        reads = await self.store.post_reads(campaign.id) if self.config.post_reads else []
+        reads = await self.store.post_reads(campaign.id) if post_link_only(campaign) else []
         reach = await self.store.reach_sent(campaign.id)
         people_sent = max(await self.store.people_sent(campaign.id) - reach, 0)
         if not reads:
