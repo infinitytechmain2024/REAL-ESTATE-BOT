@@ -17,13 +17,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-# Dockerfile -> modules its containers run (CMD and compose `command:`). Healthchecks
-# run their probe at import time, so they are left out.
+# Dockerfile -> modules its containers run (CMD and compose `command:`). The new healthchecks only probe under __main__, so
+# they are listed; the older ones probe at import time and are left out.
 ENTRY_POINTS = {
     "agent-reach.Dockerfile": ["bot.agent_reach.main", "bot.agent_reach.worker"],
-    "analysis-pipeline.Dockerfile": ["bot.analysis_pipeline.main"],
+    "analysis-pipeline.Dockerfile": ["bot.analysis_pipeline.main", "bot.analysis_pipeline.healthcheck"],
     "browser-session.Dockerfile": ["bot.browser_session.main"],
-    "campaign-runner.Dockerfile": ["bot.campaign.runner", "bot.web_search.worker", "bot.web_search.settings"],
+    "campaign-runner.Dockerfile": ["bot.campaign.runner", "bot.web_search.worker", "bot.web_search.settings",
+                                   "bot.campaign.healthcheck", "bot.agents.healthcheck", "bot.ops.watchdog"],
     "facebook-collector.Dockerfile": ["bot.facebook_collector.main", "bot.facebook_collector.runner"],
     "scrapling-connector.Dockerfile": ["bot.scrapling_connector.main", "bot.scrapling_connector.worker"],
     "telegram-control.Dockerfile": ["bot.control_plane.main"],

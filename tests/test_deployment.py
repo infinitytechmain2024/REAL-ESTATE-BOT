@@ -114,3 +114,30 @@ def test_compose_passes_every_setting_to_its_service() -> None:
             if match and key in example and "..." not in example[key] and match[1] != example[key]:
                 stale.append(f"{service}: {key} compose={match[1]!r} .env.example={example[key]!r}")
     assert stale == [], f"compose defaults differ from .env.example: {stale}"
+
+
+def test_every_service_has_healthcheck_and_restart() -> None:
+    """A service that dies or hangs silently is the 24/7 failure; one-shot (profile) services are exempt."""
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    services = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+    long_running = {name: spec for name, spec in services.items() if "restart" in spec or not spec.get("profiles")}
+
+    no_healthcheck = [n for n, spec in long_running.items() if not (spec.get("healthcheck") or {}).get("test")]
+    no_restart = [n for n, spec in long_running.items() if spec.get("restart") != "unless-stopped"]
+    assert no_healthcheck == [], f"services without a healthcheck: {no_healthcheck}"
+    assert no_restart == [], f"services without restart: unless-stopped: {no_restart}"
+
+
+def test_compose_healthcheck_modules_exist() -> None:
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    services = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+    missing: list[str] = []
+    for name, spec in services.items():
+        test = (spec.get("healthcheck") or {}).get("test") or []
+        if test[:3] == ["CMD", "python", "-m"] and not (repo / (test[3].replace(".", "/") + ".py")).exists():
+            missing.append(f"{name}: {test[3]}")
+    assert missing == [], missing

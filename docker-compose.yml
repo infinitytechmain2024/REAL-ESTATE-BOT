@@ -128,6 +128,12 @@ services:
     # no host port: the live-view gate on :8081 is reached only through Caddy.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.control_plane.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
@@ -157,6 +163,12 @@ services:
     # only by services on the private backend network.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.browser_session.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 120s
     shm_size: 1gb
 
   facebook-collector:
@@ -236,6 +248,12 @@ services:
       CAMPAIGN_BUDGET_USD: ${CAMPAIGN_BUDGET_USD:-5}
     networks: [backend]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.facebook_collector.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
@@ -339,6 +357,12 @@ services:
       AGENT_REACH_UPSTREAM_ENABLED: "false"
     networks: [backend]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.agent_reach.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
@@ -362,6 +386,12 @@ services:
       SCRAPLING_POLL_SECONDS: ${SCRAPLING_POLL_SECONDS:-15}
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.scrapling_connector.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
@@ -390,6 +420,12 @@ services:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.analysis_pipeline.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
@@ -425,6 +461,12 @@ services:
       AGENT_REDUCTION_TIMEOUT_SECONDS: ${AGENT_REDUCTION_TIMEOUT_SECONDS:-45}
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.agents.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
@@ -602,6 +644,12 @@ services:
     # Telegram messages, calls OpenRouter and reads public web pages.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.campaign.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
@@ -626,6 +674,13 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE, FOWNER]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      # Busybox wget, else curl, else python: whichever the image has answers /healthz.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || curl -fsS -o /dev/null http://127.0.0.1:8080/healthz || python3 -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8080/healthz', timeout=5)\""]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
 
   # Optional VPN for the web stage (docs/WEB_SEARCH.md): uncomment, fill the
   # WireGuard values in .env, then set WEB_SEARCH_PROXY_URL=http://gluetun:8888.
@@ -678,6 +733,12 @@ services:
     # Telegram notices.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.verification.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
