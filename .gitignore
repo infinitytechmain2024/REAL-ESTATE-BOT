@@ -41,3 +41,9 @@ fb-bot-profile/
 **/Cookies
 screenshots/
 *.png
+
+# Archify check evidence (receipts, screenshots); keep only candidate.json and the HTML
+.archify/**/review-*/
+.archify/**/visual-check/
+.archify/**/*.finalize.json
+.archify/**/*.finalize-summary.json

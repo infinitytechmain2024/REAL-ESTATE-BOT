@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "8c776640-6d5e-4864-908e-3bdb07a98de0",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/home/user/REAL-ESTATE-BOT/.archify/architecture-real-estate-bot-20261015-190842/candidate.json",
+  "output": "/home/user/REAL-ESTATE-BOT/.archify/architecture-real-estate-bot-20261015-190842/real-estate-bot.html",
+  "specification": {
+    "sha256": "77aa1632f989c4e1b6ff761aaa1388f809ed33790d6e4ce9bd97131399d4d2ba",
+    "bytes": 6900
+  },
+  "artifact": {
+    "sha256": "9b7ac1fc2c9631f6262f58dd65f87ce31d231c04a2717c3b510462e71075fa32",
+    "bytes": 842986
+  }
+}
