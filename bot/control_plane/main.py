@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
@@ -25,9 +26,10 @@ from bot.campaign.offers import PostgresOfferDesk
 from bot.campaign.store import PostgresCampaignStore
 from bot.control_plane import menu
 from bot.control_plane.access import AccessDesk, PostgresAccessStore
+from bot.control_plane.anthropic_interviewer import AnthropicInterviewer, FallbackInterviewer
 from bot.control_plane.auto import PostgresSettingsStore
 from bot.control_plane.intake import PostgresIntakeStore
-from bot.control_plane.interviewer import OpenRouterInterviewer
+from bot.control_plane.interviewer import Interviewer, OpenRouterInterviewer
 from bot.control_plane.live_view import (
     BrowserLiveClient,
     LiveViewConfig,
@@ -43,6 +45,7 @@ from bot.operators import OperatorSet
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import ConfirmedCommand
 from bot.orchestra.store import PostgresOrchestraStore
+from bot.utils import costs
 
 
 def _incoming(message: Message) -> IncomingMessage:
@@ -81,6 +84,12 @@ def _markup(reply: Reply) -> InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyK
         for b in reply.buttons
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def install_interview_costs(pool: Any) -> None:
+    """Book the Claude interview calls in ``campaign_costs`` (no budget: the interview has no campaign yet)."""
+    if pool is not None:
+        costs.install(costs.PostgresLedger(pool))
 
 
 async def run() -> None:
@@ -136,11 +145,16 @@ async def run() -> None:
         )
     else:
         logging.getLogger(__name__).warning("telegram.control.stt_disabled", extra={"hint": "set OPENROUTER_API_KEY; voice messages are refused"})
-    interviewer: OpenRouterInterviewer | None = None
+    interviewer: Interviewer | None = None
     if settings.openrouter_api_key:
         interviewer = OpenRouterInterviewer(api_key=settings.openrouter_api_key, model=settings.interview_model,
                                             timeout_seconds=settings.interview_timeout_seconds)
-    else:
+    if settings.architect_provider == "anthropic":
+        claude = AnthropicInterviewer(api_key=settings.anthropic_api_key, model=settings.anthropic_interview_model,
+                                      timeout_seconds=settings.anthropic_timeout_seconds)
+        interviewer = FallbackInterviewer(claude, interviewer) if interviewer is not None else claude
+        install_interview_costs(orchestra_store.pool)
+    if interviewer is None:
         logging.getLogger(__name__).warning("telegram.control.interviewer_disabled",
                                             extra={"hint": "set OPENROUTER_API_KEY; tasks are interviewed by rules"})
 
@@ -227,7 +241,7 @@ async def run() -> None:
         if transcriber is not None:
             await transcriber.aclose()
         if interviewer is not None:
-            await interviewer.aclose()
+            await interviewer.aclose()  # type: ignore[attr-defined]
         await bot.session.close()
 
 

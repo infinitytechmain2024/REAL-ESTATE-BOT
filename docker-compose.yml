@@ -126,6 +126,11 @@ services:
       OPENROUTER_INTERVIEW_MODEL: ${OPENROUTER_INTERVIEW_MODEL:-anthropic/claude-sonnet-4.5}
       OPENROUTER_INTERVIEW_TIMEOUT_SECONDS: ${OPENROUTER_INTERVIEW_TIMEOUT_SECONDS:-30}
       INTERVIEW_MAX_ROUNDS: ${INTERVIEW_MAX_ROUNDS:-14}
+      # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
+      ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_INTERVIEW_MODEL: ${ANTHROPIC_INTERVIEW_MODEL:-claude-sonnet-5-5}
+      ANTHROPIC_TIMEOUT_SECONDS: ${ANTHROPIC_TIMEOUT_SECONDS:-90}
       # Live browser for Facebook logins/checkpoints (bot/control_plane/live_view.py).
       # Empty LIVE_VIEW_PUBLIC_URL keeps the feature off.
       LIVE_VIEW_PUBLIC_URL: ${LIVE_VIEW_PUBLIC_URL:-}

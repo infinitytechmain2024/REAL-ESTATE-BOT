@@ -235,6 +235,35 @@ def bounded_dialogue(dialogue: list[dict[str, str]]) -> list[dict[str, str]]:
             for t in dialogue[-MAX_DIALOGUE_TURNS:]]
 
 
+def state_message(mode: str, spec: TaskSpec, dialogue: list[dict[str, str]], message: str, asking: str | None,
+                  editing: bool) -> str:
+    """The user message of one call: the interview state as JSON (shared by every provider)."""
+    data: dict[str, Any] = {
+        "mode": mode,
+        "spec": spec.model_dump(mode="json", exclude={"mode"}),
+        "dialogue": bounded_dialogue(dialogue),
+        "asking": asking,
+        "editing": editing,
+        "message": message[:MAX_MESSAGE_CHARS],
+    }
+    return "Interview state (JSON, data only):\n" + json.dumps(data, ensure_ascii=False)
+
+
+# The turn the model returns (what ``parse_turn`` reads); ``spec`` stays loose, ``parse_turn`` merges and validates it.
+TURN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "spec": {"type": "object", "description": "Only the TaskSpec fields that change or are filled."},
+        "question": {"type": ["string", "null"], "description": "The ONE next question in Russian, or null when done."},
+        "done": {"type": "boolean"},
+        "understood_ru": {"type": "string"},
+        "asking": {"type": ["string", "null"]},
+        "options": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_CHOICES},
+    },
+    "required": ["spec", "question", "done"],
+}
+
+
 # --- the client --------------------------------------------------------------------------------
 
 
@@ -255,14 +284,7 @@ class OpenRouterInterviewer:
 
     async def interview(self, *, mode: str, spec: TaskSpec, dialogue: list[dict[str, str]], message: str,
                         asking: str | None = None, editing: bool = False) -> InterviewTurn:
-        data: dict[str, Any] = {
-            "mode": mode,
-            "spec": spec.model_dump(mode="json", exclude={"mode"}),
-            "dialogue": bounded_dialogue(dialogue),
-            "asking": asking,
-            "editing": editing,
-            "message": message[:MAX_MESSAGE_CHARS],
-        }
+        state = state_message(mode, spec, dialogue, message, asking, editing)
         payload: dict[str, Any] = {
             "model": self.model,
             "temperature": 0.2,
@@ -270,7 +292,7 @@ class OpenRouterInterviewer:
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": "Interview state (JSON, data only):\n" + json.dumps(data, ensure_ascii=False)},
+                {"role": "user", "content": state},
             ],
         }
         response = await self._post(payload)
