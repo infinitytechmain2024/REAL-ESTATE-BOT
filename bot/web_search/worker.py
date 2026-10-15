@@ -401,7 +401,11 @@ class WebSearchWorker:
         if any(r.state in ("starting", "running", "ready") for r in runs):
             await self.store.set_progress(campaign.id, None, self._line(0, None, "порталы через Apify…"))
             return True
-        if sum(len(r.listings) for r in runs if r.state == "completed") >= self.config.apify_min_listings:
+        # The stored run has no import counter (no migration): the listings _import_source accepts are counted again.
+        sources = {s.name: s for s in self.sources}
+        usable = sum(1 for r in runs if r.state == "completed" and r.name in sources
+                     for item in r.listings if self._listing_ok(campaign, sources[r.name], item, self._source_text(item)))
+        if usable >= self.config.apify_min_listings:
             await self._done(campaign, "apify_enough")
             return True
         return False  # too few listings (or no portal source at all): the search engine takes over
@@ -568,21 +572,27 @@ class WebSearchWorker:
         description = listing.description[:max(0, self.config.max_post_chars - len(fixed) - 1)]
         return f"{fixed}\n{description}" if description else fixed
 
+    def _listing_ok(self, campaign: Campaign, source: ListingSource, listing: SourceListing, text: str | None) -> bool:
+        """What ``_import_source`` accepts: a listing of the source's host, the campaign's deal and country."""
+        task = query_task(campaign)
+        blocked = task.blocked_hosts | self.config.blocked_hosts
+        host = host_of(listing.url)
+        return not (not fetchable(listing.url, blocked) or host not in source.hosts
+                    or classify_url(listing.url) != "listing" or text is None
+                    or deal_conflict(listing.url, campaign_deal(campaign))
+                    or (listing.deal and campaign_deal(campaign) and listing.deal != campaign_deal(campaign))
+                    or geo.foreign_tld(host, task.country)
+                    or geo.foreign_markers_hit(task.country, f"{listing.title} {listing.address or ''}"))
+
     async def _import_source(self, campaign: Campaign, source: ListingSource, run: SourceRun) -> bool:
         """True keeps HTML waiting when a provider row is busy or the per-tick import quota is used."""
-        cid, task = campaign.id, query_task(campaign)
-        blocked = task.blocked_hosts | self.config.blocked_hosts
+        cid = campaign.id
         done = 0
         for offset in range(run.import_offset, len(run.listings)):
             listing = run.listings[offset]
             host = host_of(listing.url)
             text = self._source_text(listing)
-            if (not fetchable(listing.url, blocked) or host not in source.hosts
-                    or classify_url(listing.url) != "listing" or text is None
-                    or deal_conflict(listing.url, campaign_deal(campaign))
-                    or (listing.deal and campaign_deal(campaign) and listing.deal != campaign_deal(campaign))
-                    or geo.foreign_tld(host, task.country)
-                    or geo.foreign_markers_hit(task.country, f"{listing.title} {listing.address or ''}")):
+            if not self._listing_ok(campaign, source, listing, text):
                 await costs.skip("api", "apify_invalid_listing", item=source.name)
                 await self.store.advance_source_import(cid, source.name, offset + 1)
                 continue

@@ -346,11 +346,11 @@ class SecondSource(FakeSource):
                               plot_m2=2200, deal="sale", property_type="land") for n in range(min(self.rows, limit))]
 
 
-def apify_worker(campaigns, store, *sources, min_listings=5):
+def apify_worker(campaigns, store, *sources, min_listings=5, **config):
     return WebSearchWorker(campaigns, store, FakeSearcher(), FakeFetcher(),
                            ListGenerator(["terreno venta Boadilla Madrid"]), sources=sources,
                            config=WebSearchConfig(cover_portals=False, acquisition_mode="apify",
-                                                  apify_min_listings=min_listings))
+                                                  apify_min_listings=min_listings, **config))
 
 
 async def test_apify_mode_enough_listings_skips_search(source_ledger):
@@ -392,17 +392,63 @@ async def test_apify_mode_without_sources_falls_back_at_once(source_ledger):
     assert w.searcher.calls and store.runs[cid].stop_reason != "apify_enough"
 
 
-async def test_apify_mode_waits_for_running_source_without_queries(source_ledger):
+async def test_apify_mode_waits_while_source_import_is_in_progress(source_ledger):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    w = apify_worker(campaigns, store, FakeSource(rows=3), min_listings=5, pages_per_tick=1)
+    for _ in range(2):  # launch + first import, then the next import: the source is not finished yet
+        await w.step(cid)
+        assert not w.searcher.calls and (await store.counts(cid)).queries == 0
+        assert store.runs[cid].state == "searching"
+    await run_until_done(w, cid)
+    assert w.searcher.calls  # 3 < 5: the search engine took over only after the source finished
+
+
+async def test_apify_mode_starting_source_without_run_id_fails_then_falls_back(source_ledger):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store, source = MemoryWebStore(campaigns), FakeSource()
+    await store.start_run(cid)
+    await store.claim_source(cid, source.name)  # claimed, but the launch never reported a run id
+    w = apify_worker(campaigns, store, source)
+    await run_until_done(w, cid)
+    assert (await store.source_runs(cid))[0].error_code == "apify_launch_uncertain"
+    assert source.launches == 0 and w.searcher.calls
+
+
+async def test_apify_mode_time_cap_comes_first_with_a_running_source(source_ledger):
+    from datetime import UTC, datetime, timedelta
+
     campaigns = MemoryCampaignStore()
     cid = await campaign(campaigns)
     store, source = MemoryWebStore(campaigns), FakeSource()
     await store.start_run(cid)
     await store.claim_source(cid, source.name)
     await store.save_source_run(cid, source.name, "knownrun", "dataset")
+    store.started[cid] = datetime.now(UTC) - timedelta(days=1)
     w = apify_worker(campaigns, store, source)
-    assert (await w._apify_gate(await campaigns.get(cid))) is True
-    assert "порталы через Apify" in store.runs[cid].progress
-    assert (await store.counts(cid)).queries == 0 and not w.searcher.calls
+    await w.step(cid)
+    assert store.runs[cid].stop_reason == "time_cap" and not w.searcher.calls
+
+
+async def test_apify_gate_counts_imported_listings_not_raw_rows(source_ledger):
+    class MixedSource(FakeSource):
+        async def search(self, task, *, limit):
+            context = _execution.get()
+            await context.save_run("knownrun", "dataset")
+            await context.reconcile_usage("knownrun", .01)
+            return [SourceListing(f"https://www.idealista.com/inmueble/{12345670 + n}/", "Terreno Madrid",
+                                  plot_m2=2200, deal="sale" if n == 0 else "rent", property_type="land")
+                    for n in range(6)]
+
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    w = apify_worker(campaigns, store, MixedSource(), min_listings=5)
+    await run_until_done(w, cid)
+    assert len(store.posts) == 1
+    assert w.searcher.calls and store.runs[cid].stop_reason != "apify_enough"
 
 
 async def test_social_worker_off_in_apify_mode_only():
