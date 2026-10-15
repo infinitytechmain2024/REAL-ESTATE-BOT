@@ -136,7 +136,7 @@
       "stream": "acquisition",
       "agent": "builder",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Пт",
       "hours": 4
     },
@@ -249,7 +249,7 @@
       "stream": "portals",
       "agent": "sources",
       "deps": [],
-      "status": "ready",
+      "status": "in_progress",
       "day": "Пт-Сб",
       "hours": 6
     },
