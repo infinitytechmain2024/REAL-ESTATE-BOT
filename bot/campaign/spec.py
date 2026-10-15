@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-Mode = Literal["real_estate", "investors"]
+Mode = Literal["real_estate", "investors", "both"]
 Deal = Literal["rent", "sale", "any"]
 PropertyType = Literal["apartment", "house", "land", "room", "commercial", "other", "any"]
 Level = Literal["city", "province", "region"]
@@ -35,6 +35,7 @@ UserRole = Literal["raising", "deploying"]
 MODE_TITLES: dict[str, str] = {
     "real_estate": "🏡 Участки и объекты",
     "investors": "💼 Инвесторы и компании",
+    "both": "🏡💼 Недвижимость + инвесторы",
 }
 DEAL_RU = {"rent": "аренда", "sale": "покупка", "any": "не важно"}
 PROPERTY_RU = {
@@ -556,12 +557,16 @@ class TaskSpec(_Model):
 
         real_estate: place, deal, property_type, budget.max, rooms.min (only for an apartment or a house).
         investors: place (or geography), investor.who, investor.ticket, investor.user_role.
+        both: the real estate fields, then the investor ones.
         """
         mode = mode or self.mode or "real_estate"
+        real_estate = tuple(p for p in REAL_ESTATE_ORDER if p != "rooms.min" or self.property_type in ROOMS_TYPES)
         if mode == "investors":
             order: tuple[str, ...] = INVESTORS_ORDER
+        elif mode == "both":
+            order = (*real_estate, *(p for p in INVESTORS_ORDER if p != "place"))
         else:
-            order = tuple(p for p in REAL_ESTATE_ORDER if p != "rooms.min" or self.property_type in ROOMS_TYPES)
+            order = real_estate
         # The place can never be waved away: a search needs somewhere to look.
         return [p for p in order if not (self.filled(p) or (p != "place" and self.is_unspecified(p)))]
 
@@ -618,10 +623,10 @@ class TaskSpec(_Model):
             lines.append(f"Районы: {', '.join(self.place.districts)}")
         if self.place.radius_km:
             lines.append(f"Радиус: {_num(self.place.radius_km)} км")
-        if self.mode == "investors":
-            self._investor_lines(lines)
-        else:
+        if self.mode in ("real_estate", "both") or self.mode is None:
             self._real_estate_lines(lines)
+        if self.mode in ("investors", "both"):
+            self._investor_lines(lines)
         if self.must_have:
             lines.append(f"Обязательно: {', '.join(self.must_have)}")
         if self.wishes:

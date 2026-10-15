@@ -96,7 +96,7 @@ def parse_campaign(arguments: str) -> tuple[str, str]:
     return ("plan", text)
 
 
-GOAL_MODES = frozenset({"real_estate", "investors"})
+GOAL_MODES = frozenset({"real_estate", "investors", "both"})
 
 
 PLACE_KEYS = frozenset({"en", "es", "ru", "uk", "ru_in", "uk_in", "country"})
@@ -137,7 +137,7 @@ def parse_campaign_goal(value: str) -> tuple[str, str | None, str | None, dict[s
             continue  # read by ``parse_campaign_spec``; the goal text and the place do not depend on it
         if key == "mode":
             if raw not in GOAL_MODES or vertical is not None:
-                raise CommandValidationError("mode must be real_estate or investors")
+                raise CommandValidationError("mode must be real_estate, investors or both")
             vertical = raw
         elif key == "city":
             name = " ".join(raw.replace("_", " ").split())

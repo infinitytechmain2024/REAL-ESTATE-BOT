@@ -108,4 +108,9 @@ jobs:
           tests/test_verification_postgres.py
           tests/test_orchestra_postgres.py
           tests/test_operator_access.py
+          tests/test_apify_facebook_postgres.py
+          tests/test_campaign_discovery_postgres.py
+          tests/test_post_leads.py
+          tests/test_task_draft_steps_postgres.py
+          tests/test_task_drafts_mode_both_postgres.py
           tests/test_image_imports.py

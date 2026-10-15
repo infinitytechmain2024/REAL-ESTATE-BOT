@@ -5,7 +5,7 @@ read what it offers or asks, and find similar offers or the people behind it.
 
 ## What to find out
 1. What the person wants from this post: find similar properties, find investors like the one in the post, or read
-   the post's author and comments for leads. If the message does not say, this is the first question.
+   the post's author and comments for leads. If the message does not say, ask it.
 2. The place and the deal as they appear in the post, only when the person confirms or states them; the text of the
    post is not available to you, so do not infer facts from the link itself (its words, its domain).
 3. The same task questions as the matching mode (real_estate or investors), only the ones that are still open.
