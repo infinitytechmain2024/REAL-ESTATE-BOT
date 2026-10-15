@@ -661,10 +661,69 @@ def cost_lines(spent: CostSummary | None, budget: float = 0.0) -> list[str]:
     return lines
 
 
+@dataclass(frozen=True, slots=True)
+class LeadsSummary:
+    """The investor branch of a campaign. ``None``: not known (no post read, so no count) -- never a guessed zero."""
+
+    leads_saved: int | None = None
+    people_sent: int = 0     # person cards sent (from comments)
+    reach_sent: int = 0      # reach contacts sent
+    posts_read: int | None = None
+    comments_read: int | None = None
+
+    @property
+    def empty(self) -> bool:
+        return not (self.leads_saved or self.people_sent or self.reach_sent or self.posts_read or self.comments_read)
+
+
+# Cost-ledger items (``Entry.item``) that identify a branch; every other item stays «общее» (models of the lead and
+# reach judges are booked under the model name, the same as the listing judges, so they cannot be told apart).
+_INVESTOR_ITEMS = ("facebook-comments", "facebook-posts")
+_REAL_ESTATE_ITEMS = ("idealista", "fotocasa", "yaencontre", "portal")
+_REAL_ESTATE_STAGES = ("search", "fetch", "scrape")
+
+
+def cost_split(spent: CostSummary) -> tuple[float, float, float]:
+    """``(real estate, investors, common)`` USD of the ledger: the web stages by stage, the Apify actors by ``item``
+    (an actor id has no dot, a scraped host has); whatever is not identified is common."""
+    real_estate = sum(v for k, v in spent.by_stage.items() if k in _REAL_ESTATE_STAGES)
+    investors = 0.0
+    for item, value in spent.by_item.items():
+        name = item.lower()
+        if any(mark in name for mark in _INVESTOR_ITEMS):
+            investors += value
+        elif "." not in name and any(mark in name for mark in _REAL_ESTATE_ITEMS):
+            real_estate += value
+    return real_estate, investors, max(spent.total - real_estate - investors, 0.0)
+
+
+def branch_cost_line(spent: CostSummary | None) -> list[str]:
+    if spent is None or spent.total <= 0:
+        return []
+    real_estate, investors, common = cost_split(spent)
+    return [f"По веткам: недвижимость {_usd(real_estate)} · инвесторы {_usd(investors)} · общее {_usd(common)}"]
+
+
+def investors_section(leads: LeadsSummary | None) -> list[str]:
+    """«💼 Инвесторы»: what the investor branch gave."""
+    lines = ["💼 Инвесторы"]
+    if leads is None or leads.empty:
+        return [*lines, "Людей и контактов пока не найдено."]
+    if leads.posts_read is not None:
+        lines.append(f"Прочитано постов: {leads.posts_read}, комментариев: {leads.comments_read or 0}")
+    if leads.leads_saved is not None:
+        lines.append(f"Лидов сохранено: {leads.leads_saved}")
+    lines.append(f"Отправлено вам: людей {leads.people_sent}, контактов из поиска {leads.reach_sent}")
+    return lines
+
+
 def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequence[str], unreadable: Sequence[Site],
                 recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None,
-                costs: Sequence[str] = (), evidence: Sequence[str] = (), task_text: str = "") -> str:
-    """The Russian report (see the module notes), fitted to one Telegram message. ``costs``: ``cost_lines``."""
+                costs: Sequence[str] = (), evidence: Sequence[str] = (), task_text: str = "", section: str = "",
+                reserve: int = 0) -> str:
+    """The Russian report (see the module notes), fitted to one Telegram message. ``costs``: ``cost_lines``.
+    ``section``: a heading above the counts (the ``both`` report); ``reserve``: characters left for what follows."""
+    limit = MAX_REPORT_CHARS - reserve
     head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
     if task_text and task_text.casefold() not in goal.casefold():
         head = f"📋 Отчёт по поиску\n🎯 {goal}\nВаш запрос: {' '.join(task_text.split())[:220]}\n\n"
@@ -695,6 +754,8 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
             log.warning("campaign.unverified_majority %s/%s", counts.ai_failed, counts.sent + counts.held)
             summary.append(f"⚠️ ИИ-проверка не сработала для большинства находок "
                            f"({counts.ai_failed} из {counts.sent + counts.held}): см. ошибки ИИ ниже")
+    if section:
+        summary.insert(0, section)
     summary += list(costs)
     reasons: list[str] = []
     if counts.excluded:
@@ -711,9 +772,9 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
             by_site.append(f"Прочие сайты из поиска: {other_sites} (не относятся к недвижимости или без объявлений)")
         parts = [part for part in (summary, list(evidence), reasons, best, broken, by_site, advice) if part]
         text = head + "\n\n".join("\n".join(part) for part in parts)
-        if len(text) <= MAX_REPORT_CHARS:
+        if len(text) <= limit:
             return text
-    return text[:MAX_REPORT_CHARS].rstrip()
+    return text[:limit].rstrip()
 
 
 def similar_note(counts: Tally, offers: Mapping[str, str | None] | None) -> str | None:
@@ -743,10 +804,17 @@ class FinalReporter:
                     sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = (),
                     tolerance_pct: float | None = None, offers: Mapping[str, str | None] | None = None,
                     costs: CostSummary | None = None, budget: float = 0.0, task_text: str = "",
-                    held: Sequence[HeldEvidence] = (), scope: PlaceScope | None = None) -> str:
+                    held: Sequence[HeldEvidence] = (), scope: PlaceScope | None = None,
+                    leads: LeadsSummary | None = None, vertical: str = "real_estate") -> str:
         """``offers``: the state of each bucket's question (``offer_state``: None, asked, approved, declined); with it
         a report that sent nothing but holds similar variants says how to get them. ``costs``: the run's ledger
-        (``bot.utils.costs``) and ``budget`` its limit: the money, what was dropped before the model, its errors."""
+        (``bot.utils.costs``) and ``budget`` its limit: the money, what was dropped before the model, its errors.
+        ``vertical``: ``real_estate`` (the text above, unchanged), ``both`` (it as «🏠 Недвижимость», then «💼 Инвесторы»
+        from ``leads``, then the money by branch), ``investors`` (the investor section only)."""
+        if vertical == "investors":
+            head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
+            return (head + "\n".join(investors_section(leads)) + "\n\n"
+                    + "\n".join(cost_lines(costs, budget) + branch_cost_line(costs))).rstrip()[:MAX_REPORT_CHARS]
         counts = tally(outcomes)
         sources, reports, other_sites = real_estate_sources(sources, reports, portals)
         stats = site_stats(sources, reports, portals)
@@ -759,8 +827,15 @@ class FinalReporter:
                                        requested_place=request.location, min_area=request.min_area, scope=scope)
         advice = evidence_actions(held)
         advice.extend(tip for tip in await self._advice(facts, counts) if tip not in advice)
+        if vertical != "both":
+            return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
+                               other_sites, note, cost_lines(costs, budget), evidence, task_text)
+        tail = "\n\n" + "\n".join(investors_section(leads))
+        money = cost_lines(costs, budget) + branch_cost_line(costs)
+        if money:
+            tail += "\n\n" + "\n".join(money)
         return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
-                           other_sites, note, cost_lines(costs, budget), evidence, task_text)
+                           other_sites, note, (), evidence, task_text, "🏠 Недвижимость", len(tail)) + tail
 
     async def _advice(self, facts: dict[str, Any], counts: Tally) -> list[str]:
         if facts["task"].get("only_exact"):

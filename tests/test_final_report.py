@@ -716,3 +716,55 @@ async def test_report_uses_the_actual_criterion_verdict_and_geographic_scope(
     else:
         assert f"не подтверждено: {unknown_label}" in text
     assert len(text) <= 3900
+
+
+# --- B4: the report by branch -------------------------------------------------------------------------------------------------
+
+
+def _spent():
+    from bot.utils.costs import CostSummary
+    return CostSummary(
+        by_stage={"llm": 1.0, "search": 0.2, "scrape": 0.3, "api": 0.9},
+        by_item={"anthropic/claude-sonnet-4.5": 1.0, "query": 0.2, "idealista.com": 0.3,
+                 "igolaizola~idealista-scraper": 0.6, "apify/facebook-comments-scraper": 0.3})
+
+
+def test_the_money_is_split_by_branch_and_what_cannot_be_told_is_common() -> None:
+    from bot.campaign.final_report import cost_split
+    real_estate, investors, common = cost_split(_spent())
+    assert (round(real_estate, 2), round(investors, 2), round(common, 2)) == (1.1, 0.3, 1.0)  # common: the models
+    assert round(real_estate + investors + common, 2) == 2.4
+
+
+async def test_a_both_report_has_both_sections_and_the_money_by_branch() -> None:
+    from bot.campaign.final_report import LeadsSummary
+    _campaigns, store, _, _, _, reporter, cid = await build()
+    seed(store, cid)
+    outcomes = await store.outcome_counts(cid)
+    text = await reporter.build("Квартиры", Request(), outcomes, [], [], [], costs=_spent(), budget=5.0,
+                                leads=LeadsSummary(5, 3, 2, 1, 30), vertical="both")
+    assert text.startswith(REPORT) and text.index("🏠 Недвижимость") < text.index("💼 Инвесторы")
+    assert "Прочитано постов: 1, комментариев: 30" in text and "Лидов сохранено: 5" in text
+    assert "людей 3, контактов из поиска 2" in text
+    assert "Расход: $2.40 из $5.00" in text
+    assert "По веткам: недвижимость $1.10 · инвесторы $0.30 · общее $1.00" in text
+    assert text.index("💼 Инвесторы") < text.index("По веткам") and len(text) <= 3900
+
+
+async def test_an_investors_report_is_the_investor_section_only() -> None:
+    from bot.campaign.final_report import LeadsSummary
+    text = await FinalReporter().build("Инвесторы", Request(), [], [], [], [], costs=_spent(),
+                                       leads=LeadsSummary(None, 4, 1), vertical="investors")
+    assert "💼 Инвесторы" in text and "людей 4, контактов из поиска 1" in text and "По веткам" in text
+    assert "🏠" not in text and "Лидов сохранено" not in text and "Прочитано постов" not in text
+
+
+async def test_the_real_estate_report_ignores_the_investor_arguments() -> None:
+    from bot.campaign.final_report import LeadsSummary
+    _, store, _, _, _, reporter, cid = await build()
+    seed(store, cid)
+    outcomes = await store.outcome_counts(cid)
+    plain = await reporter.build("Квартиры", Request(), outcomes, [], [], [], costs=_spent(), budget=5.0)
+    with_leads = await reporter.build("Квартиры", Request(), outcomes, [], [], [], costs=_spent(), budget=5.0,
+                                      leads=LeadsSummary(5, 3, 2, 1, 30))
+    assert plain == with_leads and "💼" not in plain and "По веткам" not in plain

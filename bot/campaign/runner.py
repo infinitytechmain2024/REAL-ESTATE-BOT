@@ -63,7 +63,7 @@ from bot.utils import costs
 from . import offers, people
 from .dedup import Listing, listing_of, same_object, site_of
 from .fblinks import post_link_only
-from .final_report import FinalReporter, HeldEvidence, place_scope_of, task_title
+from .final_report import FinalReporter, HeldEvidence, LeadsSummary, place_scope_of, task_title
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
@@ -1009,15 +1009,29 @@ class CampaignRunner:
         Telegram failed. Investor-only searches have no property cards to report; a cancelled search that found and
         rejected nothing is not reported.
         """
-        if (self.config.post_reads and campaign.plan.vertical == "investors" and campaign.state in SUMMARY_STATES
-                and campaign.finished_at is not None and await self.store.post_reads(campaign.id)):
-            return await self._post_report(campaign)  # a post sent by link: a short count instead of the full report
-        if (self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None
-                or campaign.plan.vertical == "investors"):
+        if (self.final_report is None and self.config.post_reads and campaign.plan.vertical == "investors"
+                and campaign.state in SUMMARY_STATES and campaign.finished_at is not None
+                and await self.store.post_reads(campaign.id)):
+            return await self._post_report(campaign)  # no reporter: a post sent by link gets a short count
+        if self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None:
             return
         if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_final_report(campaign.id):
             return
         try:
+            vertical = campaign.plan.vertical
+            leads = await self._leads_summary(campaign) if vertical != "real_estate" else None
+            if vertical == "investors":
+                if leads is not None and leads.empty:  # nothing found: nothing to report
+                    return
+                sink = costs.ledger()
+                spent = await sink.summary(campaign.id) if sink is not None else None
+                text = await self.final_report.build(campaign.plan.goal, campaign_request(campaign), [], [], [], [],
+                                                     costs=spent, budget=costs.budget(), leads=leads,
+                                                     vertical="investors")
+                await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
+                self._below_status.add(campaign.id)
+                log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
+                return
             outcomes = await self.store.outcome_counts(campaign.id)
             if campaign.state == "cancelled" and not outcomes:
                 return
@@ -1039,7 +1053,8 @@ class CampaignRunner:
             spent = await sink.summary(campaign.id) if sink is not None else None
             text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals,
                                                  offers=offers, costs=spent, budget=costs.budget(),
-                                                 task_text=campaign.source_text, held=held, scope=scope)
+                                                 task_text=campaign.source_text, held=held, scope=scope,
+                                                 leads=leads, vertical=vertical)
             await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
             log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})
@@ -1047,6 +1062,17 @@ class CampaignRunner:
             return
         self._below_status.add(campaign.id)  # the status message moves below the report
         log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
+
+    async def _leads_summary(self, campaign: Campaign) -> LeadsSummary:
+        """The investor branch for the report: people and reach contacts sent, and (a post sent by link) its read."""
+        reads = await self.store.post_reads(campaign.id) if self.config.post_reads else []
+        reach = await self.store.reach_sent(campaign.id)
+        people_sent = max(await self.store.people_sent(campaign.id) - reach, 0)
+        if not reads:
+            return LeadsSummary(people_sent=people_sent, reach_sent=reach)
+        return LeadsSummary(leads_saved=sum(r.leads for r in reads), people_sent=people_sent, reach_sent=reach,
+                            posts_read=sum(1 for r in reads if r.state == "done"),
+                            comments_read=sum(r.comments for r in reads))
 
     async def _post_report(self, campaign: Campaign) -> None:
         """«Комментариев: N, лидов: M, $»: once, for a search over a post sent by link (the full investor report: B4)."""

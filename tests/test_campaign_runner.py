@@ -525,3 +525,57 @@ async def test_the_status_moves_below_the_cards_after_every_fifth_one_and_the_ol
     assert kinds[-2:] == ["card", "status"]  # the status is the last message in the chat
     assert messenger.deleted == [(CHAT, first_status)] and after_fifth != first_status
     assert (await campaigns.get(cid)).status_message_id == messenger.sent[-1][1]
+
+
+# --- B4: a `both` campaign runs both branches and reports them apart -------------------------------------
+
+
+async def test_a_both_campaign_runs_the_web_stage_the_comment_queue_and_the_people_in_one_step() -> None:
+    from bot.campaign.final_report import FinalReporter
+    from bot.campaign.leads import Person, Sighting
+    from bot.campaign.runs import PostReadSummary
+    from bot.web_search.models import WebStatus
+
+    class Web:
+        asked = 0
+
+        async def web_status(self, campaign_id: str) -> WebStatus:
+            Web.asked += 1
+            return WebStatus(True, "idealista.com", "сайты: страниц 3/60")
+
+        async def site_report(self, campaign_id: str) -> list:
+            return []
+
+    post = "https://www.facebook.com/groups/123/posts/456/"
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids=set(), web=Web(),
+                            final_report=FinalReporter(),
+                            config=RunnerConfig(relevance_fail_closed=False, comment_leads="all", comment_max_posts=2,
+                                                max_people=3, post_reads=True))
+    cid = await campaigns.create(plan_campaign("Купить участок в Мадриде и найти инвесторов"), chat_id=CHAT,
+                                 requested_by=8, source_text=GOAL, actor="test")
+    assert (await campaigns.get(cid)).plan.vertical == "both"
+    await campaigns.set_state(cid, "running", "campaign:test")
+    store.add_finding(cid, "f1", "🏠 land", payload={"relevant": True, "listing_kind": "offer", "deal_type": "sale",
+                                                    "property_type": "land", "price_amount": 50_000,
+                                                    "price_currency": "EUR", "location": "Madrid", "country": "ES"},
+                      url=post)
+    store.post_people[cid] = [Person("fb:1", "https://www.facebook.com/profile.php?id=1", "P1",
+                                     (Sighting(post, "Me interesa", "buyer", datetime(2026, 9, 20, tzinfo=UTC)),))]
+    store.post_read_rows[cid] = [PostReadSummary(post, "done", 30, 5, 0.09)]
+    await runner.step(cid)
+    assert Web.asked, "the web stage is looked at"
+    assert store.comment_reads[cid] == {"f1": post}, "the sent card queues its comment read"
+    assert set(store.deliveries) == {(cid, "fb:1")}, "the investor branch sends its people in the same step"
+    assert (await campaigns.get(cid)).state == "running", "the sites are still being read"
+
+    Web.asked = 0
+    await campaigns.set_state(cid, "completed", "test")
+    clock.at = (await campaigns.get(cid)).finished_at + timedelta(minutes=1)
+    await runner.step(cid)
+    await runner.step(cid)
+    reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    assert len(reports) == 1, "one report, once"
+    assert "🏠 Недвижимость" in reports[0] and "💼 Инвесторы" in reports[0]
+    assert "Прочитано постов: 1, комментариев: 30" in reports[0] and "людей 1, контактов из поиска 0" in reports[0]
