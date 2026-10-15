@@ -1,8 +1,7 @@
 """Default-off Apify adapters for Spanish portals built on ``ApifyListingSource`` (one actor run per campaign).
 
-* ``ApifyPisosSource``, ``ApifyHabitacliaSource``, ``ApifyMilanunciosSource`` — B5: written from the actors' public
-  names only (their README pages were not readable from the build sandbox, no live run): input and output field names
-  are assumptions, read tolerantly through synonyms (see ``_TolerantPortal``) and to be fixed by the first live sample.
+* ``ApifyPisosSource``, ``ApifyHabitacliaSource``, ``ApifyMilanunciosSource`` — B5: input and output field names
+  come from the actors' published schemas (Apify Store, read 2026-10-15), not from a run of ours.
 * ``ApifyFotocasaSource`` — ``igolaizola/fotocasa-scraper``; the row shape below is taken from a live run
   (5 plots in Madrid, 2026-10-13): ``url``, ``transaction.{type,price}``, ``surface``, ``rooms``, ``phone``,
   ``agency.name``, ``location.level{2,5,7,8}Name``, ``location.{latitude,longitude}`` (strings), ``description``.
@@ -321,44 +320,26 @@ class ApifyIdealistaPortalSource(_PortalSource):
             property_type=self._TYPES.get(task_kind(task)))
 
 
-_SALE_WORDS = frozenset({"sale", "buy", "venta", "comprar", "compra", "sell", "sold"})
-_RENT_WORDS = frozenset({"rent", "rental", "alquiler", "alquilar", "lloguer", "alquilo"})
 _EURO = frozenset({"eur", "euro", "euros", "\u20ac"})
+_PISOS_CITIES = frozenset({"madrid", "barcelona", "valencia", "sevilla", "malaga"})  # slug ``<name>_capital``
+_PISOS_PROVINCES = frozenset({"madrid", "barcelona", "valencia", "sevilla", "malaga", "alicante", "zaragoza", "cadiz"})
 
 
-def _dig(item: dict[str, Any], *paths: str) -> Any:
-    """The first non-empty value among dotted ``paths`` (``"location.city"``); a path through a non-dict is skipped."""
-    for path in paths:
-        value: Any = item
-        for key in path.split("."):
-            value = value.get(key) if isinstance(value, dict) else None
-        if value not in (None, "", [], {}):
-            return value
-    return None
+def _slug(value: str) -> str:
+    """Lowercase ASCII with ``_`` for spaces, the slug form the portal actors use."""
+    return "_".join(_fold(value).replace("-", " ").split())
 
 
-def _named(value: Any) -> str:
-    """A name given as a string or as an object with a ``name``-like field."""
-    if isinstance(value, dict):
-        value = _dig(value, "name", "commercialName", "companyName", "title")
-    return _text(value)
+def _pages(amount: int, per_page: int) -> int:
+    return max(1, -(-amount // per_page))
 
 
-def _first_phone(value: Any) -> Any:
-    if isinstance(value, list | tuple):
-        value = next((v for v in value if v not in (None, "")), None)
-    if isinstance(value, dict):
-        value = _dig(value, "phone", "number", "formatted", "phoneNumber")
-    return value
+class _SchemaPortal(_PortalSource):
+    """Shared rules of the three schema-based portal actors: city or province tasks only (no radius), sale or rent
+    read from the row's ``transactionType`` when it has one and from the URL otherwise."""
 
-
-class _TolerantPortal(_PortalSource):
-    """A portal actor whose output schema is known only by assumption: every fact is read through several synonyms
-    of the field name, and a row is dropped when the deal, the place or the URL cannot be confirmed from it.
-
-    Radius searches are not offered (the actors' geo inputs are unverified): city and province tasks only.
-    """
-
+    kinds: ClassVar[dict[str, str]] = {"land": "land", "house": "house", "apartment": "apartment",
+                                       "commercial": "commercial"}
     _TITLES: ClassVar[dict[str, str]] = {"land": "Terreno", "house": "Casa", "apartment": "Piso", "commercial": "Local"}
     _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "house": "house", "apartment": "apartment",
                                         "commercial": "commercial"}
@@ -366,116 +347,175 @@ class _TolerantPortal(_PortalSource):
     def supports(self, task: QueryTask) -> bool:
         return task.radius_km is None and super().supports(task)
 
-    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
-                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
-        constraints = task.constraints
-        actor_input: dict[str, Any] = {
-            "maxItems": amount, "operation": self.deals[self._deal(task)], "propertyType": self.kinds[task_kind(task)],
-            "location": task.location.strip()[:120],
-            "locationType": "province" if task.place_level == "province" else "municipality"}
-        for key, field in (("minPrice", "min_price"), ("maxPrice", "max_price"), ("minSize", "min_area")):
-            value = _whole(constraints.get(field))
+    def _filters(self, task: QueryTask, names: tuple[str, str, str]) -> dict[str, int]:
+        found = {}
+        for key, field in zip(names, ("min_price", "max_price", "min_area"), strict=True):
+            value = _whole(task.constraints.get(field))
             if value:
-                actor_input[key] = value
-        return self.actor_id, actor_input, None
+                found[key] = value
+        return found
 
-    def _deal_ok(self, item: dict[str, Any], url: str, task: QueryTask) -> bool:
-        wanted = self._deal(task)
-        raw = _dig(item, "operation", "operationType", "transactionType", "transaction.type", "transaction",
-                   "dealType", "listingType", "offerType")
-        word = _fold(_text(raw))
-        if raw is not None and word not in _SALE_WORDS | _RENT_WORDS:
-            return False
-        if word and (word in _SALE_WORDS) != (wanted == "sale"):
-            return False
-        return not deal_conflict(url, wanted)
-
-    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+    def _row_ok(self, item: Any, task: QueryTask) -> tuple[dict[str, Any], str] | None:
+        """(row, url) when the row is a dict with a listing URL of this portal and no other deal."""
         if not isinstance(item, dict):
             return None
-        url = self._url(_dig(item, "url", "link", "detailUrl", "listingUrl", "adUrl"), task)
-        if url is None or not self._deal_ok(item, url, task):
+        url = self._url(item.get("detailUrl", item.get("url")), task)
+        wanted = self._deal(task)
+        row_deal = _text(item.get("transactionType")).casefold()
+        if url is None or (row_deal and row_deal != wanted) or deal_conflict(url, wanted):
             return None
-        country = _fold(_text(_dig(item, "country", "countryCode")))
-        if country not in ("", "es", "espana", "spain"):
-            return None
-        municipality = _text(_dig(item, "municipality", "city", "town", "locality", "municipio", "poblacion",
-                                  "location.municipality", "location.city", "address.municipality", "address.city"))
-        province = _text(_dig(item, "province", "provincia", "location.province", "address.province"))
-        if not self._place_ok(task, None, None, municipality, province):
-            return None
-        kind = task_kind(task)
-        currency = _fold(_text(_dig(item, "currency", "priceCurrency", "price.currency")))
-        price = _dig(item, "price.amount", "price.value", "price", "priceValue", "amount")
-        if isinstance(price, dict) or (currency and currency not in _EURO):
-            price = None
-        plot = _dig(item, "plotArea", "plotSize", "landArea", "lotSize", "plotSurface")
-        built = _dig(item, "surface", "area", "size", "builtArea", "squareMeters", "surfaceArea", "m2")
-        area = (plot if plot is not None else built) if kind == "land" else built
-        neighbourhood = _text(_dig(item, "neighbourhood", "neighborhood", "district", "zone", "barrio"))
-        title = _text(_dig(item, "title", "name", "headline"))
-        if not title:
-            deal = "venta" if self._deal(task) == "sale" else "alquiler"
-            title = f"{self._TITLES[kind]} en {deal}, {neighbourhood or municipality}".rstrip(", ")
-        return self._listing(
-            task, url=url, title=title, price=price, area=area,
-            rooms=_dig(item, "rooms", "bedrooms", "habitaciones"),
-            address=[_text(_dig(item, "street", "address.street", "streetName")) or
-                     (_text(item.get("address")) if isinstance(item.get("address"), str) else ""),
-                     neighbourhood, municipality, province],
-            description=_text(_dig(item, "description", "text", "body")),
-            phone=_first_phone(_dig(item, "phone", "telephone", "contactPhone", "phones", "phoneNumber",
-                                    "contact.phone")),
-            advertiser=_named(_dig(item, "agency", "agencyName", "advertiser", "seller", "contactName",
-                                   "contact.name", "owner")),
-            property_type=self._TYPES.get(kind))
+        return item, url
+
+    def _price(self, item: dict[str, Any]) -> Any:
+        currency = _fold(_text(item.get("priceCurrency")))
+        return None if currency and currency not in _EURO else item.get("price")
+
+    def _title(self, item: dict[str, Any], task: QueryTask, place: str) -> str:
+        deal = "venta" if self._deal(task) == "sale" else "alquiler"
+        return _text(item.get("title")) or f"{self._TITLES[task_kind(task)]} en {deal}, {place}".rstrip(", ")
 
 
-class ApifyPisosSource(_TolerantPortal):
-    """Pisos.com through ``logiover/pisos-com-property-scraper``.
+class ApifyPisosSource(_SchemaPortal):
+    """Pisos.com through ``logiover/pisos-com-property-scraper`` ($0.0035 per result, $0.00005 per start).
 
-    Actor, price and input come from the README, which could not be opened when this was written (no network to
-    apify.com): the price is not confirmed (similar portal actors charge about $0.001 per listing) and the input
-    fields below are an assumption: ``maxItems``, ``operation``, ``propertyType``, ``location``, ``locationType``,
-    ``minPrice``, ``maxPrice``, ``minSize``. Output fields are read through synonyms (``url``, ``operation``,
-    ``price``, ``surface``, ``rooms``, ``municipality``/``city``, ``province``, ``phone``, ``agency``,
-    ``description``). Not run live; the first live sample must confirm both.
+    Input (published schema): ``transactionType`` (sale/rent), ``propertyType`` (land, house, apartment, commercial),
+    ``location`` slug (``madrid_capital`` for a city, ``madrid`` for a province; only the cities and provinces in
+    ``_PISOS_CITIES``/``_PISOS_PROVINCES`` are served, any other place is not supported), ``sortBy``, ``maxListings``,
+    ``maxPages`` (about 33 per page), ``fetchDetails=true`` (the detail page adds ``usableAreaSqm``),
+    ``minPrice``/``maxPrice``/``minArea``. Output: ``detailUrl``, ``price`` + ``priceCurrency``, ``areaSqm``,
+    ``rooms``, ``city``, ``province``, ``fullAddress``, ``advertiserName``, ``shortDescription``. There is no phone
+    in the output (``phone`` stays empty); ``terrainAreaSqm`` is always null today and is not used: a plot is
+    ``plot_area(areaSqm, shortDescription)``. Not run live.
     """
 
     name = "apify_pisos"
     hosts = frozenset({"pisos.com"})
-    kinds: ClassVar[dict[str, str]] = {"land": "land", "house": "house", "apartment": "flat", "commercial": "premises"}
 
     def __init__(self, token: str, *, actor_id: str = "logiover/pisos-com-property-scraper", **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
 
+    @staticmethod
+    def _location(task: QueryTask) -> str | None:
+        slug = _slug(task.location)
+        if task.place_level == "province":
+            return slug if slug in _PISOS_PROVINCES else None
+        return f"{slug}_capital" if slug in _PISOS_CITIES else None
 
-class ApifyHabitacliaSource(_TolerantPortal):
-    """Habitaclia through ``trev0n/habitaclia-com-spain-scraper``.
+    def supports(self, task: QueryTask) -> bool:
+        return super().supports(task) and self._location(task) is not None
 
-    Same status as ``ApifyPisosSource``: README unread, price unconfirmed, input and output names assumed (the input
-    is the same set of fields; Habitaclia is strongest in Catalonia). Not run live.
+    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
+                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
+        actor_input: dict[str, Any] = {
+            "transactionType": self._deal(task), "propertyType": self.kinds[task_kind(task)],
+            "location": self._location(task), "sortBy": "newest", "maxListings": amount,
+            "maxPages": _pages(amount, 30), "fetchDetails": True}
+        actor_input |= self._filters(task, ("minPrice", "maxPrice", "minArea"))
+        return self.actor_id, actor_input, None
+
+    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+        found = self._row_ok(item, task)
+        if found is None:
+            return None
+        row, url = found
+        city, province = _text(row.get("city")), _text(row.get("province"))
+        if not self._place_ok(task, None, None, city, province):
+            return None
+        return self._listing(
+            task, url=url, title=self._title(row, task, city), price=self._price(row), area=row.get("areaSqm"),
+            rooms=row.get("rooms"),
+            address=[_text(row.get("fullAddress"))] if row.get("fullAddress") else [city, province],
+            description=_text(row.get("shortDescription")), phone=None, advertiser=row.get("advertiserName"),
+            property_type=self._TYPES.get(task_kind(task)))
+
+
+class ApifyHabitacliaSource(_SchemaPortal):
+    """Habitaclia through ``trev0n/habitaclia-com-spain-scraper`` ($0.001 per result, $0.00005 per start).
+
+    Input (published schema): ``transactionType`` (sale/rent), ``propertyType`` (land, house, apartment, commercial),
+    ``location`` (free text, the actor makes the slug), ``sort``, ``maxListings``, ``maxPages`` (about 25 per page),
+    ``fetchPropertyDetails=false``, ``minPrice``/``maxPrice``/``minArea``. Output: ``detailUrl``, ``price`` +
+    ``priceCurrency``, ``areaSqm``, ``rooms``, ``city``, ``province``, ``location``, ``advertiserName``,
+    ``description``/``shortDescription``. There is no phone and no separate plot area (``areaSqm`` + the text:
+    ``plot_area``). Not run live.
     """
 
     name = "apify_habitaclia"
     hosts = frozenset({"habitaclia.com"})
-    kinds: ClassVar[dict[str, str]] = {"land": "land", "house": "house", "apartment": "flat", "commercial": "premises"}
 
     def __init__(self, token: str, *, actor_id: str = "trev0n/habitaclia-com-spain-scraper", **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
 
+    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
+                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
+        actor_input: dict[str, Any] = {
+            "transactionType": self._deal(task), "propertyType": self.kinds[task_kind(task)],
+            "location": task.location.strip()[:120], "sort": "newest", "maxListings": amount,
+            "maxPages": _pages(amount, 25), "fetchPropertyDetails": False}
+        actor_input |= self._filters(task, ("minPrice", "maxPrice", "minArea"))
+        return self.actor_id, actor_input, None
 
-class ApifyMilanunciosSource(_TolerantPortal):
-    """Milanuncios through ``rastriq/milanuncios-scraper``.
+    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+        found = self._row_ok(item, task)
+        if found is None:
+            return None
+        row, url = found
+        city, province = _text(row.get("city")), _text(row.get("province"))
+        if not self._place_ok(task, None, None, city, province):
+            return None
+        return self._listing(
+            task, url=url, title=self._title(row, task, city), price=self._price(row), area=row.get("areaSqm"),
+            rooms=row.get("rooms"), address=[_text(row.get("location")), city, province],
+            description=_text(row.get("description")) or _text(row.get("shortDescription")), phone=None,
+            advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)))
 
-    Same status as ``ApifyPisosSource``: README unread, price unconfirmed, input and output names assumed. Milanuncios
-    mixes private sellers, agencies and unrelated ads: only rows whose URL is a concrete listing of the portal and
-    whose deal and municipality are confirmed by the row are kept. The seller name is passed as given. Not run live.
+
+class ApifyMilanunciosSource(_SchemaPortal):
+    """Milanuncios through ``rastriq/milanuncios-scraper`` ($0.00125 per result, $0.005 per start).
+
+    Input (published schema): ``searchUrl`` (wins over the other fields; the category and the place are in the path,
+    not in parameters, so the price filters are not sent), ``maxItems``, ``maxPages`` (about 41 per page),
+    ``fetchDetails=false`` and ``stripSellerPII=true`` always (no private seller ids, phones or e-mails). The
+    ``searchUrl`` is ``https://www.milanuncios.com/<category>-en-<place>/`` with ``<place>`` the lowercase slug with
+    ``_`` for spaces (an assumption for towns; the actor's own ``province`` slug is documented only for provinces).
+    Categories: ``venta-de-terrenos`` (sale of land), ``venta-de-pisos``/``alquiler-de-pisos``,
+    ``venta-de-casas``/``alquiler-de-casas``, ``venta-de-locales``; a rent of land or of premises is not supported.
+    Output (listing mode): ``url``, ``title``, ``price`` (euros, no currency field), ``description``,
+    ``tag_sqm``, ``tag_bedrooms``, ``cityName``, ``provinceName``, ``sellerType`` (a type, not a name). No phone and no
+    advertiser name; a plot is ``plot_area(tag_sqm, description)``. Not run live.
     """
 
     name = "apify_milanuncios"
     hosts = frozenset({"milanuncios.com"})
-    kinds: ClassVar[dict[str, str]] = {"land": "land", "house": "house", "apartment": "flat", "commercial": "premises"}
+    _CATEGORIES: ClassVar[dict[tuple[str, str], str]] = {
+        ("sale", "land"): "venta-de-terrenos", ("sale", "apartment"): "venta-de-pisos",
+        ("rent", "apartment"): "alquiler-de-pisos", ("sale", "house"): "venta-de-casas",
+        ("rent", "house"): "alquiler-de-casas", ("sale", "commercial"): "venta-de-locales"}
 
     def __init__(self, token: str, *, actor_id: str = "rastriq/milanuncios-scraper", **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
+
+    def supports(self, task: QueryTask) -> bool:
+        return (super().supports(task) and bool(_slug(task.location))
+                and (str(task.constraints.get("deal")), task_kind(task)) in self._CATEGORIES)
+
+    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
+                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
+        category = self._CATEGORIES[(self._deal(task), task_kind(task))]
+        actor_input: dict[str, Any] = {
+            "searchUrl": f"https://www.milanuncios.com/{category}-en-{_slug(task.location)}/", "maxItems": amount,
+            "maxPages": _pages(amount, 41), "fetchDetails": False, "stripSellerPII": True}
+        return self.actor_id, actor_input, None
+
+    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+        found = self._row_ok(item, task)
+        if found is None:
+            return None
+        row, url = found
+        city, province = _text(row.get("cityName")), _text(row.get("provinceName"))
+        if not self._place_ok(task, None, None, city, province):
+            return None
+        return self._listing(
+            task, url=url, title=self._title(row, task, city), price=row.get("price"), area=row.get("tag_sqm"),
+            rooms=row.get("tag_bedrooms"), address=[city, province], description=_text(row.get("description")),
+            phone=None, advertiser=None, property_type=self._TYPES.get(task_kind(task)))

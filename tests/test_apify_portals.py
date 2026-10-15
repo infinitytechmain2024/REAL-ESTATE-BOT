@@ -283,376 +283,217 @@ async def test_idealista_provider_setting_picks_the_actor_family(monkeypatch):
         WebSearchSettings(_env_file=None, APIFY_IDEALISTA_PROVIDER="other")
 
 
-# --- Pisos.com (B5): rows follow assumed field names, no live run yet --------------------------------------------
+# --- Pisos.com, Habitaclia, Milanuncios (B5): published schemas, synthetic values, no live run yet -----------------
+
+PISOS_URL = "https://www.pisos.com/comprar/terreno-madrid_capital-45678901_100500/"
+HAB_URL = "https://www.habitaclia.com/comprar-terreno-madrid-i500003456789.htm"
+MIL_URL = "https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm"
 
 
 def pisos_row(**kwargs):
-    row = {
-        "url": "https://www.pisos.com/comprar/terreno-madrid_capital-45678901_100500/", "operation": "venta", "title": "Parcela urbana en Pisos.com", "price": 250000,
-        "currency": "EUR", "surface": 3200, "rooms": None, "municipality": "Madrid", "province": "Madrid",
-        "neighbourhood": "Barajas", "street": "Calle Ejemplo", "phone": "+34910000002",
-        "agency": {"name": "Inmobiliaria Ejemplo S.L."},
-        "description": "Parcela de 3.200 m2 de suelo urbano.",
-    }
+    row = {"detailUrl": PISOS_URL, "title": "Parcela urbana en Madrid", "price": 250000, "priceCurrency": "EUR",
+           "areaSqm": 3200, "usableAreaSqm": None, "terrainAreaSqm": None, "rooms": None, "city": "Madrid",
+           "province": "Madrid", "fullAddress": "Calle Ejemplo, Barajas, Madrid", "advertiserName": "Inmobiliaria Ejemplo",
+           "transactionType": "sale", "shortDescription": "Parcela de 3.200 m2 de suelo urbano."}
     return {**row, **kwargs}
 
 
-def pisos(rows, requests, **kwargs):
-    return ApifyPisosSource("secret-token", client=api(rows, requests), sleep=AsyncMock(), **kwargs)
+def habitaclia_row(**kwargs):
+    row = {"detailUrl": HAB_URL, "title": "Terreno en Madrid", "price": 250000, "priceCurrency": "EUR", "areaSqm": 3200,
+           "rooms": None, "city": "Madrid", "province": "Madrid", "location": "Barajas, Madrid",
+           "advertiserName": "Inmobiliaria Ejemplo", "transactionType": "sale", "description": None,
+           "shortDescription": "Parcela de 3.200 m2."}
+    return {**row, **kwargs}
 
 
+def milanuncios_row(**kwargs):
+    row = {"url": MIL_URL, "title": "Parcela urbana", "price": 250000, "description": "Parcela de 3.200 m2 urbana.",
+           "cityName": "Madrid", "provinceName": "Madrid", "categorySlug": "venta-de-terrenos", "sellerType": "private",
+           "tag_sqm": 3200, "tag_bedrooms": None}
+    return {**row, **kwargs}
+
+
+CASES = {
+    "pisos": (ApifyPisosSource, pisos_row, "logiover~pisos-com-property-scraper", "pisos.com", PISOS_URL),
+    "habitaclia": (ApifyHabitacliaSource, habitaclia_row, "trev0n~habitaclia-com-spain-scraper", "habitaclia.com",
+                   HAB_URL),
+    "milanuncios": (ApifyMilanunciosSource, milanuncios_row, "rastriq~milanuncios-scraper", "milanuncios.com", MIL_URL),
+}
+ALL = pytest.mark.parametrize("key", CASES)
+
+
+def build(key, rows, requests):
+    return CASES[key][0]("secret-token", client=api(rows, requests), sleep=AsyncMock())
+
+
+@ALL
 @pytest.mark.parametrize("change", [
     {"country_code": "IT"}, {"vertical": "investors"}, {"constraints": {"deal": "both"}}, {"location": " "},
-    {"task_text": "habitación", "goal": "habitación"}, {"blocked_hosts": frozenset({"pisos.com"})},
-    {"suburbs_only": True}, {"radius_km": 25.0},
+    {"task_text": "habitación", "goal": "habitación"}, {"suburbs_only": True}, {"radius_km": 25.0},
 ])
-def test_pisos_supports_spanish_sale_or_rent_without_radius(change):
-    adapter = pisos([], [])
+def test_portal_supports_spanish_sale_or_rent_without_radius(key, change):
+    adapter = build(key, [], [])
     assert adapter.supports(task()) and adapter.supports(task(place_level="province"))
     assert not adapter.supports(task(**change))
-    assert not ApifyPisosSource("").supports(task())
+    assert not adapter.supports(task(blocked_hosts=frozenset({CASES[key][3]})))
+    assert not CASES[key][0]("").supports(task())
     assert "secret" not in repr(adapter)
 
 
-def test_pisos_url_classification_matches_the_portal_regexes():
+def test_pisos_serves_only_places_it_has_a_slug_for():
+    adapter = build("pisos", [], [])
+    assert not adapter.supports(task(location="Getafe"))
+    assert adapter.supports(task(location="Málaga")) and adapter.supports(task(location="Getafe", place_level="province")) is False
+
+
+def test_milanuncios_serves_only_known_categories():
+    adapter = build("milanuncios", [], [])
+    rent_land = task(constraints={"deal": "rent"})
+    assert not adapter.supports(rent_land)
+    assert adapter.supports(task(task_text="piso", goal="piso", constraints={"deal": "rent"}))
+    assert not adapter.supports(task(task_text="local comercial", goal="local comercial", constraints={"deal": "rent"}))
+
+
+@ALL
+def test_portal_urls_are_listings_and_search_pages_are_not(key):
     from bot.web_search.urls import classify_url
 
-    assert classify_url("https://www.pisos.com/comprar/terreno-madrid_capital-45678901_100500/") == "listing"
-    assert classify_url("https://www.pisos.com/alquilar/piso-madrid_capital-45678902_100500/") == "listing"
-    assert classify_url("https://www.pisos.com/venta/terrenos-madrid/") != "listing"
+    assert classify_url(CASES[key][4]) == "listing"
 
 
-async def test_pisos_launch_body_is_capped_pinned_and_rows_are_mapped():
+async def test_pisos_launch_body_is_capped_pinned_and_row_mapped():
     requests = []
-    adapter = pisos([pisos_row(), pisos_row(municipality="Alcorcón")], requests)
+    adapter = build("pisos", [pisos_row(), pisos_row(city="Alcorcón")], requests)
     with source_run_scope(context("apify_pisos")):
         listings = await adapter.search(task(), limit=5)
     launch = next(r for r in requests if r.method == "POST")
     assert launch.url.path.endswith("/acts/logiover~pisos-com-property-scraper/runs")
     assert launch.url.params["maxTotalChargeUsd"] == "0.05" and launch.url.params["maxItems"] == "5"
-    assert json.loads(launch.content) == {"maxItems": 5, "operation": "sale", "propertyType": "land",
-                                          "location": "Madrid", "locationType": "municipality",
-                                          "minSize": 2000, "maxPrice": 3000000}
+    assert json.loads(launch.content) == {
+        "transactionType": "sale", "propertyType": "land", "location": "madrid_capital", "sortBy": "newest",
+        "maxListings": 5, "maxPages": 1, "fetchDetails": True, "maxPrice": 3000000, "minArea": 2000}
     assert len(listings) == 1  # Alcorcón is another municipality
-    listing = listings[0]
-    assert listing.url == "https://www.pisos.com/comprar/terreno-madrid_capital-45678901_100500/" and listing.title == "Parcela urbana en Pisos.com"
-    assert listing.price == 250000 and listing.currency == "EUR" and listing.deal == "sale"
-    assert listing.plot_m2 == 3200 and listing.area_m2 is None and listing.property_type == "landparcel"
-    assert listing.phone == "+34910000002" and listing.advertiser == "Inmobiliaria Ejemplo S.L."
-    assert listing.address == "Calle Ejemplo, Barajas, Madrid"
+    one = listings[0]
+    assert one.url == PISOS_URL and one.price == 250000 and one.currency == "EUR" and one.deal == "sale"
+    assert one.plot_m2 == 3200 and one.area_m2 is None and one.property_type == "landparcel"
+    assert one.phone is None and one.advertiser == "Inmobiliaria Ejemplo"
+    assert one.address == "Calle Ejemplo, Barajas, Madrid" and one.description.startswith("Parcela de 3.200")
     await adapter.aclose()
 
 
-def test_pisos_house_area_is_built_area_not_plot():
-    adapter = pisos([], [])
+async def test_pisos_province_slug_and_house_area():
+    adapter = build("pisos", [], [])
+    _, body, _ = await adapter._plan(task(place_level="province", task_text="casa", goal="casa"), 5, None)
+    assert body["location"] == "madrid" and body["propertyType"] == "house"
     house = task(task_text="casa", goal="casa", constraints={"deal": "sale"})
-    listing = adapter._normalize(pisos_row(surface=140, rooms=3), house, None)
+    listing = adapter._normalize(pisos_row(areaSqm=140, rooms=3, terrainAreaSqm=900), house, None)
     assert listing.area_m2 == 140 and listing.plot_m2 is None and listing.rooms == 3
-    assert listing.property_type == "house"
 
 
-@pytest.mark.parametrize("change", [
-    {"operation": "alquiler"}, {"operation": "rent"}, {"operation": "unknown"},
-    {"url": "https://www.pisos.com/alquilar/piso-madrid_capital-45678902_100500/", "operation": None},
-    {"url": "https://www.idealista.com/inmueble/123456/"}, {"url": "https://www.pisos.com/venta/terrenos-madrid/"},
-    {"url": "/not-a-listing"}, {"url": "javascript:alert(1)"},
-    {"municipality": "Alcorcón"}, {"municipality": None, "city": None}, {"country": "FR"},
-])
-def test_pisos_rejects_foreign_deal_place_and_non_listing_rows(change):
-    adapter = pisos([], [])
-    assert adapter._normalize(pisos_row(**change), task(), None) is None
-    assert adapter._normalize("not a row", task(), None) is None
-
-
-def test_pisos_never_guesses_missing_facts():
-    adapter = pisos([], [])
-    listing = adapter._normalize(pisos_row(price=None, surface=None, phone="", agency=None, street=None,
-                                         neighbourhood=None), task(), None)
-    assert listing.price is None and listing.currency is None and listing.plot_m2 is None
-    assert listing.phone is None and listing.advertiser is None and listing.rooms is None
-    # a price text, a price in another currency and a price without a number are not prices
-    for price, currency in (("250.000 €", None), (250000, "USD"), (0, "EUR"), ("consultar", None)):
-        row = pisos_row(price=price, currency=currency)
-        assert adapter._normalize(row, task(), None).price is None
-    # a surface that the description contradicts is not a plot
-    other = pisos_row(description="Parcela de 900 m2 de suelo.")
-    assert adapter._normalize(other, task(), None).plot_m2 is None
-
-
-def test_pisos_reads_field_synonyms_and_an_explicit_plot_area():
-    adapter = pisos([], [])
-    row = {"link": "https://www.pisos.com/comprar/terreno-madrid_capital-45678901_100500/", "transactionType": "SALE", "price": {"amount": 99000}, "plotArea": 1500,
-           "surface": 80, "city": "Madrid", "phones": ["+34910000003"], "advertiser": "Particular", "text": "Solar."}
-    listing = adapter._normalize(row, task(), None)
-    assert listing.plot_m2 == 1500 and listing.area_m2 is None and listing.phone == "+34910000003"
-    assert listing.advertiser == "Particular" and listing.description == "Solar."
-    assert listing.price == 99000 and listing.currency == "EUR"
-
-
-async def test_pisos_setting_builds_the_source_only_when_enabled(monkeypatch):
-    from bot.web_search.settings import WebSearchSettings
-
-    monkeypatch.delenv("APIFY_PISOS_ENABLED", raising=False)
-    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").apify_pisos_enabled is False
-    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").sources() == ()
-    assert WebSearchSettings(_env_file=None, APIFY_PISOS_ENABLED=True).sources() == ()  # no token
-    settings = WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token", APIFY_PISOS_ENABLED=True,
-                                 APIFY_PISOS_MAX_RESULTS=7, APIFY_PISOS_MAX_CHARGE_USD=.03)
-    source, = settings.sources()
-    try:
-        assert isinstance(source, ApifyPisosSource) and source.actor_id == "logiover~pisos-com-property-scraper"
-        assert source.max_items == 7 and source.max_charge_usd == .03
-    finally:
-        await source.aclose()
-    with pytest.raises(ValueError):
-        WebSearchSettings(_env_file=None, APIFY_PISOS_MAX_RESULTS=51)
-
-
-# --- Habitaclia (B5): rows follow assumed field names, no live run yet --------------------------------------------
-
-
-def habitaclia_row(**kwargs):
-    row = {
-        "url": "https://www.habitaclia.com/comprar-terreno-sant_cugat_del_valles-i500003456789.htm", "operation": "venta", "title": "Parcela urbana en Habitaclia", "price": 250000,
-        "currency": "EUR", "surface": 3200, "rooms": None, "municipality": "Madrid", "province": "Madrid",
-        "neighbourhood": "Barajas", "street": "Calle Ejemplo", "phone": "+34910000002",
-        "agency": {"name": "Inmobiliaria Ejemplo S.L."},
-        "description": "Parcela de 3.200 m2 de suelo urbano.",
-    }
-    return {**row, **kwargs}
-
-
-def habitaclia(rows, requests, **kwargs):
-    return ApifyHabitacliaSource("secret-token", client=api(rows, requests), sleep=AsyncMock(), **kwargs)
-
-
-@pytest.mark.parametrize("change", [
-    {"country_code": "IT"}, {"vertical": "investors"}, {"constraints": {"deal": "both"}}, {"location": " "},
-    {"task_text": "habitación", "goal": "habitación"}, {"blocked_hosts": frozenset({"habitaclia.com"})},
-    {"suburbs_only": True}, {"radius_km": 25.0},
-])
-def test_habitaclia_supports_spanish_sale_or_rent_without_radius(change):
-    adapter = habitaclia([], [])
-    assert adapter.supports(task()) and adapter.supports(task(place_level="province"))
-    assert not adapter.supports(task(**change))
-    assert not ApifyHabitacliaSource("").supports(task())
-    assert "secret" not in repr(adapter)
-
-
-def test_habitaclia_url_classification_matches_the_portal_regexes():
-    from bot.web_search.urls import classify_url
-
-    assert classify_url("https://www.habitaclia.com/comprar-terreno-sant_cugat_del_valles-i500003456789.htm") == "listing"
-    assert classify_url("https://www.habitaclia.com/alquiler-piso-sant_cugat_del_valles-i500003456790.htm") == "listing"
-    assert classify_url("https://www.habitaclia.com/terrenos-sant_cugat_del_valles.htm") != "listing"
-
-
-async def test_habitaclia_launch_body_is_capped_pinned_and_rows_are_mapped():
+async def test_habitaclia_launch_body_is_capped_pinned_and_row_mapped():
     requests = []
-    adapter = habitaclia([habitaclia_row(), habitaclia_row(municipality="Alcorcón")], requests)
+    adapter = build("habitaclia", [habitaclia_row()], requests)
     with source_run_scope(context("apify_habitaclia")):
         listings = await adapter.search(task(), limit=5)
     launch = next(r for r in requests if r.method == "POST")
     assert launch.url.path.endswith("/acts/trev0n~habitaclia-com-spain-scraper/runs")
     assert launch.url.params["maxTotalChargeUsd"] == "0.05" and launch.url.params["maxItems"] == "5"
-    assert json.loads(launch.content) == {"maxItems": 5, "operation": "sale", "propertyType": "land",
-                                          "location": "Madrid", "locationType": "municipality",
-                                          "minSize": 2000, "maxPrice": 3000000}
-    assert len(listings) == 1  # Alcorcón is another municipality
-    listing = listings[0]
-    assert listing.url == "https://www.habitaclia.com/comprar-terreno-sant_cugat_del_valles-i500003456789.htm" and listing.title == "Parcela urbana en Habitaclia"
-    assert listing.price == 250000 and listing.currency == "EUR" and listing.deal == "sale"
-    assert listing.plot_m2 == 3200 and listing.area_m2 is None and listing.property_type == "landparcel"
-    assert listing.phone == "+34910000002" and listing.advertiser == "Inmobiliaria Ejemplo S.L."
-    assert listing.address == "Calle Ejemplo, Barajas, Madrid"
+    assert json.loads(launch.content) == {
+        "transactionType": "sale", "propertyType": "land", "location": "Madrid", "sort": "newest", "maxListings": 5,
+        "maxPages": 1, "fetchPropertyDetails": False, "maxPrice": 3000000, "minArea": 2000}
+    one, = listings
+    assert one.price == 250000 and one.plot_m2 == 3200 and one.phone is None and one.advertiser == "Inmobiliaria Ejemplo"
+    assert one.address == "Barajas, Madrid, Madrid" and one.description == "Parcela de 3.200 m2."  # shortDescription fallback
     await adapter.aclose()
 
 
-def test_habitaclia_house_area_is_built_area_not_plot():
-    adapter = habitaclia([], [])
-    house = task(task_text="casa", goal="casa", constraints={"deal": "sale"})
-    listing = adapter._normalize(habitaclia_row(surface=140, rooms=3), house, None)
-    assert listing.area_m2 == 140 and listing.plot_m2 is None and listing.rooms == 3
-    assert listing.property_type == "house"
-
-
-@pytest.mark.parametrize("change", [
-    {"operation": "alquiler"}, {"operation": "rent"}, {"operation": "unknown"},
-    {"url": "https://www.habitaclia.com/alquiler-piso-sant_cugat_del_valles-i500003456790.htm", "operation": None},
-    {"url": "https://www.idealista.com/inmueble/123456/"}, {"url": "https://www.habitaclia.com/terrenos-sant_cugat_del_valles.htm"},
-    {"url": "/not-a-listing"}, {"url": "javascript:alert(1)"},
-    {"municipality": "Alcorcón"}, {"municipality": None, "city": None}, {"country": "FR"},
-])
-def test_habitaclia_rejects_foreign_deal_place_and_non_listing_rows(change):
-    adapter = habitaclia([], [])
-    assert adapter._normalize(habitaclia_row(**change), task(), None) is None
-    assert adapter._normalize("not a row", task(), None) is None
-
-
-def test_habitaclia_never_guesses_missing_facts():
-    adapter = habitaclia([], [])
-    listing = adapter._normalize(habitaclia_row(price=None, surface=None, phone="", agency=None, street=None,
-                                         neighbourhood=None), task(), None)
-    assert listing.price is None and listing.currency is None and listing.plot_m2 is None
-    assert listing.phone is None and listing.advertiser is None and listing.rooms is None
-    # a price text, a price in another currency and a price without a number are not prices
-    for price, currency in (("250.000 €", None), (250000, "USD"), (0, "EUR"), ("consultar", None)):
-        row = habitaclia_row(price=price, currency=currency)
-        assert adapter._normalize(row, task(), None).price is None
-    # a surface that the description contradicts is not a plot
-    other = habitaclia_row(description="Parcela de 900 m2 de suelo.")
-    assert adapter._normalize(other, task(), None).plot_m2 is None
-
-
-def test_habitaclia_reads_field_synonyms_and_an_explicit_plot_area():
-    adapter = habitaclia([], [])
-    row = {"link": "https://www.habitaclia.com/comprar-terreno-sant_cugat_del_valles-i500003456789.htm", "transactionType": "SALE", "price": {"amount": 99000}, "plotArea": 1500,
-           "surface": 80, "city": "Madrid", "phones": ["+34910000003"], "advertiser": "Particular", "text": "Solar."}
-    listing = adapter._normalize(row, task(), None)
-    assert listing.plot_m2 == 1500 and listing.area_m2 is None and listing.phone == "+34910000003"
-    assert listing.advertiser == "Particular" and listing.description == "Solar."
-    assert listing.price == 99000 and listing.currency == "EUR"
-
-
-async def test_habitaclia_setting_builds_the_source_only_when_enabled(monkeypatch):
-    from bot.web_search.settings import WebSearchSettings
-
-    monkeypatch.delenv("APIFY_HABITACLIA_ENABLED", raising=False)
-    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").apify_habitaclia_enabled is False
-    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").sources() == ()
-    assert WebSearchSettings(_env_file=None, APIFY_HABITACLIA_ENABLED=True).sources() == ()  # no token
-    settings = WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token", APIFY_HABITACLIA_ENABLED=True,
-                                 APIFY_HABITACLIA_MAX_RESULTS=7, APIFY_HABITACLIA_MAX_CHARGE_USD=.03)
-    source, = settings.sources()
-    try:
-        assert isinstance(source, ApifyHabitacliaSource) and source.actor_id == "trev0n~habitaclia-com-spain-scraper"
-        assert source.max_items == 7 and source.max_charge_usd == .03
-    finally:
-        await source.aclose()
-    with pytest.raises(ValueError):
-        WebSearchSettings(_env_file=None, APIFY_HABITACLIA_MAX_RESULTS=51)
-
-
-# --- Milanuncios (B5): rows follow assumed field names, no live run yet --------------------------------------------
-
-
-def milanuncios_row(**kwargs):
-    row = {
-        "url": "https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm", "operation": "venta", "title": "Parcela urbana en Milanuncios", "price": 250000,
-        "currency": "EUR", "surface": 3200, "rooms": None, "municipality": "Madrid", "province": "Madrid",
-        "neighbourhood": "Barajas", "street": "Calle Ejemplo", "phone": "+34910000002",
-        "agency": {"name": "Inmobiliaria Ejemplo S.L."},
-        "description": "Parcela de 3.200 m2 de suelo urbano.",
-    }
-    return {**row, **kwargs}
-
-
-def milanuncios(rows, requests, **kwargs):
-    return ApifyMilanunciosSource("secret-token", client=api(rows, requests), sleep=AsyncMock(), **kwargs)
-
-
-@pytest.mark.parametrize("change", [
-    {"country_code": "IT"}, {"vertical": "investors"}, {"constraints": {"deal": "both"}}, {"location": " "},
-    {"task_text": "habitación", "goal": "habitación"}, {"blocked_hosts": frozenset({"milanuncios.com"})},
-    {"suburbs_only": True}, {"radius_km": 25.0},
-])
-def test_milanuncios_supports_spanish_sale_or_rent_without_radius(change):
-    adapter = milanuncios([], [])
-    assert adapter.supports(task()) and adapter.supports(task(place_level="province"))
-    assert not adapter.supports(task(**change))
-    assert not ApifyMilanunciosSource("").supports(task())
-    assert "secret" not in repr(adapter)
-
-
-def test_milanuncios_url_classification_matches_the_portal_regexes():
-    from bot.web_search.urls import classify_url
-
-    assert classify_url("https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm") == "listing"
-    assert classify_url("https://www.milanuncios.com/alquiler-de-pisos-en-madrid/piso-centro-123456790.htm") == "listing"
-    assert classify_url("https://www.milanuncios.com/venta-de-terrenos-en-madrid/") != "listing"
-
-
-async def test_milanuncios_launch_body_is_capped_pinned_and_rows_are_mapped():
+async def test_milanuncios_launch_body_strips_seller_pii_and_row_is_mapped():
     requests = []
-    adapter = milanuncios([milanuncios_row(), milanuncios_row(municipality="Alcorcón")], requests)
+    adapter = build("milanuncios", [milanuncios_row()], requests)
     with source_run_scope(context("apify_milanuncios")):
-        listings = await adapter.search(task(), limit=5)
+        listings = await adapter.search(task(location="Las Palmas"), limit=5)
+    assert listings == []  # the row is Madrid, not Las Palmas
     launch = next(r for r in requests if r.method == "POST")
     assert launch.url.path.endswith("/acts/rastriq~milanuncios-scraper/runs")
     assert launch.url.params["maxTotalChargeUsd"] == "0.05" and launch.url.params["maxItems"] == "5"
-    assert json.loads(launch.content) == {"maxItems": 5, "operation": "sale", "propertyType": "land",
-                                          "location": "Madrid", "locationType": "municipality",
-                                          "minSize": 2000, "maxPrice": 3000000}
-    assert len(listings) == 1  # Alcorcón is another municipality
-    listing = listings[0]
-    assert listing.url == "https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm" and listing.title == "Parcela urbana en Milanuncios"
-    assert listing.price == 250000 and listing.currency == "EUR" and listing.deal == "sale"
-    assert listing.plot_m2 == 3200 and listing.area_m2 is None and listing.property_type == "landparcel"
-    assert listing.phone == "+34910000002" and listing.advertiser == "Inmobiliaria Ejemplo S.L."
-    assert listing.address == "Calle Ejemplo, Barajas, Madrid"
+    assert json.loads(launch.content) == {
+        "searchUrl": "https://www.milanuncios.com/venta-de-terrenos-en-las_palmas/", "maxItems": 5, "maxPages": 1,
+        "fetchDetails": False, "stripSellerPII": True}
+    listing = adapter._normalize(milanuncios_row(), task(), None)
+    assert listing.price == 250000 and listing.currency == "EUR" and listing.plot_m2 == 3200
+    assert listing.area_m2 is None and listing.phone is None and listing.advertiser is None
+    assert listing.address == "Madrid"
     await adapter.aclose()
 
 
-def test_milanuncios_house_area_is_built_area_not_plot():
-    adapter = milanuncios([], [])
-    house = task(task_text="casa", goal="casa", constraints={"deal": "sale"})
-    listing = adapter._normalize(milanuncios_row(surface=140, rooms=3), house, None)
-    assert listing.area_m2 == 140 and listing.plot_m2 is None and listing.rooms == 3
-    assert listing.property_type == "house"
-
-
+@ALL
 @pytest.mark.parametrize("change", [
-    {"operation": "alquiler"}, {"operation": "rent"}, {"operation": "unknown"},
-    {"url": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid/piso-centro-123456790.htm", "operation": None},
-    {"url": "https://www.idealista.com/inmueble/123456/"}, {"url": "https://www.milanuncios.com/venta-de-terrenos-en-madrid/"},
-    {"url": "/not-a-listing"}, {"url": "javascript:alert(1)"},
-    {"municipality": "Alcorcón"}, {"municipality": None, "city": None}, {"country": "FR"},
+    {"transactionType": "rent"}, {"transactionType": "new"}, {"city": "Alcorcón"}, {"cityName": "Alcorcón"},
+    {"city": None, "cityName": None}, {"detailUrl": "https://www.idealista.com/inmueble/123456/"},
+    {"url": "https://www.idealista.com/inmueble/123456/"}, {"detailUrl": "/not-a-listing"}, {"url": "javascript:alert(1)"},
 ])
-def test_milanuncios_rejects_foreign_deal_place_and_non_listing_rows(change):
-    adapter = milanuncios([], [])
-    assert adapter._normalize(milanuncios_row(**change), task(), None) is None
+def test_portal_rejects_foreign_deal_place_and_non_listing_rows(key, change):
+    adapter = build(key, [], [])
+    row = CASES[key][1]()
+    if ("detailUrl" in change and key == "milanuncios") or ("url" in change and key != "milanuncios"):
+        return  # a field this actor does not have
+    if ("city" in change and key == "milanuncios") or ("cityName" in change and key != "milanuncios"):
+        return
+    assert adapter._normalize({**row, **change}, task(), None) is None
     assert adapter._normalize("not a row", task(), None) is None
 
 
-def test_milanuncios_never_guesses_missing_facts():
-    adapter = milanuncios([], [])
-    listing = adapter._normalize(milanuncios_row(price=None, surface=None, phone="", agency=None, street=None,
-                                         neighbourhood=None), task(), None)
+@ALL
+def test_portal_rejects_a_rent_url_for_a_sale_task_and_a_search_page(key):
+    adapter = build(key, [], [])
+    field = "url" if key == "milanuncios" else "detailUrl"
+    rent = {"pisos": "https://www.pisos.com/alquilar/piso-madrid_capital-45678902_100500/",
+            "habitaclia": "https://www.habitaclia.com/alquiler-piso-madrid-i500003456790.htm",
+            "milanuncios": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid/piso-centro-123456790.htm"}[key]
+    search = {"pisos": "https://www.pisos.com/venta/terrenos-madrid/",
+              "habitaclia": "https://www.habitaclia.com/terrenos-madrid.htm",
+              "milanuncios": "https://www.milanuncios.com/venta-de-terrenos-en-madrid/"}[key]
+    row = CASES[key][1]()
+    row.pop("transactionType", None)
+    assert adapter._normalize({**row, field: rent}, task(), None) is None
+    assert adapter._normalize({**row, field: search}, task(), None) is None
+
+
+@ALL
+def test_portal_never_guesses_missing_facts(key):
+    adapter = build(key, [], [])
+    row = CASES[key][1]()
+    listing = adapter._normalize({**row, "price": None, "areaSqm": None, "tag_sqm": None, "advertiserName": None,
+                                  "fullAddress": None, "location": None}, task(), None)
     assert listing.price is None and listing.currency is None and listing.plot_m2 is None
     assert listing.phone is None and listing.advertiser is None and listing.rooms is None
-    # a price text, a price in another currency and a price without a number are not prices
-    for price, currency in (("250.000 €", None), (250000, "USD"), (0, "EUR"), ("consultar", None)):
-        row = milanuncios_row(price=price, currency=currency)
-        assert adapter._normalize(row, task(), None).price is None
-    # a surface that the description contradicts is not a plot
-    other = milanuncios_row(description="Parcela de 900 m2 de suelo.")
-    assert adapter._normalize(other, task(), None).plot_m2 is None
+    for price in ("250.000 €", 0, "consultar"):
+        assert adapter._normalize({**row, "price": price}, task(), None).price is None
+    contradicted = {"shortDescription": "Parcela de 900 m2.", "description": "Parcela de 900 m2."}
+    assert adapter._normalize({**row, **contradicted}, task(), None).plot_m2 is None
 
 
-def test_milanuncios_reads_field_synonyms_and_an_explicit_plot_area():
-    adapter = milanuncios([], [])
-    row = {"link": "https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm", "transactionType": "SALE", "price": {"amount": 99000}, "plotArea": 1500,
-           "surface": 80, "city": "Madrid", "phones": ["+34910000003"], "advertiser": "Particular", "text": "Solar."}
-    listing = adapter._normalize(row, task(), None)
-    assert listing.plot_m2 == 1500 and listing.area_m2 is None and listing.phone == "+34910000003"
-    assert listing.advertiser == "Particular" and listing.description == "Solar."
-    assert listing.price == 99000 and listing.currency == "EUR"
+@pytest.mark.parametrize("key", ["pisos", "habitaclia"])
+def test_portal_price_in_another_currency_is_not_a_price(key):
+    adapter = build(key, [], [])
+    assert adapter._normalize({**CASES[key][1](), "priceCurrency": "USD"}, task(), None).price is None
 
 
-async def test_milanuncios_setting_builds_the_source_only_when_enabled(monkeypatch):
+@ALL
+async def test_portal_setting_builds_the_source_only_when_enabled(key, monkeypatch):
     from bot.web_search.settings import WebSearchSettings
 
-    monkeypatch.delenv("APIFY_MILANUNCIOS_ENABLED", raising=False)
-    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").apify_milanuncios_enabled is False
+    flag = f"APIFY_{key.upper()}_ENABLED"
+    monkeypatch.delenv(flag, raising=False)
     assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").sources() == ()
-    assert WebSearchSettings(_env_file=None, APIFY_MILANUNCIOS_ENABLED=True).sources() == ()  # no token
-    settings = WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token", APIFY_MILANUNCIOS_ENABLED=True,
-                                 APIFY_MILANUNCIOS_MAX_RESULTS=7, APIFY_MILANUNCIOS_MAX_CHARGE_USD=.03)
+    assert WebSearchSettings(_env_file=None, **{flag: True}).sources() == ()  # no token
+    settings = WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token", **{
+        flag: True, f"APIFY_{key.upper()}_MAX_RESULTS": 7, f"APIFY_{key.upper()}_MAX_CHARGE_USD": .03})
     source, = settings.sources()
     try:
-        assert isinstance(source, ApifyMilanunciosSource) and source.actor_id == "rastriq~milanuncios-scraper"
+        assert isinstance(source, CASES[key][0]) and source.actor_id == CASES[key][2]
         assert source.max_items == 7 and source.max_charge_usd == .03
     finally:
         await source.aclose()
     with pytest.raises(ValueError):
-        WebSearchSettings(_env_file=None, APIFY_MILANUNCIOS_MAX_RESULTS=51)
+        WebSearchSettings(_env_file=None, **{f"APIFY_{key.upper()}_MAX_RESULTS": 51})
