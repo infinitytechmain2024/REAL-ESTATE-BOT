@@ -249,7 +249,7 @@ def test_extra_fields_off_keeps_the_old_card(monkeypatch) -> None:
 
 def test_card_shows_built_area_and_phone_in_order() -> None:
     card = _extra(es_payload(area_m2=85.5, phone="+34 600 111 222"), confidence=0.9)
-    assert "Площадь: 85.5 м²" in card and "Телефон: +34 600 111 222" in card
+    assert "Площадь: 85,5 м²" in card and "Телефон: +34 600 111 222" in card
     lines = card.splitlines()
     names = [x.split(":")[0] for x in lines if ":" in x]
     assert names.index("Цена") < names.index("Площадь") < names.index("Локация")
@@ -270,9 +270,8 @@ def test_house_with_plot_shows_both_areas_apart() -> None:
 def test_no_area_no_phone_no_lines() -> None:
     card = _extra(es_payload(area_m2=None, phone=None))
     assert "Площадь" not in card and "Телефон" not in card
-    card = _extra(es_payload(area_m2=0, phone="  ", phones=[]))
+    card = _extra(es_payload(area_m2=0, phone="  "))
     assert "Площадь" not in card and "Телефон" not in card
-    assert "Телефон: +34 1, +34 2" in _extra(es_payload(phones=["+34 1", "+34 2", "+34 3"]))
 
 
 def test_investor_card_has_no_area_or_phone() -> None:

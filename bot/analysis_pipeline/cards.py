@@ -167,8 +167,8 @@ def card_extra_fields_enabled() -> bool:
 def _m2(value: Any) -> str | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         return None
-    text = f"{value:,.0f}" if float(value).is_integer() else f"{value:,.1f}"
-    return text.replace(",", " ") + " м²"
+    text = _number(float(value)) if float(value).is_integer() else f"{value:,.1f}".replace(",", " ").replace(".", ",")
+    return text + " м²"
 
 
 def _area(payload: Mapping[str, Any]) -> str | None:
@@ -183,10 +183,8 @@ def _area(payload: Mapping[str, Any]) -> str | None:
 
 
 def _phone(payload: Mapping[str, Any]) -> str | None:
-    """The phone as the source gave it (payload ``phone`` or ``phones``); never taken from the post's text."""
+    """The phone as the source gave it (payload ``phone``); never taken from the post's text."""
     raw = payload.get("phone")
-    if raw is None and isinstance(payload.get("phones"), list):
-        raw = ", ".join(str(p).strip() for p in payload["phones"][:2] if str(p).strip())
     return _trim(raw.strip(), 60) if isinstance(raw, str) and raw.strip() else None
 
 

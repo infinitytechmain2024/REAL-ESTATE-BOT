@@ -51,6 +51,7 @@ class Evidence(BaseModel):
     published_at: datetime | None = None
     comments: list[str] = Field(default_factory=list)
     profile_extract: dict[str, object] | None = None
+    platform: str | None = None  # the source's platform; only "website" posts start with a trusted JSON-LD line
 
 
 class FilterDecision(BaseModel):
