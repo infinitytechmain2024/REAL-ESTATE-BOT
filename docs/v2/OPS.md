@@ -77,3 +77,66 @@ docker compose --env-file .env logs --tail=20 watchdog     # "watchdog started"
 Проверка после включения: `docker compose --env-file .env stop analysis-worker` даёт алерт `exited` в течение
 минуты-двух, `docker compose --env-file .env up -d analysis-worker` возвращает сервис. (`kill` не годится для проверки:
 политика `unless-stopped` сразу поднимает убитый контейнер обратно, и состояние `exited` можно не застать.)
+
+## Бэкапы
+
+`scripts/backup.sh` делает `pg_dump | gzip` через `docker compose --env-file .env exec -T postgres` в
+`/root/backups/bot-ГГГГММДД-ЧЧММСС.sql.gz` (`BACKUP_DIR` переопределяет каталог). Дамп не больше 10 КБ считается
+сломанным: файл удаляется, код выхода 1. Старше `BACKUP_KEEP_DAYS` (14) дней удаляются только `bot-*.sql.gz` внутри
+`BACKUP_DIR`. Секретов в дампе нет только в смысле `.env`: сами данные кампаний там есть, каталог держите `chmod 700`.
+
+Первый запуск и проверка восстановления:
+
+```bash
+cd /opt/real-estate-bot
+chmod 700 /root/backups 2>/dev/null || true
+set -o pipefail; ./scripts/backup.sh && ls -lh /root/backups | tail -3
+./scripts/restore_check.sh          # "OK, campaigns=N"
+```
+
+`restore_check.sh` поднимает временный `postgres:16` (`real-estate-restore-check`, данные в tmpfs, без сети и портов),
+загружает последний бэкап, считает `campaigns` и удаляет контейнер (и при ошибке тоже). Рабочая БД не затрагивается.
+
+### Расписание (cron root, `crontab -e`)
+
+```cron
+0 3 * * *   cd /opt/real-estate-bot && ./scripts/backup.sh >> /var/log/re-backup.log 2>&1 || echo "backup failed" >> /var/log/re-backup.log
+30 4 * * 0  cd /opt/real-estate-bot && ./scripts/restore_check.sh >> /var/log/re-backup.log 2>&1
+15 4 * * *  cd /opt/real-estate-bot && docker compose --env-file .env run --rm facebook-runner python -m bot.facebook_collector.apify.retention >> /var/log/re-backup.log 2>&1
+```
+
+Третья строка: ежедневная чистка `apify_raw_items` старше `APIFY_FACEBOOK_RAW_RETENTION_DAYS` (команда из
+`docs/apify_adapter.md`; перед первым включением прогоните её с `--dry-run`). Аудит `apify_runs` и посты она не трогает.
+Раз в неделю смотрите `tail -20 /var/log/re-backup.log`: должно быть `OK:` и `OK, campaigns=`. Отключить: закомментировать
+строку в `crontab -e`. Сам `/var/log/re-backup.log` ротируйте через `logrotate` или периодически очищайте.
+
+## Перезагрузка VPS
+
+```bash
+cd /opt/real-estate-bot
+set -o pipefail; ./scripts/backup.sh                    # 1. бэкап; при ошибке дальше не идти
+docker compose --env-file .env down                     # 2. остановка (тома не удаляются, без -v)
+reboot                                                  # 3. после входа по SSH:
+cd /opt/real-estate-bot && docker compose --env-file .env up -d     # 4. подъём
+sleep 60
+docker compose --env-file .env ps                       # 5. все сервисы Up, healthy
+curl -fsS http://127.0.0.1:8080/healthz && echo healthz ok
+docker compose --env-file .env logs --since=5m | grep -iE "error|traceback|critical" || echo "ошибок нет"
+```
+
+Сервисы с `restart: unless-stopped` после `down` сами не стартуют, поэтому `up -d` нужен. Если пропустить `down`,
+Docker сам поднимет контейнеры после загрузки. Алерт watchdog о недоступности после перезагрузки допустим; если сервис
+остался `unhealthy` через 3 минуты, смотрите `logs --tail=50 <сервис>`.
+
+## Ротация логов
+
+Все сервисы пишут через драйвер `json-file` с `max-size: "20m"`, `max-file: "5"` (якорь `x-logging` в
+`docker-compose.yml`): не больше 100 МБ на контейнер. Настройка применяется при пересоздании контейнера, то есть после
+`BRANCH=main ./scripts/update.sh`. Проверка:
+
+```bash
+docker inspect -f '{{.HostConfig.LogConfig}}' real-estate-monitor-postgres-1
+df -h /var/lib/docker
+```
+
+Откат: убрать строку `logging: *logging` у нужного сервиса и пересоздать его (`up -d <сервис>`).
