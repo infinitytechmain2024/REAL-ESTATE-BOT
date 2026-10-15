@@ -742,6 +742,49 @@ services:
     read_only: true
     tmpfs: [/tmp]
 
+  watchdog:
+    # Owner alerts (docs/v2/OPS.md): containers that are exited/restarting/unhealthy (Docker Engine API through the
+    # socket below), failing Apify calls, a spent budget, campaigns without cards, a portal with no listings, and a
+    # daily summary, all sent to OWNER_ALERT_CHAT_ID in Telegram. Off twice over: the `ops` profile (enable with
+    # COMPOSE_PROFILES=ops in .env, which update.sh honours) and WATCHDOG_ENABLED=false (the process then only logs).
+    # The socket is mounted read-only, but the Docker API is not read-only for whoever holds the socket: this
+    # container is host-level trusted, so it has no ports and runs no code but this repository's.
+    profiles: [ops]
+    build:
+      context: .
+      dockerfile: docker/campaign-runner.Dockerfile
+    command: ["python", "-m", "bot.ops.watchdog"]
+    restart: unless-stopped
+    # The socket is root:docker; WATCHDOG_DOCKER_GID is that group's id (stat -c %g /var/run/docker.sock).
+    group_add: ["${WATCHDOG_DOCKER_GID:-999}"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
+      WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-false}
+      OWNER_ALERT_CHAT_ID: ${OWNER_ALERT_CHAT_ID:-0}
+      WATCHDOG_POLL_SECONDS: ${WATCHDOG_POLL_SECONDS:-60}
+      WATCHDOG_ALERT_COOLDOWN_MINUTES: ${WATCHDOG_ALERT_COOLDOWN_MINUTES:-30}
+      WATCHDOG_DAILY_SUMMARY_HOUR: ${WATCHDOG_DAILY_SUMMARY_HOUR:-9}
+      # Empty: containers are not checked. /var/run/docker.sock: they are.
+      WATCHDOG_DOCKER_SOCKET: ${WATCHDOG_DOCKER_SOCKET:-}
+      CAMPAIGN_BUDGET_USD: ${CAMPAIGN_BUDGET_USD:-5}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # `backend` reaches PostgreSQL; `egress` sends the Telegram messages.
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.ops.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    read_only: true
+    tmpfs: [/tmp]
+
 volumes:
   postgres_data:
   redis_data:

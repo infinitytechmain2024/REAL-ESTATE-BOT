@@ -24,7 +24,7 @@ ENTRY_POINTS = {
     "analysis-pipeline.Dockerfile": ["bot.analysis_pipeline.main", "bot.analysis_pipeline.healthcheck"],
     "browser-session.Dockerfile": ["bot.browser_session.main"],
     "campaign-runner.Dockerfile": ["bot.campaign.runner", "bot.web_search.worker", "bot.web_search.settings",
-                                   "bot.campaign.healthcheck", "bot.agents.healthcheck", "bot.ops.watchdog"],
+                                   "bot.campaign.healthcheck", "bot.agents.healthcheck", "bot.ops.watchdog", "bot.ops.healthcheck"],
     "facebook-collector.Dockerfile": ["bot.facebook_collector.main", "bot.facebook_collector.runner"],
     "scrapling-connector.Dockerfile": ["bot.scrapling_connector.main", "bot.scrapling_connector.worker"],
     "telegram-control.Dockerfile": ["bot.control_plane.main"],

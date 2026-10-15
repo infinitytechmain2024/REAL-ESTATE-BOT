@@ -77,6 +77,7 @@ _SERVICE_SETTINGS = {
     "agent-reach-worker": ["bot/agent_reach/settings.py"],
     "scrapling-worker": ["bot/scrapling_connector/settings.py"],
     "verification": ["bot/verification/settings.py"],
+    "watchdog": ["bot/ops/settings.py"],
 }
 
 
