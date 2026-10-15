@@ -21,7 +21,7 @@ from bot.campaign.runner import (
     RunnerConfig,
     TelegramMessenger,
 )
-from bot.campaign.runs import MemoryRunStore
+from bot.campaign.runs import MemoryRunStore, _MemGroup
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import CommandState
 from bot.orchestra.parser import CommandValidationError, parse_campaign
@@ -525,6 +525,179 @@ async def test_the_status_moves_below_the_cards_after_every_fifth_one_and_the_ol
     assert kinds[-2:] == ["card", "status"]  # the status is the last message in the chat
     assert messenger.deleted == [(CHAT, first_status)] and after_fifth != first_status
     assert (await campaigns.get(cid)).status_message_id == messenger.sent[-1][1]
+
+
+# --- B4: a `both` campaign runs both branches and reports them apart -------------------------------------
+
+
+async def test_a_both_campaign_runs_the_web_stage_the_comment_queue_and_the_people_in_one_step() -> None:
+    from bot.campaign.final_report import FinalReporter
+    from bot.campaign.leads import Person, Sighting
+    from bot.web_search.models import WebStatus
+
+    class Web:
+        asked = 0
+
+        async def web_status(self, campaign_id: str) -> WebStatus:
+            Web.asked += 1
+            return WebStatus(True, "idealista.com", "сайты: страниц 3/60")
+
+        async def site_report(self, campaign_id: str) -> list:
+            return []
+
+    post = "https://www.facebook.com/groups/123/posts/456/"
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids=set(), web=Web(),
+                            final_report=FinalReporter(),
+                            config=RunnerConfig(relevance_fail_closed=False, comment_leads="all", comment_max_posts=2,
+                                                max_people=3, post_reads=True, investor_report=True))
+    cid = await campaigns.create(plan_campaign("Купить участок в Мадриде и найти инвесторов"), chat_id=CHAT,
+                                 requested_by=8, source_text=GOAL, actor="test")
+    assert (await campaigns.get(cid)).plan.vertical == "both"
+    await campaigns.set_state(cid, "running", "campaign:test")
+    store.add_finding(cid, "f1", "🏠 land", payload={"relevant": True, "listing_kind": "offer", "deal_type": "sale",
+                                                    "property_type": "land", "price_amount": 50_000,
+                                                    "price_currency": "EUR", "location": "Madrid", "country": "ES"},
+                      url=post)
+    store.people["Madrid"] = [Person("fb:1", "https://www.facebook.com/profile.php?id=1", "P1",
+                                     (Sighting(post, "Me interesa", "buyer", datetime(2026, 9, 20, tzinfo=UTC)),))]
+    await runner.step(cid)
+    assert Web.asked, "the web stage is looked at"
+    assert store.comment_reads[cid] == {"f1": post}, "the sent card queues its comment read"
+    assert set(store.deliveries) == {(cid, "fb:1")}, "the investor branch sends its people in the same step"
+    assert (await campaigns.get(cid)).state == "running", "the sites are still being read"
+
+    Web.asked = 0
+    await campaigns.set_state(cid, "completed", "test")
+    clock.at = (await campaigns.get(cid)).finished_at + timedelta(minutes=1)
+    await runner.step(cid)
+    await runner.step(cid)
+    reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    assert len(reports) == 1, "one report, once"
+    assert "🏠 Недвижимость" in reports[0] and "💼 Инвесторы" in reports[0]
+    assert "людей 1, доставок из поиска 0" in reports[0]
+
+
+async def test_without_the_investor_report_flag_a_both_report_is_the_old_one_and_investors_get_none() -> None:
+    from bot.campaign.final_report import FinalReporter
+
+    for goal, vertical in (("Купить участок в Мадриде и найти инвесторов", "both"), ("Найди инвесторов в Мадриде", "investors")):
+        campaigns = MemoryCampaignStore()
+        store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+        runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids=set(),
+                                final_report=FinalReporter(), config=RunnerConfig(relevance_fail_closed=False))
+        assert runner.config.investor_report is False
+        cid = await campaigns.create(plan_campaign(goal), chat_id=CHAT, requested_by=8, source_text=goal, actor="test")
+        assert (await campaigns.get(cid)).plan.vertical == vertical
+        await campaigns.set_state(cid, "running", "test")
+        await campaigns.set_state(cid, "completed", "test")
+        clock.at = (await campaigns.get(cid)).finished_at + timedelta(minutes=1)
+        await runner.step(cid)
+        reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+        assert not any("💼" in t or "По веткам" in t for t in reports)
+        assert len(reports) == (1 if vertical == "both" else 0)
+
+
+async def _investors_with_flag(link: str = "", **config):
+    from bot.campaign.final_report import FinalReporter
+    from bot.campaign.spec import Place, Sources, TaskSpec
+
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids=set(), final_report=FinalReporter(),
+                            config=RunnerConfig(relevance_fail_closed=False, investor_report=True, **config))
+    goal = "Найди инвесторов в Мадриде"
+    spec = TaskSpec(mode="investors", place=Place(name="Spain", names={"ru": "Испания"}, level="region"),
+                    sources=Sources(required=[link] if link else []), post_link=bool(link))
+    plan = plan_campaign(goal, vertical="investors", place={"en": "Spain", "ru": "Испания"}, spec=spec)
+    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=8, source_text=goal, actor="test",
+                                 spec=spec.model_dump(mode="json"))
+    await campaigns.set_state(cid, "running", "test")
+    await campaigns.set_state(cid, "completed", "test")
+    clock.at = (await campaigns.get(cid)).finished_at + timedelta(minutes=1)
+    return store, messenger, runner, cid
+
+
+async def test_an_investor_report_names_a_failed_post_read_with_its_reason_and_cost() -> None:
+    from bot.campaign.runs import PostReadSummary
+
+    store, messenger, runner, cid = await _investors_with_flag("https://www.facebook.com/groups/1/posts/2/", post_reads=True)
+    store.post_read_rows[cid] = [PostReadSummary("https://www.facebook.com/groups/1/posts/2/", "failed", 0, 0, 0.05, "closed")]
+    await runner.step(cid)
+    reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    if not reports:  # the post-link campaign may need more steps to settle
+        await runner.step(cid)
+        reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    assert len(reports) == 1 and "closed" in reports[0] and "$0.05" in reports[0]
+
+
+async def test_an_investor_report_with_no_people_but_money_spent_is_still_sent() -> None:
+    from bot.utils import costs
+
+    _store, messenger, runner, cid = await _investors_with_flag()
+    costs.install(costs.MemoryLedger(), 0.0)
+    try:
+        with costs.scope(cid):
+            await costs.record("api", provider="apify", item="apify/facebook-comments-scraper", cost_usd=0.4)
+        await runner.step(cid)
+    finally:
+        costs.install(None, 0.0)
+    reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    assert len(reports) == 1 and "$0.40" in reports[0] and "инвесторы $0.40" in reports[0]
+
+
+async def test_investor_groups_of_the_task_are_queued_without_a_browser_and_their_post_becomes_a_card() -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+    from bot.campaign.spec import Place, Sources, TaskSpec
+
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    disco_store = MemoryDiscoveryStore()
+    real = FacebookDiscovery(campaigns, disco_store, None, None, acquisition_mode="apify")
+
+    class Discovery:
+        """The real discovery (no browser); the run store gets the groups it queued, as the DB would."""
+
+        async def run(self, campaign_id: str) -> None:
+            await real.run(campaign_id)
+            for g in await disco_store.groups(campaign_id):
+                store.groups.setdefault(campaign_id, []).append(
+                    _MemGroup(g.group_key, g.canonical_url, g.name or g.group_key, g.window_no or 1, g.relevance_score))
+
+    runner = CampaignRunner(campaigns, store, messenger, Discovery(), now=clock, owner_ids={7},
+                            config=RunnerConfig(relevance_fail_closed=False))
+    spec = TaskSpec(mode="investors", place=Place(name="Madrid", names={"ru": "Мадрид"}, level="city"),
+                    sources=Sources(required=["https://www.facebook.com/groups/madrid.investors/"]))
+    goal = "Найди инвесторов в Мадриде, группа facebook.com/groups/madrid.investors"
+    plan = plan_campaign(goal, vertical="investors", place={"en": "Madrid", "ru": "Мадрид"}, spec=spec)
+    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=7, source_text=goal, actor="test",
+                                 spec=spec.model_dump(mode="json"))
+
+    await runner.tick()
+
+    assert (await campaigns.get(cid)).state == "running"
+    window = store.batches[only_batch(store, cid)]
+    assert window.urls == ["https://www.facebook.com/groups/madrid.investors/"]
+    # a post of that group, analysed as an investor lead, is a finding and then a card
+    store.add_finding(cid, "inv1", "💼 Инвестор: Juan, ищет объекты в Мадриде", vertical="investors")
+    await runner.tick()
+    assert messenger.findings() == ["💼 Инвестор: Juan, ищет объекты в Мадриде\n\n🔎 Найдено: 1 · ищу дальше"]
+    assert store.findings_state == {"inv1": "delivered"}
+
+
+async def test_a_task_without_groups_and_without_a_browser_pauses_with_a_human_text() -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+    from bot.campaign.runner import NO_GROUPS
+
+    campaigns = MemoryCampaignStore()
+    store = MemoryRunStore(campaigns)
+    discovery = FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="apify")
+    runner = CampaignRunner(campaigns, store, FakeMessenger(), discovery, now=Clock(), owner_ids={7},
+                            config=RunnerConfig(relevance_fail_closed=False))
+    cid = await create(campaigns, plan_campaign(GOAL))
+    assert "укажите группы в задаче" in NO_GROUPS
+    assert (await runner._discover(await campaigns.get(cid))) == NO_GROUPS
 
 
 # --- closed groups: «вступите» (CAMPAIGN_JOIN_NOTICES) ---------------------------------

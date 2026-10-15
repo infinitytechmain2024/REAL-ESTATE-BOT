@@ -172,3 +172,13 @@ async def test_upsert_never_rewrites_a_queued_group_and_constraints_hold(pool) -
             "insert into campaign_groups(campaign_id, group_key, canonical_url) values($1::uuid,'g','https://evil.example/g/')", cid)
     await pool.execute("delete from campaigns where id=$1::uuid", cid)
     assert await pool.fetchval("select count(*) from campaign_groups") == 0
+
+
+async def test_required_groups_keep_their_window_number_in_postgres(pool) -> None:
+    _, cid = await _campaign(pool)
+    store = PostgresDiscoveryStore(pool)
+    group = CampaignGroup(group_key="madrid.investors", canonical_url=url_of("madrid.investors"), name=None,
+                          language=None, seed="required", relevance_score=1.0, state="queued", window_no=2)
+    await store.save_group(cid, group, "campaign:discovery")
+    row = await pool.fetchrow("select state, window_no, seed from campaign_groups where campaign_id = $1::uuid", cid)
+    assert (row["state"], row["window_no"], row["seed"]) == ("queued", 2, "required")

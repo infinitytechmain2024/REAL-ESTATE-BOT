@@ -443,6 +443,8 @@ class TaskSpec(_Model):
     deviations: Deviations = Field(default_factory=Deviations)
     context: Context = Field(default_factory=Context)
     notes: str = ""
+    # The task is one Facebook post link (v2 B1, set by the intake): the campaign only reads that post's comments.
+    post_link: bool = False
     # field paths the person said do not matter ('budget.max', 'rooms.min', 'investor.ticket' ...)
     unspecified: list[str] = Field(default_factory=list)
 

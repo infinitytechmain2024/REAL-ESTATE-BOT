@@ -62,7 +62,8 @@ from bot.utils import costs
 
 from . import offers, people
 from .dedup import Listing, listing_of, same_object, site_of
-from .final_report import FinalReporter, HeldEvidence, place_scope_of, task_title
+from .fblinks import post_link_only
+from .final_report import FinalReporter, HeldEvidence, LeadsSummary, place_scope_of, task_title
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
@@ -78,6 +79,7 @@ from .relevance import (
 from .runs import (
     TERMINAL_BATCH_STATES,
     ClusterHead,
+    PostReadSummary,
     RunState,
     RunStore,
     SentFinding,
@@ -124,6 +126,7 @@ SEARCHING = "Сейчас: поиск групп Facebook"
 ANALYSIS = "Сейчас: анализ"
 VERIFY = "Нужна verification"
 PROFILE_BUSY = "Ожидание: профиль Facebook занят"
+NO_GROUPS = "Пауза: поиск групп не настроен: укажите группы в задаче или настройте браузер"
 QUEUE_BUSY = "Ожидание: Facebook занят другой кампанией"
 STOPPED = "Кампания остановлена"
 MAX_MESSAGE_CHARS = 3900
@@ -269,6 +272,11 @@ class RunnerConfig:
     # seen in the last ``lead_days``.
     max_people: int = 60
     lead_days: int = 90
+    # Posts sent by link (``post_leads``, v2 B1): their commenters are sent by campaign, and the campaign waits for the
+    # read and ends with a short count. Off unless a post worker runs beside the runner (``main``).
+    post_reads: bool = False
+    # The final report has the investor section (``final_report``, v2 B4); off: real estate only, as before.
+    investor_report: bool = False
     # The campaign's metrics row (``campaign_metrics``) is recomputed at most this often while it runs.
     metrics_seconds: float = 30
     # Tell the chat once about each closed Facebook group (Apify ``group_private``) with a «Вступил» button.
@@ -428,6 +436,11 @@ class CampaignRunner:
     # -- phases --
 
     async def _advance(self, campaign: Campaign) -> str:
+        if post_link_only(campaign):  # by the marker alone: switching the flag off never turns it into a discovery
+            # A post link: no Facebook discovery or windows, only the comment read, then it is over.
+            if campaign.state in ("planned", "discovering"):
+                await self.campaigns.set_state(campaign.id, "running", ACTOR)
+            return await self._drain(campaign, await self.store.get_run(campaign.id), "post_reads_done")
         if campaign.state in ("planned", "discovering"):
             return await self._discover(campaign)
         window = await self.store.open_window(campaign.id)
@@ -441,7 +454,7 @@ class CampaignRunner:
         from .discovery import DiscoveryRefused
 
         if self.discovery is None:
-            return "Пауза: поиск групп не настроен (BROWSER_SESSION_API_TOKEN)"
+            return NO_GROUPS
         if (waiting := await self._facebook_wait()) is not None:
             return waiting
         if await self.store.busy_elsewhere(campaign.id):
@@ -456,6 +469,8 @@ class CampaignRunner:
         try:
             await self.discovery.run(campaign.id)
         except DiscoveryRefused as exc:
+            if str(exc) == "no_groups_no_browser":
+                return NO_GROUPS
             return PROFILE_BUSY if "profile" in str(exc) else f"Пауза: {exc}"
         after = await self.campaigns.get(campaign.id)
         if after is not None and after.state == "paused_verification":
@@ -541,7 +556,7 @@ class CampaignRunner:
 
     async def _drain(self, campaign: Campaign, run: RunState, reason: str) -> str:
         """Wait for the web stage, give the analysis worker a bounded chance to finish, then complete."""
-        web = await self._web(campaign.id)
+        web = None if post_link_only(campaign) else await self._web(campaign.id)  # a post link has no web stage
         if web is not None and web.active:
             return web.line or "сайты: поиск"
         now = self.now()
@@ -556,6 +571,8 @@ class CampaignRunner:
             return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
+        if waited < self.config.social_grace_seconds and await self._post_read_pending(campaign):
+            return ANALYSIS  # the comments under the post it was sent are still being read (bot.campaign.post_leads)
         fallback_grace = max(self.config.social_grace_seconds, self.config.window_cooldown_seconds * 2)
         if (self.config.join_notices and waited < fallback_grace
                 and await self.store.fallback_pending(campaign.id)):
@@ -565,6 +582,15 @@ class CampaignRunner:
             return ANALYSIS  # findings still wait for the AI check: do not complete (and lose them) yet
         await self.campaigns.set_state(campaign.id, "completed", ACTOR, reason=reason)
         return ANALYSIS
+
+    async def _post_read_pending(self, campaign: Campaign) -> bool:
+        """A post sent by link whose comments are not read yet (or not even queued by the post worker)."""
+        if not self.config.post_reads or not post_link_only(campaign):
+            return False
+        reads = await self.store.post_reads(campaign.id)
+        if reads:
+            return any(read.active for read in reads)
+        return bool(post_links_of(campaign))
 
     async def _close(self, campaign: Campaign) -> None:
         """A cancelled or failed campaign stops its in-flight window through the ordinary batch cancel."""
@@ -852,14 +878,20 @@ class CampaignRunner:
         if room <= 0:
             return
         limit = min(room, self.config.max_stream_per_step)
-        # People from comments under objects first (they asked about a concrete object), then the reach.
-        cards: list[tuple[str, str]] = [
-            (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
-                                        now=self.now()))
-            for p in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit)]
-        keyed: list[tuple[str, list[str], str | None, str]] = [(key, [key], None, card) for key, card in cards]
-        if len(cards) < limit:
-            keyed += await self._reach_cards(campaign, location, room - len(cards), limit - len(cards))
+        if post_link_only(campaign):
+            # A post sent by link: the people who commented under it (no city, no reach).
+            keyed: list[tuple[str, list[str], str | None, str]] = [
+                (p.profile_key, [p.profile_key], None, person_card(p, location=None, now=self.now()))
+                for p in await self.store.stored_people_of_campaign(campaign.id, limit)]
+        else:
+            # People from comments under objects first (they asked about a concrete object), then the reach.
+            cards: list[tuple[str, str]] = [
+                (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
+                                            now=self.now()))
+                for p in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit)]
+            keyed = [(key, [key], None, card) for key, card in cards]
+            if len(cards) < limit:
+                keyed += await self._reach_cards(campaign, location, room - len(cards), limit - len(cards))
         headers: set[tuple[str, str]] = self.__dict__.setdefault("_reach_headers", set())
         for key, keys, group, card in keyed:
             if not await self.store.claim_person(campaign.id, key):
@@ -1007,15 +1039,35 @@ class CampaignRunner:
 
         Same guards as the summary: only for a campaign that ended within ``SUMMARY_WINDOW`` (older ones get none),
         claimed in the database before it is built (a restart never repeats it), given back when the store or
-        Telegram failed. Investor-only searches have no property cards to report; a cancelled search that found and
-        rejected nothing is not reported.
+        Telegram failed. A cancelled search that found and rejected nothing is not reported. With
+        ``investor_report`` an ``investors`` search gets the investor section only (people and reach deliveries sent,
+        every post read incl. a failed one, the money); it is skipped when it found and spent nothing. Without the
+        flag an ``investors`` search has no report (a post sent by link: the short count) and ``both`` the property one.
         """
+        if ((self.final_report is None or not self.config.investor_report) and post_link_only(campaign)
+                and campaign.state in SUMMARY_STATES and campaign.finished_at is not None
+                and await self.store.post_reads(campaign.id)):
+            return await self._post_report(campaign)  # no reporter: a post sent by link gets a short count
         if (self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None
-                or campaign.plan.vertical == "investors"):
+                or (campaign.plan.vertical == "investors" and not self.config.investor_report)):
             return
         if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_final_report(campaign.id):
             return
         try:
+            vertical = campaign.plan.vertical if self.config.investor_report else "real_estate"
+            leads = await self._leads_summary(campaign) if vertical != "real_estate" else None
+            if vertical == "investors":
+                sink = costs.ledger()
+                spent = await sink.summary(campaign.id) if sink is not None else None
+                if leads is not None and leads.empty and not (spent is not None and spent.total > 0):
+                    return  # nothing found and nothing spent: nothing to report
+                text = await self.final_report.build(campaign.plan.goal, campaign_request(campaign), [], [], [], [],
+                                                     costs=spent, budget=costs.budget(), leads=leads,
+                                                     vertical="investors")
+                await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
+                self._below_status.add(campaign.id)
+                log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
+                return
             outcomes = await self.store.outcome_counts(campaign.id)
             if campaign.state == "cancelled" and not outcomes:
                 return
@@ -1037,7 +1089,8 @@ class CampaignRunner:
             spent = await sink.summary(campaign.id) if sink is not None else None
             text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals,
                                                  offers=offers, costs=spent, budget=costs.budget(),
-                                                 task_text=campaign.source_text, held=held, scope=scope)
+                                                 task_text=campaign.source_text, held=held, scope=scope,
+                                                 leads=leads, vertical=vertical)
             await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
             log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})
@@ -1045,6 +1098,35 @@ class CampaignRunner:
             return
         self._below_status.add(campaign.id)  # the status message moves below the report
         log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
+
+    async def _leads_summary(self, campaign: Campaign) -> LeadsSummary:
+        """The investor branch for the report: people and reach contacts sent, and (a post sent by link) its read."""
+        reads = await self.store.post_reads(campaign.id) if post_link_only(campaign) else []
+        reach = await self.store.reach_sent(campaign.id)
+        people_sent = max(await self.store.people_sent(campaign.id) - reach, 0)
+        if not reads:
+            return LeadsSummary(people_sent=people_sent, reach_sent=reach)
+        lines = tuple(post_read_line(r) if r.state == "done" else f"{post_read_line(r)} Расход: ${r.cost_usd:.2f}"
+                      for r in reads)
+        return LeadsSummary(read_lines=lines, leads_saved=sum(r.leads for r in reads), people_sent=people_sent, reach_sent=reach,
+                            posts_read=sum(1 for r in reads if r.state == "done"),
+                            comments_read=sum(r.comments for r in reads))
+
+    async def _post_report(self, campaign: Campaign) -> None:
+        """«Комментариев: N, лидов: M, $»: once, for a search over a post sent by link (the full investor report: B4)."""
+        assert campaign.finished_at is not None
+        if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_final_report(campaign.id):
+            return
+        try:
+            reads = await self.store.post_reads(campaign.id)
+            text = "\n".join(post_read_line(read) for read in reads)
+            await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
+        except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
+            log.warning("campaign.post_report_failed", extra={"campaign_id": campaign.id})
+            await self.store.release_final_report(campaign.id)
+            return
+        self._below_status.add(campaign.id)
+        log.info("campaign.post_report_sent", extra={"campaign_id": campaign.id})
 
     async def _metrics(self, campaign: Campaign, *, final: bool = False) -> None:
         """Recompute the campaign's ``campaign_metrics`` row: at most every ``metrics_seconds`` while it runs, and
@@ -1239,6 +1321,21 @@ class CampaignRunner:
         return STOPPED if not found else f"{STOPPED} · найдено {found}"
 
 
+def post_links_of(campaign: Campaign) -> list[str]:
+    """The Facebook post links the person sent as the task (``spec.sources.required``)."""
+    sources = (getattr(campaign, "spec", None) or {}).get("sources")
+    required = sources.get("required") if isinstance(sources, dict) else None
+    return [u for u in required if isinstance(u, str) and is_facebook_post(u)] if isinstance(required, list) else []
+
+
+def post_read_line(read: PostReadSummary) -> str:
+    """One post's outcome for the person: the count, or that the post could not be read."""
+    if read.state != "done":
+        return f"Пост недоступен или не прочитан ({read.error or read.state}): комментарии не получены."
+    line = f"Комментариев: {read.comments}, лидов: {read.leads}, ${read.cost_usd:.2f}"
+    return line if read.leads else f"{line}\nЛидов нет: подходящих комментариев не нашлось."
+
+
 def facebook_limit(refusal: str) -> str | None:
     """The stop reason when a refusal means no more Facebook reads today (daily quota, safety breaker)."""
     if refusal.startswith("daily quota reached") and "Facebook" in refusal:
@@ -1325,10 +1422,14 @@ async def main() -> None:
     messenger = TelegramMessenger(settings.telegram_token)
     campaigns = PostgresCampaignStore(pool)
     discovery = None
-    if settings.browser_token:
+    if settings.acquisition_mode == "apify" and not settings.browser_token:
+        # The groups come from the task and Apify reads them: discovery needs no browser (it refuses a search).
+        discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), None, None, acquisition_mode="apify")
+    elif settings.browser_token:
         browser = BrowserSessionClient(settings.browser_url, settings.browser_token)
         reader = FacebookGroupReader(browser, max_posts=settings.discovery_max_posts, timeout_seconds=settings.discovery_group_timeout_seconds)
-        discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, reader)
+        discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, reader,
+                                      acquisition_mode=settings.acquisition_mode)
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
     web = await _web_stage(campaigns, pool, settings)
@@ -1337,10 +1438,13 @@ async def main() -> None:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     final_reporter = settings.final_reporter()
     comments, lead_judge = _comment_worker(settings, pool)
+    post_reads, post_closers = _post_worker(settings, pool, lead_judge)
     reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None)
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
+    if post_reads is not None:
+        config = replace(config, post_reads=True)
     store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days,
                              join_notices=settings.join_notices)
     runner = CampaignRunner(campaigns, store, messenger, discovery,
@@ -1363,6 +1467,8 @@ async def main() -> None:
             tasks.append(social.serve(settings.social_poll_seconds, stop))
         if comments is not None:
             tasks.append(comments.serve(settings.comment_poll_seconds, stop))
+        if post_reads is not None:
+            tasks.append(post_reads.serve(settings.comment_poll_seconds, stop))
         if reach is not None:
             tasks.append(reach.serve(settings.reach_poll_seconds, stop))
         await asyncio.gather(*tasks)
@@ -1375,7 +1481,9 @@ async def main() -> None:
             await generator.aclose()
         if lead_judge is not None:
             await lead_judge.aclose()
-        for close in reach_closers:
+        if comments is not None and getattr(comments, "reader", None) is not None:
+            await comments.reader.aclose()
+        for close in reach_closers + post_closers:
             await close()
         if judge is not None:
             await judge.aclose()
@@ -1491,7 +1599,8 @@ def _reach_worker(settings: Any, pool: Any, fetcher: Any = None) -> tuple[Any, l
     judge = None
     if settings.openrouter_api_key:
         judge = OpenRouterReachJudge(api_key=settings.openrouter_api_key, model=settings.reach_model,
-                                     timeout_seconds=settings.leads_timeout_seconds)
+                                     timeout_seconds=settings.leads_timeout_seconds,
+                                     acquisition_mode=settings.acquisition_mode)
     else:
         log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), fetcher=fetcher)
@@ -1502,7 +1611,12 @@ def _comment_worker(settings: Any, pool: Any) -> tuple[Any, Any]:
     """The comment reader for investor leads, unless CAMPAIGN_COMMENT_LEADS=off (or the browser is unreachable)."""
     if settings.comment_leads == "off" or not settings.comment_max_posts:
         return None, None
-    if not settings.browser_token:
+    apify = settings.leads_provider == "apify"
+    if apify and settings.post_reads_config() is None:
+        log.warning("campaign.runner.leads_provider_apify_disabled",
+                    extra={"hint": "set APIFY_FACEBOOK_COMMENTS_ENABLED=true; reading with the browser"})
+        apify = False
+    if not apify and not settings.browser_token:
         log.warning("campaign.runner.comment_leads_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
         return None, None
     from bot.facebook_collector.browser import BrowserSessionClient
@@ -1515,10 +1629,46 @@ def _comment_worker(settings: Any, pool: Any) -> tuple[Any, Any]:
                                     timeout_seconds=settings.leads_timeout_seconds)
     else:
         log.warning("campaign.runner.comment_leads_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
+    if apify:
+        from bot.acquisition.apify_client import ApifyHttp
+        from bot.acquisition.apify_facebook_comments import ApifyCommentsSource
+
+        from .comment_reader import ApifyCommentReader
+
+        store = PostgresLeadStore(pool, settings.safety_limits())
+        reader = ApifyCommentReader(ApifyCommentsSource(ApifyHttp(settings.apify_token), settings.post_reads_config()),
+                                    store)
+        return CommentLeadWorker(store, None, judge, config=settings.comment_config(), reader=reader), judge
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
     worker = CommentLeadWorker(PostgresLeadStore(pool, settings.safety_limits()), browser, judge,
                                config=settings.comment_config())
     return worker, judge
+
+
+def _post_worker(settings: Any, pool: Any, judge: Any = None) -> tuple[Any, list[Any]]:
+    """The reader of posts sent by link, only with APIFY_FACEBOOK_COMMENTS_ENABLED=true (else None, nothing changes).
+
+    ``judge``: the comment worker's judge when it exists; with a key but no comment worker one is built here.
+    """
+    config = settings.post_reads_config()
+    if config is None:
+        return None, []
+    from bot.acquisition.apify_client import ApifyHttp
+    from bot.acquisition.apify_facebook_comments import ApifyCommentsSource
+
+    from .leads import OpenRouterLeadJudge, PostgresLeadStore
+    from .post_leads import PostgresPostReadStore, PostLeadWorker
+
+    closers: list[Any] = []
+    if judge is None and settings.openrouter_api_key:
+        judge = OpenRouterLeadJudge(api_key=settings.openrouter_api_key, model=settings.leads_model,
+                                    timeout_seconds=settings.leads_timeout_seconds)
+        closers.append(judge.aclose)
+    elif judge is None:
+        log.warning("campaign.runner.post_reads_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
+    source = ApifyCommentsSource(ApifyHttp(settings.apify_token), config)
+    worker = PostLeadWorker(PostgresPostReadStore(pool), source, PostgresLeadStore(pool, settings.safety_limits()), judge)
+    return worker, [source.aclose, *closers]
 
 
 if __name__ == "__main__":

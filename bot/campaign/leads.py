@@ -25,12 +25,17 @@ import random
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from urllib.parse import parse_qs, urlsplit
 
 from bot.facebook_collector.challenges import detect_challenge
+
+from .fblinks import (  # noqa: F401 - re-exported (runner, post_leads, tests)
+    FB_HOSTS,
+    is_facebook_post,
+)
 
 if TYPE_CHECKING:
     import asyncpg
@@ -50,8 +55,7 @@ MAX_COMMENTS = 40
 MAX_COMMENT_CHARS = 1500
 MAX_CARD_COMMENT_CHARS = 300
 
-_FB_HOSTS = frozenset({"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"})
-_POST_PATH = re.compile(r"^/(?:groups/[^/]+/(?:posts|permalink)/[^/]+|[^/]+/posts/[^/]+)/?$")
+_FB_HOSTS = FB_HOSTS
 # First path segments that are never a person or a page.
 _NOT_PROFILES = frozenset({
     "groups", "hashtag", "photo", "photo.php", "photos", "watch", "events", "share", "sharer", "sharer.php",
@@ -61,14 +65,6 @@ _NOT_PROFILES = frozenset({
 })
 _VANITY = re.compile(r"^[A-Za-z0-9.\-]{3,80}$")
 _DIGITS = re.compile(r"^\d{5,25}$")
-
-
-def is_facebook_post(url: str | None) -> bool:
-    """A single Facebook post (a group permalink or a page's /posts/): the only pages whose comments are read."""
-    if not url:
-        return False
-    parts = urlsplit(url)
-    return parts.scheme == "https" and (parts.hostname or "") in _FB_HOSTS and bool(_POST_PATH.match(parts.path))
 
 
 def profile_link(href: object) -> tuple[str, str] | None:
@@ -423,7 +419,7 @@ def person_card(person: Person, *, location: str | None, now: datetime) -> str:
 @dataclass(frozen=True, slots=True)
 class CommentRead:
     campaign_id: str
-    finding_id: str
+    finding_id: str | None  # None: a post sent by link (``post_leads``), not a finding of the campaign
     post_url: str
     attempts: int
     context: PostContext
@@ -459,6 +455,28 @@ class LeadStore(Protocol):
     async def save_leads(self, leads: Sequence[Lead]) -> int: ...
 
 
+class ApifyReadStore(LeadStore, Protocol):
+    """What the Apify reader (``LEADS_PROVIDER=apify``) needs besides the browser store (migration 049)."""
+
+    async def apify_reads_today(self) -> int: ...
+    async def run_id(self, read: CommentRead) -> str | None: ...
+    async def save_run(self, read: CommentRead, run_id: str) -> bool: ...
+
+
+class CommentReadFailed(Exception):
+    """A read that ends ``failed`` with this code and is never retried (a retry could pay for a second run)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class CommentReader(Protocol):
+    """Reads the comments under one post without a browser (Apify): ``(post_text, comments)``."""
+
+    async def read(self, read: CommentRead) -> tuple[str | None, list[Comment]]: ...
+
+
 class LeadBrowser(Protocol):
     async def acquire(self, profile_id: str, profile_name: str, persisted_state: str, *,
                       platform: str = "facebook") -> BrowserLease: ...
@@ -474,19 +492,21 @@ class CommentConfig:
     pause_min_seconds: float = 6.0
     pause_max_seconds: float = 14.0
     snapshot_timeout_ms: int = 30_000
+    apify_reads_per_day: int = 40  # its own day quota: ``reads_per_day`` is the browser's
 
     def __post_init__(self) -> None:
-        if (not 0 <= self.reads_per_day <= 500 or not 1 <= self.reads_per_round <= 10 or self.max_attempts < 1
+        if (not 0 <= self.reads_per_day <= 500 or not 0 <= self.apify_reads_per_day <= 500 or not 1 <= self.reads_per_round <= 10 or self.max_attempts < 1
                 or self.pause_min_seconds < 0 or self.pause_max_seconds < self.pause_min_seconds
                 or not 1_000 <= self.snapshot_timeout_ms <= 60_000):
             raise ValueError("unsafe comment reader settings")
 
 
 class CommentLeadWorker:
-    def __init__(self, store: LeadStore, browser: LeadBrowser, judge: LeadJudge | None = None, *,
+    def __init__(self, store: LeadStore, browser: LeadBrowser | None, judge: LeadJudge | None = None, *,
                  config: CommentConfig | None = None,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
-        self.store, self.browser, self.judge = store, browser, judge
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 reader: CommentReader | None = None) -> None:
+        self.store, self.browser, self.judge, self.reader = store, browser, judge, reader
         self.config, self.sleep = config or CommentConfig(), sleep
 
     async def serve(self, poll_seconds: float, stop: asyncio.Event) -> None:
@@ -506,6 +526,9 @@ class CommentLeadWorker:
         """Read up to ``reads_per_round`` queued posts on one lease; returns how many were read."""
         if not await self.store.has_reads():
             return 0
+        if self.reader is not None:
+            return await self._step_reader(self.reader)
+        assert self.browser is not None  # without a reader the worker is the browser one
         left = self.config.reads_per_day - await self.store.reads_today()
         if left <= 0 or await self.store.breaker_reason() is not None:
             return 0
@@ -557,6 +580,29 @@ class CommentLeadWorker:
             finally:
                 await self.store.release_profile(profile.id, profile_state)
 
+    async def _step_reader(self, reader: CommentReader) -> int:
+        """``LEADS_PROVIDER=apify``: no Facebook profile, no browser; one paid run per post, ``apify_reads_per_day``."""
+        store = cast("ApifyReadStore", self.store)
+        left = self.config.apify_reads_per_day - await store.apify_reads_today()
+        if left <= 0:
+            return 0
+        done = 0
+        for read in await store.claim_reads(min(left, self.config.reads_per_round)):
+            try:
+                post_text, comments = await reader.read(read)
+            except CommentReadFailed as exc:
+                log.warning("campaign.comments.read_failed %s", exc.code, extra={"campaign_id": read.campaign_id})
+                await store.finish_read(read, "failed", error=exc.code[:200])
+                continue
+            except Exception as exc:  # noqa: BLE001 - one unreadable post never stops the others; the run id is kept
+                await self._failed(read, getattr(exc, "code", None) or f"error:{type(exc).__name__}")
+                continue
+            if post_text:
+                read = replace(read, context=replace(read.context, post_text=post_text))
+            await self._finish(read, comments)
+            done += 1
+        return done
+
     async def _failed(self, read: CommentRead, error: str) -> None:
         log.warning("campaign.comments.read_failed %s", error, extra={"campaign_id": read.campaign_id})
         if read.attempts >= self.config.max_attempts:
@@ -565,7 +611,9 @@ class CommentLeadWorker:
             await self.store.requeue(read)
 
     async def _read(self, read: CommentRead, snapshot: dict[str, Any]) -> None:
-        comments = parse_comments(snapshot.get("comments"), post_author=snapshot.get("post_author_url"))
+        await self._finish(read, parse_comments(snapshot.get("comments"), post_author=snapshot.get("post_author_url")))
+
+    async def _finish(self, read: CommentRead, comments: list[Comment]) -> None:
         verdicts, judged_by = await self._judge(read.context, comments)
         leads = [Lead(read, comment, verdict, judged_by)
                  for comment, verdict in zip(comments, verdicts, strict=True) if verdict.lead]
@@ -608,6 +656,24 @@ class PostgresLeadStore:
     async def reads_today(self) -> int:
         return int(await self.pool.fetchval(
             "select count(*) from campaign_comment_reads where started_at > now() - interval '1 day'"))
+
+    async def apify_reads_today(self) -> int:
+        """Reads that started a paid Apify run within a day (migration 049: they carry a ``run_id``)."""
+        return int(await self.pool.fetchval(
+            """select count(*) from campaign_comment_reads
+                where run_id is not null and started_at > now() - interval '1 day'"""))
+
+    async def run_id(self, read: CommentRead) -> str | None:
+        return await self.pool.fetchval(
+            "select run_id from campaign_comment_reads where campaign_id = $1::uuid and finding_id = $2::uuid",
+            read.campaign_id, read.finding_id)
+
+    async def save_run(self, read: CommentRead, run_id: str) -> bool:
+        result = await self.pool.execute(
+            """update campaign_comment_reads set run_id = $3
+                where campaign_id = $1::uuid and finding_id = $2::uuid and state = 'reading'""",
+            read.campaign_id, read.finding_id, run_id[:100])
+        return result.split()[-1] != "0"
 
     async def breaker_reason(self) -> str | None:
         from bot.orchestra.store import challenge_breaker
@@ -713,12 +779,14 @@ class MemoryLeadStore:
     """In-memory :class:`LeadStore` for tests."""
 
     def __init__(self, reads: Sequence[CommentRead] = (), *, profile_state: str = "ready",
-                 busy: bool = False, breaker: str | None = None, today: int = 0) -> None:
+                 busy: bool = False, breaker: str | None = None, today: int = 0, apify_today: int = 0) -> None:
         self.queued: list[CommentRead] = list(reads)
         self.reading: list[CommentRead] = []
         self.finished: dict[str, tuple[str, int, int, str | None]] = {}
         self.leads: dict[tuple[str, str], Lead] = {}  # (person, post) -> the lead
         self.profile_state, self.busy, self.breaker, self.today = profile_state, busy, breaker, today
+        self.apify_today = apify_today
+        self.runs: dict[tuple[str, str | None], str] = {}  # (campaign, finding) -> the paid Apify run
 
     async def recover(self) -> int:
         count = len(self.reading)
@@ -731,6 +799,17 @@ class MemoryLeadStore:
 
     async def reads_today(self) -> int:
         return self.today
+
+    async def apify_reads_today(self) -> int:
+        return self.apify_today
+
+    async def run_id(self, read: CommentRead) -> str | None:
+        return self.runs.get((read.campaign_id, read.finding_id))
+
+    async def save_run(self, read: CommentRead, run_id: str) -> bool:
+        self.runs[(read.campaign_id, read.finding_id)] = run_id
+        self.apify_today += 1
+        return True
 
     async def breaker_reason(self) -> str | None:
         return self.breaker

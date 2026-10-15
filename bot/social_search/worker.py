@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from bot.campaign.fblinks import post_link_only
 from bot.campaign.models import TERMINAL_STATES
 
 from .adapters import PLATFORM_NAMES, SOCIAL_PLATFORMS, Block, SocialItem, adapter_for, detect_block
@@ -187,7 +188,7 @@ class SocialSearchWorker:
             if social.state == "done":
                 continue
             campaign = await self.campaigns.get(campaign_id)
-            if campaign is None or campaign.state in TERMINAL_STATES:
+            if campaign is None or campaign.state in TERMINAL_STATES or post_link_only(campaign):
                 continue
             query = await self._next_query(campaign, platform, social.rounds)
             if query is None:
