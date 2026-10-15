@@ -150,3 +150,19 @@ async def test_confirm_join_of_a_finished_campaign_queues_nothing(pool) -> None:
 
     assert await confirm_group_join(pool, group) == "ended"
     assert await pool.fetchval("select state from campaign_groups where id = $1::uuid", group) == "skipped"
+
+
+async def test_next_groups_orders_with_and_without_the_join_flag(pool) -> None:
+    from bot.campaign.runs import PostgresRunStore
+    from bot.orchestra.store import SafetyLimits
+
+    cid = await PostgresCampaignStore(pool).create(plan_campaign(TEXT), chat_id=1, requested_by=2, source_text=TEXT, actor="t")
+    for key, confirmed in (("a", False), ("b", True)):
+        await pool.execute(
+            """insert into campaign_groups (campaign_id, group_key, canonical_url, state, relevance_score, join_confirmed_at)
+               values ($1::uuid, $2, 'https://www.facebook.com/groups/' || $2 || '/', 'queued', 0.5,
+                       case when $3 then now() end)""", cid, key, confirmed)
+    off = await PostgresRunStore(pool, SafetyLimits()).next_groups(cid, 20)
+    assert [(g.group_key, g.joined) for g in off] == [("a", False), ("b", False)]
+    on = await PostgresRunStore(pool, SafetyLimits(), join_notices=True).next_groups(cid, 20)
+    assert [(g.group_key, g.joined) for g in on] == [("b", True)]  # joined groups are a window of their own

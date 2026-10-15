@@ -431,11 +431,12 @@ class PostgresRunStore:
                        and not exists ({_RECENT_FINDING})""",
                 campaign_id)
             joined = "(g.join_confirmed_at is not null)" if self.join_notices else "false"
+            first = f"{joined} desc, " if self.join_notices else ""  # a constant in ORDER BY is a column number
             rows = await conn.fetch(
                 f"""select g.id::text as id, g.group_key, g.canonical_url, g.name, {joined} as joined
                       from campaign_groups g
                      where g.campaign_id = $1::uuid and g.state = 'queued' and g.batch_id is null
-                     order by {joined} desc, exists ({_RECENT_FINDING}) desc, g.window_no nulls last,
+                     order by {first}exists ({_RECENT_FINDING}) desc, g.window_no nulls last,
                               g.relevance_score desc, g.group_key limit $2""",
                 campaign_id, _window_size(limit),
             )
