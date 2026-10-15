@@ -458,3 +458,35 @@ def test_the_prompt_lists_the_v6_keys():
     from bot.analysis_pipeline.openrouter import EXTRACTION_SCHEMA, INSTRUCTIONS
 
     assert all(key in INSTRUCTIONS for key in EXTRACTION_SCHEMA["required"])
+
+
+LD_LINE = ('JSON-LD: {"url": "https://x.es/a", "plot_m2": 2500.0, "phone": "+34 600 111 222", '
+           '"advertiser": "Inmo Sol", "area_m2": 2500.0}')
+
+
+def _res(**kw):
+    return AnalysisResult(relevant=True, confidence=0.7, summary="s", location="Madrid", price_signals=[],
+                          related_links=[], category="real_estate", reason="x", **kw)
+
+
+def test_source_line_facts_reach_the_payload_but_never_area(monkeypatch):
+    from bot.analysis_pipeline.cards import render_card
+    from bot.analysis_pipeline.formatters import finding_payload
+    monkeypatch.setenv("CARD_EXTRA_FIELDS", "true")
+    p = finding_payload(_res(property_type="house"), evidence(text=f"{LD_LINE}\nFlat\nbody", platform="website"))
+    assert (p["plot_m2"], p["phone"], p["advertiser"]) == (2500.0, "+34 600 111 222", "Inmo Sol")
+    assert p["area_m2"] is None and "area_source" not in p
+    assert "Площадь: участок 2 500 м²" in render_card(p, vertical="real_estate")
+    assert finding_payload(_res(area_m2=150), evidence(text=f"{LD_LINE}\nFlat", platform="website"))["area_m2"] == 150
+
+
+def test_payload_is_unchanged_without_line_flag_website_or_with_broken_json(monkeypatch):
+    from bot.analysis_pipeline.formatters import finding_payload
+    monkeypatch.setenv("CARD_EXTRA_FIELDS", "true")
+    plain = finding_payload(_res(), evidence(platform="website"))
+    keys = {"plot_m2", "phone", "advertiser", "area_source"}
+    assert not keys & plain.keys()
+    assert finding_payload(_res(), evidence(text="JSON-LD: {broken\nFlat", platform="website")) == plain
+    assert not keys & finding_payload(_res(), evidence(text=f"{LD_LINE}\nFlat", platform="facebook")).keys()
+    monkeypatch.setenv("CARD_EXTRA_FIELDS", "false")
+    assert not keys & finding_payload(_res(), evidence(text=f"{LD_LINE}\nFlat", platform="website")).keys()
