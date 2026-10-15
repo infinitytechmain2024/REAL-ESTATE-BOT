@@ -386,7 +386,7 @@ class TaskIntake:
         return mode_menu(text, both=self.both_mode)
 
     async def _draft(self, user_id: int, chat_id: int) -> Draft:
-        draft = await self.store.get(user_id)
+        draft = await self._stored(user_id)
         if draft is None:
             return Draft(user_id, chat_id)
         if draft.expired(self.now()):  # untouched for a day: the task is gone, the mode stays
@@ -394,13 +394,20 @@ class TaskIntake:
         draft.chat_id = chat_id
         return draft
 
-    async def mode(self, user_id: int) -> str | None:
+    async def _stored(self, user_id: int) -> Draft | None:
+        """The saved draft; with the flag off a «both» draft counts as no mode chosen (the menu comes back)."""
         draft = await self.store.get(user_id)
+        if draft is not None and draft.mode == "both" and not self.both_mode:
+            draft = replace(draft.fresh(), mode=None)
+        return draft
+
+    async def mode(self, user_id: int) -> str | None:
+        draft = await self._stored(user_id)
         return draft.mode if draft else None
 
     async def drafting(self, user_id: int) -> bool:
         """A task is being written (a question or the card is on screen) and has not expired."""
-        draft = await self.store.get(user_id)
+        draft = await self._stored(user_id)
         return draft is not None and draft.step != "idle" and not draft.expired(self.now())
 
     async def choose_mode(self, user_id: int, chat_id: int, mode: str) -> Reply:

@@ -53,6 +53,7 @@ async def test_rollback_refused_with_both_drafts_then_works(conn):
     await conn.execute(INSERT, 1, "both")
     with pytest.raises(asyncpg.PostgresError, match="mode both"):
         await conn.execute(ROLLBACK.read_text(encoding="utf-8"))
+    await conn.execute("rollback")  # the refused script left its transaction aborted
     await conn.execute("delete from public.user_task_drafts")
     await conn.execute(ROLLBACK.read_text(encoding="utf-8"))
     await conn.execute(ROLLBACK.read_text(encoding="utf-8"))  # repeated rollback does not fail

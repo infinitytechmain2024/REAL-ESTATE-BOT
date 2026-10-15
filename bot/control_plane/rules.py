@@ -167,15 +167,18 @@ def _split(text: str) -> list[str]:
 
 def generic_question(spec: TaskSpec) -> str:
     """One generic question per kind of task, for the no-AI fallback."""
+    investors = ("Какие проекты и стадии вам интересны? Например: стартапы на ранней стадии, готовый бизнес, девелопмент."
+                 if spec.investor.user_role == "deploying" else
+                 "На какой стадии проект и какая сумма нужна? Например: идея, 300 тыс. €; запущен, 1,5 млн €.")
     if spec.mode == "investors":
-        if spec.investor.user_role == "deploying":
-            return "Какие проекты и стадии вам интересны? Например: стартапы на ранней стадии, готовый бизнес, девелопмент."
-        return "На какой стадии проект и какая сумма нужна? Например: идея, 300 тыс. €; запущен, 1,5 млн €."
+        return investors
     if spec.property_type == "land":
-        return "Под какое строительство? Например: дом для себя, апарт-отель, пока только в инвестиции."
-    if spec.deal == "rent":
-        return "На какой срок? Например: на год, от 6 месяцев, на лето."
-    return "Этаж, лифт, состояние важны? Например: «не ниже 3 этажа, лифт обязателен», «после ремонта», «не важно»."
+        real_estate = "Под какое строительство? Например: дом для себя, апарт-отель, пока только в инвестиции."
+    elif spec.deal == "rent":
+        real_estate = "На какой срок? Например: на год, от 6 месяцев, на лето."
+    else:
+        real_estate = "Этаж, лифт, состояние важны? Например: «не ниже 3 этажа, лифт обязателен», «после ремонта», «не важно»."
+    return f"{real_estate} И про инвесторов: {investors}" if spec.mode == "both" else real_estate
 
 
 def deviation_question(spec: TaskSpec) -> str:
@@ -299,7 +302,8 @@ class RuleInterviewer:
             self._set_place(spec, {"name": name})
         if mode in ("investors", "both"):
             self._read_investors(spec, text, asking, editing)
-        if mode != "investors":
+        # in «both» an answer about the investor's ticket or role is not a price or rooms of the property
+        if mode != "investors" and not (mode == "both" and (asking or "").startswith("investor.")):
             self._read_real_estate(spec, text, asking, editing)
         self._read_asked_lists(spec, text, asking, editing)
         return many

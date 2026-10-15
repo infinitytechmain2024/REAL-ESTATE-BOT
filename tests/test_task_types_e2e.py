@@ -169,3 +169,39 @@ async def test_the_orchestra_takes_mode_both_whatever_the_intake_flag_says() -> 
     [campaign] = campaigns.campaigns.values()
     assert campaign.plan.vertical == "both" and not any("failed" in n for n in notices)
     assert isinstance(campaigns, MemoryCampaignStore)
+
+
+@pytest.mark.asyncio
+async def test_a_both_draft_is_dropped_when_the_flag_is_turned_off() -> None:
+    control, _, _ = plane()
+    control.intake.both_mode = True
+    await press(control, USER, "mode:both")
+    await say(control, USER, FIRST["both"])
+    control.intake.both_mode = False
+    assert await control.intake.mode(USER) is None and not await control.intake.drafting(USER)
+    reply = await say(control, USER, "ещё одна задача в Мадриде")
+    assert callbacks(reply) == ["mode:real_estate", "mode:investors"]
+
+
+@pytest.mark.asyncio
+async def test_the_ticket_answer_keeps_the_property_budget_in_both() -> None:
+    control, _, _ = plane()
+    control.intake.both_mode = True
+    await press(control, USER, "mode:both")
+    await say(control, USER, FIRST["both"])
+    draft = await control.intake.store.get(USER)
+    assert draft is not None and draft.spec is not None and draft.spec.budget.max == 300000
+    for answer in ("2", "фонды"):
+        await say(control, USER, answer)
+    draft = await control.intake.store.get(USER)
+    assert draft is not None and draft.asking == "investor.ticket"
+    await say(control, USER, "до 2 000 000 евро")
+    draft = await control.intake.store.get(USER)
+    assert draft is not None and draft.spec is not None
+    assert draft.spec.budget.max == 300000 and draft.spec.investor.ticket.max == 2_000_000
+
+
+def test_the_generic_question_of_both_has_an_investor_part() -> None:
+    from bot.control_plane.rules import generic_question
+
+    assert "про инвесторов" in generic_question(TaskSpec(mode="both")) and "про инвесторов" not in generic_question(TaskSpec(mode="real_estate"))
