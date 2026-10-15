@@ -94,6 +94,7 @@ from .status_text import (
     is_checking_line,
     is_live_line,
     join_notice,
+    join_notice_ended,
     reach_line,
     site_line,
     social_line,
@@ -492,8 +493,11 @@ class CampaignRunner:
         """One message per closed group, then the mark: a repeated tick sends nothing (CAMPAIGN_JOIN_NOTICES)."""
         for group in await self.store.groups_needing_join(campaign.id):
             try:
-                await self.messenger.send_buttons(campaign.chat_id, join_notice(group.name, group.url),
-                                                  [(JOIN_BUTTON, f"group:joined:{group.id}")])
+                if campaign.state in TERMINAL_STATES:  # nothing will read it: no button, only the news
+                    await self.messenger.send(campaign.chat_id, join_notice_ended(group.name, group.url))
+                else:
+                    await self.messenger.send_buttons(campaign.chat_id, join_notice(group.name, group.url),
+                                                      [(JOIN_BUTTON, f"group:joined:{group.id}")])
             except Exception:  # noqa: BLE001 - Telegram down: the notice is tried again next tick
                 log.warning("campaign.join_notice_failed", extra={"campaign_id": campaign.id, "group_id": group.id})
                 continue
@@ -509,7 +513,7 @@ class CampaignRunner:
         groups = await self.store.next_groups(campaign.id, min(limits.window_size, WINDOW_SIZE))
         if not groups:
             return await self._drain(campaign, run, "queue_exhausted")
-        if started >= limits.max_windows:
+        if started >= limits.max_windows and not groups[0].joined:  # a window of joined groups is over the limit
             return await self._drain(campaign, run, "max_windows")
         if run.next_window_at is not None and run.next_window_at > now:
             return ANALYSIS
@@ -552,7 +556,8 @@ class CampaignRunner:
             return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
-        if (self.config.join_notices and waited < self.config.social_grace_seconds
+        fallback_grace = max(self.config.social_grace_seconds, self.config.window_cooldown_seconds * 2)
+        if (self.config.join_notices and waited < fallback_grace
                 and await self.store.fallback_pending(campaign.id)):
             return ANALYSIS  # the browser still re-reads the closed groups: their «вступите» notice may follow
         final = waited >= self.config.analysis_grace_seconds

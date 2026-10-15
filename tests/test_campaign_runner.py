@@ -616,7 +616,7 @@ async def test_a_campaign_that_ends_with_a_closed_group_still_sends_the_notice()
     await runner.campaigns.set_state(cid, "cancelled", "t")
     await runner.step(cid)
     await runner.step(cid)
-    assert len(messenger.buttons) == 1
+    assert messenger.buttons == [] and sum("новом поиске" in t for _, _, t in messenger.sent) == 1
 
 
 async def test_confirm_join_of_an_ended_campaign_is_refused() -> None:
@@ -648,3 +648,34 @@ async def test_joined_groups_get_a_window_of_their_own() -> None:
     assert len(rest) == 19 and not any(g.joined for g in rest)
     other = await store.start_window(cid, rest, vertical="real_estate", actor="t")
     assert store.batches[other.batch_id].requested_by == "campaign:runner" and other.batch_id != one.batch_id
+
+
+async def test_a_joined_group_is_read_even_when_the_windows_are_spent() -> None:
+    campaigns, store, _, discovery, clock, _, plan = make(groups=21, max_windows=1)
+    messenger = ButtonMessenger()
+    store.join_notices = True
+    runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids={7},
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0, join_notices=True))
+    cid = await create(campaigns, plan)
+    await runner.step(cid)
+    await runner.step(cid)  # window 1 (20 groups)
+    store.private_groups.add("https://www.facebook.com/groups/g002/")
+    store.finish_batch(only_batch(store, cid))
+    store.normalised[cid] = 1  # analysis still runs: the drain waits, the campaign is alive
+    await runner.step(cid)  # window closed
+    await runner.step(cid)  # notice; max_windows spent, the 21st group is left
+    group_id = messenger.buttons[0][2][0][1].removeprefix("group:joined:")
+    assert await store.confirm_join(group_id) == "queued"
+    await runner.step(cid)  # the joined group gets a window of its own
+    batch = next(b for _, b, s in store.windows[cid] if s == "active")
+    assert store.batches[batch].urls == ["https://www.facebook.com/groups/g002/"]
+    assert store.batches[batch].requested_by == f"apify_fallback:join:{group_id}"
+    assert (await campaigns.get(cid)).state == "running"
+
+
+async def test_the_notice_of_an_ended_campaign_has_no_button() -> None:
+    _, messenger, runner, cid = await _closed_group_run(True)
+    await runner.campaigns.set_state(cid, "cancelled", "t")
+    await runner.step(cid)
+    assert messenger.buttons == []
+    assert any("новом поиске" in t for _, _, t in messenger.sent)
