@@ -16,6 +16,7 @@ from bot.web_search.queries import QueryTask
 from bot.web_search.sources.apify import SourceRunContext, source_run_scope
 from bot.web_search.sources.portals import (
     ApifyFotocasaSource,
+    ApifyHabitacliaSource,
     ApifyIdealistaPortalSource,
     ApifyPisosSource,
     ApifyYaencontreSource,
@@ -404,3 +405,128 @@ async def test_pisos_setting_builds_the_source_only_when_enabled(monkeypatch):
         await source.aclose()
     with pytest.raises(ValueError):
         WebSearchSettings(_env_file=None, APIFY_PISOS_MAX_RESULTS=51)
+
+
+# --- Habitaclia (B5): rows follow assumed field names, no live run yet --------------------------------------------
+
+
+def habitaclia_row(**kwargs):
+    row = {
+        "url": "https://www.habitaclia.com/comprar-terreno-sant_cugat_del_valles-i500003456789.htm", "operation": "venta", "title": "Parcela urbana en Habitaclia", "price": 250000,
+        "currency": "EUR", "surface": 3200, "rooms": None, "municipality": "Madrid", "province": "Madrid",
+        "neighbourhood": "Barajas", "street": "Calle Ejemplo", "phone": "+34910000002",
+        "agency": {"name": "Inmobiliaria Ejemplo S.L."},
+        "description": "Parcela de 3.200 m2 de suelo urbano.",
+    }
+    return {**row, **kwargs}
+
+
+def habitaclia(rows, requests, **kwargs):
+    return ApifyHabitacliaSource("secret-token", client=api(rows, requests), sleep=AsyncMock(), **kwargs)
+
+
+@pytest.mark.parametrize("change", [
+    {"country_code": "IT"}, {"vertical": "investors"}, {"constraints": {"deal": "both"}}, {"location": " "},
+    {"task_text": "habitación", "goal": "habitación"}, {"blocked_hosts": frozenset({"habitaclia.com"})},
+    {"suburbs_only": True}, {"radius_km": 25.0},
+])
+def test_habitaclia_supports_spanish_sale_or_rent_without_radius(change):
+    adapter = habitaclia([], [])
+    assert adapter.supports(task()) and adapter.supports(task(place_level="province"))
+    assert not adapter.supports(task(**change))
+    assert not ApifyHabitacliaSource("").supports(task())
+    assert "secret" not in repr(adapter)
+
+
+def test_habitaclia_url_classification_matches_the_portal_regexes():
+    from bot.web_search.urls import classify_url
+
+    assert classify_url("https://www.habitaclia.com/comprar-terreno-sant_cugat_del_valles-i500003456789.htm") == "listing"
+    assert classify_url("https://www.habitaclia.com/alquiler-piso-sant_cugat_del_valles-i500003456790.htm") == "listing"
+    assert classify_url("https://www.habitaclia.com/terrenos-sant_cugat_del_valles.htm") != "listing"
+
+
+async def test_habitaclia_launch_body_is_capped_pinned_and_rows_are_mapped():
+    requests = []
+    adapter = habitaclia([habitaclia_row(), habitaclia_row(municipality="Alcorcón")], requests)
+    with source_run_scope(context("apify_habitaclia")):
+        listings = await adapter.search(task(), limit=5)
+    launch = next(r for r in requests if r.method == "POST")
+    assert launch.url.path.endswith("/acts/trev0n~habitaclia-com-spain-scraper/runs")
+    assert launch.url.params["maxTotalChargeUsd"] == "0.05" and launch.url.params["maxItems"] == "5"
+    assert json.loads(launch.content) == {"maxItems": 5, "operation": "sale", "propertyType": "land",
+                                          "location": "Madrid", "locationType": "municipality",
+                                          "minSize": 2000, "maxPrice": 3000000}
+    assert len(listings) == 1  # Alcorcón is another municipality
+    listing = listings[0]
+    assert listing.url == "https://www.habitaclia.com/comprar-terreno-sant_cugat_del_valles-i500003456789.htm" and listing.title == "Parcela urbana en Habitaclia"
+    assert listing.price == 250000 and listing.currency == "EUR" and listing.deal == "sale"
+    assert listing.plot_m2 == 3200 and listing.area_m2 is None and listing.property_type == "landparcel"
+    assert listing.phone == "+34910000002" and listing.advertiser == "Inmobiliaria Ejemplo S.L."
+    assert listing.address == "Calle Ejemplo, Barajas, Madrid"
+    await adapter.aclose()
+
+
+def test_habitaclia_house_area_is_built_area_not_plot():
+    adapter = habitaclia([], [])
+    house = task(task_text="casa", goal="casa", constraints={"deal": "sale"})
+    listing = adapter._normalize(habitaclia_row(surface=140, rooms=3), house, None)
+    assert listing.area_m2 == 140 and listing.plot_m2 is None and listing.rooms == 3
+    assert listing.property_type == "house"
+
+
+@pytest.mark.parametrize("change", [
+    {"operation": "alquiler"}, {"operation": "rent"}, {"operation": "unknown"},
+    {"url": "https://www.habitaclia.com/alquiler-piso-sant_cugat_del_valles-i500003456790.htm", "operation": None},
+    {"url": "https://www.idealista.com/inmueble/123456/"}, {"url": "https://www.habitaclia.com/terrenos-sant_cugat_del_valles.htm"},
+    {"url": "/not-a-listing"}, {"url": "javascript:alert(1)"},
+    {"municipality": "Alcorcón"}, {"municipality": None, "city": None}, {"country": "FR"},
+])
+def test_habitaclia_rejects_foreign_deal_place_and_non_listing_rows(change):
+    adapter = habitaclia([], [])
+    assert adapter._normalize(habitaclia_row(**change), task(), None) is None
+    assert adapter._normalize("not a row", task(), None) is None
+
+
+def test_habitaclia_never_guesses_missing_facts():
+    adapter = habitaclia([], [])
+    listing = adapter._normalize(habitaclia_row(price=None, surface=None, phone="", agency=None, street=None,
+                                         neighbourhood=None), task(), None)
+    assert listing.price is None and listing.currency is None and listing.plot_m2 is None
+    assert listing.phone is None and listing.advertiser is None and listing.rooms is None
+    # a price text, a price in another currency and a price without a number are not prices
+    for price, currency in (("250.000 €", None), (250000, "USD"), (0, "EUR"), ("consultar", None)):
+        row = habitaclia_row(price=price, currency=currency)
+        assert adapter._normalize(row, task(), None).price is None
+    # a surface that the description contradicts is not a plot
+    other = habitaclia_row(description="Parcela de 900 m2 de suelo.")
+    assert adapter._normalize(other, task(), None).plot_m2 is None
+
+
+def test_habitaclia_reads_field_synonyms_and_an_explicit_plot_area():
+    adapter = habitaclia([], [])
+    row = {"link": "https://www.habitaclia.com/comprar-terreno-sant_cugat_del_valles-i500003456789.htm", "transactionType": "SALE", "price": {"amount": 99000}, "plotArea": 1500,
+           "surface": 80, "city": "Madrid", "phones": ["+34910000003"], "advertiser": "Particular", "text": "Solar."}
+    listing = adapter._normalize(row, task(), None)
+    assert listing.plot_m2 == 1500 and listing.area_m2 is None and listing.phone == "+34910000003"
+    assert listing.advertiser == "Particular" and listing.description == "Solar."
+    assert listing.price == 99000 and listing.currency == "EUR"
+
+
+async def test_habitaclia_setting_builds_the_source_only_when_enabled(monkeypatch):
+    from bot.web_search.settings import WebSearchSettings
+
+    monkeypatch.delenv("APIFY_HABITACLIA_ENABLED", raising=False)
+    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").apify_habitaclia_enabled is False
+    assert WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token").sources() == ()
+    assert WebSearchSettings(_env_file=None, APIFY_HABITACLIA_ENABLED=True).sources() == ()  # no token
+    settings = WebSearchSettings(_env_file=None, APIFY_TOKEN="secret-token", APIFY_HABITACLIA_ENABLED=True,
+                                 APIFY_HABITACLIA_MAX_RESULTS=7, APIFY_HABITACLIA_MAX_CHARGE_USD=.03)
+    source, = settings.sources()
+    try:
+        assert isinstance(source, ApifyHabitacliaSource) and source.actor_id == "trev0n~habitaclia-com-spain-scraper"
+        assert source.max_items == 7 and source.max_charge_usd == .03
+    finally:
+        await source.aclose()
+    with pytest.raises(ValueError):
+        WebSearchSettings(_env_file=None, APIFY_HABITACLIA_MAX_RESULTS=51)

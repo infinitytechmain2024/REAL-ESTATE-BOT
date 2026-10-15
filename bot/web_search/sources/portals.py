@@ -448,3 +448,18 @@ class ApifyPisosSource(_TolerantPortal):
 
     def __init__(self, token: str, *, actor_id: str = "logiover/pisos-com-property-scraper", **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
+
+
+class ApifyHabitacliaSource(_TolerantPortal):
+    """Habitaclia through ``trev0n/habitaclia-com-spain-scraper``.
+
+    Same status as ``ApifyPisosSource``: README unread, price unconfirmed, input and output names assumed (the input
+    is the same set of fields; Habitaclia is strongest in Catalonia). Not run live.
+    """
+
+    name = "apify_habitaclia"
+    hosts = frozenset({"habitaclia.com"})
+    kinds: ClassVar[dict[str, str]] = {"land": "land", "house": "house", "apartment": "flat", "commercial": "premises"}
+
+    def __init__(self, token: str, *, actor_id: str = "trev0n/habitaclia-com-spain-scraper", **kwargs: Any) -> None:
+        super().__init__(token, actor_id=actor_id, **kwargs)

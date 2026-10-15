@@ -15,6 +15,7 @@
 | Yaencontre | `APIFY_YAENCONTRE_ENABLED` | `igolaizola/yaencontre-scraper` | по схеме выдачи из Apify Store |
 | Idealista | `APIFY_IDEALISTA_ENABLED` + `APIFY_IDEALISTA_PROVIDER=igolaizola` | `igolaizola/idealista-scraper` | по схеме выдачи из Apify Store |
 | Pisos.com | `APIFY_PISOS_ENABLED` | `logiover/pisos-com-property-scraper` | по схеме из README, живой сэмпл не делался (README с сервера не читался — поля выдачи предположены) |
+| Habitaclia | `APIFY_HABITACLIA_ENABLED` | `trev0n/habitaclia-com-spain-scraper` | по схеме из README, живой сэмпл не делался (README с сервера не читался — поля выдачи предположены) |
 
 Задачи, которые берут порталы: Испания, недвижимость, продажа или аренда, участок, жильё или коммерция; город,
 провинция или явный радиус. Комнаты, инвесторы и «только пригороды» идут обычным поиском.
