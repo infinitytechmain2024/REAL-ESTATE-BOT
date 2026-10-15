@@ -295,7 +295,7 @@
       "stream": "ops",
       "agent": "deployer+builder",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Сб",
       "hours": 6
     },
