@@ -146,7 +146,7 @@
       "stream": "acquisition",
       "agent": "builder+db",
       "deps": [],
-      "status": "ready",
+      "status": "review",
       "day": "Пт",
       "hours": 5
     },
@@ -183,7 +183,7 @@
       "stream": "acquisition",
       "agent": "analyst",
       "deps": [],
-      "status": "ready",
+      "status": "in_progress",
       "day": "Пт",
       "hours": 1.5
     },
@@ -193,7 +193,7 @@
       "stream": "acquisition",
       "agent": "analyst",
       "deps": [],
-      "status": "ready",
+      "status": "in_progress",
       "day": "Пт",
       "hours": 2
     },
@@ -249,7 +249,7 @@
       "stream": "portals",
       "agent": "sources",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Пт-Сб",
       "hours": 6
     },
