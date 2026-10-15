@@ -151,7 +151,14 @@ class PostLeadWorker:
                                           code="estimated")
                 await self.store.finish(read, "failed", cost_usd=cfg.max_usd_per_post, error="run_id_not_saved")
                 return
-        run = await self.source.wait(run_id)
+        try:
+            run = await self.source.wait(run_id)
+        except Exception:
+            # Paid for but never reconciled: booked at its cap (a late real usage replaces it, see record_unique).
+            await costs.record_unique("api", key=f"post-read:{read.campaign_id}:{url_key(read.post_url)}",
+                                      provider="apify", item=cfg.actor_id, cost_usd=cfg.max_usd_per_post,
+                                      code="estimated")
+            raise
         cost = await self._bill(read, run)
         status = str(run.get("status"))
         if status != "SUCCEEDED":

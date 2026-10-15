@@ -460,7 +460,7 @@ class ApifyReadStore(LeadStore, Protocol):
 
     async def apify_reads_today(self) -> int: ...
     async def run_id(self, read: CommentRead) -> str | None: ...
-    async def save_run(self, read: CommentRead, run_id: str) -> None: ...
+    async def save_run(self, read: CommentRead, run_id: str) -> bool: ...
 
 
 class CommentReadFailed(Exception):
@@ -668,11 +668,12 @@ class PostgresLeadStore:
             "select run_id from campaign_comment_reads where campaign_id = $1::uuid and finding_id = $2::uuid",
             read.campaign_id, read.finding_id)
 
-    async def save_run(self, read: CommentRead, run_id: str) -> None:
-        await self.pool.execute(
+    async def save_run(self, read: CommentRead, run_id: str) -> bool:
+        result = await self.pool.execute(
             """update campaign_comment_reads set run_id = $3
                 where campaign_id = $1::uuid and finding_id = $2::uuid and state = 'reading'""",
             read.campaign_id, read.finding_id, run_id[:100])
+        return result.split()[-1] != "0"
 
     async def breaker_reason(self) -> str | None:
         from bot.orchestra.store import challenge_breaker
@@ -805,9 +806,10 @@ class MemoryLeadStore:
     async def run_id(self, read: CommentRead) -> str | None:
         return self.runs.get((read.campaign_id, read.finding_id))
 
-    async def save_run(self, read: CommentRead, run_id: str) -> None:
+    async def save_run(self, read: CommentRead, run_id: str) -> bool:
         self.runs[(read.campaign_id, read.finding_id)] = run_id
         self.apify_today += 1
+        return True
 
     async def breaker_reason(self) -> str | None:
         return self.breaker

@@ -566,7 +566,7 @@ async def test_apify_over_budget_starts_no_run(ledger) -> None:
     assert api.launches() == [] and store.finished[_read(1).post_url][3] == "budget_cap"
 
 
-def test_leads_provider_defaults_to_the_browser_and_apify_without_the_flag_falls_back(monkeypatch, caplog) -> None:
+async def test_leads_provider_defaults_to_the_browser_and_apify_without_the_flag_falls_back(monkeypatch, caplog) -> None:
     import os
 
     from bot.campaign.runner import _comment_worker
@@ -585,3 +585,65 @@ def test_leads_provider_defaults_to_the_browser_and_apify_without_the_flag_falls
     settings = CampaignRunnerSettings(_env_file=None)
     worker, _ = _comment_worker(settings, object())
     assert worker is not None and worker.reader is None and worker.browser is not None  # warning + browser
+
+
+async def test_apify_a_wait_that_never_succeeds_books_the_run_at_its_cap(ledger) -> None:
+    import httpx
+
+    from tests.test_post_leads import Api, thirty
+
+    class RunDown(Api):
+        def __call__(self, request):
+            if "/actor-runs/" in request.url.path:
+                self.calls.append(request)
+                return httpx.Response(503, json={"error": "x"})
+            return super().__call__(request)
+
+    api = RunDown(items=thirty())
+    store = MemoryLeadStore([_read(1)])
+    lead_worker = _apify_worker(api, store, max_attempts=3)
+    for _ in range(4):
+        await lead_worker.step()
+    assert store.finished[_read(1).post_url][0] == "failed" and len(api.launches()) == 1
+    assert [(e.cost_usd, e.code) for e in ledger.entries if e.kind == "cost"] == [(1.0, "estimated")]
+
+
+async def test_apify_a_refused_launch_fails_at_once_without_a_retry(ledger) -> None:
+    from tests.test_post_leads import Api
+
+    api = Api(launch=402)
+    store = MemoryLeadStore([_read(1)])
+    await _apify_worker(api, store).step()
+    assert store.queued == [] and store.finished[_read(1).post_url][0] == "failed"
+    assert len(api.launches()) == 1
+
+
+async def test_apify_a_run_id_that_is_not_saved_fails_without_a_second_run(ledger) -> None:
+    from tests.test_post_leads import Api
+
+    class Lost(MemoryLeadStore):
+        async def save_run(self, read, run_id):
+            return False
+
+    api = Api()
+    store = Lost([_read(1)])
+    await _apify_worker(api, store).step()
+    assert store.finished[_read(1).post_url][3] == "run_id_not_saved" and len(api.launches()) == 1
+
+
+async def test_apify_an_empty_dataset_is_done_with_nothing(ledger) -> None:
+    from tests.test_post_leads import Api
+
+    store = MemoryLeadStore([_read(1)])
+    await _apify_worker(Api(items=[]), store).step()
+    assert store.finished[_read(1).post_url][:3] == ("done", 0, 0) and not store.leads
+
+
+@pytest.mark.parametrize("status", ["FAILED", "ABORTED"])
+async def test_apify_a_run_that_did_not_succeed_fails_the_read(status, ledger) -> None:
+    from tests.test_post_leads import Api, thirty
+
+    store = MemoryLeadStore([_read(1)])
+    await _apify_worker(Api(items=thirty(), status=status), store).step()
+    assert store.finished[_read(1).post_url][0] == "failed"
+    assert store.finished[_read(1).post_url][3] == f"apify_run_{status.lower()}" and not store.leads

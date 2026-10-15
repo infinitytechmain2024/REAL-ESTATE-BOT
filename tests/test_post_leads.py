@@ -594,3 +594,21 @@ def test_migration_048_is_additive_and_has_a_guarded_rollback() -> None:
     assert not any(word in sql for word in ("drop table", "alter table public.campaigns", "delete from", "update "))
     down = ROLLBACK.read_text(encoding="utf-8").lower()
     assert "raise exception" in down and "drop table if exists public.campaign_post_reads" in down
+
+
+async def test_a_wait_that_never_succeeds_books_the_run_at_its_cap(ledger) -> None:
+    class RunDown(Api):
+        def __call__(self, request):
+            if "/actor-runs/" in request.url.path:
+                self.calls.append(request)
+                return httpx.Response(503, json={"error": "x"})
+            return super().__call__(request)
+
+    api = RunDown(items=thirty())
+    w, store, _ = worker(api)
+    for _ in range(4):
+        await w.step()
+    row = store.rows[(CID, POST)]
+    assert row["state"] == "failed" and len(api.launches()) == 1
+    costs_rows = [e for e in ledger.entries if e.kind == "cost"]
+    assert [(e.cost_usd, e.code) for e in costs_rows] == [(1.0, "estimated")]

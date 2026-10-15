@@ -4,10 +4,15 @@
 -- After running it, delete the 048 row from schema_migrations so the migration can be applied again.
 begin;
 do $$
+declare
+    has_rows boolean;
 begin
-    if to_regclass('public.campaign_post_reads') is not null
-       and exists (select 1 from public.campaign_post_reads) then
-        raise exception 'campaign_post_reads still has rows';
+    if to_regclass('public.campaign_post_reads') is not null then
+        -- dynamic: a plain query would be planned (and fail) even when the table is already gone
+        execute 'select exists (select 1 from public.campaign_post_reads)' into has_rows;
+        if has_rows then
+            raise exception 'campaign_post_reads still has rows';
+        end if;
     end if;
 end $$;
 drop table if exists public.campaign_post_reads;

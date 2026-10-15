@@ -4,11 +4,16 @@
 -- After running it, delete the 049 row from schema_migrations so the migration can be applied again.
 begin;
 do $$
+declare
+    has_ids boolean;
 begin
     if exists (select 1 from information_schema.columns
-                where table_schema = 'public' and table_name = 'campaign_comment_reads' and column_name = 'run_id')
-       and exists (select 1 from public.campaign_comment_reads where run_id is not null) then
-        raise exception 'campaign_comment_reads still has run ids';
+                where table_schema = 'public' and table_name = 'campaign_comment_reads' and column_name = 'run_id') then
+        -- dynamic: a plain query would be planned (and fail) once the column is gone
+        execute 'select exists (select 1 from public.campaign_comment_reads where run_id is not null)' into has_ids;
+        if has_ids then
+            raise exception 'campaign_comment_reads still has run ids';
+        end if;
     end if;
 end $$;
 alter table public.campaign_comment_reads drop column if exists run_id;

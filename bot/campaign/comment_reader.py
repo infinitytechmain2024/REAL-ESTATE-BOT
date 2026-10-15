@@ -13,7 +13,7 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
-from bot.acquisition.apify_client import ApifyError, LaunchUnknown
+from bot.acquisition.apify_client import ApifyError, LaunchUnknown, TemporaryApifyError
 from bot.utils import costs
 
 from .leads import CommentReadFailed
@@ -42,6 +42,8 @@ class ApifyCommentReader:
             except Exception as exc:
                 code = exc.code if isinstance(exc, ApifyError) else f"error:{type(exc).__name__}"
                 await costs.error("api", code[:120], item=self.source.config.actor_id)
+                if isinstance(exc, ApifyError) and not isinstance(exc, TemporaryApifyError):
+                    raise CommentReadFailed(code) from None  # 400/402: a retry cannot help
                 raise
 
     async def _estimate(self, read: CommentRead) -> None:
@@ -62,11 +64,18 @@ class ApifyCommentReader:
                 await self._estimate(read)
                 raise CommentReadFailed("apify_launch_unknown") from None
             try:
-                await self.store.save_run(read, run_id)
+                saved = await self.store.save_run(read, run_id)
             except Exception:  # noqa: BLE001 - the run exists but its id is lost: never queue a second paid one
+                saved = False
+            if not saved:
                 await self._estimate(read)
-                raise CommentReadFailed("run_id_not_saved") from None
-        run = await self.source.wait(run_id)
+                raise CommentReadFailed("run_id_not_saved")
+        try:
+            run = await self.source.wait(run_id)
+        except Exception:
+            # The run was paid for but never reconciled: booked at its cap (a late real usage replaces it).
+            await self._estimate(read)
+            raise
         usage = run.get("usageTotalUsd")
         known = isinstance(usage, int | float) and not isinstance(usage, bool) and math.isfinite(usage) and usage >= 0
         await costs.record_unique("api", key=f"comment-read:{read.campaign_id}:{read.finding_id}", provider="apify",
