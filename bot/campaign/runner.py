@@ -1445,6 +1445,8 @@ async def main() -> None:
             await generator.aclose()
         if lead_judge is not None:
             await lead_judge.aclose()
+        if comments is not None and getattr(comments, "reader", None) is not None:
+            await comments.reader.aclose()
         for close in reach_closers + post_closers:
             await close()
         if judge is not None:
@@ -1569,7 +1571,12 @@ def _comment_worker(settings: Any, pool: Any) -> tuple[Any, Any]:
     """The comment reader for investor leads, unless CAMPAIGN_COMMENT_LEADS=off (or the browser is unreachable)."""
     if settings.comment_leads == "off" or not settings.comment_max_posts:
         return None, None
-    if not settings.browser_token:
+    apify = settings.leads_provider == "apify"
+    if apify and settings.post_reads_config() is None:
+        log.warning("campaign.runner.leads_provider_apify_disabled",
+                    extra={"hint": "set APIFY_FACEBOOK_COMMENTS_ENABLED=true; reading with the browser"})
+        apify = False
+    if not apify and not settings.browser_token:
         log.warning("campaign.runner.comment_leads_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
         return None, None
     from bot.facebook_collector.browser import BrowserSessionClient
@@ -1582,6 +1589,16 @@ def _comment_worker(settings: Any, pool: Any) -> tuple[Any, Any]:
                                     timeout_seconds=settings.leads_timeout_seconds)
     else:
         log.warning("campaign.runner.comment_leads_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
+    if apify:
+        from bot.acquisition.apify_client import ApifyHttp
+        from bot.acquisition.apify_facebook_comments import ApifyCommentsSource
+
+        from .comment_reader import ApifyCommentReader
+
+        store = PostgresLeadStore(pool, settings.safety_limits())
+        reader = ApifyCommentReader(ApifyCommentsSource(ApifyHttp(settings.apify_token), settings.post_reads_config()),
+                                    store)
+        return CommentLeadWorker(store, None, judge, config=settings.comment_config(), reader=reader), judge
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
     worker = CommentLeadWorker(PostgresLeadStore(pool, settings.safety_limits()), browser, judge,
                                config=settings.comment_config())

@@ -148,6 +148,10 @@ class CampaignRunnerSettings(BaseSettings):
     apify_comments_max: int = Field(default=200, ge=1, le=1000, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_PER_POST")
     apify_comments_max_usd: float = Field(default=1.0, gt=0, le=100, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST")
     apify_comments_timeout_seconds: int = Field(default=300, ge=30, le=3600, validation_alias="APIFY_FACEBOOK_COMMENTS_TIMEOUT_SECONDS")
+    # Who reads the comments under sent objects (v2 B2): browser (default, unchanged) or apify (needs the flag above,
+    # else a warning and browser). Its day quota is its own: SAFETY_MAX_FACEBOOK_COMMENT_READS_PER_DAY is the browser's.
+    leads_provider: str = Field(default="browser", pattern="^(browser|apify)$", validation_alias="LEADS_PROVIDER")
+    apify_comments_max_per_day: int = Field(default=40, ge=0, le=500, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY")
 
     @model_validator(mode="after")
     def _comments_ready(self) -> CampaignRunnerSettings:
@@ -228,7 +232,8 @@ class CampaignRunnerSettings(BaseSettings):
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig
 
-        return CommentConfig(reads_per_day=self.comment_reads_per_day, reads_per_round=self.comment_reads_per_round)
+        return CommentConfig(reads_per_day=self.comment_reads_per_day, reads_per_round=self.comment_reads_per_round,
+                             apify_reads_per_day=self.apify_comments_max_per_day)
 
 
     def owner_ids(self) -> frozenset[int]:

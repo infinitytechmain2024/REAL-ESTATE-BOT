@@ -457,3 +457,131 @@ async def test_the_browser_script_reads_each_comment_and_the_posts_author() -> N
     assert [(c.author, c.profile_url) for c in comments] == [
         ("Juan Pérez", "https://www.facebook.com/profile.php?id=100012345678"),
         ("Olga Invest", "https://www.facebook.com/olga.invest")]
+
+
+# --- v2 B2: LEADS_PROVIDER=apify (httpx.MockTransport, no browser) -------------------------------------------------
+
+
+class NoBrowser(FakeBrowser):
+    async def acquire(self, *args, **kwargs):
+        raise AssertionError("LEADS_PROVIDER=apify must not open a browser")
+
+
+def _apify_worker(api, store, **config):
+    from bot.campaign.comment_reader import ApifyCommentReader
+    from tests.test_post_leads import source
+
+    reader = ApifyCommentReader(source(api), store)
+    return CommentLeadWorker(store, NoBrowser(), None, config=CommentConfig(**config), reader=reader)
+
+
+@pytest.fixture
+def ledger():
+    from bot.utils import costs
+
+    sink = costs.MemoryLedger()
+    costs.install(sink, budget_usd=5)
+    try:
+        yield sink
+    finally:
+        costs.install(None)
+
+
+async def test_apify_reads_without_a_browser_keeps_the_leads_and_books_one_cost(ledger) -> None:
+    from tests.test_post_leads import Api, thirty
+
+    api = Api(items=thirty())
+    store = MemoryLeadStore([_read(1)], profile_state="human_verification_required")
+    lead_worker = _apify_worker(api, store)
+
+    assert await lead_worker.step() == 1
+    assert store.finished[_read(1).post_url][:3] == ("done", 30, 5)
+    assert len(store.leads) == 5 and store.profile_state == "human_verification_required"  # no profile claimed
+    assert len(api.launches()) == 1
+    assert float(api.launches()[0].url.params["maxTotalChargeUsd"]) > 0
+    rows = [e for e in ledger.entries if e.kind == "cost"]
+    assert len(rows) == 1 and rows[0].cost_usd == pytest.approx(0.0825) and sorted(ledger.keys) == ["comment-read:c1:f1"]
+    assert await lead_worker.step() == 0 and len(api.launches()) == 1
+
+
+async def test_apify_a_second_tick_resumes_the_stored_run_and_never_launches_again(ledger) -> None:
+    import httpx
+
+    from tests.test_post_leads import Api, thirty
+
+    class DatasetDown(Api):
+        down = True
+
+        def __call__(self, request):
+            if self.down and "/datasets/" in request.url.path:
+                self.calls.append(request)
+                return httpx.Response(503, json={"error": "x"})
+            return super().__call__(request)
+
+    api = DatasetDown(items=thirty())
+    store = MemoryLeadStore([_read(1)])
+    lead_worker = _apify_worker(api, store, max_attempts=3)
+
+    assert await lead_worker.step() == 0  # the run was paid and stored, the dataset is unreachable: requeued
+    assert store.runs == {("c1", "f1"): "RUNC"} and len(store.queued) == 1 and not store.finished
+    api.down = False
+    assert await lead_worker.step() == 1  # the same run is resumed
+    assert len(api.launches()) == 1 and len(store.leads) == 5
+    assert len([e for e in ledger.entries if e.kind == "cost"]) == 1
+    assert await lead_worker.step() == 0 and len(api.launches()) == 1
+
+
+async def test_apify_day_quota_is_its_own(ledger) -> None:
+    from tests.test_post_leads import Api, thirty
+
+    api = Api(items=thirty())
+    store = MemoryLeadStore([_read(1)], today=500, apify_today=2)
+    assert await _apify_worker(api, store, apify_reads_per_day=2).step() == 0
+    assert api.launches() == [] and len(store.queued) == 1
+    store.apify_today = 1
+    assert await _apify_worker(api, store, apify_reads_per_day=2).step() == 1  # the browser's 500 does not count
+
+
+async def test_apify_a_lost_launch_answer_fails_the_read_with_an_estimate(ledger) -> None:
+    import httpx
+
+    from tests.test_post_leads import Api
+
+    api = Api(launch=httpx.ReadTimeout("lost"))
+    store = MemoryLeadStore([_read(1)])
+    await _apify_worker(api, store).step()
+    assert store.finished[_read(1).post_url][0] == "failed"
+    assert store.finished[_read(1).post_url][3] == "apify_launch_unknown"
+    assert [e.code for e in ledger.entries if e.kind == "cost"] == ["estimated"]
+
+
+async def test_apify_over_budget_starts_no_run(ledger) -> None:
+    from bot.utils import costs
+    from tests.test_post_leads import Api
+
+    await ledger.add(costs.Entry("c1", "llm", "cost", cost_usd=9.0))
+    api = Api()
+    store = MemoryLeadStore([_read(1)])
+    await _apify_worker(api, store).step()
+    assert api.launches() == [] and store.finished[_read(1).post_url][3] == "budget_cap"
+
+
+def test_leads_provider_defaults_to_the_browser_and_apify_without_the_flag_falls_back(monkeypatch, caplog) -> None:
+    import os
+
+    from bot.campaign.runner import _comment_worker
+    from bot.campaign.settings import CampaignRunnerSettings
+
+    for name in [k for k in os.environ if k.startswith("APIFY_") or k == "LEADS_PROVIDER"]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("TELEGRAM_TOKEN", "t")
+    settings = CampaignRunnerSettings(_env_file=None)
+    assert settings.leads_provider == "browser" and settings.apify_comments_max_per_day == 40
+    assert settings.comment_config().apify_reads_per_day == 40 and settings.comment_config().reads_per_day == 40
+
+    monkeypatch.setenv("LEADS_PROVIDER", "apify")
+    monkeypatch.setenv("BROWSER_SESSION_API_TOKEN", "t")
+    settings = CampaignRunnerSettings(_env_file=None)
+    worker, _ = _comment_worker(settings, object())
+    assert worker is not None and worker.reader is None and worker.browser is not None  # warning + browser

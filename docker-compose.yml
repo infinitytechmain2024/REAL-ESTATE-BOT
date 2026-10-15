@@ -500,6 +500,9 @@ services:
       APIFY_FACEBOOK_COMMENTS_MAX_PER_POST: ${APIFY_FACEBOOK_COMMENTS_MAX_PER_POST:-200}
       APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST: ${APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST:-1.0}
       APIFY_FACEBOOK_COMMENTS_TIMEOUT_SECONDS: ${APIFY_FACEBOOK_COMMENTS_TIMEOUT_SECONDS:-300}
+      # Who reads the comments under sent objects: browser (default) or apify, and the Apify day quota (v2 B2).
+      LEADS_PROVIDER: ${LEADS_PROVIDER:-browser}
+      APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY: ${APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY:-40}
       # The final report gets the investors section (v2 B4); off by default.
       CAMPAIGN_INVESTOR_REPORT: ${CAMPAIGN_INVESTOR_REPORT:-false}
       WEB_SEARCH_SEARXNG_URL: http://searxng:8080
