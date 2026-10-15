@@ -32,6 +32,8 @@ class ControlPlaneSettings:
     interview_model: str = "anthropic/claude-sonnet-4.5"
     interview_timeout_seconds: float = 30.0
     interview_max_rounds: int = 14
+    # A Facebook post link as the task (v2 B1, needs the same flag as the campaign-runner's post reader): off = plain text.
+    apify_comments_enabled: bool = False
     # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
     # OpenRouter stays its fallback. The key is never logged or echoed.
     architect_provider: str = "openrouter"
@@ -87,6 +89,7 @@ class ControlPlaneSettings:
             interview_model=os.environ.get("OPENROUTER_INTERVIEW_MODEL", "").strip() or "anthropic/claude-sonnet-4.5",
             interview_timeout_seconds=float(_bounded_int("OPENROUTER_INTERVIEW_TIMEOUT_SECONDS", 30, 1, 180)),
             interview_max_rounds=_bounded_int("INTERVIEW_MAX_ROUNDS", 14, 1, 30),
+            apify_comments_enabled=os.environ.get("APIFY_FACEBOOK_COMMENTS_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"},
             architect_provider=_architect_provider(os.environ.get("ARCHITECT_PROVIDER", "openrouter")),
             anthropic_api_key=anthropic_key,
             anthropic_interview_model=os.environ.get("ANTHROPIC_INTERVIEW_MODEL", "").strip() or "claude-sonnet-5-5",

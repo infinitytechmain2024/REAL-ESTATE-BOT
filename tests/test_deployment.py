@@ -117,6 +117,30 @@ def test_compose_passes_every_setting_to_its_service() -> None:
     assert stale == [], f"compose defaults differ from .env.example: {stale}"
 
 
+def test_compose_has_no_duplicate_keys() -> None:
+    """PyYAML's safe_load keeps the last of two equal keys; docker compose refuses the file (a merge can do this)."""
+    import yaml
+
+    class Strict(yaml.SafeLoader):
+        pass
+
+    def construct(loader: yaml.SafeLoader, node: yaml.MappingNode):
+        keys = [loader.construct_object(k, deep=True) for k, _ in node.value]
+        dupes = sorted({str(k) for k in keys if keys.count(k) > 1})
+        assert not dupes, f"duplicate keys in docker-compose.yml: {dupes} (line {node.start_mark.line + 1})"
+        return loader.construct_mapping(node, deep=True)
+
+    Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct)
+    repo = Path(__file__).resolve().parent.parent
+    assert yaml.load((repo / "docker-compose.yml").read_text(encoding="utf-8"), Loader=Strict)["services"]
+
+    bad = "services:\n  a:\n    environment:\n      X: 1\n      X: 2\n"
+    import pytest
+
+    with pytest.raises(AssertionError, match="duplicate keys"):
+        yaml.load(bad, Loader=Strict)
+
+
 def test_every_service_has_healthcheck_and_restart() -> None:
     """A service that dies or hangs silently is the 24/7 failure; one-shot (profile) services are exempt."""
     import yaml

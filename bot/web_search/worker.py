@@ -33,6 +33,7 @@ from datetime import UTC, datetime, timedelta
 
 from bot.campaign import geo
 from bot.campaign.architect import SearchPlanner, plan_with_model
+from bot.campaign.fblinks import post_link_only
 from bot.campaign.models import TERMINAL_STATES, Campaign
 from bot.campaign.search_plan import blocked_hosts_of, country_portals, source_hosts
 from bot.campaign.spec import TaskSpec
@@ -302,7 +303,7 @@ class WebSearchWorker:
     async def step(self, campaign_id: str) -> None:
         self._listing_hosts = {}  # per-tick cache of ``_host_has_listing``
         campaign = await self.campaigns.get(campaign_id)
-        if campaign is None:
+        if campaign is None or post_link_only(campaign):  # a post link campaign only reads that post's comments
             return
         run = await self.store.get_run(campaign_id)
         if campaign.state in TERMINAL_STATES:

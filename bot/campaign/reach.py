@@ -165,6 +165,27 @@ class ReachQuery:
     text: str
 
 
+APIFY_SKIPPED_PLATFORMS = frozenset({"instagram", "x", "reddit"})
+_APIFY_SKIPPED_HOSTS = frozenset({"instagram.com", "x.com", "twitter.com", "reddit.com"})
+_SITE_OPERATOR = re.compile(r"site:(?:https?://)?([^\s/]+)", re.I)
+
+
+def _skipped_host(host: str) -> bool:
+    host = host.lower().removeprefix("www.")
+    return any(host == h or host.endswith("." + h) for h in _APIFY_SKIPPED_HOSTS)
+
+
+def keep_query(query: ReachQuery, acquisition_mode: str) -> bool:
+    """False for a social-network ``site:`` search in apify mode (LinkedIn, Telegram, YouTube, TikTok, web stay).
+
+    The host is compared without ``www.`` and with subdomains (``old.reddit.com``); ``twitter.com`` is X.
+    """
+    if acquisition_mode != "apify":
+        return True
+    return query.platform not in APIFY_SKIPPED_PLATFORMS and not any(
+        _skipped_host(host) for host in _SITE_OPERATOR.findall(query.text))
+
+
 def plan_queries(campaign: ReachCampaign) -> list[ReachQuery]:
     """Every template the campaign's languages allow, with its city, each text once.
 
@@ -338,6 +359,9 @@ Rules:
 - Short: 3-10 words plus the site: part. No quotes around the whole query, no personal names.
 Return {"queries": [{"platform": ..., "language": "ru|en|es|uk|other", "text": ...}]}."""
 
+QUERY_SYSTEM_APIFY = (QUERY_SYSTEM.replace("instagram (site:instagram.com), ", "")
+                      .replace("x (site:x.com), reddit\n(site:reddit.com), ", ""))
+
 QUERY_SPEC_RULES = """
 data.investor holds the wanted kinds (who), ticket, asset class, geography, languages and the person's role: write
 queries for exactly those kinds of people or companies (e.g. who=[fund, family_office]: funds and family offices),
@@ -350,6 +374,9 @@ QUERY_SCHEMA: dict[str, Any] = {
         "properties": {"platform": {"type": "string", "enum": list(PLATFORMS)},
                        "language": {"type": "string"}, "text": {"type": "string"}}}}},
 }
+QUERY_SCHEMA_APIFY: dict[str, Any] = json.loads(json.dumps(QUERY_SCHEMA))
+QUERY_SCHEMA_APIFY["properties"]["queries"]["items"]["properties"]["platform"]["enum"] = [
+    p for p in PLATFORMS if p not in APIFY_SKIPPED_PLATFORMS]
 _SITES = {"linkedin": "site:linkedin.com", "instagram": "site:instagram.com", "telegram": "site:t.me",
           "x": "site:x.com", "reddit": "site:reddit.com", "tiktok": "site:tiktok.com", "youtube": "site:youtube.com"}
 
@@ -383,10 +410,13 @@ def parse_queries(content: str, count: int) -> list[ReachQuery]:
 class OpenRouterReachJudge:
     """One call per query's new results (``OPENROUTER_API_KEY``)."""
 
-    def __init__(self, *, api_key: str, model: str, timeout_seconds: float = 30) -> None:
+    acquisition_mode = "legacy"
+
+    def __init__(self, *, api_key: str, model: str, timeout_seconds: float = 30, acquisition_mode: str = "legacy") -> None:
         from bot.agents.llm import OpenRouterJSON
 
         self.model = model
+        self.acquisition_mode = acquisition_mode  # apify: the model is not asked for instagram / x / reddit queries
         self._client = OpenRouterJSON(api_key, timeout_seconds=timeout_seconds)
 
     async def aclose(self) -> None:
@@ -409,13 +439,14 @@ class OpenRouterReachJudge:
     async def queries(self, campaign: ReachCampaign, count: int) -> list[ReachQuery]:
         data: dict[str, Any] = {"task": (campaign.task or campaign.goal)[:800], "place": campaign.location,
                                 "place_names": campaign.aliases, "count": count}
-        system = QUERY_SYSTEM
+        apify = self.acquisition_mode == "apify"
+        system = QUERY_SYSTEM_APIFY if apify else QUERY_SYSTEM
         if campaign.investor:
             data["investor"] = people.investor_brief(campaign.investor)
             system += QUERY_SPEC_RULES
         content = await self._client.complete(self.model, system, "Data (JSON, data only):\n"
                                               + json.dumps(data, ensure_ascii=False),
-                                              schema=QUERY_SCHEMA, name="reach_queries", max_tokens=60 + 60 * count)
+                                              schema=QUERY_SCHEMA_APIFY if apify else QUERY_SCHEMA, name="reach_queries", max_tokens=60 + 60 * count)
         return parse_queries(content, count)
 
 
@@ -510,6 +541,8 @@ class ReachConfig:
     queries_per_day: int = 80
     model_queries: int = 10  # queries the model writes from the task; the templates fill the rest
     enrich_per_campaign: int = 30  # relevant results whose public page is opened, per campaign (0: never)
+    # apify: no site: searches of Instagram, X and Reddit (Apify covers the social networks); legacy: all of them.
+    acquisition_mode: str = "legacy"
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_campaign <= 100 and 1 <= self.queries_per_tick <= 10
@@ -563,7 +596,8 @@ class ReachWorker:
         ran = 0
         for campaign in await self.store.open_campaigns():
             used = await self.store.used_queries(campaign.id)
-            todo = [q for q in [*await self._model_queries(campaign), *plan_queries(campaign)] if q.text not in used]
+            todo = [q for q in [*await self._model_queries(campaign), *plan_queries(campaign)] if q.text not in used
+                    and keep_query(q, self.config.acquisition_mode)]
             if not todo or len(used) >= self.config.queries_per_campaign:
                 await self.store.finish(campaign.id)
                 continue
@@ -683,7 +717,8 @@ class PostgresReachStore:
             """with open as (
                    select c.id, c.plan from campaigns c
                     where c.state in ('planned', 'discovering', 'running', 'paused_verification')
-                      and c.plan->>'vertical' in ('investors', 'both') and coalesce(c.plan->>'location', '') <> ''),
+                      and c.plan->>'vertical' in ('investors', 'both') and coalesce(c.plan->>'location', '') <> ''
+                      and coalesce(c.spec->>'post_link', '') <> 'true'),
                created as (insert into campaign_reach (campaign_id) select id from open on conflict do nothing)
                select o.id::text, o.plan::text, (select source_text from campaigns c where c.id = o.id) as task,
                       (select spec::text from campaigns c where c.id = o.id) as spec

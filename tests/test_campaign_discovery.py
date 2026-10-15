@@ -450,3 +450,100 @@ async def test_unsafe_limits_are_rejected() -> None:
                 {"pause_min_seconds": 5, "pause_max_seconds": 1}, {"search_timeout_ms": 120_000}):
         with pytest.raises(ValueError):
             FacebookDiscovery(campaigns, store, FakeBrowser(), FakeReader(), **bad)
+
+
+# --- B3: the groups named in the task -----------------------------------------------------
+
+
+def investor_plan(groups_per_window: int = 20):
+    return plan("Найди инвесторов в недвижимость в Мадриде").model_copy(update={"vertical": "investors"})
+
+
+GROUPS_SPEC = {"mode": "investors", "sources": {
+    "required": ["https://www.facebook.com/groups/Madrid.Investors/", "facebook.com/groups/123456",
+                 "https://www.idealista.com/", "https://www.facebook.com/groups/123/posts/9/"],
+    "extra": ["https://m.facebook.com/groups/madrid.investors/?ref=x", "https://www.facebook.com/groups/second/"],
+    "blocked": []}}
+
+
+async def setup_spec(mode: str, spec: dict[str, Any] | None = GROUPS_SPEC, **kwargs: Any):
+    campaigns = MemoryCampaignStore()
+    cid = await campaigns.create(investor_plan(), chat_id=1, requested_by=2, source_text=RENT, actor="telegram:2",
+                                 spec=spec)
+    store, sleeps = MemoryDiscoveryStore(), Sleeps()
+    browser, reader = kwargs.pop("browser", FakeBrowser()), kwargs.pop("reader", FakeReader())
+    discovery = FacebookDiscovery(campaigns, store, browser, reader, sleep=sleeps, now=lambda: NOW,
+                                  acquisition_mode=mode, **kwargs)
+    return SimpleNamespace(campaigns=campaigns, cid=cid, store=store, browser=browser, reader=reader,
+                           discovery=discovery)
+
+
+def test_the_groups_of_the_task_are_its_facebook_group_urls_once_each() -> None:
+    from bot.campaign.discovery import required_groups
+
+    assert required_groups(GROUPS_SPEC) == [
+        ("madrid.investors", url_of("madrid.investors")), ("123456", url_of("123456")), ("second", url_of("second"))]
+    assert required_groups(None) == [] and required_groups({"sources": "x"}) == []
+    assert required_groups({"sources": {"required": [None, 5, ""]}}) == []
+
+
+async def test_apify_mode_queues_the_groups_of_the_task_and_never_opens_a_browser() -> None:
+    h = await setup_spec("apify", browser=None, reader=None)
+
+    report = await h.discovery.run(h.cid)
+
+    groups = {g.group_key: g for g in await h.store.groups(h.cid)}
+    assert set(groups) == {"madrid.investors", "123456", "second"}
+    assert all((g.state, g.activity, g.seed, g.window_no) == ("queued", "UNKNOWN", "required", 1)
+               for g in groups.values())
+    assert groups["123456"].canonical_url == url_of("123456")
+    assert report.state == "running" and report.queued == 3 and report.seeds_run == 0
+    assert (await h.campaigns.get(h.cid)).state == "running"
+    assert h.store.profile.state == "ready" and h.store.progress == {}
+
+
+async def test_apify_mode_without_groups_in_the_task_still_needs_the_browser_search() -> None:
+    h = await setup_spec("apify", spec={"sources": {"required": ["https://www.idealista.com/"]}}, browser=None,
+                         reader=None)
+    with pytest.raises(DiscoveryRefused, match="no_groups_no_browser"):
+        await h.discovery.run(h.cid)
+    assert (await h.campaigns.get(h.cid)).state == "planned" and await h.store.groups(h.cid) == []
+
+    h = await setup_spec("apify", spec=None)
+    await h.discovery.run(h.cid)  # no spec: the old search runs
+    assert h.browser.navigations
+
+
+async def test_legacy_mode_adds_the_groups_and_the_search_goes_on() -> None:
+    the_plan = investor_plan()
+    seeds = plan_seeds(the_plan, 12)
+    browser = FakeBrowser({seeds[0][1]: [
+        link("madrid.investors", "Investors Madrid", "Public · 5 posts a day"),  # already queued: untouched
+        link("madridinvest", "Madrid investors club", "Public · 5 posts a day")]})
+    h = await setup_spec("legacy", browser=browser)
+
+    report = await h.discovery.run(h.cid)
+
+    groups = {g.group_key: g for g in await h.store.groups(h.cid)}
+    assert {"madrid.investors", "123456", "second", "madridinvest"} <= set(groups)
+    assert (groups["madrid.investors"].seed, groups["madrid.investors"].state) == ("required", "queued")
+    assert groups["123456"].state == "queued"
+    assert len(h.browser.navigations) == len(seeds)  # the browser search was not skipped
+    assert report.state == "running" and report.queued >= 3
+    assert h.browser.released == ["READY"] and h.store.profile.state == "ready"
+
+
+async def test_the_groups_of_the_task_respect_the_campaign_cap_and_a_rerun_adds_nothing() -> None:
+    campaigns = MemoryCampaignStore()
+    the_plan = investor_plan().model_copy(update={"limits": CampaignLimits(max_groups=2, window_size=1)})
+    cid = await campaigns.create(the_plan, chat_id=1, requested_by=2, source_text=RENT, actor="telegram:2",
+                                 spec=GROUPS_SPEC)
+    store = MemoryDiscoveryStore()
+    discovery = FacebookDiscovery(campaigns, store, None, None, acquisition_mode="apify")
+    await discovery.run(cid)
+    first = {g.group_key: (g.state, g.window_no) for g in await store.groups(cid)}
+    assert first == {"madrid.investors": ("queued", 1), "123456": ("queued", 2)}
+    await campaigns.set_state(cid, "completed", "x")
+    with pytest.raises(DiscoveryRefused):
+        await discovery.run(cid)
+    assert {g.group_key for g in await store.groups(cid)} == set(first)
