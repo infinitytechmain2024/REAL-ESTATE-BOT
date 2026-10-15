@@ -203,7 +203,7 @@
       "stream": "investors",
       "agent": "builder+sources+db+analyst",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "Сб",
       "hours": 9
     },
@@ -215,7 +215,7 @@
       "deps": [
         "B1"
       ],
-      "status": "review",
+      "status": "done",
       "day": "Сб",
       "hours": 2
     },
@@ -227,7 +227,7 @@
       "deps": [
         "B1"
       ],
-      "status": "review",
+      "status": "done",
       "day": "Сб",
       "hours": 3
     },
@@ -239,7 +239,7 @@
       "deps": [
         "B1"
       ],
-      "status": "review",
+      "status": "done",
       "day": "Пт-Вс",
       "hours": 5
     },
@@ -285,7 +285,7 @@
         "B1",
         "B4"
       ],
-      "status": "blocked",
+      "status": "in_progress",
       "day": "Вс",
       "hours": 4
     },
