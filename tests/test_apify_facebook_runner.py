@@ -153,3 +153,15 @@ async def test_closed_groups_get_one_browser_batch_that_never_goes_back_to_apify
         BatchPlan(batch, "", "", "", 20, ()), [BatchItem("x", str(await pool.fetchval(
             "select id from monitoring_sources where canonical_url = $1", G2)), G2, 1)], cid)
     assert again is None  # once per Apify batch
+
+
+@needs_db
+async def test_a_join_confirmed_batch_is_read_by_the_browser(pool, monkeypatch) -> None:
+    """A2: ``apify_fallback:join:<group id>`` (CAMPAIGN_JOIN_NOTICES) is the browser's even with scope=all."""
+    from bot.facebook_collector.main import campaign_provider
+    from tests.test_apify_facebook_postgres import _batch
+
+    _, batch = await _batch(pool)
+    await pool.execute("update acquisition_batches set requested_by = 'apify_fallback:join:g1' where id = $1::uuid", batch)
+    s = settings(monkeypatch, APIFY_FACEBOOK_SCOPE="all", **ON)
+    assert await campaign_provider(pool, batch) == "fallback" and choose_provider(s, "fallback") == "local"

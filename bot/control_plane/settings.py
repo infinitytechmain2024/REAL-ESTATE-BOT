@@ -59,6 +59,8 @@ class ControlPlaneSettings:
     # row exists, and who besides owners may skip confirmation.
     auto_mode: bool = False
     auto_operator_user_ids: frozenset[int] = frozenset()
+    # «Вступил ✅» under a closed-group notice of the campaign runner (CAMPAIGN_JOIN_NOTICES).
+    campaign_join_notices: bool = False
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
@@ -109,6 +111,7 @@ class ControlPlaneSettings:
             ),
             operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_OPERATOR_IDS", "")),
             auto_mode=_on_off("AUTO_MODE"),
+            campaign_join_notices=os.environ.get("CAMPAIGN_JOIN_NOTICES", "").strip().lower() in {"1", "true", "yes", "on"},
             auto_operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_AUTO_OPERATOR_IDS", ""), "TELEGRAM_AUTO_OPERATOR_IDS"),
         )
 

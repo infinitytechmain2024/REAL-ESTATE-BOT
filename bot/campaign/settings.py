@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field, PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -38,6 +40,9 @@ class CampaignRunnerSettings(BaseSettings):
     # A group whose newest post is this many days older than its last read is dead and skipped (re-read after 30 days).
     facebook_group_dead_days: int = Field(default=7, ge=1, le=365, validation_alias="FACEBOOK_GROUP_DEAD_DAYS")
     breaker_window_hours: int = Field(default=6, ge=1, le=72, validation_alias="SAFETY_BREAKER_WINDOW_HOURS")
+
+    # apify: the browser social search is off (portals via Apify first); legacy: as before.
+    acquisition_mode: Literal["legacy", "apify"] = Field(default="legacy", validation_alias="ACQUISITION_MODE")
 
     # Social network search (bot/social_search): off unless platforms are listed.
     social_platforms_raw: str = Field(default="instagram,tiktok,linkedin", validation_alias="SOCIAL_SEARCH_PLATFORMS")
@@ -124,6 +129,8 @@ class CampaignRunnerSettings(BaseSettings):
                        if self.openrouter_api_key else None)
         return FinalReporter(recommender)
 
+    # Tell the chat about closed Facebook groups (Apify group_private) and read them after «Вступил».
+    join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -165,7 +172,8 @@ class CampaignRunnerSettings(BaseSettings):
                             relevance_fail_closed=self.relevance_fail_closed,
                             relevance_retry_limit=self.relevance_retry_limit,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
-                            max_people=self.lead_people_max, lead_days=self.lead_days)
+                            max_people=self.lead_people_max, lead_days=self.lead_days,
+                            join_notices=self.join_notices)
 
     # Investor reach across platforms through the search engines (bot/campaign/reach.py).
     reach_enabled: bool = Field(default=True, validation_alias="INVESTOR_REACH_ENABLED")

@@ -39,6 +39,10 @@ class WebSearchSettings(BaseSettings):
     serpapi_daily_cap: int = Field(default=90, ge=0, le=100_000, validation_alias="WEB_SEARCH_SERPAPI_DAILY_CAP")
     poll_seconds: float = Field(default=15, ge=2, le=600, validation_alias="WEB_SEARCH_POLL_SECONDS")
 
+    # apify: portals first, the search engine only when they gave fewer than APIFY_MIN_LISTINGS; legacy: as before.
+    acquisition_mode: Literal["legacy", "apify"] = Field(default="legacy", validation_alias="ACQUISITION_MODE")
+    apify_min_listings: int = Field(default=5, ge=1, le=200, validation_alias="APIFY_MIN_LISTINGS")
+
     apify_idealista_enabled: bool = Field(default=False, validation_alias="APIFY_IDEALISTA_ENABLED")
     apify_token: str = Field(default="", repr=False, validation_alias="APIFY_TOKEN")
     apify_idealista_actor: str = Field(default="axlymxp/idealista-scraper", validation_alias="APIFY_IDEALISTA_ACTOR")
@@ -185,6 +189,7 @@ class WebSearchSettings(BaseSettings):
             verified_host_interval_seconds=self.verified_host_interval_seconds,
             pages_per_verification=self.pages_per_verification,
             max_scrape_api_per_campaign=self.max_scrape_api_per_campaign if self.scrape_api_url else 0,
+            acquisition_mode=self.acquisition_mode, apify_min_listings=self.apify_min_listings,
             domain_policy=self.domain_policy, host_breaker_refusals=self.host_breaker_refusals,
             scrape_cost_usd=self.scrape_api_cost_usd,
             query_cost_usd=self.paid_query_cost_usd * sum(
