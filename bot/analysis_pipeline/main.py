@@ -65,6 +65,7 @@ async def analyse_batch(store, pipeline: AnalysisPipeline, *, batch_size: int, c
             text=row["body_text"],
             title=row["title"],
             published_at=row["published_at"],
+            platform=row.get("platform"),
             comments=[str(c) for c in json.loads(row["comments"] or "[]")],
         )
         context = await _context(store, e.post_id)

@@ -232,3 +232,48 @@ def test_card_shows_v6_fields_and_old_payloads_still_render() -> None:
                         "features": ["terraza", "ascensor"], "deal_type": "rent"}, vertical="real_estate")
     assert "Район: Лавапьес" in card and "Этаж: 3" in card and "Особенности: terraza, ascensor" in card
     assert "Район" not in render_card({"schema_version": "analysis-v4", "summary_ru": "Квартира"}, vertical="real_estate")
+
+
+def _extra(payload: dict, **kw) -> str:
+    return render_card(payload, vertical="real_estate", extra_fields=True, **kw)
+
+
+def test_extra_fields_off_keeps_the_old_card(monkeypatch) -> None:
+    monkeypatch.delenv("CARD_EXTRA_FIELDS", raising=False)
+    payload = es_payload(area_m2=85, phone="+34 600 111 222")
+    card = render_card(payload, original=ES_POST)
+    assert "Площадь" not in card and "Телефон" not in card
+    monkeypatch.setenv("CARD_EXTRA_FIELDS", "true")
+    assert "Площадь: 85 м²" in render_card(payload, original=ES_POST)
+
+
+def test_card_shows_built_area_and_phone_in_order() -> None:
+    card = _extra(es_payload(area_m2=85.5, phone="+34 600 111 222"), confidence=0.9)
+    assert "Площадь: 85,5 м²" in card and "Телефон: +34 600 111 222" in card
+    lines = card.splitlines()
+    names = [x.split(":")[0] for x in lines if ":" in x]
+    assert names.index("Цена") < names.index("Площадь") < names.index("Локация")
+    assert lines.index("Телефон: +34 600 111 222") + 1 == lines.index(next(x for x in lines if x.startswith("Уверенность")))
+
+
+def test_land_card_marks_plot_area() -> None:
+    assert "Площадь: 2 500 м² (участок)" in _extra(es_payload(property_type="land", area_m2=2500))
+    assert "Площадь: 4 000 м² (участок)" in _extra(es_payload(property_type="land", area_m2=2500, plot_m2=4000))
+
+
+def test_house_with_plot_shows_both_areas_apart() -> None:
+    card = _extra(es_payload(property_type="house", area_m2=180, plot_m2=2500))
+    assert "Площадь: 180 м², участок 2 500 м²" in card
+    assert "Площадь: участок 2 500 м²" in _extra(es_payload(property_type="house", plot_m2=2500, area_m2=None))
+
+
+def test_no_area_no_phone_no_lines() -> None:
+    card = _extra(es_payload(area_m2=None, phone=None))
+    assert "Площадь" not in card and "Телефон" not in card
+    card = _extra(es_payload(area_m2=0, phone="  "))
+    assert "Площадь" not in card and "Телефон" not in card
+
+
+def test_investor_card_has_no_area_or_phone() -> None:
+    card = render_card({"who": "Fondo X", "area_m2": 50, "phone": "+34 1"}, vertical="investors", extra_fields=True)
+    assert "Площадь" not in card and "Телефон" not in card

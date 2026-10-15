@@ -74,7 +74,7 @@ class PostgresAnalysisStore:
                    update collected_posts p set analysis_claim_token=gen_random_uuid(), analysis_claimed_at=now()
                      from picked, monitoring_sources s
                     where p.id=picked.id and s.id=p.source_id
-                returning p.id, p.source_id, p.canonical_url, coalesce(p.body_text,'') as body_text,
+                returning p.id, p.source_id, s.platform, p.canonical_url, coalesce(p.body_text,'') as body_text,
                           coalesce(nullif(p.raw_payload->>'title',''), s.configuration->'facebook_last_read'->>'title', '') as title, p.published_at, s.vertical,
                           p.analysis_claim_token,
                           coalesce((select jsonb_agg(c.body_text order by c.created_at)
