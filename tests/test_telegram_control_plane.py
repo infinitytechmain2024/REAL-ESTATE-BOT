@@ -211,20 +211,37 @@ def test_operator_ids_are_parsed_strictly(monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.mark.asyncio
 async def test_group_joined_button_confirms_for_operators_only_and_needs_the_flag() -> None:
     seen: list[str] = []
+    answers = iter(["queued", "stale", "ended"])
 
-    async def confirm(group_id: str) -> bool:
+    async def confirm(group_id: str) -> str:
         seen.append(group_id)
-        return len(seen) == 1
+        return next(answers)
 
     async def sink(command: CommandEnvelope) -> None:
         return None
 
     make = lambda **kw: ControlPlane(settings(), MemoryControlPlaneStore(), FakeTranscriber(TranscriptResult("", None, None, "small")), sink, **kw)  # noqa: E731
     control = make(confirm_join=confirm)
-    reply = await control.handle_callback(11, "group:joined:abc:g1")
-    assert reply.text == "Проверю группу через браузер" and seen == ["abc:g1"]
+    assert (await control.handle_callback(11, "group:joined:abc:g1")).text == "Проверю группу через браузер"
+    assert seen == ["abc:g1"]
     assert (await control.handle_callback(11, "group:joined:abc:g1")).text == "Эта кнопка устарела."  # already queued
+    assert (await control.handle_callback(11, "group:joined:abc:g1")).text.startswith("Поиск уже завершён")
     assert (await control.handle_callback(999, "group:joined:abc:g2")).text == "Эта кнопка устарела."
     assert (await control.handle_callback(None, "group:joined:abc:g2")).text == "Эта кнопка устарела."
-    assert seen == ["abc:g1", "abc:g1"]
+    assert len(seen) == 3
     assert (await make().handle_callback(11, "group:joined:abc:g1")).text != "Проверю группу через браузер"  # flag off
+
+
+@pytest.mark.asyncio
+async def test_group_joined_button_tells_the_campaign_author_that_an_operator_presses_it() -> None:
+    async def confirm(group_id: str) -> str:
+        raise AssertionError("a user must not confirm")
+
+    async def sink(command: CommandEnvelope) -> None:
+        return None
+
+    from bot.control_plane.access import AccessDesk  # noqa: F401  (role set below)
+    control = ControlPlane(settings(), MemoryControlPlaneStore(), FakeTranscriber(TranscriptResult("", None, None, "small")), sink,
+                           confirm_join=confirm)
+    control._is_user = lambda user_id: user_id == 55  # type: ignore[method-assign]
+    assert (await control.handle_callback(55, "group:joined:abc:g1")).text == "Нажать может оператор"

@@ -30,6 +30,8 @@ NOTHING = "Пока ничего подходящего не нашёл."
 # A closed group the Apify read could not open: the person joins it, then presses the button (group:joined:<id>).
 JOIN_BUTTON = "Вступил ✅"
 JOIN_JOINED = "Проверю группу через браузер"
+JOIN_ENDED = "Поиск уже завершён — запустите новый, группа будет прочитана"
+JOIN_OPERATOR_ONLY = "Нажать может оператор"
 
 
 def join_notice(name: str | None, url: str) -> str:

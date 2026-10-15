@@ -131,10 +131,22 @@ async def test_migration_047_group_join_flow(pool) -> None:
                                                        GroupState.INACCESSIBLE, "group_private")
     found = await store.groups_needing_join(cid)
     assert [(g.id, g.name, g.url) for g in found] == [(group, "Closed", url)]
-    assert not await store.confirm_join(group)  # no notice yet: the button is not valid
+    assert await store.confirm_join(group) == "stale"  # no notice yet: the button is not valid
     await store.mark_join_notice(group)
     assert await store.groups_needing_join(cid) == []  # one notice per group
-    assert await store.confirm_join(group) and not await store.confirm_join(group)
+    assert await store.confirm_join(group) == "queued" and await store.confirm_join(group) == "stale"
     row = await pool.fetchrow("select state, activity, batch_id, join_confirmed_at from campaign_groups where id = $1::uuid", group)
     assert (row["state"], row["activity"], row["batch_id"]) == ("queued", "UNKNOWN", None) and row["join_confirmed_at"]
     assert await store.groups_needing_join(cid) == []
+
+
+async def test_confirm_join_of_a_finished_campaign_queues_nothing(pool) -> None:
+    cid = await PostgresCampaignStore(pool).create(plan_campaign(TEXT), chat_id=1, requested_by=2, source_text=TEXT, actor="t")
+    group = await pool.fetchval(
+        """insert into campaign_groups (campaign_id, group_key, canonical_url, state, join_notice_at)
+           values ($1::uuid, 'g', 'https://www.facebook.com/groups/g/', 'skipped', now()) returning id::text""", cid)
+    await pool.execute("update campaigns set state = 'cancelled' where id = $1::uuid", cid)
+    from bot.campaign.join import confirm_group_join
+
+    assert await confirm_group_join(pool, group) == "ended"
+    assert await pool.fetchval("select state from campaign_groups where id = $1::uuid", group) == "skipped"

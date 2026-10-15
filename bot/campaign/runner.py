@@ -413,6 +413,8 @@ class CampaignRunner:
             if campaign.state not in TERMINAL_STATES:
                 await self._metrics(campaign)
         if campaign.state in TERMINAL_STATES:
+            if self.config.join_notices:  # a closed group is never lost silently, whatever ended the search
+                await self._notify_joins(campaign)
             await self._close(campaign)
             # Final: a finding whose AI check is still missing is held as unverified, never lost.
             await self._stream(campaign, final=True)
@@ -550,6 +552,9 @@ class CampaignRunner:
             return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
+        if (self.config.join_notices and waited < self.config.social_grace_seconds
+                and await self.store.fallback_pending(campaign.id)):
+            return ANALYSIS  # the browser still re-reads the closed groups: their «вступите» notice may follow
         final = waited >= self.config.analysis_grace_seconds
         if await self._stream(campaign, final=final, skip_misses=False) and not final:
             return ANALYSIS  # findings still wait for the AI check: do not complete (and lose them) yet
@@ -1331,7 +1336,8 @@ async def main() -> None:
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
-    store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
+    store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days,
+                             join_notices=settings.join_notices)
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool),

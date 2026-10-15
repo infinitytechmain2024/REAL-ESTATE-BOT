@@ -11,10 +11,21 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-async def confirm_group_join(pool: asyncpg.Pool[asyncpg.Record], group_id: str) -> bool:
-    """«Вступил»: the group is read again (queued, no batch, activity UNKNOWN); only once, after its notice."""
-    return bool(await pool.fetchval(
-        """update campaign_groups set join_confirmed_at = now(), state = 'queued', activity = 'UNKNOWN',
-                                      batch_id = null, reject_reason = null
-            where id = $1::uuid and join_notice_at is not null and join_confirmed_at is null returning true""",
-        group_id))
+async def confirm_group_join(pool: asyncpg.Pool[asyncpg.Record], group_id: str) -> str:
+    """«Вступил»: ``queued`` (read again: queued, no batch, activity UNKNOWN), ``ended`` (the campaign is over: nothing
+    is queued), ``stale`` (unknown group, no notice yet, or already confirmed)."""
+    from .models import TERMINAL_STATES
+
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """select c.state, g.join_notice_at is not null as noticed, g.join_confirmed_at is not null as confirmed
+                 from campaign_groups g join campaigns c on c.id = g.campaign_id where g.id = $1::uuid for update of g""",
+            group_id)
+        if row is None or not row["noticed"] or row["confirmed"]:
+            return "stale"
+        if row["state"] in TERMINAL_STATES:
+            return "ended"
+        await conn.execute(
+            """update campaign_groups set join_confirmed_at = now(), state = 'queued', activity = 'UNKNOWN',
+                                          batch_id = null, reject_reason = null where id = $1::uuid""", group_id)
+        return "queued"

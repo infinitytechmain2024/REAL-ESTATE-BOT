@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from bot.campaign import offers as near
 from bot.campaign.architect import InvalidGoal, plan_campaign
 from bot.campaign.models import TERMINAL_STATES
-from bot.campaign.status_text import JOIN_JOINED
+from bot.campaign.status_text import JOIN_ENDED, JOIN_JOINED, JOIN_OPERATOR_ONLY
 from bot.control_plane.access import LOGIN_BUTTON, SETTINGS_BUTTON, AccessDesk, label
 from bot.control_plane.auto import AUTO_COMMANDS, AutoMode, MemorySettingsStore, SettingsStore
 from bot.control_plane.intake import (
@@ -123,7 +123,7 @@ class ControlPlane:
         offers: near.OfferDesk | None = None,
         campaigns: CampaignStore | None = None,
         interviewer: Interviewer | None = None,
-        confirm_join: Callable[[str], Awaitable[bool]] | None = None,
+        confirm_join: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self.settings, self.store, self.transcriber, self.command_sink = settings, store, transcriber, command_sink
         self.live, self.access = live, access
@@ -241,7 +241,7 @@ class ControlPlane:
                               chat_id: int | None = None) -> Reply:
         """Inline buttons: ``live:done|cancel:<id>``, ``live:approve:<code>``, ``access:request``,
         ``access:helper|user|operator|deny:<id>``, ``set:...`` (owner settings), ``mode:<mode>``, ``task:<action>[:<value>]``,
-        ``search:stop`` (the same as typing «стоп») and ``near:yes|no:similar|other:<campaign id>``."""
+        ``group:joined:<campaign group id>`` (closed group joined; CAMPAIGN_JOIN_NOTICES), ``search:stop`` (the same as typing «стоп») and ``near:yes|no:similar|other:<campaign id>``."""
         kind, _, rest = data.partition(":")
         action, _, target = rest.partition(":")
         if data == STOP_CALLBACK:
@@ -287,15 +287,17 @@ class ControlPlane:
     async def _group_joined(self, user_id: int | None, group_id: str) -> Reply:
         """``group:joined:<campaign group id>``: operators and owners only; the group is read by the browser next."""
         assert self.confirm_join is not None
-        if user_id is None or not self._can_control(user_id):
+        if user_id is None:
             return Reply(STALE_BUTTON)
+        if not self._can_control(user_id):
+            return Reply(JOIN_OPERATOR_ONLY if self._is_user(user_id) else STALE_BUTTON)
         try:
-            queued = await self.confirm_join(group_id)
+            result = await self.confirm_join(group_id)
         except Exception:  # noqa: BLE001 - a bad id or a database hiccup must not break the bot; the button stays
             log.warning("telegram.control.join_failed", extra={"user_id": user_id})
             return Reply("Не получилось сохранить ответ. Попробуйте ещё раз.")
-        log.info("telegram.control.group_joined", extra={"user_id": user_id, "queued": queued})
-        return Reply(JOIN_JOINED if queued else STALE_BUTTON)
+        log.info("telegram.control.group_joined", extra={"user_id": user_id, "result": result})
+        return Reply({"queued": JOIN_JOINED, "ended": JOIN_ENDED}.get(result, STALE_BUTTON))
 
     async def _login_button(self, user_id: int | None, chat_id: int | None, action: str, platform: str) -> Reply:
         """Settings «🔐 Вход в соцсети» (owners only): ``login:list``, ``login:go:<platform>`` = /login <platform>."""

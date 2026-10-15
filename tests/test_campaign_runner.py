@@ -541,8 +541,9 @@ class ButtonMessenger(FakeMessenger):
 
 
 async def _closed_group_run(join_notices: bool):
-    campaigns, store, _, discovery, clock, _, plan = make(groups=3)
+    campaigns, store, _, discovery, clock, _, plan = make(groups=45)
     messenger = ButtonMessenger()
+    store.join_notices = join_notices
     runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids={7},
                             config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=120,
                                                 join_notices=join_notices))
@@ -578,11 +579,72 @@ async def test_confirmed_group_is_queued_again_and_its_window_is_a_browser_batch
     await runner.step(cid)  # window closed
     await runner.step(cid)  # the notice
     group_id = messenger.buttons[0][2][0][1].removeprefix("group:joined:")
-    assert not await store.confirm_join(f"{cid}:g001")  # never noticed: refused
-    assert await store.confirm_join(group_id)
+    assert await store.confirm_join(f"{cid}:g001") == "stale"  # never noticed: refused
+    assert await store.confirm_join(group_id) == "queued"
     row = next(g for g in store.groups[cid] if g.group_key == "g002")
     assert (row.state, row.batch_id) == ("queued", None)
     nxt = await store.next_groups(cid, 20)
     assert "g002" in [g.group_key for g in nxt]
     start = await store.start_window(cid, [g for g in nxt if g.group_key == "g002"], vertical="real_estate", actor="t")
     assert start is not None and store.batches[start.batch_id].requested_by == f"apify_fallback:join:{group_id}"
+
+
+async def test_a_one_window_campaign_waits_for_the_browser_reread_and_still_sends_the_notice() -> None:
+    campaigns, store, _, discovery, clock, _, plan = make(groups=2)
+    messenger = ButtonMessenger()
+    store.join_notices = True
+    runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids={7},
+                            config=RunnerConfig(relevance_fail_closed=False, window_cooldown_seconds=0, join_notices=True))
+    cid = await create(campaigns, plan)
+    await runner.step(cid)
+    await runner.step(cid)
+    store.private_groups.add("https://www.facebook.com/groups/g002/")
+    store.fallback_open.add(cid)  # the browser batch of the closed group is queued
+    store.finish_batch(only_batch(store, cid))
+    for _ in range(4):
+        await runner.step(cid)
+    assert (await campaigns.get(cid)).state == "running" and messenger.buttons == []  # drain waits, no early notice
+    store.fallback_open.clear()
+    for _ in range(4):
+        await runner.step(cid)
+    assert (await campaigns.get(cid)).state == "completed"
+    assert len(messenger.buttons) == 1 and "g002" in messenger.buttons[0][2][0][1]
+
+
+async def test_a_campaign_that_ends_with_a_closed_group_still_sends_the_notice() -> None:
+    _, messenger, runner, cid = await _closed_group_run(True)
+    await runner.campaigns.set_state(cid, "cancelled", "t")
+    await runner.step(cid)
+    await runner.step(cid)
+    assert len(messenger.buttons) == 1
+
+
+async def test_confirm_join_of_an_ended_campaign_is_refused() -> None:
+    store, messenger, runner, cid = await _closed_group_run(True)
+    await runner.step(cid)
+    await runner.step(cid)
+    await runner.campaigns.set_state(cid, "cancelled", "t")
+    assert await store.confirm_join(messenger.buttons[0][2][0][1].removeprefix("group:joined:")) == "ended"
+
+
+async def test_joined_groups_get_a_window_of_their_own() -> None:
+    campaigns, store, _, _, _, runner, plan = make(groups=20)
+    store.join_notices = True
+    cid = await create(campaigns, plan)
+    await runner.step(cid)
+    store.add_groups(cid, 0)
+    for g in store.groups[cid]:
+        if g.group_key != "g005":
+            g.state = "collected"
+    store.add_groups(cid, 19, window_size=20)  # 19 new queued groups beside the joined one
+    five = next(g for g in store.groups[cid] if g.group_key == "g005")
+    five.state, five.notice = "skipped", True
+    assert await store.confirm_join(f"{cid}:g005") == "queued"
+    first = await store.next_groups(cid, 20)
+    assert [g.group_key for g in first] == ["g005"] and first[0].joined
+    one = await store.start_window(cid, first, vertical="real_estate", actor="t")
+    assert store.batches[one.batch_id].requested_by == f"apify_fallback:join:{cid}:g005"
+    rest = await store.next_groups(cid, 20)
+    assert len(rest) == 19 and not any(g.joined for g in rest)
+    other = await store.start_window(cid, rest, vertical="real_estate", actor="t")
+    assert store.batches[other.batch_id].requested_by == "campaign:runner" and other.batch_id != one.batch_id
