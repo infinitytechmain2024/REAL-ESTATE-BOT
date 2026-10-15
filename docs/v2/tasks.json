@@ -183,7 +183,7 @@
       "stream": "acquisition",
       "agent": "analyst",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Пт",
       "hours": 1.5
     },
@@ -193,7 +193,7 @@
       "stream": "acquisition",
       "agent": "analyst",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Пт",
       "hours": 2
     },
@@ -239,7 +239,7 @@
       "deps": [
         "B1"
       ],
-      "status": "blocked",
+      "status": "in_progress",
       "day": "Пт-Вс",
       "hours": 5
     },
@@ -305,7 +305,7 @@
       "stream": "ops",
       "agent": "deployer",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Сб",
       "hours": 2
     },
