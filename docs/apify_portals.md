@@ -14,6 +14,9 @@
 | Fotocasa | `APIFY_FOTOCASA_ENABLED` | `igolaizola/fotocasa-scraper` | живой запуск 13.10 (5 участков, Мадрид, ≈ $0.006) |
 | Yaencontre | `APIFY_YAENCONTRE_ENABLED` | `igolaizola/yaencontre-scraper` | по схеме выдачи из Apify Store |
 | Idealista | `APIFY_IDEALISTA_ENABLED` + `APIFY_IDEALISTA_PROVIDER=igolaizola` | `igolaizola/idealista-scraper` | по схеме выдачи из Apify Store |
+| Pisos.com | `APIFY_PISOS_ENABLED` | `logiover/pisos-com-property-scraper` | по схеме актора из Apify Store (вход/выход подтверждены схемой, $0.0035 за объявление), живой сэмпл не делался. Города: Мадрид, Барселона, Валенсия, Севилья, Малага; без телефона |
+| Habitaclia | `APIFY_HABITACLIA_ENABLED` | `trev0n/habitaclia-com-spain-scraper` | по схеме актора из Apify Store ($0.001 за объявление), живой сэмпл не делался; без телефона |
+| Milanuncios | `APIFY_MILANUNCIOS_ENABLED` | `rastriq/milanuncios-scraper` | по схеме актора из Apify Store ($0.00125 за объявление), живой сэмпл не делался; `stripSellerPII=true` всегда; без телефона и имени продавца; нет аренды участков и локалов |
 
 Задачи, которые берут порталы: Испания, недвижимость, продажа или аренда, участок, жильё или коммерция; город,
 провинция или явный радиус. Комнаты, инвесторы и «только пригороды» идут обычным поиском.
