@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V2 Board</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#1d2330;--muted:#667085;--line:#e3e6eb;--chip:#eef1f5;
+--owner:#b54708;--blocked:#98a2b3;--ready:#1570ef;--prog:#7a5af8;--review:#dc6803;--done:#079455;--cut:#c01048}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1218;--panel:#171b23;--ink:#e6e9ef;
+--muted:#98a2b3;--line:#2a303c;--chip:#222836}}
+:root[data-theme="dark"]{--bg:#0f1218;--panel:#171b23;--ink:#e6e9ef;--muted:#98a2b3;--line:#2a303c;--chip:#222836}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:16px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}
+h1{font-size:18px;margin:0}
+.meta{color:var(--muted);font-size:12px}
+.bar{height:8px;background:var(--chip);border-radius:4px;overflow:hidden;width:220px}
+.bar>i{display:block;height:100%;background:var(--done)}
+.filters{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px 12px}
+.filters button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:4px 10px;cursor:pointer;font-size:12px}
+.filters button.on{background:var(--ink);color:var(--panel)}
+.tabs{display:flex;gap:6px;padding:0 16px 12px}
+.board{display:grid;grid-template-columns:repeat(7,minmax(220px,1fr));gap:10px;padding:0 16px 24px;overflow-x:auto}
+.col{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;min-height:120px}
+.col h2{font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:2px 4px 8px;display:flex;justify-content:space-between}
+.card{border:1px solid var(--line);border-left:4px solid var(--c);border-radius:8px;padding:8px;margin-bottom:8px;background:var(--panel)}
+.card .id{font-weight:700;margin-right:6px}
+.card .t{margin:2px 0 6px}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{background:var(--chip);border-radius:999px;padding:1px 7px;font-size:11px;color:var(--muted)}
+.dep{border:1px solid var(--c);color:var(--c);background:transparent}
+.opt{font-style:italic}
+.graph{padding:0 16px 24px;overflow-x:auto}
+.graph svg{background:var(--panel);border:1px solid var(--line);border-radius:10px}
+.legend{display:flex;flex-wrap:wrap;gap:10px;padding:0 16px 12px;font-size:12px;color:var(--muted)}
+.legend b{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+@media (max-width:700px){.board{grid-template-columns:1fr}.bar{width:140px}}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>REAL-ESTATE-BOT v2 — доска задач</h1>
+  <div class="meta" id="meta"></div></div>
+  <div><div class="bar"><i id="prog"></i></div><div class="meta" id="progtxt"></div></div>
+</header>
+<div class="tabs filters" id="tabs"></div>
+<div class="filters" id="filters"></div>
+<div class="legend" id="legend"></div>
+<div id="view"></div>
+<script id="data" type="application/json">{"updated": "2026-10-15", "statuses": ["waiting_owner", "blocked", "ready", "in_progress", "review", "done", "cut"], "tasks": [{"id": "O1", "title": "Решение клиента по COMPLIANCE §4 (Apify, комментарии, GDPR)", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Пт", "hours": 0}, {"id": "O2", "title": "Apify: тариф и лимит трат в Console", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Пт", "hours": 0}, {"id": "O3", "title": "«Ок» на живые сэмплы ≤ $0.05", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Пт", "hours": 0}, {"id": "O4", "title": "ANTHROPIC_API_KEY в .env на VPS", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Сб", "hours": 0}, {"id": "O5", "title": "«Ок» на зависимость claude-agent-sdk", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Сб", "hours": 0}, {"id": "O6", "title": "Списки групп FB (недвижимость, инвесторы)", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Пт", "hours": 0}, {"id": "O7", "title": "Золотой набор задач + посты-ссылки", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Сб", "hours": 0}, {"id": "O8", "title": "Telegram ID владельца для алертов", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Вс", "hours": 0}, {"id": "O9", "title": "Окно перезагрузки VPS", "stream": "owner", "agent": "owner", "deps": [], "status": "waiting_owner", "day": "Вс", "hours": 0}, {"id": "A1", "title": "Флаг ACQUISITION_MODE=apify: Apify первым, поисковик запасной, site:-соцпоиск выкл", "stream": "acquisition", "agent": "builder", "deps": [], "status": "ready", "day": "Пт", "hours": 4}, {"id": "A2", "title": "Закрытая группа FB → уведомление «вступите» → браузер", "stream": "acquisition", "agent": "builder", "deps": [], "status": "ready", "day": "Пт", "hours": 4}, {"id": "A3", "title": "Живая проверка Yaencontre и Idealista-igolaizola, правка мапперов", "stream": "acquisition", "agent": "sources", "deps": ["O3"], "status": "blocked", "day": "Пт", "hours": 2}, {"id": "A4", "title": "Включить Apify для FB: 1 группа, ≤ 50 постов", "stream": "acquisition", "agent": "sources", "deps": ["O1", "O2", "O6"], "status": "blocked", "day": "Пт", "hours": 1}, {"id": "A5", "title": "Модели по этапам (.env) + docs/v2/MODELS.md", "stream": "acquisition", "agent": "analyst", "deps": [], "status": "ready", "day": "Пт", "hours": 1}, {"id": "A6", "title": "Скрипт оценки кампании + шаблон золотого набора", "stream": "acquisition", "agent": "analyst", "deps": [], "status": "ready", "day": "Пт", "hours": 2}, {"id": "B1", "title": "Пост по ссылке → комментарии (Apify) → лиды-инвесторы", "stream": "investors", "agent": "builder", "deps": ["O1"], "status": "blocked", "day": "Сб", "hours": 8}, {"id": "B2", "title": "Лиды под отправленными объектами через Apify", "stream": "investors", "agent": "builder", "deps": ["B1"], "status": "blocked", "day": "Сб", "hours": 2}, {"id": "B3", "title": "Группы инвесторов FB через Apify → лиды", "stream": "investors", "agent": "sources", "deps": ["B1", "A4"], "status": "blocked", "day": "Сб", "hours": 3}, {"id": "B4", "title": "both: две ветки параллельно, бюджет и отчёт раздельно", "stream": "investors", "agent": "analyst", "deps": ["A1"], "status": "blocked", "day": "Сб", "hours": 4}, {"id": "B5", "title": "Порталы P2: Pisos, Habitaclia, Milanuncios", "stream": "portals", "agent": "sources", "deps": ["O3"], "status": "blocked", "day": "Сб", "hours": 6}, {"id": "B6", "title": "Instagram / TikTok через Apify (за флагом)", "stream": "portals", "agent": "sources", "deps": ["B1"], "status": "blocked", "day": "Сб", "hours": 6, "optional": true}, {"id": "C1", "title": "Сервис architect на Claude Agent SDK + fallback", "stream": "architect", "agent": "builder", "deps": ["O4", "O5"], "status": "blocked", "day": "Вс", "hours": 8, "optional": true}, {"id": "C2", "title": "Голос → архитектор → «Проверьте задачу» → кампания (4 типа задач)", "stream": "architect", "agent": "builder", "deps": ["B1", "B4"], "status": "blocked", "day": "Вс", "hours": 4}, {"id": "C3", "title": "24/7: healthcheck всем, watchdog, алерты, дневная сводка", "stream": "ops", "agent": "deployer", "deps": ["O8"], "status": "blocked", "day": "Вс", "hours": 5}, {"id": "C4", "title": "Бэкапы по cron, ротация логов, перезагрузка VPS", "stream": "ops", "agent": "deployer", "deps": ["O9"], "status": "blocked", "day": "Вс", "hours": 2}, {"id": "C5", "title": "Общий LLM-клиент: Claude API + OpenRouter запасной", "stream": "architect", "agent": "builder", "deps": ["O4"], "status": "blocked", "day": "Вс", "hours": 8, "optional": true}, {"id": "D1", "title": "Золотой набор на VPS, разметка, исправления", "stream": "release", "agent": "analyst", "deps": ["A1", "A2", "A3", "A5", "B1", "B4", "C2", "C3", "O7"], "status": "blocked", "day": "Пн", "hours": 5}, {"id": "D2", "title": "Деплой, включение флагов, проверка алертов", "stream": "release", "agent": "deployer", "deps": ["D1"], "status": "blocked", "day": "Пн", "hours": 2}, {"id": "D3", "title": "HANDOFF, ROLLBACK, инструкция клиенту", "stream": "release", "agent": "architect", "deps": ["D2"], "status": "blocked", "day": "Пн", "hours": 2}]}</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const T = D.tasks, byId = Object.fromEntries(T.map(t => [t.id, t]));
+const COLS = [["waiting_owner","Ждёт владельца","--owner"],["blocked","Заблокировано","--blocked"],
+  ["ready","Готово к запуску","--ready"],["in_progress","В работе","--prog"],["review","Ревью / PR","--review"],
+  ["done","Готово","--done"],["cut","Отрезано","--cut"]];
+const COLOR = Object.fromEntries(COLS.map(c => [c[0], c[2]]));
+// ready/blocked are derived from dependencies: a task starts when every dependency is done
+for (const t of T) if (t.status === "blocked" || t.status === "ready")
+  t.status = t.deps.every(d => byId[d] && byId[d].status === "done") ? "ready" : "blocked";
+const unlocks = {}; for (const t of T) for (const d of t.deps) (unlocks[d] ||= []).push(t.id);
+let stream = "all", tab = "board";
+const streams = ["all", ...new Set(T.map(t => t.stream))];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function header(){
+  const work = T.filter(t => t.agent !== "owner" && t.status !== "cut");
+  const total = work.reduce((a,t) => a + (t.hours||0), 0), done = work.filter(t => t.status==="done").reduce((a,t)=>a+(t.hours||0),0);
+  document.getElementById('meta').textContent = `обновлено ${D.updated} · задач ${T.length} · готово к запуску ${T.filter(t=>t.status==="ready").length} · ждёт владельца ${T.filter(t=>t.status==="waiting_owner").length}`;
+  document.getElementById('prog').style.width = (total ? 100*done/total : 0) + "%";
+  document.getElementById('progtxt').textContent = `${done} из ${total} ч`;
+  document.getElementById('legend').innerHTML = COLS.map(c => `<span><b style="background:var(${c[2]})"></b>${c[1]}</span>`).join("");
+}
+function filters(){
+  document.getElementById('tabs').innerHTML = [["board","Доска"],["graph","Граф зависимостей"]]
+    .map(([k,v]) => `<button class="${tab===k?"on":""}" onclick="tab='${k}';render()">${v}</button>`).join("");
+  document.getElementById('filters').innerHTML = streams.map(s =>
+    `<button class="${stream===s?"on":""}" onclick="stream='${s}';render()">${s==="all"?"все потоки":esc(s)}</button>`).join("");
+}
+function card(t){
+  const deps = t.deps.map(d => `<span class="chip dep" style="--c:var(${COLOR[byId[d].status]})" title="${esc(byId[d].title)}">${d}</span>`).join("");
+  const un = (unlocks[t.id]||[]).join(", ");
+  return `<div class="card" style="--c:var(${COLOR[t.status]})"><div><span class="id">${t.id}</span><span class="chip">${esc(t.agent)}</span>
+    <span class="chip">${esc(t.day)}${t.hours?` · ${t.hours} ч`:""}</span>${t.optional?'<span class="chip opt">если успеваем</span>':""}</div>
+    <div class="t">${esc(t.title)}</div><div class="chips">${deps?`<span class="chip">ждёт:</span>${deps}`:""}</div>
+    ${un?`<div class="meta">разблокирует: ${un}</div>`:""}</div>`;
+}
+function board(){
+  const list = T.filter(t => stream==="all" || t.stream===stream);
+  return `<div class="board">${COLS.map(([k,name,c]) => { const items = list.filter(t => t.status===k);
+    return `<div class="col"><h2 style="color:var(${c})"><span>${name}</span><span>${items.length}</span></h2>${items.map(card).join("")}</div>`; }).join("")}</div>`;
+}
+function graph(){
+  const list = T.filter(t => stream==="all" || t.stream===stream), ids = new Set(list.map(t=>t.id));
+  const depth = {}; const lvl = id => depth[id] ??= Math.max(0, ...byId[id].deps.map(d => lvl(d)+1));
+  list.forEach(t => lvl(t.id));
+  const layers = []; list.forEach(t => (layers[depth[t.id]] ||= []).push(t));
+  const W=190,H=54,GX=60,GY=16, pos={};
+  layers.forEach((L,i) => L && L.forEach((t,j) => pos[t.id] = {x:20+i*(W+GX), y:20+j*(H+GY)}));
+  const width = 40 + layers.length*(W+GX), height = 40 + Math.max(...layers.map(L => (L||[]).length))*(H+GY);
+  let s = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--muted)"/></marker></defs>`;
+  list.forEach(t => t.deps.filter(d => ids.has(d)).forEach(d => { const a=pos[d], b=pos[t.id];
+    s += `<path d="M${a.x+W},${a.y+H/2} C${a.x+W+GX/2},${a.y+H/2} ${b.x-GX/2},${b.y+H/2} ${b.x},${b.y+H/2}" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#a)"/>`; }));
+  list.forEach(t => { const p=pos[t.id];
+    s += `<g><rect x="${p.x}" y="${p.y}" width="${W}" height="${H}" rx="8" fill="var(--panel)" stroke="var(${COLOR[t.status]})" stroke-width="2"/>
+    <text x="${p.x+8}" y="${p.y+18}" fill="var(--ink)" font-size="12" font-weight="700">${t.id} · ${esc(t.agent)}</text>
+    <text x="${p.x+8}" y="${p.y+36}" fill="var(--muted)" font-size="11">${esc(t.title.length>30?t.title.slice(0,29)+"…":t.title)}</text><title>${esc(t.title)}</title></g>`; });
+  return `<div class="graph">${s}</svg></div>`;
+}
+function render(){ header(); filters(); document.getElementById('view').innerHTML = tab==="board" ? board() : graph(); }
+render();
+</script>
+</body>
+</html>
