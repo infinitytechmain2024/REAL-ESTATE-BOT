@@ -374,9 +374,10 @@ class WebSearchWorker:
         if used_count == 0:  # the first round: the search plan (once), then its direct portal pages
             campaign = await self._with_search_plan(campaign)
             await self._from_sources(campaign)
-            await self._enqueue_portal_urls(campaign)
+            # apify: the direct portal pages wait for the gate; they are queued only when it falls back to search
             if cfg.acquisition_mode == "apify" and await self._apify_gate(campaign):
                 return True
+            await self._enqueue_portal_urls(campaign)
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))

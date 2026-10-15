@@ -419,3 +419,25 @@ async def test_social_worker_off_in_apify_mode_only():
     assert worker is not None
     assert WebSearchSettings(_env_file=None).acquisition_mode == "legacy"
     assert WebSearchSettings(_env_file=None, ACQUISITION_MODE="apify").config().acquisition_mode == "apify"
+
+
+class CountingStore(MemoryWebStore):
+    enqueued: list  # set by the test
+
+    async def enqueue(self, campaign_id, candidates, **kw):
+        self.enqueued = [*self.enqueued, *candidates]
+        return await super().enqueue(campaign_id, candidates, **kw)
+
+
+async def test_apify_mode_portal_pages_queued_only_on_fallback(source_ledger):
+    for rows, expect in ((6, False), (1, True)):
+        campaigns = MemoryCampaignStore()
+        cid = await campaign(campaigns)
+        store = CountingStore(campaigns)
+        store.enqueued = []
+        await campaigns.set_search_plan(cid, {"portal_urls": [
+            {"host": "idealista.com", "url": "https://www.idealista.com/venta-terrenos/madrid-madrid/"}]})
+        w = apify_worker(campaigns, store, FakeSource(rows=rows), min_listings=5)
+        await run_until_done(w, cid)
+        portal = [c for c in store.enqueued if c.depth == 0 and c.kind != "listing"]
+        assert len(portal) == (1 if expect else 0)
