@@ -19,6 +19,7 @@ No ids, model names, prompts or English system text reach the card.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -158,6 +159,37 @@ LANGUAGE_NAMES = {
 }
 
 
+def card_extra_fields_enabled() -> bool:
+    """CARD_EXTRA_FIELDS (default off): the card also shows area and phone when the payload has them."""
+    return os.environ.get("CARD_EXTRA_FIELDS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _m2(value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    text = f"{value:,.0f}" if float(value).is_integer() else f"{value:,.1f}"
+    return text.replace(",", " ") + " м²"
+
+
+def _area(payload: Mapping[str, Any]) -> str | None:
+    """Built area and plot area stay apart (a plot is not a house); a land offer's one area is the plot's."""
+    area, plot = _m2(payload.get("area_m2")), _m2(payload.get("plot_m2"))
+    if payload.get("property_type") == "land":
+        one = plot or area
+        return f"{one} (участок)" if one else None
+    if area and plot:
+        return f"{area}, участок {plot}"
+    return area or (f"участок {plot}" if plot else None)
+
+
+def _phone(payload: Mapping[str, Any]) -> str | None:
+    """The phone as the source gave it (payload ``phone`` or ``phones``); never taken from the post's text."""
+    raw = payload.get("phone")
+    if raw is None and isinstance(payload.get("phones"), list):
+        raw = ", ".join(str(p).strip() for p in payload["phones"][:2] if str(p).strip())
+    return _trim(raw.strip(), 60) if isinstance(raw, str) and raw.strip() else None
+
+
 def render_card(
     payload: Mapping[str, Any],
     *,
@@ -168,6 +200,7 @@ def render_card(
     confidence: float | None = None,
     limit: int = MAX_CARD_CHARS,
     cluster_links: Sequence[Mapping[str, Any]] = (),
+    extra_fields: bool | None = None,
 ) -> str:
     """Build the Russian card for one finding; it names the original language, never quotes the post."""
     task = task or CardTask(vertical=vertical or "real_estate")
@@ -195,10 +228,17 @@ def render_card(
         "Этаж": str(payload["floor"]) if isinstance(payload.get("floor"), int) and not isinstance(payload["floor"], bool) else None,
         "Особенности": ", ".join(str(f) for f in payload["features"][:6]) if isinstance(payload.get("features"), list) and payload["features"] else None,
     }
+    if extra_fields is None:
+        extra_fields = card_extra_fields_enabled()
+    if extra_fields and not investors:
+        fields["Площадь"] = _area(payload)
+        fields["Телефон"] = _phone(payload)
     if investors:
         order = ["Кто", "Локация", "Цена"]
     else:
         order = ["Сделка", "Тип", "Цена", "Локация", "Район", "Комнаты", "Этаж", "Особенности"]
+        if extra_fields:
+            order = ["Сделка", "Тип", "Цена", "Площадь", "Локация", "Район", "Комнаты", "Этаж", "Особенности", "Телефон"]
         if task.deal:
             order = ["Сделка", "Тип"] + [f for f in order if f not in ("Сделка", "Тип")]
         if task.max_price:

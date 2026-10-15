@@ -24,6 +24,9 @@ class AnalysisSettings(BaseSettings):
     # it gets no more model calls here: its posts are closed and counted in its report.
     budget_usd: float = Field(default=5.0, ge=0, le=10_000, validation_alias="CAMPAIGN_BUDGET_USD")
 
+    # Card shows area and phone when the finding has them (read by bot/analysis_pipeline/cards.py from the environment).
+    card_extra_fields: bool = Field(default=False, validation_alias="CARD_EXTRA_FIELDS")
+
     @property
     def excluded_platforms(self) -> tuple[str, ...]:
         return tuple(p.strip().lower() for p in self.exclude_platforms.split(",") if p.strip())
