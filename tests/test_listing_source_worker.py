@@ -330,3 +330,92 @@ async def test_unsupported_source_and_later_round_never_launch(source_ledger):
     source.supported = True
     await run_until_done(provider_worker(campaigns, store, source), other)
     assert source.launches == 0
+
+
+class SecondSource(FakeSource):
+    name = "apify_fotocasa"
+    hosts = frozenset({"fotocasa.es"})
+
+    async def search(self, task, *, limit):
+        context = _execution.get()
+        if context.launch_allowed:
+            self.launches += 1
+            await context.save_run("secondrun", "dataset2")
+        await context.reconcile_usage("secondrun", .01)
+        return [SourceListing(f"https://www.fotocasa.es/es/comprar/terreno/madrid/{183456700 + n}/d", "Terreno",
+                              plot_m2=2200, deal="sale", property_type="land") for n in range(min(self.rows, limit))]
+
+
+def apify_worker(campaigns, store, *sources, min_listings=5):
+    return WebSearchWorker(campaigns, store, FakeSearcher(), FakeFetcher(),
+                           ListGenerator(["terreno venta Boadilla Madrid"]), sources=sources,
+                           config=WebSearchConfig(cover_portals=False, acquisition_mode="apify",
+                                                  apify_min_listings=min_listings))
+
+
+async def test_apify_mode_enough_listings_skips_search(source_ledger):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    w = apify_worker(campaigns, store, FakeSource(rows=2), SecondSource(rows=3), min_listings=5)
+    await w.step(cid)
+    await run_until_done(w, cid)
+    assert store.runs[cid].stop_reason == "apify_enough"
+    assert not w.searcher.calls and (await store.counts(cid)).queries == 0
+
+
+async def test_apify_mode_too_few_listings_falls_back_to_search(source_ledger):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    w = apify_worker(campaigns, store, FakeSource(rows=2), min_listings=5)
+    await run_until_done(w, cid)
+    assert w.searcher.calls and store.runs[cid].stop_reason != "apify_enough"
+
+
+async def test_apify_mode_failed_source_falls_back_to_search(source_ledger):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    w = apify_worker(campaigns, store, FakeSource(fail_once=True), min_listings=1)
+    await run_until_done(w, cid)
+    assert (await store.source_runs(cid))[0].state == "failed"
+    assert w.searcher.calls and store.runs[cid].stop_reason != "apify_enough"
+
+
+async def test_apify_mode_without_sources_falls_back_at_once(source_ledger):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store = MemoryWebStore(campaigns)
+    w = apify_worker(campaigns, store)
+    await run_until_done(w, cid)
+    assert w.searcher.calls and store.runs[cid].stop_reason != "apify_enough"
+
+
+async def test_apify_mode_waits_for_running_source_without_queries(source_ledger):
+    campaigns = MemoryCampaignStore()
+    cid = await campaign(campaigns)
+    store, source = MemoryWebStore(campaigns), FakeSource()
+    await store.start_run(cid)
+    await store.claim_source(cid, source.name)
+    await store.save_source_run(cid, source.name, "knownrun", "dataset")
+    w = apify_worker(campaigns, store, source)
+    assert (await w._apify_gate(await campaigns.get(cid))) is True
+    assert "порталы через Apify" in store.runs[cid].progress
+    assert (await store.counts(cid)).queries == 0 and not w.searcher.calls
+
+
+async def test_social_worker_off_in_apify_mode_only():
+    from bot.campaign.runner import _social_worker
+    from bot.campaign.settings import CampaignRunnerSettings
+
+    base = {"DATABASE_URL": "postgresql://x/y", "TELEGRAM_TOKEN": "t", "SOCIAL_SEARCH_PLATFORMS": "instagram",
+            "BROWSER_SESSION_API_TOKEN": "tok"}
+    apify = CampaignRunnerSettings(_env_file=None, ACQUISITION_MODE="apify", **base)
+    assert _social_worker(apify, None, None) == (None, None)
+    legacy = CampaignRunnerSettings(_env_file=None, **base)
+    assert legacy.acquisition_mode == "legacy"
+    worker, _generator = _social_worker(legacy, None, MemoryCampaignStore())
+    assert worker is not None
+    assert WebSearchSettings(_env_file=None).acquisition_mode == "legacy"
+    assert WebSearchSettings(_env_file=None, ACQUISITION_MODE="apify").config().acquisition_mode == "apify"

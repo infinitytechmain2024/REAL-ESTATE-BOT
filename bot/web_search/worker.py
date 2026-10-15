@@ -110,6 +110,7 @@ MIN_SNIPPET_CHARS = 60  # title + snippet: less than this says nothing about the
 
 
 DOMAIN_POLICIES = ("strict", "soft", "off")
+ACQUISITION_MODES = ("legacy", "apify")
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,10 @@ class WebSearchConfig:
     host_breaker_refusals: int = 3               # 0: off
     scrape_cost_usd: float = 0.0                 # what one scrape-API read costs (the ledger, CAMPAIGN_BUDGET_USD)
     query_cost_usd: float = 0.0                  # what one search query costs (paid backends; SearXNG is free)
+    # apify: the portal sources run first and the search engine is only the fallback when they gave fewer than
+    # ``apify_min_listings`` listings; legacy: the search engine runs next to the sources, as before.
+    acquisition_mode: str = "legacy"
+    apify_min_listings: int = 5
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -168,7 +173,8 @@ class WebSearchConfig:
                 and 0 <= self.max_renders_per_campaign <= 200 and 0 <= self.max_scrape_api_per_campaign <= 500
                 and 0 <= self.verified_host_interval_seconds <= 300 and 1 <= self.pages_per_verification <= 200
                 and self.domain_policy in DOMAIN_POLICIES and 0 <= self.host_breaker_refusals <= 100
-                and 0 <= self.scrape_cost_usd <= 10 and 0 <= self.query_cost_usd <= 10):
+                and 0 <= self.scrape_cost_usd <= 10 and 0 <= self.query_cost_usd <= 10
+                and self.acquisition_mode in ACQUISITION_MODES and 1 <= self.apify_min_listings <= 200):
             raise ValueError("unsafe web search limits")
 
 
@@ -355,6 +361,9 @@ class WebSearchWorker:
             if not waiting:  # a site's check is still pending: the stage waits for it (or for its expiry)
                 await self._done(campaign, "queries_done")
             return
+        if (cfg.acquisition_mode == "apify" and counts.queries == 0 and await self.store.source_runs(cid)
+                and await self._apify_gate(campaign)):
+            return
         if not await self._new_round(campaign, counts.queries) and not waiting:
             await self._done(campaign, "queries_exhausted")
 
@@ -366,6 +375,8 @@ class WebSearchWorker:
             campaign = await self._with_search_plan(campaign)
             await self._from_sources(campaign)
             await self._enqueue_portal_urls(campaign)
+            if cfg.acquisition_mode == "apify" and await self._apify_gate(campaign):
+                return True
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
@@ -382,6 +393,17 @@ class WebSearchWorker:
         log.info("web_search.round", extra={"campaign_id": campaign.id, "round": round_no, "generated": len(queries),
                                             "added": added})
         return bool(queries)
+
+    async def _apify_gate(self, campaign: Campaign) -> bool:
+        """apify mode, before any search query: True when the stage waits for the portals or is already done."""
+        runs = await self.store.source_runs(campaign.id)
+        if any(r.state in ("starting", "running", "ready") for r in runs):
+            await self.store.set_progress(campaign.id, None, self._line(0, None, "порталы через Apify…"))
+            return True
+        if sum(len(r.listings) for r in runs if r.state == "completed") >= self.config.apify_min_listings:
+            await self._done(campaign, "apify_enough")
+            return True
+        return False  # too few listings (or no portal source at all): the search engine takes over
 
     async def _source_limit(self, campaign: Campaign, source: ListingSource) -> int:
         for host in source.hosts:

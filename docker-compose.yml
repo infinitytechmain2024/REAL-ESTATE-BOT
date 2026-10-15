@@ -546,6 +546,10 @@ services:
       WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN: ${WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN:-40}
       # Optional outbound proxy/VPN for page fetches (and SearXNG, below).
       WEB_SEARCH_PROXY_URL: ${WEB_SEARCH_PROXY_URL:-}
+      # legacy | apify. apify: portals via Apify first, the search engine only if they gave fewer than
+      # APIFY_MIN_LISTINGS listings; the browser social search is off.
+      ACQUISITION_MODE: ${ACQUISITION_MODE:-legacy}
+      APIFY_MIN_LISTINGS: ${APIFY_MIN_LISTINGS:-5}
       # Social network search (bot/social_search): every listed network where a profile is logged in; "off" = none.
       SOCIAL_SEARCH_PLATFORMS: ${SOCIAL_SEARCH_PLATFORMS:-instagram,tiktok,linkedin}
       SOCIAL_SEARCH_QUERIES_PER_DAY: ${SOCIAL_SEARCH_QUERIES_PER_DAY:-20}

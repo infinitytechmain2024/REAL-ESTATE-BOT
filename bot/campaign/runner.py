@@ -1418,6 +1418,9 @@ async def _web_stage(campaigns: CampaignStore, pool: Any, runner_settings: Any) 
 
 def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[Any, Any]:
     """The social search worker when SOCIAL_SEARCH_PLATFORMS lists a platform (and the browser is reachable)."""
+    if getattr(settings, "acquisition_mode", "legacy") == "apify":
+        log.info("campaign.runner.social_disabled_apify")
+        return None, None
     config = settings.social_config()
     if not config.platforms:
         return None, None
