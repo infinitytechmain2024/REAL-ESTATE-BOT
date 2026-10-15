@@ -6,17 +6,15 @@ The caller (``bot.campaign.post_leads``) drives the run so that every step is re
 repeated: :meth:`launch` (one POST, never retried; a lost answer is ``LaunchUnknown``) -> the caller stores the run id
 -> :meth:`wait` (bounded, the run is aborted on timeout) -> :meth:`comments` (the dataset page by page).
 
-Actor ``apify/facebook-comments-scraper`` -- input (from the actor's input schema): ``startUrls`` ``[{"url": ...}]``,
-``resultsLimit`` (comments), ``includeNestedComments`` (replies), ``viewOption``. Output fields this mapper reads
-(from the actor's documented output; a live run may need a fix, nothing is guessed: a missing field is ``None``):
+Actor ``apify/facebook-comments-scraper`` ($0.0025 per comment + $0.001 per start) -- input: ``startUrls``
+``[{"url": ...}]``, ``resultsLimit``, ``includeNestedComments`` (replies, each its own row), ``viewOption``
+(``RANKED_UNFILTERED``, the default). ``onlyCommentsNewerThan`` is a paid add-on and is never sent. One dataset row is
+one comment; the fields read: ``text``, ``profileName``, ``profileUrl`` (the commenter's public link), ``commentUrl``,
+``postTitle`` (the post's own text), ``error`` / ``errorDescription`` (a row saying the post is unreachable: no
+``text``). A missing field is ``None``; nothing is guessed.
 
-* ``profileUrl`` -- the commenter's public profile link; ``profileName`` -- their name;
-* ``text`` -- the comment; ``commentUrl`` -- its permalink;
-* ``postTitle`` -- the post's own text, when the actor repeats it on the comment;
-* ``error`` / ``errorDescription`` -- an item that reports the post as unreachable instead of a comment.
-
-Actor ``apify/facebook-posts-scraper`` (the post's text when the comments do not carry it): ``startUrls``,
-``resultsLimit`` = 1; the item's ``text`` is read.
+Actor ``apify/facebook-posts-scraper`` ($0.005 per post): OPTIONAL, only when ``posts_actor_id`` is set (off by
+default; ``postTitle`` already carries the text). ``startUrls`` with the post link; the row's ``text`` is read.
 """
 
 from __future__ import annotations
@@ -43,7 +41,7 @@ POST_TEXT_MAX_USD = 0.1  # the posts actor reads one item: its charge cap, never
 class CommentsConfig:
     actor_id: str = "apify/facebook-comments-scraper"
     build: str = ""                       # pinned build (never «latest» in production); required to enable
-    posts_actor_id: str = "apify/facebook-posts-scraper"
+    posts_actor_id: str = ""               # optional: the post text normally comes with each comment (``postTitle``)
     max_comments: int = 200
     max_usd_per_post: float = 1.0          # maxTotalChargeUsd of the comments run
     timeout_seconds: float = 300
@@ -51,7 +49,8 @@ class CommentsConfig:
 
     def __post_init__(self) -> None:
         actor_path(self.actor_id)
-        actor_path(self.posts_actor_id)
+        if self.posts_actor_id:
+            actor_path(self.posts_actor_id)
         if not self.build.strip() or self.build.strip().lower() == "latest":
             raise ValueError("APIFY_FACEBOOK_COMMENTS_ACTOR_BUILD must name a pinned build")
         if not (1 <= self.max_comments <= 1000 and 1 <= self.page_size <= 1000

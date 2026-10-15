@@ -40,7 +40,7 @@ from urllib.parse import urlsplit
 from pydantic import ValidationError
 
 from bot.campaign.architect import MAX_TEXT_CHARS, InvalidGoal, find_places, plan_campaign
-from bot.campaign.leads import is_facebook_post
+from bot.campaign.fblinks import is_facebook_post
 from bot.campaign.models import CampaignPlan
 from bot.campaign.spec import (
     DEAL_RU,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field, PositiveInt
+from pydantic import Field, PositiveInt, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bot.orchestra.store import SafetyLimits
@@ -136,6 +136,41 @@ class CampaignRunnerSettings(BaseSettings):
     comment_poll_seconds: int = Field(default=30, ge=5, le=600, validation_alias="CAMPAIGN_COMMENT_POLL_SECONDS")
     leads_model: str = Field(default="openai/gpt-4o-mini", validation_alias="OPENROUTER_LEADS_MODEL")
     leads_timeout_seconds: int = Field(default=30, ge=5, le=120, validation_alias="OPENROUTER_LEADS_TIMEOUT_SECONDS")
+
+    # Comments under ONE Facebook post sent by link, through Apify (bot/campaign/post_leads.py, v2 B1). Off by default;
+    # on, it needs APIFY_TOKEN and a pinned actor build or the service does not start. The same flag turns on the link
+    # intake in the telegram service.
+    apify_comments_enabled: bool = Field(default=False, validation_alias="APIFY_FACEBOOK_COMMENTS_ENABLED")
+    apify_token: str = Field(default="", repr=False, validation_alias="APIFY_TOKEN")
+    apify_comments_actor: str = Field(default="apify/facebook-comments-scraper", validation_alias="APIFY_FACEBOOK_COMMENTS_ACTOR")
+    apify_comments_build: str = Field(default="", max_length=40, validation_alias="APIFY_FACEBOOK_COMMENTS_ACTOR_BUILD")
+    apify_posts_actor: str = Field(default="", validation_alias="APIFY_FACEBOOK_POSTS_ACTOR")
+    apify_comments_max: int = Field(default=200, ge=1, le=1000, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_PER_POST")
+    apify_comments_max_usd: float = Field(default=1.0, gt=0, le=100, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST")
+    apify_comments_timeout_seconds: int = Field(default=300, ge=30, le=3600, validation_alias="APIFY_FACEBOOK_COMMENTS_TIMEOUT_SECONDS")
+
+    @model_validator(mode="after")
+    def _comments_ready(self) -> CampaignRunnerSettings:
+        """APIFY_FACEBOOK_COMMENTS_ENABLED=true without what it needs is a start-up error, never a silent fallback."""
+        if self.apify_comments_enabled:
+            missing = [name for name, value in (("APIFY_TOKEN", self.apify_token),
+                                                ("APIFY_FACEBOOK_COMMENTS_ACTOR_BUILD", self.apify_comments_build))
+                       if not value.strip()]
+            if missing:
+                raise ValueError(f"APIFY_FACEBOOK_COMMENTS_ENABLED=true needs {', '.join(missing)}")
+            self.post_reads_config()  # an unpinned build or unsafe limits fail here too
+        return self
+
+    def post_reads_config(self):  # -> bot.acquisition.apify_facebook_comments.CommentsConfig | None
+        """The post comment reader's configuration, or None while APIFY_FACEBOOK_COMMENTS_ENABLED is off."""
+        if not self.apify_comments_enabled:
+            return None
+        from bot.acquisition.apify_facebook_comments import CommentsConfig
+
+        return CommentsConfig(actor_id=self.apify_comments_actor, build=self.apify_comments_build.strip(),
+                              posts_actor_id=self.apify_posts_actor, max_comments=self.apify_comments_max,
+                              max_usd_per_post=self.apify_comments_max_usd,
+                              timeout_seconds=float(self.apify_comments_timeout_seconds))
 
     def social_config(self):  # -> bot.social_search.worker.SocialConfig (imported lazily)
         from bot.social_search.worker import SocialConfig, parse_platforms

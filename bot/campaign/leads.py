@@ -32,6 +32,11 @@ from urllib.parse import parse_qs, urlsplit
 
 from bot.facebook_collector.challenges import detect_challenge
 
+from .fblinks import (  # noqa: F401 - re-exported (runner, post_leads, tests)
+    FB_HOSTS,
+    is_facebook_post,
+)
+
 if TYPE_CHECKING:
     import asyncpg
 
@@ -50,8 +55,7 @@ MAX_COMMENTS = 40
 MAX_COMMENT_CHARS = 1500
 MAX_CARD_COMMENT_CHARS = 300
 
-_FB_HOSTS = frozenset({"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"})
-_POST_PATH = re.compile(r"^/(?:groups/[^/]+/(?:posts|permalink)/[^/]+|[^/]+/posts/[^/]+)/?$")
+_FB_HOSTS = FB_HOSTS
 # First path segments that are never a person or a page.
 _NOT_PROFILES = frozenset({
     "groups", "hashtag", "photo", "photo.php", "photos", "watch", "events", "share", "sharer", "sharer.php",
@@ -61,14 +65,6 @@ _NOT_PROFILES = frozenset({
 })
 _VANITY = re.compile(r"^[A-Za-z0-9.\-]{3,80}$")
 _DIGITS = re.compile(r"^\d{5,25}$")
-
-
-def is_facebook_post(url: str | None) -> bool:
-    """A single Facebook post (a group permalink or a page's /posts/): the only pages whose comments are read."""
-    if not url:
-        return False
-    parts = urlsplit(url)
-    return parts.scheme == "https" and (parts.hostname or "") in _FB_HOSTS and bool(_POST_PATH.match(parts.path))
 
 
 def profile_link(href: object) -> tuple[str, str] | None:
@@ -423,7 +419,7 @@ def person_card(person: Person, *, location: str | None, now: datetime) -> str:
 @dataclass(frozen=True, slots=True)
 class CommentRead:
     campaign_id: str
-    finding_id: str
+    finding_id: str | None  # None: a post sent by link (``post_leads``), not a finding of the campaign
     post_url: str
     attempts: int
     context: PostContext

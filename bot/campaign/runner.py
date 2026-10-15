@@ -78,6 +78,7 @@ from .relevance import (
 from .runs import (
     TERMINAL_BATCH_STATES,
     ClusterHead,
+    PostReadSummary,
     RunState,
     RunStore,
     SentFinding,
@@ -266,6 +267,9 @@ class RunnerConfig:
     # seen in the last ``lead_days``.
     max_people: int = 60
     lead_days: int = 90
+    # Posts sent by link (``post_leads``, v2 B1): their commenters are sent by campaign, and the campaign waits for the
+    # read and ends with a short count. Off unless a post worker runs beside the runner (``main``).
+    post_reads: bool = False
     # The campaign's metrics row (``campaign_metrics``) is recomputed at most this often while it runs.
     metrics_seconds: float = 30
 
@@ -532,11 +536,22 @@ class CampaignRunner:
             return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
+        if waited < self.config.social_grace_seconds and await self._post_read_pending(campaign):
+            return ANALYSIS  # the comments under the post it was sent are still being read (bot.campaign.post_leads)
         final = waited >= self.config.analysis_grace_seconds
         if await self._stream(campaign, final=final, skip_misses=False) and not final:
             return ANALYSIS  # findings still wait for the AI check: do not complete (and lose them) yet
         await self.campaigns.set_state(campaign.id, "completed", ACTOR, reason=reason)
         return ANALYSIS
+
+    async def _post_read_pending(self, campaign: Campaign) -> bool:
+        """A post sent by link whose comments are not read yet (or not even queued by the post worker)."""
+        if not self.config.post_reads:
+            return False
+        reads = await self.store.post_reads(campaign.id)
+        if reads:
+            return any(read.active for read in reads)
+        return bool(post_links_of(campaign))
 
     async def _close(self, campaign: Campaign) -> None:
         """A cancelled or failed campaign stops its in-flight window through the ordinary batch cancel."""
@@ -824,14 +839,20 @@ class CampaignRunner:
         if room <= 0:
             return
         limit = min(room, self.config.max_stream_per_step)
-        # People from comments under objects first (they asked about a concrete object), then the reach.
-        cards: list[tuple[str, str]] = [
-            (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
-                                        now=self.now()))
-            for p in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit)]
-        keyed: list[tuple[str, list[str], str | None, str]] = [(key, [key], None, card) for key, card in cards]
-        if len(cards) < limit:
-            keyed += await self._reach_cards(campaign, location, room - len(cards), limit - len(cards))
+        if self.config.post_reads and await self.store.post_reads(campaign.id):
+            # A post sent by link: the people who commented under it (no city, no reach).
+            keyed: list[tuple[str, list[str], str | None, str]] = [
+                (p.profile_key, [p.profile_key], None, person_card(p, location=None, now=self.now()))
+                for p in await self.store.stored_people_of_campaign(campaign.id, limit)]
+        else:
+            # People from comments under objects first (they asked about a concrete object), then the reach.
+            cards: list[tuple[str, str]] = [
+                (p.profile_key, person_card(p, location=campaign.plan.location_aliases.get("ru") or location,
+                                            now=self.now()))
+                for p in await self.store.stored_people(campaign.id, location, self.config.lead_days, limit)]
+            keyed = [(key, [key], None, card) for key, card in cards]
+            if len(cards) < limit:
+                keyed += await self._reach_cards(campaign, location, room - len(cards), limit - len(cards))
         headers: set[tuple[str, str]] = self.__dict__.setdefault("_reach_headers", set())
         for key, keys, group, card in keyed:
             if not await self.store.claim_person(campaign.id, key):
@@ -982,6 +1003,9 @@ class CampaignRunner:
         Telegram failed. Investor-only searches have no property cards to report; a cancelled search that found and
         rejected nothing is not reported.
         """
+        if (self.config.post_reads and campaign.plan.vertical == "investors" and campaign.state in SUMMARY_STATES
+                and campaign.finished_at is not None and await self.store.post_reads(campaign.id)):
+            return await self._post_report(campaign)  # a post sent by link: a short count instead of the full report
         if (self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None
                 or campaign.plan.vertical == "investors"):
             return
@@ -1017,6 +1041,22 @@ class CampaignRunner:
             return
         self._below_status.add(campaign.id)  # the status message moves below the report
         log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
+
+    async def _post_report(self, campaign: Campaign) -> None:
+        """«Комментариев: N, лидов: M, $»: once, for a search over a post sent by link (the full investor report: B4)."""
+        assert campaign.finished_at is not None
+        if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_final_report(campaign.id):
+            return
+        try:
+            reads = await self.store.post_reads(campaign.id)
+            text = "\n".join(post_read_line(read) for read in reads)
+            await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
+        except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
+            log.warning("campaign.post_report_failed", extra={"campaign_id": campaign.id})
+            await self.store.release_final_report(campaign.id)
+            return
+        self._below_status.add(campaign.id)
+        log.info("campaign.post_report_sent", extra={"campaign_id": campaign.id})
 
     async def _metrics(self, campaign: Campaign, *, final: bool = False) -> None:
         """Recompute the campaign's ``campaign_metrics`` row: at most every ``metrics_seconds`` while it runs, and
@@ -1211,6 +1251,21 @@ class CampaignRunner:
         return STOPPED if not found else f"{STOPPED} · найдено {found}"
 
 
+def post_links_of(campaign: Campaign) -> list[str]:
+    """The Facebook post links the person sent as the task (``spec.sources.required``)."""
+    sources = (getattr(campaign, "spec", None) or {}).get("sources")
+    required = sources.get("required") if isinstance(sources, dict) else None
+    return [u for u in required if isinstance(u, str) and is_facebook_post(u)] if isinstance(required, list) else []
+
+
+def post_read_line(read: PostReadSummary) -> str:
+    """One post's outcome for the person: the count, or that the post could not be read."""
+    if read.state != "done":
+        return f"Пост недоступен или не прочитан ({read.error or read.state}): комментарии не получены."
+    line = f"Комментариев: {read.comments}, лидов: {read.leads}, ${read.cost_usd:.2f}"
+    return line if read.leads else f"{line}\nЛидов нет: подходящих комментариев не нашлось."
+
+
 def facebook_limit(refusal: str) -> str | None:
     """The stop reason when a refusal means no more Facebook reads today (daily quota, safety breaker)."""
     if refusal.startswith("daily quota reached") and "Facebook" in refusal:
@@ -1309,10 +1364,13 @@ async def main() -> None:
         log.warning("campaign.runner.relevance_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     final_reporter = settings.final_reporter()
     comments, lead_judge = _comment_worker(settings, pool)
+    post_reads, post_closers = _post_worker(settings, pool, lead_judge)
     reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None)
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
+    if post_reads is not None:
+        config = replace(config, post_reads=True)
     store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days)
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
@@ -1334,6 +1392,8 @@ async def main() -> None:
             tasks.append(social.serve(settings.social_poll_seconds, stop))
         if comments is not None:
             tasks.append(comments.serve(settings.comment_poll_seconds, stop))
+        if post_reads is not None:
+            tasks.append(post_reads.serve(settings.comment_poll_seconds, stop))
         if reach is not None:
             tasks.append(reach.serve(settings.reach_poll_seconds, stop))
         await asyncio.gather(*tasks)
@@ -1346,7 +1406,7 @@ async def main() -> None:
             await generator.aclose()
         if lead_judge is not None:
             await lead_judge.aclose()
-        for close in reach_closers:
+        for close in reach_closers + post_closers:
             await close()
         if judge is not None:
             await judge.aclose()
@@ -1487,6 +1547,32 @@ def _comment_worker(settings: Any, pool: Any) -> tuple[Any, Any]:
     worker = CommentLeadWorker(PostgresLeadStore(pool, settings.safety_limits()), browser, judge,
                                config=settings.comment_config())
     return worker, judge
+
+
+def _post_worker(settings: Any, pool: Any, judge: Any = None) -> tuple[Any, list[Any]]:
+    """The reader of posts sent by link, only with APIFY_FACEBOOK_COMMENTS_ENABLED=true (else None, nothing changes).
+
+    ``judge``: the comment worker's judge when it exists; with a key but no comment worker one is built here.
+    """
+    config = settings.post_reads_config()
+    if config is None:
+        return None, []
+    from bot.acquisition.apify_client import ApifyHttp
+    from bot.acquisition.apify_facebook_comments import ApifyCommentsSource
+
+    from .leads import OpenRouterLeadJudge, PostgresLeadStore
+    from .post_leads import PostgresPostReadStore, PostLeadWorker
+
+    closers: list[Any] = []
+    if judge is None and settings.openrouter_api_key:
+        judge = OpenRouterLeadJudge(api_key=settings.openrouter_api_key, model=settings.leads_model,
+                                    timeout_seconds=settings.leads_timeout_seconds)
+        closers.append(judge.aclose)
+    elif judge is None:
+        log.warning("campaign.runner.post_reads_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
+    source = ApifyCommentsSource(ApifyHttp(settings.apify_token), config)
+    worker = PostLeadWorker(PostgresPostReadStore(pool), source, PostgresLeadStore(pool, settings.safety_limits()), judge)
+    return worker, [source.aclose, *closers]
 
 
 if __name__ == "__main__":

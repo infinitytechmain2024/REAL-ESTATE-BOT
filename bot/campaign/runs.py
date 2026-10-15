@@ -157,6 +157,22 @@ class ReachActivity:
     query: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PostReadSummary:
+    """One post sent by link (``campaign_post_reads``, migration 048): how its comment read stands."""
+
+    post_url: str
+    state: str  # queued | reading | done | failed
+    comments: int = 0
+    leads: int = 0
+    cost_usd: float = 0.0
+    error: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.state in ("queued", "reading")
+
+
 _GROUP_PATH = re.compile(r"^/groups/([A-Za-z0-9_.-]{1,100})(?:/|$)")
 
 
@@ -229,6 +245,9 @@ class RunStore(Protocol):
     # investor reach across platforms (migration 027, ``reach``)
     async def stored_contacts(self, campaign_id: str, location: str, days: int, limit: int) -> list[Contact]: ...
     async def reach_pending(self, campaign_id: str) -> bool: ...
+    # comments under a post sent by link (migration 048, ``post_leads``)
+    async def post_reads(self, campaign_id: str) -> list[PostReadSummary]: ...
+    async def stored_people_of_campaign(self, campaign_id: str, limit: int) -> list[Person]: ...
     # the end-of-campaign summary (migration 030, ``summary``)
     async def source_counts(self, campaign_id: str) -> list[SourceCount]: ...
     async def claim_summary(self, campaign_id: str) -> bool: ...
@@ -856,6 +875,41 @@ class PostgresRunStore:
         return [Contact(r["url_key"], r["url"], r["platform"], r["kind"], r["name"], r["title"], r["snippet"],
                         r["summary_ru"], r["created_at"]) for r in rows]
 
+    async def post_reads(self, campaign_id: str) -> list[PostReadSummary]:
+        rows = await self.pool.fetch(
+            """select post_url, state, comments_found, leads_found, cost_usd, error_code from campaign_post_reads
+                where campaign_id = $1::uuid order by created_at, post_url""", campaign_id)
+        return [PostReadSummary(r["post_url"], r["state"], r["comments_found"] or 0, r["leads_found"] or 0,
+                                float(r["cost_usd"] or 0), r["error_code"]) for r in rows]
+
+    async def stored_people_of_campaign(self, campaign_id: str, limit: int) -> list[Person]:
+        """People stored from the comments under the posts this campaign was sent by link (not by city) that it has
+        not sent: investors first, then those with more posts, then the most recent."""
+        rows = await self.pool.fetch(
+            f"""with mine as (select post_url from campaign_post_reads where campaign_id = $1::uuid),
+                people as (
+                    select l.profile_key, bool_or(l.role = 'investor') as investor, count(*) as objects,
+                           max(l.created_at) as last_seen
+                      from investor_leads l
+                     where l.post_url in (select post_url from mine)
+                       and not exists (select 1 from campaign_lead_deliveries d
+                                        where d.campaign_id = $1::uuid and d.profile_key = l.profile_key)
+                     group by l.profile_key
+                     order by investor desc, objects desc, last_seen desc, l.profile_key limit {int(limit)})
+                select l.profile_key, l.profile_url, l.author_name, l.post_url, l.comment_text, l.role, l.summary_ru,
+                       l.object_facts::text as facts, l.created_at
+                  from investor_leads l join people p on p.profile_key = l.profile_key
+                 where l.post_url in (select post_url from mine)
+                 order by p.investor desc, p.objects desc, p.last_seen desc, l.profile_key, l.created_at desc""",
+            campaign_id)
+        people: dict[str, list[Any]] = {}
+        for r in rows:
+            people.setdefault(r["profile_key"], []).append(r)
+        return [Person(key, group[0]["profile_url"], next((r["author_name"] for r in group if r["author_name"]), None),
+                       tuple(Sighting(r["post_url"], r["comment_text"], r["role"], r["created_at"], r["summary_ru"],
+                                      _payload(r["facts"]) or {}) for r in group))
+                for key, group in people.items()]
+
     async def reach_pending(self, campaign_id: str) -> bool:
         return bool(await self.pool.fetchval(
             "select exists (select 1 from campaign_reach where campaign_id = $1::uuid and state = 'running')",
@@ -982,6 +1036,8 @@ class MemoryRunStore:
         self.deliveries: dict[tuple[str, str], int | None] = {}  # (cid, person) -> message id (None = sending)
         self.contacts: dict[str, list[Contact]] = {}  # city -> relevant reach results, in the order they are offered
         self.reaching: set[str] = set()  # campaigns whose reach stage still runs
+        self.post_read_rows: dict[str, list[PostReadSummary]] = {}  # cid -> posts sent by link
+        self.post_people: dict[str, list[Person]] = {}  # cid -> people stored from those posts' comments
         self.reach: dict[str, ReachActivity] = {}  # cid -> the reach query running now
         self.summaries: set[str] = set()  # campaigns whose summary was claimed
         self.cluster_links: dict[str, list[dict[str, str]]] = {}  # head finding -> other sightings
@@ -1323,6 +1379,12 @@ class MemoryRunStore:
 
     async def reach_pending(self, campaign_id: str) -> bool:
         return campaign_id in self.reaching
+
+    async def post_reads(self, campaign_id: str) -> list[PostReadSummary]:
+        return list(self.post_read_rows.get(campaign_id, []))
+
+    async def stored_people_of_campaign(self, campaign_id: str, limit: int) -> list[Person]:
+        return [p for p in self.post_people.get(campaign_id, []) if (campaign_id, p.profile_key) not in self.deliveries][:limit]
 
     async def reach_activity(self, campaign_id: str) -> ReachActivity:
         return self.reach.get(campaign_id, ReachActivity())
