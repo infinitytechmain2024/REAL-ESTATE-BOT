@@ -1,5 +1,8 @@
 """Default-off Apify adapters for Spanish portals built on ``ApifyListingSource`` (one actor run per campaign).
 
+* ``ApifyPisosSource``, ``ApifyHabitacliaSource``, ``ApifyMilanunciosSource`` — B5: written from the actors' public
+  names only (their README pages were not readable from the build sandbox, no live run): input and output field names
+  are assumptions, read tolerantly through synonyms (see ``_TolerantPortal``) and to be fixed by the first live sample.
 * ``ApifyFotocasaSource`` — ``igolaizola/fotocasa-scraper``; the row shape below is taken from a live run
   (5 plots in Madrid, 2026-10-13): ``url``, ``transaction.{type,price}``, ``surface``, ``rooms``, ``phone``,
   ``agency.name``, ``location.level{2,5,7,8}Name``, ``location.{latitude,longitude}`` (strings), ``description``.
@@ -17,7 +20,7 @@ from bot.utils.listing_text import areas
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.apify import ApifyListingSource, _distance_km, _fold, _number, _text
 from bot.web_search.sources.base import SourceListing
-from bot.web_search.urls import classify_url, fetchable, host_of
+from bot.web_search.urls import classify_url, deal_conflict, fetchable, host_of
 
 _DESCRIPTION_CHARS = 1500
 _DEALS = ("sale", "rent")
@@ -316,3 +319,132 @@ class ApifyIdealistaPortalSource(_PortalSource):
             phone=phone.get("phoneNumberForMobileDialing") or phone.get("formattedPhone"),
             advertiser=contact.get("commercialName") or contact.get("contactName"),
             property_type=self._TYPES.get(task_kind(task)))
+
+
+_SALE_WORDS = frozenset({"sale", "buy", "venta", "comprar", "compra", "sell", "sold"})
+_RENT_WORDS = frozenset({"rent", "rental", "alquiler", "alquilar", "lloguer", "alquilo"})
+_EURO = frozenset({"eur", "euro", "euros", "\u20ac"})
+
+
+def _dig(item: dict[str, Any], *paths: str) -> Any:
+    """The first non-empty value among dotted ``paths`` (``"location.city"``); a path through a non-dict is skipped."""
+    for path in paths:
+        value: Any = item
+        for key in path.split("."):
+            value = value.get(key) if isinstance(value, dict) else None
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _named(value: Any) -> str:
+    """A name given as a string or as an object with a ``name``-like field."""
+    if isinstance(value, dict):
+        value = _dig(value, "name", "commercialName", "companyName", "title")
+    return _text(value)
+
+
+def _first_phone(value: Any) -> Any:
+    if isinstance(value, list | tuple):
+        value = next((v for v in value if v not in (None, "")), None)
+    if isinstance(value, dict):
+        value = _dig(value, "phone", "number", "formatted", "phoneNumber")
+    return value
+
+
+class _TolerantPortal(_PortalSource):
+    """A portal actor whose output schema is known only by assumption: every fact is read through several synonyms
+    of the field name, and a row is dropped when the deal, the place or the URL cannot be confirmed from it.
+
+    Radius searches are not offered (the actors' geo inputs are unverified): city and province tasks only.
+    """
+
+    _TITLES: ClassVar[dict[str, str]] = {"land": "Terreno", "house": "Casa", "apartment": "Piso", "commercial": "Local"}
+    _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "house": "house", "apartment": "apartment",
+                                        "commercial": "commercial"}
+
+    def supports(self, task: QueryTask) -> bool:
+        return task.radius_km is None and super().supports(task)
+
+    async def _plan(self, task: QueryTask, amount: int, run_id: str | None
+                    ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
+        constraints = task.constraints
+        actor_input: dict[str, Any] = {
+            "maxItems": amount, "operation": self.deals[self._deal(task)], "propertyType": self.kinds[task_kind(task)],
+            "location": task.location.strip()[:120],
+            "locationType": "province" if task.place_level == "province" else "municipality"}
+        for key, field in (("minPrice", "min_price"), ("maxPrice", "max_price"), ("minSize", "min_area")):
+            value = _whole(constraints.get(field))
+            if value:
+                actor_input[key] = value
+        return self.actor_id, actor_input, None
+
+    def _deal_ok(self, item: dict[str, Any], url: str, task: QueryTask) -> bool:
+        wanted = self._deal(task)
+        raw = _dig(item, "operation", "operationType", "transactionType", "transaction.type", "transaction",
+                   "dealType", "listingType", "offerType")
+        word = _fold(_text(raw))
+        if raw is not None and word not in _SALE_WORDS | _RENT_WORDS:
+            return False
+        if word and (word in _SALE_WORDS) != (wanted == "sale"):
+            return False
+        return not deal_conflict(url, wanted)
+
+    def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
+        if not isinstance(item, dict):
+            return None
+        url = self._url(_dig(item, "url", "link", "detailUrl", "listingUrl", "adUrl"), task)
+        if url is None or not self._deal_ok(item, url, task):
+            return None
+        country = _fold(_text(_dig(item, "country", "countryCode")))
+        if country not in ("", "es", "espana", "spain"):
+            return None
+        municipality = _text(_dig(item, "municipality", "city", "town", "locality", "municipio", "poblacion",
+                                  "location.municipality", "location.city", "address.municipality", "address.city"))
+        province = _text(_dig(item, "province", "provincia", "location.province", "address.province"))
+        if not self._place_ok(task, None, None, municipality, province):
+            return None
+        kind = task_kind(task)
+        currency = _fold(_text(_dig(item, "currency", "priceCurrency", "price.currency")))
+        price = _dig(item, "price.amount", "price.value", "price", "priceValue", "amount")
+        if isinstance(price, dict) or (currency and currency not in _EURO):
+            price = None
+        plot = _dig(item, "plotArea", "plotSize", "landArea", "lotSize", "plotSurface")
+        built = _dig(item, "surface", "area", "size", "builtArea", "squareMeters", "surfaceArea", "m2")
+        area = (plot if plot is not None else built) if kind == "land" else built
+        neighbourhood = _text(_dig(item, "neighbourhood", "neighborhood", "district", "zone", "barrio"))
+        title = _text(_dig(item, "title", "name", "headline"))
+        if not title:
+            deal = "venta" if self._deal(task) == "sale" else "alquiler"
+            title = f"{self._TITLES[kind]} en {deal}, {neighbourhood or municipality}".rstrip(", ")
+        return self._listing(
+            task, url=url, title=title, price=price, area=area,
+            rooms=_dig(item, "rooms", "bedrooms", "habitaciones"),
+            address=[_text(_dig(item, "street", "address.street", "streetName")) or
+                     (_text(item.get("address")) if isinstance(item.get("address"), str) else ""),
+                     neighbourhood, municipality, province],
+            description=_text(_dig(item, "description", "text", "body")),
+            phone=_first_phone(_dig(item, "phone", "telephone", "contactPhone", "phones", "phoneNumber",
+                                    "contact.phone")),
+            advertiser=_named(_dig(item, "agency", "agencyName", "advertiser", "seller", "contactName",
+                                   "contact.name", "owner")),
+            property_type=self._TYPES.get(kind))
+
+
+class ApifyPisosSource(_TolerantPortal):
+    """Pisos.com through ``logiover/pisos-com-property-scraper``.
+
+    Actor, price and input come from the README, which could not be opened when this was written (no network to
+    apify.com): the price is not confirmed (similar portal actors charge about $0.001 per listing) and the input
+    fields below are an assumption: ``maxItems``, ``operation``, ``propertyType``, ``location``, ``locationType``,
+    ``minPrice``, ``maxPrice``, ``minSize``. Output fields are read through synonyms (``url``, ``operation``,
+    ``price``, ``surface``, ``rooms``, ``municipality``/``city``, ``province``, ``phone``, ``agency``,
+    ``description``). Not run live; the first live sample must confirm both.
+    """
+
+    name = "apify_pisos"
+    hosts = frozenset({"pisos.com"})
+    kinds: ClassVar[dict[str, str]] = {"land": "land", "house": "house", "apartment": "flat", "commercial": "premises"}
+
+    def __init__(self, token: str, *, actor_id: str = "logiover/pisos-com-property-scraper", **kwargs: Any) -> None:
+        super().__init__(token, actor_id=actor_id, **kwargs)
