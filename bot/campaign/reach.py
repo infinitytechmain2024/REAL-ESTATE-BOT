@@ -165,6 +165,18 @@ class ReachQuery:
     text: str
 
 
+APIFY_SKIPPED_PLATFORMS = frozenset({"instagram", "x", "reddit"})
+_APIFY_SKIPPED_SITES = ("site:instagram.com", "site:x.com", "site:reddit.com")
+
+
+def keep_query(query: ReachQuery, acquisition_mode: str) -> bool:
+    """False for a social-network ``site:`` search in apify mode (LinkedIn, Telegram, YouTube, TikTok, web stay)."""
+    if acquisition_mode != "apify":
+        return True
+    return query.platform not in APIFY_SKIPPED_PLATFORMS and not any(
+        site in query.text.casefold() for site in _APIFY_SKIPPED_SITES)
+
+
 def plan_queries(campaign: ReachCampaign) -> list[ReachQuery]:
     """Every template the campaign's languages allow, with its city, each text once.
 
@@ -510,6 +522,8 @@ class ReachConfig:
     queries_per_day: int = 80
     model_queries: int = 10  # queries the model writes from the task; the templates fill the rest
     enrich_per_campaign: int = 30  # relevant results whose public page is opened, per campaign (0: never)
+    # apify: no site: searches of Instagram, X and Reddit (Apify covers the social networks); legacy: all of them.
+    acquisition_mode: str = "legacy"
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_campaign <= 100 and 1 <= self.queries_per_tick <= 10
@@ -563,7 +577,8 @@ class ReachWorker:
         ran = 0
         for campaign in await self.store.open_campaigns():
             used = await self.store.used_queries(campaign.id)
-            todo = [q for q in [*await self._model_queries(campaign), *plan_queries(campaign)] if q.text not in used]
+            todo = [q for q in [*await self._model_queries(campaign), *plan_queries(campaign)] if q.text not in used
+                    and keep_query(q, self.config.acquisition_mode)]
             if not todo or len(used) >= self.config.queries_per_campaign:
                 await self.store.finish(campaign.id)
                 continue

@@ -21,7 +21,7 @@ from bot.campaign.runner import (
     RunnerConfig,
     TelegramMessenger,
 )
-from bot.campaign.runs import MemoryRunStore
+from bot.campaign.runs import MemoryRunStore, _MemGroup
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import CommandState
 from bot.orchestra.parser import CommandValidationError, parse_campaign
@@ -645,3 +645,42 @@ async def test_an_investor_report_with_no_people_but_money_spent_is_still_sent()
         costs.install(None, 0.0)
     reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
     assert len(reports) == 1 and "$0.40" in reports[0] and "инвесторы $0.40" in reports[0]
+
+
+async def test_investor_groups_of_the_task_are_queued_without_a_browser_and_their_post_becomes_a_card() -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+    from bot.campaign.spec import Place, Sources, TaskSpec
+
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    disco_store = MemoryDiscoveryStore()
+    real = FacebookDiscovery(campaigns, disco_store, None, None, acquisition_mode="apify")
+
+    class Discovery:
+        """The real discovery (no browser); the run store gets the groups it queued, as the DB would."""
+
+        async def run(self, campaign_id: str) -> None:
+            await real.run(campaign_id)
+            for g in await disco_store.groups(campaign_id):
+                store.groups.setdefault(campaign_id, []).append(
+                    _MemGroup(g.group_key, g.canonical_url, g.name or g.group_key, g.window_no or 1, g.relevance_score))
+
+    runner = CampaignRunner(campaigns, store, messenger, Discovery(), now=clock, owner_ids={7},
+                            config=RunnerConfig(relevance_fail_closed=False))
+    spec = TaskSpec(mode="investors", place=Place(name="Madrid", names={"ru": "Мадрид"}, level="city"),
+                    sources=Sources(required=["https://www.facebook.com/groups/madrid.investors/"]))
+    goal = "Найди инвесторов в Мадриде, группа facebook.com/groups/madrid.investors"
+    plan = plan_campaign(goal, vertical="investors", place={"en": "Madrid", "ru": "Мадрид"}, spec=spec)
+    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=7, source_text=goal, actor="test",
+                                 spec=spec.model_dump(mode="json"))
+
+    await runner.tick()
+
+    assert (await campaigns.get(cid)).state == "running"
+    window = store.batches[only_batch(store, cid)]
+    assert window.urls == ["https://www.facebook.com/groups/madrid.investors/"]
+    # a post of that group, analysed as an investor lead, is a finding and then a card
+    store.add_finding(cid, "inv1", "💼 Инвестор: Juan, ищет объекты в Мадриде", vertical="investors")
+    await runner.tick()
+    assert messenger.findings() == ["💼 Инвестор: Juan, ищет объекты в Мадриде\n\n🔎 Найдено: 1 · ищу дальше"]
+    assert store.findings_state == {"inv1": "delivered"}

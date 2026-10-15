@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field, PositiveInt, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -38,6 +40,9 @@ class CampaignRunnerSettings(BaseSettings):
     # A group whose newest post is this many days older than its last read is dead and skipped (re-read after 30 days).
     facebook_group_dead_days: int = Field(default=7, ge=1, le=365, validation_alias="FACEBOOK_GROUP_DEAD_DAYS")
     breaker_window_hours: int = Field(default=6, ge=1, le=72, validation_alias="SAFETY_BREAKER_WINDOW_HOURS")
+
+    # apify: the browser social search is off (portals via Apify first); legacy: as before.
+    acquisition_mode: Literal["legacy", "apify"] = Field(default="legacy", validation_alias="ACQUISITION_MODE")
 
     # Social network search (bot/social_search): off unless platforms are listed.
     social_platforms_raw: str = Field(default="instagram,tiktok,linkedin", validation_alias="SOCIAL_SEARCH_PLATFORMS")
@@ -227,7 +232,8 @@ class CampaignRunnerSettings(BaseSettings):
         return ReachConfig(queries_per_campaign=self.reach_queries_per_campaign,
                            queries_per_tick=self.reach_queries_per_tick, queries_per_day=self.reach_queries_per_day,
                            model_queries=self.reach_model_queries,
-                           enrich_per_campaign=self.reach_enrich_per_campaign)
+                           enrich_per_campaign=self.reach_enrich_per_campaign,
+                           acquisition_mode=self.acquisition_mode)
 
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig

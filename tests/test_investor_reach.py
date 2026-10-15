@@ -15,6 +15,7 @@ from bot.campaign.reach import (
     PostgresReachStore,
     ReachCampaign,
     ReachConfig,
+    ReachQuery,
     ReachWorker,
     contact_card,
     parse_judged,
@@ -76,6 +77,21 @@ def test_queries_cover_every_platform_in_the_campaigns_languages_with_its_city()
                                       ("es", "en", "ru", "uk"), country="ID"))
     assert "es" not in {q.language for q in bali}, "Spanish only for Spain"
     assert "site:t.me инвестиции недвижимость Убуд, Бали" in {q.text for q in bali}
+
+
+def test_apify_mode_drops_the_site_searches_of_instagram_x_and_reddit_only() -> None:
+    from bot.campaign.reach import keep_query
+
+    queries = plan_queries(MADRID)
+    legacy = [q for q in queries if keep_query(q, "legacy")]
+    assert legacy == queries, "legacy: every template, as before"
+    kept = [q for q in queries if keep_query(q, "apify")]
+    assert {q.platform for q in kept} == {"linkedin", "tiktok", "youtube", "telegram", "web"}
+    assert not any(s in q.text for q in kept for s in ("site:instagram.com", "site:x.com", "site:reddit.com"))
+    assert any("site:linkedin.com" in q.text for q in kept)
+    # a model-written query is judged by its text as well
+    assert not keep_query(ReachQuery("web", "es", "site:instagram.com inversor Madrid"), "apify")
+    assert keep_query(ReachQuery("web", "es", "site:instagram.com inversor Madrid"), "legacy")
 
 
 def _cand(title: str, snippet: str = "", url: str = "https://es.linkedin.com/in/x") -> Candidate:
@@ -198,6 +214,24 @@ async def test_the_model_decides_and_the_rules_step_in_when_it_fails() -> None:
         await ReachWorker(store, FakeSearcher({LINKEDIN_Q: HITS}), Judge(fail),
                           config=ReachConfig(queries_per_tick=1)).tick()
         assert [(s.judged.kind, s.judged_by) for s in store.contacts.values()] == expected
+
+
+async def test_the_worker_searches_no_instagram_x_or_reddit_in_apify_mode_and_all_in_legacy() -> None:
+    searched: dict[str, list[str]] = {}
+    for mode in ("legacy", "apify"):
+        store = MemoryReachStore([MADRID])
+        searcher = FakeSearcher()
+        worker = ReachWorker(store, searcher, config=ReachConfig(queries_per_campaign=100, queries_per_tick=10,
+                                                                 acquisition_mode=mode))
+        while await worker.tick():
+            pass
+        searched[mode] = [q for q, _ in searcher.queries]
+    assert any("site:instagram.com" in q for q in searched["legacy"])
+    assert any("site:reddit.com" in q for q in searched["legacy"]) and any("site:x.com" in q for q in searched["legacy"])
+    assert searched["apify"] and not any(s in q for q in searched["apify"]
+                                         for s in ("site:instagram.com", "site:x.com", "site:reddit.com"))
+    assert any("site:linkedin.com" in q for q in searched["apify"])
+    assert set(searched["apify"]) < set(searched["legacy"])
 
 
 def test_unsafe_reach_settings_are_refused() -> None:

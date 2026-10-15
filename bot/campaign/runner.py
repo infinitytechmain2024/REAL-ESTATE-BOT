@@ -1391,10 +1391,14 @@ async def main() -> None:
     messenger = TelegramMessenger(settings.telegram_token)
     campaigns = PostgresCampaignStore(pool)
     discovery = None
-    if settings.browser_token:
+    if settings.acquisition_mode == "apify" and not settings.browser_token:
+        # The groups come from the task and Apify reads them: discovery needs no browser (it refuses a search).
+        discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), None, None, acquisition_mode="apify")
+    elif settings.browser_token:
         browser = BrowserSessionClient(settings.browser_url, settings.browser_token)
         reader = FacebookGroupReader(browser, max_posts=settings.discovery_max_posts, timeout_seconds=settings.discovery_group_timeout_seconds)
-        discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, reader)
+        discovery = FacebookDiscovery(campaigns, PostgresDiscoveryStore(pool), browser, reader,
+                                      acquisition_mode=settings.acquisition_mode)
     else:
         log.warning("campaign.runner.discovery_disabled", extra={"hint": "set BROWSER_SESSION_API_TOKEN"})
     web = await _web_stage(campaigns, pool, settings)

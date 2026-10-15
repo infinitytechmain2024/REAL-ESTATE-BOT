@@ -113,6 +113,24 @@ _GROUP_PATH = re.compile(r"/groups/([A-Za-z0-9_.-]{1,100})/?")
 _RESERVED_GROUP_PATHS = frozenset({"feed", "discover", "joins", "create", "search", "category", "you"})
 
 
+def required_groups(spec: object) -> list[tuple[str, str]]:
+    """``(group_key, url)`` of the Facebook groups the task itself names (``sources.required``, then ``extra``)."""
+    sources = spec.get("sources") if isinstance(spec, dict) else None
+    items: list[object] = []
+    for name in ("required", "extra"):
+        listed = sources.get(name) if isinstance(sources, dict) else None
+        items.extend(listed if isinstance(listed, list) else [])
+    found: dict[str, str] = {}
+    for item in items:
+        text = item.strip() if isinstance(item, str) else ""
+        if text and "://" not in text:
+            text = "https://" + text
+        group = canonical_group(text)
+        if group and group[0] not in found:
+            found[group[0]] = group[1]
+    return list(found.items())
+
+
 def search_url(seed: str) -> str:
     return SEARCH_URL.format(query=quote(seed, safe=""))
 
@@ -619,8 +637,8 @@ class FacebookDiscovery:
         self,
         campaigns: CampaignStore,
         store: DiscoveryStore,
-        browser: DiscoveryBrowser,
-        reader: GroupReader,
+        browser: DiscoveryBrowser | None,
+        reader: GroupReader | None,
         *,
         max_seeds: int = 12,
         max_results_per_seed: int = 15,
@@ -631,6 +649,7 @@ class FacebookDiscovery:
         search_timeout_ms: int = 30_000,
         visit_timeout_seconds: float = 90.0,
         max_errors: int = 3,
+        acquisition_mode: str = "legacy",
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -644,7 +663,25 @@ class FacebookDiscovery:
         self.pause_min_seconds, self.pause_max_seconds = pause_min_seconds, pause_max_seconds
         self.time_budget_seconds, self.search_timeout_ms = time_budget_seconds, search_timeout_ms
         self.visit_timeout_seconds, self.max_errors = visit_timeout_seconds, max_errors
+        self.acquisition_mode = acquisition_mode
         self.sleep, self.clock, self.now = sleep, clock, now
+
+    async def _seed_required_groups(self, campaign: Campaign) -> int:
+        """Store the groups named in the task as queued (activity unknown); returns how many are queued now.
+
+        An existing row is never rewritten. No browser is used here.
+        """
+        known = {g.group_key: g for g in await self.store.groups(campaign.id)}
+        limits = campaign.plan.limits
+        queued = sum(1 for g in known.values() if g.state == "queued")
+        for key, url in required_groups(campaign.spec):
+            if key in known or queued >= limits.max_groups:
+                continue
+            await self.store.save_group(campaign.id, CampaignGroup(
+                group_key=key, canonical_url=url, name=None, language=None, seed="required", relevance_score=1.0,
+                activity="UNKNOWN", state="queued", window_no=queued // limits.window_size + 1), ACTOR)
+            queued += 1
+        return queued
 
     async def run(self, campaign_id: str) -> DiscoveryReport:
         """Discover, (re)start or resume; raises ``DiscoveryRefused`` without side effects."""
@@ -653,6 +690,12 @@ class FacebookDiscovery:
             raise DiscoveryRefused("campaign_not_found")
         if campaign.state not in RESUMABLE_STATES:
             raise DiscoveryRefused(f"campaign_{campaign.state}")
+        if self.acquisition_mode == "apify" and await self._seed_required_groups(campaign):  # the groups are given: no browser search for more
+            if campaign.state != "running" and not await self.campaigns.set_state(campaign_id, "running", ACTOR):
+                raise DiscoveryRefused("campaign_state_changed")
+            return await self._report(campaign_id, _Run())
+        if self.browser is None or self.reader is None:
+            raise DiscoveryRefused("browser_unavailable")
         profile = await self.store.claim_profile(ACTOR)
         if profile is None:
             raise DiscoveryRefused("facebook_profile_not_ready")
@@ -667,6 +710,7 @@ class FacebookDiscovery:
             if campaign.state != "discovering" and not await self.campaigns.set_state(campaign_id, "discovering", ACTOR):
                 raise DiscoveryRefused("campaign_state_changed")
             try:
+                await self._seed_required_groups(campaign)  # the task's own groups first; idempotent
                 await self._discover(campaign, lease, run)
             except ChallengeDetected as challenge:
                 # Stop everything; a human clears the checkpoint in the live window.

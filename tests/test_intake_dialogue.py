@@ -245,3 +245,14 @@ async def test_edit_changes_one_field_and_cancel_still_works() -> None:
     for reply in (edit, cancel):
         assert_clean(reply)
     assert sink.envelopes == []
+
+
+async def test_a_comma_list_of_group_links_answers_the_required_sources_question() -> None:
+    from bot.campaign.spec import TaskSpec
+    from bot.control_plane.rules import RuleInterviewer
+
+    answer = "https://www.facebook.com/groups/madrid.investors/, facebook.com/groups/inversores2"
+    turn = await RuleInterviewer().interview(mode="investors", spec=TaskSpec(mode="investors"), dialogue=[],
+                                             message=answer, asking="sources.required")
+    assert turn.spec.sources.required == ["https://www.facebook.com/groups/madrid.investors/",
+                                          "facebook.com/groups/inversores2"]
