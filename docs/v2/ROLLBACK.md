@@ -99,7 +99,16 @@ echo "delete from schema_migrations where filename = '047_campaign_group_join.sq
 | `scripts/rollback/049_campaign_comment_reads_run_id_down.sql` | в `campaign_comment_reads` есть строка с `run_id is not null` | был хотя бы один платный Apify-запуск B2 |
 | `scripts/rollback/048_campaign_post_reads_down.sql` | в `campaign_post_reads` есть хотя бы одна строка | был хотя бы один пост по ссылке (B1) |
 | `scripts/rollback/047_campaign_group_join_down.sql` | в `campaign_groups` есть `join_notice_at` или `join_confirmed_at` | бот хотя бы раз отправил «вступите» |
+| `scripts/rollback/050_task_drafts_mode_both_down.sql` | в `user_task_drafts` есть черновик с `mode = 'both'` | C2: кто-то выбрал «Недвижимость + инвесторы» (черновик 24 ч; обнулить: `update user_task_drafts set mode = null where mode = 'both';`) |
 
 Отказ — штатный исход: значит, откат схемы не нужен, оставьте её. Удалять эти данные ради отката не рекомендуется
 (это учёт расходов и аудит); если владелец решит иначе — отдельная задача db-агенту с «ок» владельца.
 Восстановление БД из бэкапа — только в крайнем случае (`OPS.md` «Бэкапы», `scripts/restore_check.sh`).
+
+## C2: режим «Недвижимость + инвесторы»
+
+Откат функции: `INTAKE_BOTH_MODE=false` в `.env` и перезапуск `telegram` (кнопки нет; уже начатый черновик `both`
+начинается заново с меню). Перед откатом **кода** на версию без C2: `update user_task_drafts set mode = null where
+mode = 'both';` (старый код не знает этот режим). Кампании `both` в `campaigns` остаются рабочими. Миграция 050
+расширяющая; откат схемы — `scripts/rollback/050_task_drafts_mode_both_down.sql` (строка в таблице выше), после
+всех остальных и только после отката кода.
