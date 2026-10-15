@@ -4,8 +4,16 @@
 # nor Redis ever join an egress-capable network or publish a host port.
 name: real-estate-monitor
 
+# Docker keeps at most 5 x 20 MB of logs per container (docs/v2/OPS.md).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
+    logging: *logging
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
@@ -25,6 +33,7 @@ services:
     security_opt: [no-new-privileges:true]
 
   redis:
+    logging: *logging
     image: redis:7-alpine
     restart: unless-stopped
     environment:
@@ -42,6 +51,7 @@ services:
     security_opt: [no-new-privileges:true]
 
   caddy:
+    logging: *logging
     image: caddy:2.8-alpine
     restart: unless-stopped
     depends_on:
@@ -71,6 +81,7 @@ services:
     security_opt: [no-new-privileges:true]
 
   telegram:
+    logging: *logging
     build:
       context: .
       dockerfile: docker/telegram-control.Dockerfile
@@ -133,10 +144,17 @@ services:
     # no host port: the live-view gate on :8081 is reached only through Caddy.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.control_plane.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
   browser:
+    logging: *logging
     build:
       context: .
       dockerfile: docker/browser-session.Dockerfile
@@ -162,9 +180,16 @@ services:
     # only by services on the private backend network.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.browser_session.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 120s
     shm_size: 1gb
 
   facebook-collector:
+    logging: *logging
     profiles: [collector]
     build:
       context: .
@@ -204,6 +229,7 @@ services:
     tmpfs: [/tmp]
 
   facebook-runner:
+    logging: *logging
     # Same image and limits as facebook-collector, but long-running: it starts
     # only batches that a verification Resume requeued (collector_launch_requests),
     # one at a time. Batches queued by /run stay manual.
@@ -241,10 +267,17 @@ services:
       CAMPAIGN_BUDGET_USD: ${CAMPAIGN_BUDGET_USD:-5}
     networks: [backend]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.facebook_collector.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
   agent-reach:
+    logging: *logging
     # Controlled, one-shot public-page reader. It is deliberately profile-gated
     # so upstream Agent Reach is never installed or invoked by this stack.
     profiles: [agent-reach]
@@ -269,6 +302,7 @@ services:
     tmpfs: [/tmp]
 
   scrapling-connector:
+    logging: *logging
     # One-shot HTTP-first public website reader. It has no browser profile,
     # browser API token, shell tool, or crawler capability.
     profiles: [scrapling]
@@ -292,6 +326,7 @@ services:
     tmpfs: [/tmp]
 
   analysis-pipeline:
+    logging: *logging
     # One-shot, DB-backed analysis worker. It only receives bounded evidence
     # selected by deterministic filters before OpenRouter is called.
     profiles: [analysis]
@@ -323,6 +358,7 @@ services:
   # time, with the same limits as its one-shot service above.
 
   agent-reach-worker:
+    logging: *logging
     build:
       context: .
       dockerfile: docker/agent-reach.Dockerfile
@@ -344,10 +380,17 @@ services:
       AGENT_REACH_UPSTREAM_ENABLED: "false"
     networks: [backend]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.agent_reach.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
   scrapling-worker:
+    logging: *logging
     build:
       context: .
       dockerfile: docker/scrapling-connector.Dockerfile
@@ -367,10 +410,17 @@ services:
       SCRAPLING_POLL_SECONDS: ${SCRAPLING_POLL_SECONDS:-15}
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.scrapling_connector.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
   analysis-worker:
+    logging: *logging
     # Idle without OPENROUTER_API_KEY; digests need ANALYSIS_TELEGRAM_CHAT_ID.
     build:
       context: .
@@ -395,10 +445,17 @@ services:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.analysis_pipeline.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
   reduction-worker:
+    logging: *logging
     # Hybrid pipeline SA-2 Reduction agents (docs/HYBRID_AGENTS.md). AGENT_REDUCTION_MODE=shadow (default):
     # Claude extracts each campaign post, Jev decides at once, the gate files it;
     # every decision is stored in agent_reductions and nothing is sent. live: the same, and the
@@ -430,10 +487,17 @@ services:
       AGENT_REDUCTION_TIMEOUT_SECONDS: ${AGENT_REDUCTION_TIMEOUT_SECONDS:-45}
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.agents.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
   campaign-runner:
+    logging: *logging
     # Drives /campaign goals: discovery, then windows of at most 20 groups as
     # ordinary Facebook batches that facebook-runner executes (same quotas and
     # breakers as /run), live status and findings in the campaign's chat.
@@ -494,6 +558,18 @@ services:
       APIFY_YAENCONTRE_ACTOR: ${APIFY_YAENCONTRE_ACTOR:-igolaizola/yaencontre-scraper}
       APIFY_YAENCONTRE_MAX_RESULTS: ${APIFY_YAENCONTRE_MAX_RESULTS:-20}
       APIFY_YAENCONTRE_MAX_CHARGE_USD: ${APIFY_YAENCONTRE_MAX_CHARGE_USD:-0.10}
+      APIFY_PISOS_ENABLED: ${APIFY_PISOS_ENABLED:-false}
+      APIFY_PISOS_ACTOR: ${APIFY_PISOS_ACTOR:-logiover/pisos-com-property-scraper}
+      APIFY_PISOS_MAX_RESULTS: ${APIFY_PISOS_MAX_RESULTS:-20}
+      APIFY_PISOS_MAX_CHARGE_USD: ${APIFY_PISOS_MAX_CHARGE_USD:-0.10}
+      APIFY_HABITACLIA_ENABLED: ${APIFY_HABITACLIA_ENABLED:-false}
+      APIFY_HABITACLIA_ACTOR: ${APIFY_HABITACLIA_ACTOR:-trev0n/habitaclia-com-spain-scraper}
+      APIFY_HABITACLIA_MAX_RESULTS: ${APIFY_HABITACLIA_MAX_RESULTS:-20}
+      APIFY_HABITACLIA_MAX_CHARGE_USD: ${APIFY_HABITACLIA_MAX_CHARGE_USD:-0.10}
+      APIFY_MILANUNCIOS_ENABLED: ${APIFY_MILANUNCIOS_ENABLED:-false}
+      APIFY_MILANUNCIOS_ACTOR: ${APIFY_MILANUNCIOS_ACTOR:-rastriq/milanuncios-scraper}
+      APIFY_MILANUNCIOS_MAX_RESULTS: ${APIFY_MILANUNCIOS_MAX_RESULTS:-20}
+      APIFY_MILANUNCIOS_MAX_CHARGE_USD: ${APIFY_MILANUNCIOS_MAX_CHARGE_USD:-0.10}
       APIFY_PORTALS_TIMEOUT_SECONDS: ${APIFY_PORTALS_TIMEOUT_SECONDS:-120}
       WEB_SEARCH_SEARXNG_URL: http://searxng:8080
       WEB_SEARCH_SEARXNG_TIMEOUT_SECONDS: ${WEB_SEARCH_SEARXNG_TIMEOUT_SECONDS:-25}
@@ -607,10 +683,17 @@ services:
     # Telegram messages, calls OpenRouter and reads public web pages.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.campaign.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
   searxng:
+    logging: *logging
     # Metasearch for the campaigns' website stage: the official image with
     # docker/searxng/settings.yml (JSON output only, limiter off). No host
     # port: only services on the private backend network reach it; it joins
@@ -631,6 +714,13 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE, FOWNER]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      # Busybox wget, else curl, else python: whichever the image has answers /healthz.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || curl -fsS -o /dev/null http://127.0.0.1:8080/healthz || python3 -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8080/healthz', timeout=5)\""]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
 
   # Optional VPN for the web stage (docs/WEB_SEARCH.md): uncomment, fill the
   # WireGuard values in .env, then set WEB_SEARCH_PROXY_URL=http://gluetun:8888.
@@ -653,6 +743,7 @@ services:
   #   networks: [backend, egress]
 
   verification:
+    logging: *logging
     # Human-in-the-loop verification (bot/verification). Operators open it as
     # a Telegram Mini App through Caddy at /verify/*; it publishes no host port.
     # Without VERIFICATION_PUBLIC_URL (or LIVE_VIEW_PUBLIC_URL) it stays idle.
@@ -683,6 +774,56 @@ services:
     # Telegram notices.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.verification.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    read_only: true
+    tmpfs: [/tmp]
+
+  watchdog:
+    logging: *logging
+    # Owner alerts (docs/v2/OPS.md): containers that are exited/restarting/unhealthy (Docker Engine API through the
+    # socket below), failing Apify calls, a spent budget, campaigns without cards, a portal with no listings, and a
+    # daily summary, all sent to OWNER_ALERT_CHAT_ID in Telegram. Off twice over: the `ops` profile (enable with
+    # COMPOSE_PROFILES=ops in .env, which update.sh honours) and WATCHDOG_ENABLED=false (the process then only logs).
+    # The socket is mounted read-only, but the Docker API is not read-only for whoever holds the socket: this
+    # container is host-level trusted, so it has no ports and runs no code but this repository's.
+    profiles: [ops]
+    build:
+      context: .
+      dockerfile: docker/campaign-runner.Dockerfile
+    command: ["python", "-m", "bot.ops.watchdog"]
+    restart: unless-stopped
+    # The socket is root:docker; WATCHDOG_DOCKER_GID is that group's id (stat -c %g /var/run/docker.sock).
+    group_add: ["${WATCHDOG_DOCKER_GID:-999}"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
+      WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-false}
+      OWNER_ALERT_CHAT_ID: ${OWNER_ALERT_CHAT_ID:-0}
+      WATCHDOG_POLL_SECONDS: ${WATCHDOG_POLL_SECONDS:-60}
+      WATCHDOG_ALERT_COOLDOWN_MINUTES: ${WATCHDOG_ALERT_COOLDOWN_MINUTES:-30}
+      WATCHDOG_DAILY_SUMMARY_HOUR: ${WATCHDOG_DAILY_SUMMARY_HOUR:-9}
+      # Empty: containers are not checked. /var/run/docker.sock: they are.
+      WATCHDOG_DOCKER_SOCKET: ${WATCHDOG_DOCKER_SOCKET:-}
+      CAMPAIGN_BUDGET_USD: ${CAMPAIGN_BUDGET_USD:-5}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # `backend` reaches PostgreSQL; `egress` sends the Telegram messages.
+    networks: [backend, egress]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "bot.ops.healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     read_only: true
     tmpfs: [/tmp]
 
