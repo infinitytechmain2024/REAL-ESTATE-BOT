@@ -196,14 +196,14 @@ _TEMPLATES: dict[str, dict[Language, tuple[tuple[str, str], ...]]] = {
 }
 
 
-EXPLICIT_VERTICALS = ("real_estate", "investors")
+EXPLICIT_VERTICALS = ("real_estate", "investors", "both")
 
 
 def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str | None = None,
                   place: Mapping[str, Any] | None = None, spec: TaskSpec | None = None) -> CampaignPlan:
     """Turn a user goal in ES/EN/RU/UK into a bounded plan, or raise ``InvalidGoal``.
 
-    ``vertical`` (real_estate|investors), ``place`` (names per language,
+    ``vertical`` (real_estate|investors|both), ``place`` (names per language,
     ``ru_in``/``uk_in`` locatives and ``country``, see :func:`world_place`)
     and ``location`` (any place name) are choices a person already made;
     they override what the text says, so "no vertical" and "several cities"

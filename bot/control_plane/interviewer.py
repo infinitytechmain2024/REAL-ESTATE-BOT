@@ -84,6 +84,8 @@ RULES
 3. Ask exactly ONE next question: the most important missing HARD field first, in this order:
    real_estate: place, deal, property_type, budget.max, rooms.min (rooms only for apartment or house).
    investors: place (or investor.geography), investor.who, investor.ticket, investor.user_role.
+   both (one task looks for properties AND for investors in the same place): the real_estate fields in that order,
+   then investor.who, investor.ticket, investor.user_role (place is asked once). Parts B and C cover both sides.
    A hard field counts as answered when it has a value or is listed in `unspecified`.
 4. The question is in Russian, short, friendly, plain; add 2-4 example answers ("Например: ...").
    No lists of several questions, no greetings, no explanations of why you ask.

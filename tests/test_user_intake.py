@@ -497,20 +497,22 @@ def test_explicit_vertical_and_location_override_detection() -> None:
     assert plan_campaign("что-нибудь в Мадриде", vertical="investors").vertical == "investors"  # no "no vertical" error
     assert plan_campaign("квартиры в Мадриде или Барселоне", location="Barcelona").location == "Barcelona"
     assert plan_campaign("квартиры", location="Lisbon").location == "Lisbon"  # any place in the world
+    assert plan_campaign("квартиры в Мадриде", vertical="both").vertical == "both"  # C2: the mode «both»
     with pytest.raises(InvalidGoal):
-        plan_campaign("квартиры в Мадриде", vertical="both")  # type: ignore[arg-type]
+        plan_campaign("квартиры в Мадриде", vertical="land")  # type: ignore[arg-type]
 
 
 def test_the_campaign_parser_strips_mode_and_city_tokens() -> None:
     assert parse_campaign_goal("mode=investors city=Málaga квартиры") == ("квартиры", "investors", "Málaga", None)
     assert parse_campaign_goal("city=Ubud,_Bali виллы") == ("виллы", None, "Ubud, Bali", None)
+    assert parse_campaign_goal("mode=both квартиры")[1] == "both"
     assert parse_campaign_goal("квартиры в Мадриде") == ("квартиры в Мадриде", None, None, None)
     from bot.control_plane.intake import encode_place
 
     token = encode_place({"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"})
     assert " " not in token
     assert parse_campaign_goal(f"place={token} виллы")[3] == {"en": "Ubud, Bali", "ru": "Убуд, Бали", "country": "ID"}
-    for bad in ("mode=both квартиры", "mode=investors mode=investors x", "city= x", "mode=investors",
+    for bad in ("mode=land квартиры", "mode=investors mode=investors x", "city= x", "mode=investors",
                 "city=Madrid city=Kyiv квартиры", "place=%%% x", f"place={token} place={token} x",
                 "city=" + "a" * 81 + " x", "place=" + encode_place({"ru": "без en"}) + " x"):
         with pytest.raises(CommandValidationError):
@@ -519,7 +521,7 @@ def test_the_campaign_parser_strips_mode_and_city_tokens() -> None:
 
 @pytest.mark.asyncio
 async def test_bad_mode_or_city_tokens_are_rejected_without_a_campaign() -> None:
-    for arguments in ("mode=both квартиры в Мадриде", "place=%%% квартиры"):
+    for arguments in ("mode=land квартиры в Мадриде", "place=%%% квартиры"):
         _store, campaigns, notices = await dispatch(claimed("campaign", arguments))
         assert campaigns.campaigns == {}
         assert "failed validation" in notices[-1]

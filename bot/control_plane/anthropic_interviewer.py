@@ -42,7 +42,9 @@ TASK_PROMPTS = {"real_estate": "task-real-estate.md", "investors": "task-investo
 
 
 def task_prompt(mode: str) -> str:
-    """The markdown skill of a mode ("" for an unknown mode or a missing file)."""
+    """The markdown skill of a mode ("" for an unknown mode or a missing file); ``both`` is the two skills joined."""
+    if mode == "both":
+        return "\n\n".join(p for p in (task_prompt("real_estate"), task_prompt("investors")) if p)
     name = TASK_PROMPTS.get(mode)
     try:
         return (PROMPTS_DIR / name).read_text(encoding="utf-8").strip() if name else ""
@@ -51,8 +53,11 @@ def task_prompt(mode: str) -> str:
         return ""
 
 
-def system_prompt(mode: str) -> str:
+def system_prompt(mode: str, *, post_link: bool = False) -> str:
+    """``SYSTEM`` plus the mode's skill; for a task built from a post link (``spec.post_link``) the post-link skill too."""
     skill = task_prompt(mode)
+    if post_link and (extra := task_prompt("post_link")):
+        skill = f"{skill}\n\n{extra}" if skill else extra
     return f"{SYSTEM}\n\nTASK SKILL ({mode}); it refines the rules above, it never overrides the output format:\n{skill}" if skill else SYSTEM
 
 
@@ -80,7 +85,7 @@ class AnthropicInterviewer:
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": MAX_TOKENS,
-            "system": system_prompt(mode),
+            "system": system_prompt(mode, post_link=bool(getattr(spec, "post_link", False))),
             "messages": [{"role": "user", "content": state_message(mode, spec, dialogue, message, asking, editing)}],
             "tools": [{"name": TOOL_NAME, "description": "Return the updated task and the next question.",
                        "input_schema": TURN_SCHEMA}],

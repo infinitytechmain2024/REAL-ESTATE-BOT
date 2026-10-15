@@ -86,7 +86,8 @@ MAX_HEARD_CHARS = 300
 CANCEL_WORDS = frozenset({"отмена", "отменить", "cancel", "скасувати"})
 ENOUGH_WORDS = frozenset({"хватит", "хватит, ищи", "хватит ищи", "ищи", "достаточно", "хватит вопросов", "enough"})
 DEAL_TEXT = dict(DEAL_RU)
-EXAMPLES = {"real_estate": "«квартиры в аренду в Мадриде до 1200 €»", "investors": "«инвесторы для стартапа в Барселоне»"}
+EXAMPLES = {"real_estate": "«квартиры в аренду в Мадриде до 1200 €»", "investors": "«инвесторы для стартапа в Барселоне»",
+            "both": "«квартиры на продажу в Валенсии до 300 тыс. € и инвесторы в недвижимость там же»"}
 _SUBURB = re.compile(r"пригород|передміст|окрестност|околиц|afueras|alrededores|suburb|outskirts", re.IGNORECASE)
 _RADIUS = re.compile(r"(?<!\d)(\d{1,3}(?:[.,]\d+)?)\s*(?:км|km|kilomet(?:er|re)s?)(?!\w)", re.IGNORECASE)
 # «Изменить»: callback code -> (button title, the TaskSpec field the interviewer is pointed at)
@@ -104,6 +105,8 @@ FIELDS: dict[str, dict[str, tuple[str, str]]] = {
         "wishes": ("Пожелания", "wishes"), "exclude": ("Исключить", "exclude"),
     },
 }
+FIELDS["both"] = {**FIELDS["real_estate"], "who": FIELDS["investors"]["who"], "ticket": FIELDS["investors"]["ticket"],
+                  "role": FIELDS["investors"]["role"], "geo": FIELDS["investors"]["geo"]}
 _WORD = re.compile(r"\w+")
 
 
@@ -133,10 +136,9 @@ class Draft:
         first price it finds), the type, the task, then the must-haves and the wishes, within the length limit."""
         spec = self.spec or TaskSpec()
         head: list[str] = []
-        if self.mode == "investors":
-            if who := ", ".join(INVESTOR_WHO_RU.get(w, w) for w in spec.investor.who):
-                head.append(f"Кого ищем: {who}.")
-        else:
+        if self.mode in ("investors", "both") and (who := ", ".join(INVESTOR_WHO_RU.get(w, w) for w in spec.investor.who)):
+            head.append(f"Кого ищем: {who}.")
+        if self.mode != "investors":
             if spec.deal in ("rent", "sale"):
                 head.append(DEAL_TEXT[spec.deal])
             if spec.budget.max:
@@ -291,8 +293,10 @@ class PostgresIntakeStore:
                           json.loads(row[3]) if row[3] else None) if row else None
 
 
-def mode_menu(text: str = "Выберите режим:") -> Reply:
-    return Reply(text, tuple(Button(title, callback_data=f"mode:{mode}") for mode, title in MODES.items()))
+def mode_menu(text: str = "Выберите режим:", *, both: bool = False) -> Reply:
+    """The mode buttons; «Недвижимость + инвесторы» only with ``both`` (INTAKE_BOTH_MODE)."""
+    return Reply(text, tuple(Button(title, callback_data=f"mode:{mode}") for mode, title in MODES.items()
+                             if both or mode != "both"))
 
 
 # The bottom (reply) keyboard: the control buttons stay at hand below the chat, not under one message.
@@ -360,11 +364,14 @@ class TaskIntake:
                  now: Callable[[], datetime] = lambda: datetime.now(UTC),
                  technical: Callable[[int], bool] = lambda _user_id: False,
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
-                 post_links: bool = False) -> None:
+                 post_links: bool = False, both_mode: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
         investor search over that post's comments (no interview); off, the link is an ordinary task text.
+
+        ``both_mode`` (``INTAKE_BOTH_MODE``): the mode «Недвижимость + инвесторы» is offered and accepted; off,
+        the menu has no such button and the choice is refused.
 
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
@@ -373,7 +380,10 @@ class TaskIntake:
         self.notify_owners, self.now, self.technical = notify_owners, now, technical
         self.interviewer = interviewer
         self.rules = RuleInterviewer()
-        self.max_rounds, self.post_links = max_rounds, post_links
+        self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
+
+    def menu(self, text: str = "Выберите режим:") -> Reply:
+        return mode_menu(text, both=self.both_mode)
 
     async def _draft(self, user_id: int, chat_id: int) -> Draft:
         draft = await self.store.get(user_id)
@@ -394,7 +404,7 @@ class TaskIntake:
         return draft is not None and draft.step != "idle" and not draft.expired(self.now())
 
     async def choose_mode(self, user_id: int, chat_id: int, mode: str) -> Reply:
-        if mode not in MODES:
+        if mode not in MODES or (mode == "both" and not self.both_mode):
             return Reply(STALE)
         draft = await self._draft(user_id, chat_id)
         draft.mode = mode
@@ -441,7 +451,7 @@ class TaskIntake:
         draft = replace(draft.fresh(), task=text, message_id=message.message_id)
         if draft.mode is None:
             await self.store.save(draft)
-            return mode_menu("Сначала выберите режим — задача сохранена:")
+            return self.menu("Сначала выберите режим — задача сохранена:")
         return await self._interview(draft, text)
 
     async def _post_task(self, draft: Draft, message: IncomingMessage, url: str) -> Reply:
@@ -610,7 +620,7 @@ class TaskIntake:
             question = question_for(spec, asking) if asking else None
             options = options_for(asking) if asking else ()
             choices = ()
-        suburb_scope = (mode == "real_estate" and bool(_SUBURB.search(draft.task))
+        suburb_scope = (mode in ("real_estate", "both") and bool(_SUBURB.search(draft.task))
                         and not spec.place.radius_km and not spec.place.districts
                         and not spec.is_unspecified("place.districts"))
         if not missing and not capped and suburb_scope:
@@ -620,7 +630,7 @@ class TaskIntake:
         elif question is None and missing and not capped:
             asking, question = missing[0], question_for(spec, missing[0])
             options = options_for(missing[0])
-        elif (question is None and not missing and not capped and not editing and mode == "real_estate"
+        elif (question is None and not missing and not capped and not editing and mode in ("real_estate", "both")
               and not spec.answered(DEVIATION_PATH)):
             # Whatever the model said, the deviation question is always asked before the card.
             asking, question, options, choices = DEVIATION_PATH, question_for(spec, DEVIATION_PATH), DEVIATION_OPTIONS, ()

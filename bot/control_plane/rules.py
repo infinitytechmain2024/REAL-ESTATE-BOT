@@ -234,13 +234,13 @@ def next_path(spec: TaskSpec, mode: str, *, soft: bool = True) -> str | None:
         return missing[0]
     if not soft:
         return None
-    if mode == "real_estate" and (found := next((p for p in SOFT_ORDER
+    if mode in ("real_estate", "both") and (found := next((p for p in SOFT_ORDER
                                                   if not spec.answered(p)
                                                   and not (p == "place.districts" and spec.place.radius_km)), None)):
         return found
     if not spec.answered(TASK_PATH):
         return TASK_PATH
-    if mode == "real_estate" and not spec.answered(DEVIATION_PATH):
+    if mode in ("real_estate", "both") and not spec.answered(DEVIATION_PATH):
         return DEVIATION_PATH
     return None
 
@@ -297,9 +297,9 @@ class RuleInterviewer:
             many = places
         elif asking == "place" and (name := typed_place(text)) is not None:
             self._set_place(spec, {"name": name})
-        if mode == "investors":
+        if mode in ("investors", "both"):
             self._read_investors(spec, text, asking, editing)
-        else:
+        if mode != "investors":
             self._read_real_estate(spec, text, asking, editing)
         self._read_asked_lists(spec, text, asking, editing)
         return many

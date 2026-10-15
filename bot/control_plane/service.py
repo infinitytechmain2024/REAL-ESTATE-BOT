@@ -26,7 +26,6 @@ from bot.control_plane.intake import (
     MemoryIntakeStore,
     TaskIntake,
     key_command,
-    mode_menu,
 )
 from bot.control_plane.interviewer import Interviewer
 from bot.control_plane.live_view import (
@@ -142,7 +141,8 @@ class ControlPlane:
         # ``interviewer`` interviews with AI; None (tests, no key) keeps the deterministic rules.
         self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners,
                                  technical=self._is_owner, interviewer=interviewer,
-                                 max_rounds=settings.interview_max_rounds, post_links=settings.apify_comments_enabled)
+                                 max_rounds=settings.interview_max_rounds, post_links=settings.apify_comments_enabled,
+                                 both_mode=settings.intake_both_mode)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""
@@ -223,7 +223,7 @@ class ControlPlane:
         """«Запустить» / «Изменить» at the task summary, «Новый поиск»: the mode menu."""
         assert message.user_id is not None
         if key == "новый поиск":
-            return mode_menu("Выберите режим нового поиска:")
+            return self.intake.menu("Выберите режим нового поиска:")
         who = label(None, None, message.user_id) if self._is_user(message.user_id) else None
         return await self.intake.on_button(message.user_id, message.chat_id,
                                            "launch" if key == "запустить" else "edit", "", who)
@@ -461,7 +461,7 @@ class ControlPlane:
         if command == "mode":
             if not self._may_give_tasks(message.user_id):
                 return self._with_access_button(Reply("Режим доступен после одобрения доступа."), message.user_id)
-            return mode_menu()
+            return self.intake.menu()
         if command in {"help", "start"}:
             role = self.operators.role(message.user_id)
             if command == "start" and role != "owner":
@@ -469,10 +469,10 @@ class ControlPlane:
                 if role == "helper":
                     return Reply(HELPER_GREETING)
                 if self._may_give_tasks(message.user_id):
-                    return mode_menu(GREETING)
+                    return self.intake.menu(GREETING)
                 return self._with_access_button(Reply(GUEST_GREETING), message.user_id)
             if role == "user":
-                return mode_menu(USER_HELP) if command == "start" or not await self.intake.mode(message.user_id) else Reply(USER_HELP)
+                return self.intake.menu(USER_HELP) if command == "start" or not await self.intake.mode(message.user_id) else Reply(USER_HELP)
             if role == "helper":
                 return Reply(HELPER_GREETING)
             if role is None:
@@ -488,7 +488,7 @@ class ControlPlane:
                          "without confirmation, /cancel still asks.")
             if command == "start" and self._can_control(message.user_id):
                 text += "\n\nИли выберите режим и опишите задачу: бот уточнит детали и попросит подтвердить «Запустить»."
-                menu = mode_menu(text)
+                menu = self.intake.menu(text)
                 if role == "owner" and self.access is not None:
                     return Reply(menu.text, (*menu.buttons, LOGIN_BUTTON, SETTINGS_BUTTON))
                 return menu
