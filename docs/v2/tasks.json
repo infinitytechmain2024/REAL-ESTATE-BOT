@@ -285,7 +285,7 @@
         "B1",
         "B4"
       ],
-      "status": "review",
+      "status": "done",
       "day": "Вс",
       "hours": 4
     },
@@ -328,7 +328,7 @@
       "stream": "release",
       "agent": "analyst",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Сб",
       "hours": 2
     },
