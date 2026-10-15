@@ -203,7 +203,7 @@
       "stream": "investors",
       "agent": "builder+sources+db+analyst",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Сб",
       "hours": 9
     },
@@ -272,7 +272,7 @@
       "stream": "architect",
       "agent": "builder+analyst",
       "deps": [],
-      "status": "ready",
+      "status": "in_progress",
       "day": "Вс",
       "hours": 5
     },
