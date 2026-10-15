@@ -138,7 +138,7 @@ class ControlPlane:
         # ``interviewer`` interviews with AI; None (tests, no key) keeps the deterministic rules.
         self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners,
                                  technical=self._is_owner, interviewer=interviewer,
-                                 max_rounds=settings.interview_max_rounds)
+                                 max_rounds=settings.interview_max_rounds, post_links=settings.apify_comments_enabled)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""

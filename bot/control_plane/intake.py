@@ -35,12 +35,22 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
 from bot.campaign.architect import MAX_TEXT_CHARS, InvalidGoal, find_places, plan_campaign
+from bot.campaign.leads import is_facebook_post
 from bot.campaign.models import CampaignPlan
-from bot.campaign.spec import DEAL_RU, INVESTOR_WHO_RU, MODE_TITLES, PROPERTY_RU, TaskSpec
+from bot.campaign.spec import (
+    DEAL_RU,
+    INVESTOR_WHO_RU,
+    MODE_TITLES,
+    PROPERTY_RU,
+    Place,
+    Sources,
+    TaskSpec,
+)
 from bot.control_plane.interviewer import Interviewer, InterviewTurn
 from bot.control_plane.models import Button, CommandEnvelope, IncomingMessage, Reply
 from bot.control_plane.rules import (
@@ -321,6 +331,20 @@ def _norm(text: str) -> str:
     return text.casefold().strip(".! ")
 
 
+POST_TASK = "лиды из комментариев под постом"
+MAX_POST_LINK_CHARS = 120  # ``TaskSpec.sources`` keeps a link this long at most
+
+
+def post_link(text: str) -> str | None:
+    """The text as one Facebook post link without tracking parameters (kept in ``sources.required``), else None."""
+    text = text.strip()
+    if not text or any(ch.isspace() for ch in text) or not is_facebook_post(text):
+        return None
+    parts = urlsplit(text)
+    link = f"https://{parts.hostname}{parts.path}"
+    return link if len(link) <= MAX_POST_LINK_CHARS else None
+
+
 LAUNCHED = "Принято. Начинаю поиск. Найденные варианты пришлю сюда."
 STOP_HINT = "Чтобы остановить поиск, нажмите «Остановить поиск» внизу или напишите «стоп»."
 STOP_CALLBACK = "search:stop"
@@ -335,8 +359,12 @@ class TaskIntake:
     def __init__(self, store: IntakeStore, sink: CommandSink, notify_owners: OwnerNotice | None = None,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC),
                  technical: Callable[[int], bool] = lambda _user_id: False,
-                 interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS) -> None:
+                 interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
+                 post_links: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
+
+        ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
+        investor search over that post's comments (no interview); off, the link is an ordinary task text.
 
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
@@ -345,7 +373,7 @@ class TaskIntake:
         self.notify_owners, self.now, self.technical = notify_owners, now, technical
         self.interviewer = interviewer
         self.rules = RuleInterviewer()
-        self.max_rounds = max_rounds
+        self.max_rounds, self.post_links = max_rounds, post_links
 
     async def _draft(self, user_id: int, chat_id: int) -> Draft:
         draft = await self.store.get(user_id)
@@ -408,11 +436,24 @@ class TaskIntake:
         # idle (or a stale step from an older version): a new task
         if len(text) > MAX_TASK_CHARS:
             return Reply(f"Слишком длинная задача (больше {MAX_TASK_CHARS} символов). Сократите её.")
+        if self.post_links and (url := post_link(text)) is not None:
+            return await self._post_task(draft, message, url)
         draft = replace(draft.fresh(), task=text, message_id=message.message_id)
         if draft.mode is None:
             await self.store.save(draft)
             return mode_menu("Сначала выберите режим — задача сохранена:")
         return await self._interview(draft, text)
+
+    async def _post_task(self, draft: Draft, message: IncomingMessage, url: str) -> Reply:
+        """A Facebook post link as the whole task: an investor search over its comments, straight to the card.
+
+        The campaign needs a place; the post has none, so the country stands in (the post itself is the source).
+        """
+        spec = TaskSpec(mode="investors", sources=Sources(required=[url]),
+                        place=Place(name="Spain", country="ES", level="region",
+                                    names={"es": "España", "ru": "Испания", "uk": "Іспанія"}))
+        draft = replace(draft.fresh(), mode="investors", task=POST_TASK, message_id=message.message_id, spec=spec)
+        return await self._card(draft)
 
     # --- buttons ----------------------------------------------------------------------------
 

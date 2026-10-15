@@ -31,6 +31,8 @@ class ControlPlaneSettings:
     interview_model: str = "anthropic/claude-sonnet-4.5"
     interview_timeout_seconds: float = 30.0
     interview_max_rounds: int = 14
+    # A Facebook post link as the task (v2 B1, needs the same flag as the campaign-runner's post reader): off = plain text.
+    apify_comments_enabled: bool = False
     # Live browser for logins and checkpoints. Empty public URL disables it.
     live_view_public_url: str = ""
     live_view_open_minutes: int = 20
@@ -75,6 +77,7 @@ class ControlPlaneSettings:
             interview_model=os.environ.get("OPENROUTER_INTERVIEW_MODEL", "").strip() or "anthropic/claude-sonnet-4.5",
             interview_timeout_seconds=float(_bounded_int("OPENROUTER_INTERVIEW_TIMEOUT_SECONDS", 30, 1, 180)),
             interview_max_rounds=_bounded_int("INTERVIEW_MAX_ROUNDS", 14, 1, 30),
+            apify_comments_enabled=os.environ.get("APIFY_FACEBOOK_COMMENTS_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"},
             live_view_public_url=_public_url(os.environ.get("LIVE_VIEW_PUBLIC_URL", "")),
             live_view_open_minutes=_bounded_int("LIVE_VIEW_OPEN_MINUTES", 20, 5, 60),
             live_view_request_minutes=_bounded_int("LIVE_VIEW_REQUEST_MINUTES", 60, 10, 1440),

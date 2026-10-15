@@ -627,3 +627,47 @@ async def test_owner_settings_switch_roles_with_buttons() -> None:
     await press(control, OWNER, f"set:role:{USER}:admin")
     assert control.operators.role(USER) == "user"
     assert (await say(control, OWNER, "/settings")).text.startswith("⚙️ Настройки")
+
+
+# --- v2 B1: a Facebook post link as the task ---------------------------------------------------
+
+POST_LINK = "https://www.facebook.com/groups/123/posts/456/"
+
+
+def post_plane(enabled: bool) -> tuple[ControlPlane, Sink]:
+    control, sink, _ = plane()
+    control.intake.post_links = enabled
+    return control, sink
+
+
+@pytest.mark.asyncio
+async def test_a_post_link_is_an_investor_search_with_the_post_as_its_source() -> None:
+    control, sink = post_plane(True)
+    reply = await say(control, USER, f"{POST_LINK}?__cft__[0]=tracking&comment_id=9")  # no mode chosen, no interview
+    assert reply.text.startswith("Проверьте задачу:") and POST_LINK in reply.text and "Инвесторы" in reply.text
+    assert reply.keyboard == TASK_KEYBOARD
+    assert "__cft__" not in reply.text
+    assert (await press(control, USER, "task:launch")).text.startswith("Принято.")
+    [envelope] = sink.envelopes
+    assert envelope.arguments.startswith("mode=investors ")
+    _, campaigns, _ = await dispatch(claimed("campaign", envelope.arguments))
+    [campaign] = campaigns.campaigns.values()
+    assert campaign.plan.vertical == "investors"
+    assert campaign.spec is not None and campaign.spec["sources"]["required"] == [POST_LINK]  # reaches campaigns.spec
+
+
+@pytest.mark.asyncio
+async def test_a_post_link_is_plain_text_while_the_flag_is_off() -> None:
+    control, _ = post_plane(False)
+    reply = await say(control, USER, POST_LINK)
+    assert "Проверьте задачу" not in reply.text and "режим" in reply.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_only_a_single_post_link_alone_is_taken_for_a_post_task() -> None:
+    from bot.control_plane.intake import post_link
+
+    assert post_link(f"  {POST_LINK}  ") == POST_LINK
+    assert post_link(f"найди инвесторов {POST_LINK}") is None
+    assert post_link("https://www.facebook.com/groups/123/") is None
+    assert post_link("https://www.idealista.com/inmueble/1/") is None
