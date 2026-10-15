@@ -323,6 +323,16 @@
       "optional": true
     },
     {
+      "id": "D1a",
+      "title": "Карточка объекта: площадь (участок отдельно), телефон, агентство из источника",
+      "stream": "release",
+      "agent": "analyst",
+      "deps": [],
+      "status": "in_progress",
+      "day": "Сб",
+      "hours": 2
+    },
+    {
       "id": "D1",
       "title": "Золотой набор на VPS, разметка, исправления",
       "stream": "release",
@@ -341,7 +351,8 @@
         "O1",
         "O2",
         "O7",
-        "O10"
+        "O10",
+        "D1a"
       ],
       "status": "blocked",
       "day": "Пн",
