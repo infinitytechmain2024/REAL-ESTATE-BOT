@@ -44,7 +44,7 @@ class Clock:
 
 @dataclass
 class FakeStore:
-    apify: list[str] = field(default_factory=list)
+    apify: list[tuple[str, int]] = field(default_factory=list)
     budget: list[tuple[str, float]] = field(default_factory=list)
     empty: list[str] = field(default_factory=list)
     portals: list[tuple[str, str]] = field(default_factory=list)
@@ -52,7 +52,7 @@ class FakeStore:
     broken: bool = False
     summary_calls: int = 0
 
-    async def apify_error_streaks(self, since: datetime) -> list[str]:
+    async def apify_error_streaks(self, since: datetime) -> list[tuple[str, int]]:
         if self.broken:
             raise RuntimeError("db down")
         return self.apify
@@ -146,7 +146,7 @@ async def test_empty_docker_socket_skips_containers() -> None:
 
 
 async def test_three_apify_errors_in_a_row_alert() -> None:
-    rig = Rig(store=FakeStore(apify=["aaaaaaaa-1111"]))
+    rig = Rig(store=FakeStore(apify=[("aaaaaaaa-1111", 7)]))
     await rig.dog.tick()
     assert len(rig.messages) == 1 and "Apify" in rig.messages[0]["text"] and "aaaaaaaa" in rig.messages[0]["text"]
     await rig.dog.tick()
@@ -226,7 +226,8 @@ async def test_token_and_chat_id_never_reach_the_logs(caplog: pytest.LogCaptureF
     assert TOKEN in ok.telegram_urls[0]  # the token does travel to Telegram ...
     logs = caplog.text
     assert TOKEN not in logs and "SECRET-TOKEN" not in logs and str(CHAT) not in logs  # ... and nowhere else
-    assert TOKEN not in repr(rig.dog.settings)
+    assert TOKEN not in repr(rig.dog.settings) and str(CHAT) not in repr(rig.dog.settings)
+    assert "postgresql://" not in repr(settings(database_url="postgresql://u:pw@h/db"))
 
 
 async def test_disabled_watchdog_only_sleeps(caplog: pytest.LogCaptureFixture) -> None:
@@ -248,3 +249,55 @@ def test_settings_defaults_are_off() -> None:
         False, 0, 60, 30, 9, "")
     assert settings(owner_chat_id=0).missing() == ["OWNER_ALERT_CHAT_ID"]
     assert settings().missing() == []
+
+
+async def test_budget_alert_is_sent_once_not_every_cooldown() -> None:
+    rig = Rig(store=FakeStore(budget=[("bbbbbbbb-2222", 5.25)]))
+    for _ in range(4):
+        await rig.dog.tick()
+        rig.clock.advance(minutes=31)
+    assert len(rig.messages) == 1
+
+
+async def test_apify_streak_alerts_once_per_series_and_again_for_a_new_one() -> None:
+    rig = Rig(store=FakeStore(apify=[("aaaaaaaa-1111", 7)]))
+    for _ in range(3):
+        await rig.dog.tick()
+        rig.clock.advance(minutes=31)
+    assert len(rig.messages) == 1
+    rig.store.apify = [("aaaaaaaa-1111", 12)]  # a later error row: a new series
+    await rig.dog.tick()
+    assert len(rig.messages) == 2
+
+
+async def test_postgres_store_queries_exclude_stop_codes_and_finished_campaigns() -> None:
+    from bot.ops.watchdog import NOT_APIFY_FAILURES, PostgresStore
+
+    seen: list[tuple] = []
+
+    class Pool:
+        async def fetch(self, sql: str, *args: object) -> list:
+            seen.append((sql, args))
+            return []
+
+    store = PostgresStore(Pool())
+    await store.apify_error_streaks(datetime(2026, 1, 1, tzinfo=UTC))
+    await store.over_budget(5.0)
+    await store.empty_campaign_streak()
+    assert list(NOT_APIFY_FAILURES) in seen[0][1] and "apify_time_cap" in NOT_APIFY_FAILURES
+    assert "c.state = any" in seen[0][0] and "c.state = any" in seen[1][0]
+    assert "campaign_lead_deliveries" in seen[2][0]
+
+
+async def test_docker_api_failure_alerts_once() -> None:
+    rig = Rig()
+
+    def denied(request: httpx.Request) -> httpx.Response:
+        raise PermissionError("denied")
+
+    rig.dog.docker = httpx.AsyncClient(transport=httpx.MockTransport(denied), base_url="http://docker")
+    await rig.dog.tick()
+    rig.clock.advance(hours=2)
+    await rig.dog.tick()
+    assert len(rig.messages) == 1
+    assert "docker API недоступен" in rig.messages[0]["text"]

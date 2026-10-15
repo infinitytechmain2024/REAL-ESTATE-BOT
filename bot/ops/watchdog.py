@@ -32,6 +32,10 @@ COMPOSE_PROJECT = "real-estate-monitor"
 BAD_STATES = ("exited", "restarting")
 MANY_SERVICES = 3  # this many broken containers at once are reported as one alert
 APIFY_ERRORS_IN_A_ROW = 3
+# Stop codes of the web worker (bot/web_search/worker.py): the run was ended on purpose, Apify did not fail.
+NOT_APIFY_FAILURES = ("apify_campaign_cancelled", "apify_campaign_failed", "apify_time_cap",
+                      "apify_disabled_during_run", "apify_task_changed", "apify_launch_uncertain")
+ACTIVE_STATES = ("planned", "discovering", "running", "paused_verification")
 EMPTY_CAMPAIGNS_IN_A_ROW = 2
 TELEGRAM_API = "https://api.telegram.org"
 
@@ -60,7 +64,7 @@ class Summary:
 
 
 class Store(Protocol):
-    async def apify_error_streaks(self, since: datetime) -> list[str]: ...
+    async def apify_error_streaks(self, since: datetime) -> list[tuple[str, int]]: ...
     async def over_budget(self, budget_usd: float) -> list[tuple[str, float]]: ...
     async def empty_campaign_streak(self) -> list[str]: ...
     async def empty_portals(self, since: datetime) -> list[tuple[str, str]]: ...
@@ -71,33 +75,40 @@ class PostgresStore:
     def __init__(self, pool: Any) -> None:
         self.pool = pool
 
-    async def apify_error_streaks(self, since: datetime) -> list[str]:
-        """Campaigns whose last three Apify (stage ``api``) ledger rows are all errors."""
+    async def apify_error_streaks(self, since: datetime) -> list[tuple[str, int]]:
+        """(campaign, id of its last error row) for running campaigns whose last three real Apify rows are errors.
+
+        Stop codes (NOT_APIFY_FAILURES) are not Apify failures and are left out of the count.
+        """
         rows = await self.pool.fetch(
-            """select campaign_id::text from (
-                   select campaign_id, kind, row_number() over (partition by campaign_id order by id desc) as rn
-                   from campaign_costs
-                   where stage = 'api' and kind in ('cost', 'error') and campaign_id is not null and created_at >= $1
+            """select campaign_id::text, max(id) from (
+                   select k.campaign_id, k.kind, k.id,
+                          row_number() over (partition by k.campaign_id order by k.id desc) as rn
+                   from campaign_costs k join campaigns c on c.id = k.campaign_id
+                   where k.stage = 'api' and k.kind in ('cost', 'error') and k.created_at >= $1
+                     and coalesce(k.code, '') <> all($3::text[]) and c.state = any($4::text[])
                ) t where rn <= $2 group by campaign_id having count(*) = $2 and bool_and(kind = 'error')""",
-            since, APIFY_ERRORS_IN_A_ROW)
-        return [r[0] for r in rows]
+            since, APIFY_ERRORS_IN_A_ROW, list(NOT_APIFY_FAILURES), list(ACTIVE_STATES))
+        return [(r[0], int(r[1])) for r in rows]
 
     async def over_budget(self, budget_usd: float) -> list[tuple[str, float]]:
-        """Running campaigns (or finished in the last day) whose paid calls reached the budget; 0 = no limit."""
+        """Running campaigns whose paid calls reached the budget; 0 = no limit. Finished campaigns are not reported."""
         if budget_usd <= 0:
             return []
         rows = await self.pool.fetch(
             """select c.id::text, sum(k.cost_usd)::float8 as spent
                from campaigns c join campaign_costs k on k.campaign_id = c.id and k.kind = 'cost'
-               where c.state not in ('completed', 'cancelled', 'failed') or c.updated_at >= now() - interval '1 day'
-               group by c.id having sum(k.cost_usd) >= $1""", budget_usd)
+               where c.state = any($2::text[])
+               group by c.id having sum(k.cost_usd) >= $1""", budget_usd, list(ACTIVE_STATES))
         return [(r[0], float(r[1])) for r in rows]
 
     async def empty_campaign_streak(self) -> list[str]:
-        """Ids of the last two completed campaigns when neither sent a single card, else an empty list."""
+        """Ids of the last two completed campaigns when neither sent a card or an investor lead, else empty."""
         rows = await self.pool.fetch(
             """select c.id::text, (select count(*) from campaign_findings f
-                                   where f.campaign_id = c.id and f.state = 'sent') as cards
+                                   where f.campaign_id = c.id and f.state = 'sent')
+                                  + (select count(*) from campaign_lead_deliveries d
+                                     where d.campaign_id = c.id and d.state = 'sent') as cards
                from campaigns c where c.state = 'completed'
                order by c.finished_at desc nulls last, c.created_at desc limit $1""", EMPTY_CAMPAIGNS_IN_A_ROW)
         if len(rows) == EMPTY_CAMPAIGNS_IN_A_ROW and all(r[1] == 0 for r in rows):
@@ -202,7 +213,8 @@ class Watchdog:
             return container_alerts(container_problems(response.json()))
         except Exception as exc:  # noqa: BLE001
             log.warning("docker api check failed: %s", type(exc).__name__)
-            return []
+            return [Alert("docker:unavailable", "Watchdog: контейнеры не проверяются, docker API недоступен "
+                          f"({type(exc).__name__}). Проверь WATCHDOG_DOCKER_SOCKET и WATCHDOG_DOCKER_GID.", once=True)]
 
     async def database_alerts(self) -> list[Alert]:
         if self.store is None:
@@ -210,12 +222,12 @@ class Watchdog:
         now = self.clock()
         alerts: list[Alert] = []
         try:
-            for campaign in await self.store.apify_error_streaks(now - timedelta(hours=6)):
-                alerts.append(Alert(f"apify:{campaign}", f"Кампания {campaign[:8]}: {APIFY_ERRORS_IN_A_ROW} ошибки Apify "
-                                    "подряд. Проверь токен/лимиты Apify и логи campaign-runner."))
+            for campaign, last_error in await self.store.apify_error_streaks(now - timedelta(hours=6)):
+                alerts.append(Alert(f"apify:{campaign}:{last_error}", f"Кампания {campaign[:8]}: {APIFY_ERRORS_IN_A_ROW} "
+                                    "ошибки Apify подряд. Проверь токен/лимиты Apify и логи campaign-runner.", once=True))
             for campaign, spent in await self.store.over_budget(self.settings.budget_usd):
                 alerts.append(Alert(f"budget:{campaign}", f"Кампания {campaign[:8]}: бюджет исчерпан, потрачено "
-                                    f"${spent:.2f} из ${self.settings.budget_usd:.2f} (CAMPAIGN_BUDGET_USD)."))
+                                    f"${spent:.2f} из ${self.settings.budget_usd:.2f} (CAMPAIGN_BUDGET_USD).", once=True))
             empty = await self.store.empty_campaign_streak()
             if empty:
                 alerts.append(Alert(f"empty:{empty[0]}", f"{EMPTY_CAMPAIGNS_IN_A_ROW} завершённые кампании подряд без "
