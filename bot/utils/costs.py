@@ -44,6 +44,10 @@ PRICES: dict[str, tuple[float, float]] = {
     "anthropic/claude-opus": (15.0, 75.0),
     "anthropic/claude-sonnet": (3.0, 15.0),
     "anthropic/claude-haiku": (1.0, 5.0),
+    # The Claude API's own ids (ARCHITECT_PROVIDER=anthropic); same prices as the OpenRouter ids until checked.
+    "claude-opus": (15.0, 75.0),
+    "claude-sonnet": (3.0, 15.0),
+    "claude-haiku": (1.0, 5.0),
     "openai/gpt-4o-mini": (0.15, 0.60),
     "openai/gpt-4o": (2.5, 10.0),
     "openai/whisper": (0.0, 0.0),
