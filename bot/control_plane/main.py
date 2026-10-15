@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
@@ -44,6 +45,7 @@ from bot.operators import OperatorSet
 from bot.orchestra.dispatcher import OrchestraDispatcher
 from bot.orchestra.models import ConfirmedCommand
 from bot.orchestra.store import PostgresOrchestraStore
+from bot.utils import costs
 
 
 def _incoming(message: Message) -> IncomingMessage:
@@ -82,6 +84,12 @@ def _markup(reply: Reply) -> InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyK
         for b in reply.buttons
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def install_interview_costs(pool: Any) -> None:
+    """Book the Claude interview calls in ``campaign_costs`` (no budget: the interview has no campaign yet)."""
+    if pool is not None:
+        costs.install(costs.PostgresLedger(pool))
 
 
 async def run() -> None:
@@ -145,6 +153,7 @@ async def run() -> None:
         claude = AnthropicInterviewer(api_key=settings.anthropic_api_key, model=settings.anthropic_interview_model,
                                       timeout_seconds=settings.anthropic_timeout_seconds)
         interviewer = FallbackInterviewer(claude, interviewer) if interviewer is not None else claude
+        install_interview_costs(orchestra_store.pool)
     if interviewer is None:
         logging.getLogger(__name__).warning("telegram.control.interviewer_disabled",
                                             extra={"hint": "set OPENROUTER_API_KEY; tasks are interviewed by rules"})

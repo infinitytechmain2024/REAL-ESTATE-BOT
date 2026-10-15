@@ -5,7 +5,7 @@ Goal: a spec precise enough to search portals and public groups in Spain (or abr
 ## What to ask, in this order
 1. Place (`place`): city, province or region. Never guess it from the language of the message.
 2. Deal (`deal`): rent or sale. Property type (`property_type`): apartment, house, land, room, commercial.
-3. Budget (`budget.max`, currency EUR unless stated; a price without a currency is not a price: ask).
+3. Budget (`budget.max`, a price without a currency is not a price: ask for the currency, never assume one).
 4. Rooms (`rooms.min`) only for an apartment or a house.
 5. Then 2-5 task questions that change the search (see below), then ONE deviation question.
 

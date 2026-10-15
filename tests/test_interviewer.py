@@ -866,6 +866,10 @@ async def test_anthropic_returns_the_turn_from_the_forced_tool_call() -> None:
     (_tool_use({"spec": {}}), "schema_mismatch"),
     (_tool_use({"spec": {}, "question": "What is your budget?", "done": False}), "schema_mismatch"),
     (httpx.Response(200, content=b"not json"), "schema_mismatch"),
+    (httpx.Response(200, json={"content": []}), "schema_mismatch"),
+    (httpx.Response(200, json={}), "schema_mismatch"),
+    (httpx.Response(200, json={"stop_reason": "max_tokens", "content": [
+        {"type": "tool_use", "name": "submit_turn", "input": GOOD_TURN}]}), "schema_mismatch"),
 ])
 async def test_anthropic_failures_raise_a_safe_code_without_retrying(response: httpx.Response | Exception, code: str) -> None:
     claude, seen = _claude(response)
@@ -958,3 +962,24 @@ def test_openrouter_mode_never_builds_the_anthropic_client() -> None:
     source = (Path(__file__).parents[1] / "bot/control_plane/main.py").read_text()
     assert 'if settings.architect_provider == "anthropic":' in source
     assert source.index("AnthropicInterviewer(") > source.index('settings.architect_provider == "anthropic"')
+
+
+@pytest.mark.asyncio
+async def test_main_installs_the_ledger_so_claude_costs_reach_campaign_costs() -> None:
+    from bot.control_plane.main import install_interview_costs
+
+    rows: list[tuple[Any, ...]] = []
+
+    class FakePool:
+        async def execute(self, sql: str, *args: Any) -> None:
+            rows.append(args)
+
+    install_interview_costs(FakePool())
+    try:
+        claude, _ = _claude(_tool_use(GOOD_TURN))
+        await claude.interview(mode="real_estate", spec=TaskSpec(), dialogue=[], message="x")
+    finally:
+        costs.install(None)
+    assert rows and rows[0][0] is None and rows[0][1] == "llm" and rows[0][3] == "anthropic"
+    install_interview_costs(None)
+    assert costs.ledger() is None

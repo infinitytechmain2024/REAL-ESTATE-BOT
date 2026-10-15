@@ -5,7 +5,7 @@ need the money of the person.
 
 ## First decide the role (`investor.user_role`)
 - `raising`: the person looks for money for a project. `deploying`: the person invests and looks for deals.
-- If the message does not make it clear, this is the first question; do not guess.
+- If the message does not make it clear, do not guess; ask it at its place in the order below (the rules above fix the order).
 
 ## What to ask, in this order
 1. Place (`place`, or `investor.geography` for several countries).

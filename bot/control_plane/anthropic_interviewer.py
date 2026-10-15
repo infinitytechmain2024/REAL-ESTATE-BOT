@@ -102,6 +102,8 @@ class AnthropicInterviewer:
         try:
             body = response.json()
             await self._book(body)
+            if body.get("stop_reason") == "max_tokens":
+                raise ValueError("answer cut off")
             block = next(b for b in body["content"] if b.get("type") == "tool_use" and b.get("name") == TOOL_NAME)
             if not isinstance(block["input"], dict):
                 raise ValueError("tool input is not an object")
