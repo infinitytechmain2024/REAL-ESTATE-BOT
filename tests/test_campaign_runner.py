@@ -684,3 +684,17 @@ async def test_investor_groups_of_the_task_are_queued_without_a_browser_and_thei
     await runner.tick()
     assert messenger.findings() == ["💼 Инвестор: Juan, ищет объекты в Мадриде\n\n🔎 Найдено: 1 · ищу дальше"]
     assert store.findings_state == {"inv1": "delivered"}
+
+
+async def test_a_task_without_groups_and_without_a_browser_pauses_with_a_human_text() -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+    from bot.campaign.runner import NO_GROUPS
+
+    campaigns = MemoryCampaignStore()
+    store = MemoryRunStore(campaigns)
+    discovery = FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="apify")
+    runner = CampaignRunner(campaigns, store, FakeMessenger(), discovery, now=Clock(), owner_ids={7},
+                            config=RunnerConfig(relevance_fail_closed=False))
+    cid = await create(campaigns, plan_campaign(GOAL))
+    assert "укажите группы в задаче" in NO_GROUPS
+    assert (await runner._discover(await campaigns.get(cid))) == NO_GROUPS

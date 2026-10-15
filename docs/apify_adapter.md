@@ -64,6 +64,8 @@ update campaigns set acquisition_provider = 'apify' where id = '<campaign uuid>'
 ```
 Или `APIFY_FACEBOOK_SCOPE=all` — для всех кампаний. Обратно — `acquisition_provider = 'local'`.
 
+Группы из задачи (`ACQUISITION_MODE=apify`, B3) ставятся в очередь без браузера, но окна запускает раннер и ему нужна строка профиля Facebook в состоянии `ready`; Apify читает окна только при `acquisition_provider='apify'` или `APIFY_FACEBOOK_SCOPE=all`.
+
 ## Деплой
 
 1. Применить миграции `scripts/apply_migrations.sh`. Нужны 042 (`campaign_costs`), 043–045 (Idealista) и 046

@@ -562,8 +562,9 @@ class PostgresDiscoveryStore:
             await _set_actor(conn, actor)
             await conn.execute(
                 """insert into campaign_groups (campaign_id, group_key, canonical_url, name, language, seed,
-                                                relevance_score, activity, activity_evidence, state, reject_reason)
-                   values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+                                                relevance_score, activity, activity_evidence, state, reject_reason,
+                                                window_no)
+                   values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
                    on conflict (campaign_id, group_key) do update set
                        name = excluded.name, relevance_score = excluded.relevance_score,
                        activity = excluded.activity, activity_evidence = excluded.activity_evidence,
@@ -571,7 +572,7 @@ class PostgresDiscoveryStore:
                    where campaign_groups.state in ('discovered', 'rejected')""",
                 campaign_id, group.group_key, group.canonical_url, (group.name or None) and group.name[:200],
                 group.language, group.seed, group.relevance_score, group.activity,
-                json.dumps(group.activity_evidence), group.state, group.reject_reason,
+                json.dumps(group.activity_evidence), group.state, group.reject_reason, group.window_no,
             )
 
     async def finalize(self, campaign_id: str, *, max_groups: int, window_size: int, actor: str) -> int:
@@ -684,7 +685,13 @@ class FacebookDiscovery:
         return queued
 
     async def run(self, campaign_id: str) -> DiscoveryReport:
-        """Discover, (re)start or resume; raises ``DiscoveryRefused`` without side effects."""
+        """Discover, (re)start or resume; raises ``DiscoveryRefused`` without side effects.
+
+        ``apify`` with groups named in the task: they are queued and no browser is used here. The windows are still
+        started by the runner, which needs a ready Facebook profile row; Apify reads them only for a campaign with
+        ``acquisition_provider='apify'`` or with ``APIFY_FACEBOOK_SCOPE=all``. Without such groups and without a
+        browser: ``no_groups_no_browser``.
+        """
         campaign = await self.campaigns.get(campaign_id)
         if campaign is None:
             raise DiscoveryRefused("campaign_not_found")
@@ -695,7 +702,7 @@ class FacebookDiscovery:
                 raise DiscoveryRefused("campaign_state_changed")
             return await self._report(campaign_id, _Run())
         if self.browser is None or self.reader is None:
-            raise DiscoveryRefused("browser_unavailable")
+            raise DiscoveryRefused("no_groups_no_browser")
         profile = await self.store.claim_profile(ACTOR)
         if profile is None:
             raise DiscoveryRefused("facebook_profile_not_ready")

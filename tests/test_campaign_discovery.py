@@ -505,7 +505,7 @@ async def test_apify_mode_queues_the_groups_of_the_task_and_never_opens_a_browse
 async def test_apify_mode_without_groups_in_the_task_still_needs_the_browser_search() -> None:
     h = await setup_spec("apify", spec={"sources": {"required": ["https://www.idealista.com/"]}}, browser=None,
                          reader=None)
-    with pytest.raises(DiscoveryRefused, match="browser_unavailable"):
+    with pytest.raises(DiscoveryRefused, match="no_groups_no_browser"):
         await h.discovery.run(h.cid)
     assert (await h.campaigns.get(h.cid)).state == "planned" and await h.store.groups(h.cid) == []
 

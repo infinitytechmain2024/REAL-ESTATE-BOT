@@ -123,6 +123,7 @@ SEARCHING = "Сейчас: поиск групп Facebook"
 ANALYSIS = "Сейчас: анализ"
 VERIFY = "Нужна verification"
 PROFILE_BUSY = "Ожидание: профиль Facebook занят"
+NO_GROUPS = "Пауза: поиск групп не настроен: укажите группы в задаче или настройте браузер"
 QUEUE_BUSY = "Ожидание: Facebook занят другой кампанией"
 STOPPED = "Кампания остановлена"
 MAX_MESSAGE_CHARS = 3900
@@ -446,7 +447,7 @@ class CampaignRunner:
         from .discovery import DiscoveryRefused
 
         if self.discovery is None:
-            return "Пауза: поиск групп не настроен (BROWSER_SESSION_API_TOKEN)"
+            return NO_GROUPS
         if (waiting := await self._facebook_wait()) is not None:
             return waiting
         if await self.store.busy_elsewhere(campaign.id):
@@ -461,6 +462,8 @@ class CampaignRunner:
         try:
             await self.discovery.run(campaign.id)
         except DiscoveryRefused as exc:
+            if str(exc) == "no_groups_no_browser":
+                return NO_GROUPS
             return PROFILE_BUSY if "profile" in str(exc) else f"Пауза: {exc}"
         after = await self.campaigns.get(campaign.id)
         if after is not None and after.state == "paused_verification":
@@ -1564,7 +1567,8 @@ def _reach_worker(settings: Any, pool: Any, fetcher: Any = None) -> tuple[Any, l
     judge = None
     if settings.openrouter_api_key:
         judge = OpenRouterReachJudge(api_key=settings.openrouter_api_key, model=settings.reach_model,
-                                     timeout_seconds=settings.leads_timeout_seconds)
+                                     timeout_seconds=settings.leads_timeout_seconds,
+                                     acquisition_mode=settings.acquisition_mode)
     else:
         log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
     worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), fetcher=fetcher)

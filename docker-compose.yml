@@ -464,7 +464,6 @@ services:
       CAMPAIGN_WINDOW_COOLDOWN_SECONDS: ${CAMPAIGN_WINDOW_COOLDOWN_SECONDS:-120}
       CAMPAIGN_ANALYSIS_GRACE_SECONDS: ${CAMPAIGN_ANALYSIS_GRACE_SECONDS:-600}
       CAMPAIGN_REFUSAL_RETRY_SECONDS: ${CAMPAIGN_REFUSAL_RETRY_SECONDS:-300}
-      ACQUISITION_MODE: ${ACQUISITION_MODE:-legacy}
       SAFETY_MAX_FACEBOOK_BATCHES_PER_DAY: ${SAFETY_MAX_FACEBOOK_BATCHES_PER_DAY:-6}
       SAFETY_MAX_FACEBOOK_GROUPS_PER_DAY: ${SAFETY_MAX_FACEBOOK_GROUPS_PER_DAY:-60}
       SAFETY_MAX_RUNS_PER_DAY: ${SAFETY_MAX_RUNS_PER_DAY:-40}
@@ -562,6 +561,9 @@ services:
       WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN: ${WEB_SEARCH_MAX_SCRAPE_API_PER_CAMPAIGN:-40}
       # Optional outbound proxy/VPN for page fetches (and SearXNG, below).
       WEB_SEARCH_PROXY_URL: ${WEB_SEARCH_PROXY_URL:-}
+      # legacy | apify. apify: portals via Apify first, the search engine only if they gave fewer than
+      # APIFY_MIN_LISTINGS listings; the browser social search is off.
+      ACQUISITION_MODE: ${ACQUISITION_MODE:-legacy}
       # Social network search (bot/social_search): every listed network where a profile is logged in; "off" = none.
       SOCIAL_SEARCH_PLATFORMS: ${SOCIAL_SEARCH_PLATFORMS:-instagram,tiktok,linkedin}
       SOCIAL_SEARCH_QUERIES_PER_DAY: ${SOCIAL_SEARCH_QUERIES_PER_DAY:-20}

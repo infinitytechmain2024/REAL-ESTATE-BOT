@@ -89,6 +89,11 @@ def test_apify_mode_drops_the_site_searches_of_instagram_x_and_reddit_only() -> 
     assert {q.platform for q in kept} == {"linkedin", "tiktok", "youtube", "telegram", "web"}
     assert not any(s in q.text for q in kept for s in ("site:instagram.com", "site:x.com", "site:reddit.com"))
     assert any("site:linkedin.com" in q.text for q in kept)
+    for text in ("site:www.instagram.com inversor", "site:old.reddit.com/r/spain inversor", "site:twitter.com inversor",
+                 "site:https://x.com/search inversor", 'inversor "family office" site:WWW.X.com'):
+        assert not keep_query(ReachQuery("web", "es", text), "apify"), text
+        assert keep_query(ReachQuery("web", "es", text), "legacy")
+    assert keep_query(ReachQuery("web", "es", "site:linkedin.com/in inversor next.com"), "apify")
     # a model-written query is judged by its text as well
     assert not keep_query(ReachQuery("web", "es", "site:instagram.com inversor Madrid"), "apify")
     assert keep_query(ReachQuery("web", "es", "site:instagram.com inversor Madrid"), "legacy")
@@ -364,3 +369,18 @@ async def test_the_task_drives_the_queries_before_the_templates() -> None:
     card = contact_card(Contact(stored.candidate.url_key, stored.candidate.url, "telegram", "company",
                                 "Bali Villa Care"))
     assert card.startswith("🏢 Компания · Telegram\nИмя: Bali Villa Care\nСсылка: https://t.me/bali_villa_care")
+
+
+def test_the_model_is_not_asked_for_instagram_x_or_reddit_in_apify_mode() -> None:
+    from bot.campaign.reach import (
+        QUERY_SCHEMA,
+        QUERY_SCHEMA_APIFY,
+        QUERY_SYSTEM,
+        QUERY_SYSTEM_APIFY,
+    )
+
+    for word in ("instagram", "site:x.com", "reddit"):
+        assert word in QUERY_SYSTEM and word not in QUERY_SYSTEM_APIFY
+    enum = QUERY_SCHEMA_APIFY["properties"]["queries"]["items"]["properties"]["platform"]["enum"]
+    assert set(enum) == {"linkedin", "telegram", "tiktok", "youtube", "web"}
+    assert "instagram" in QUERY_SCHEMA["properties"]["queries"]["items"]["properties"]["platform"]["enum"]
