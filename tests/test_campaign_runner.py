@@ -576,7 +576,7 @@ async def test_a_both_campaign_runs_the_web_stage_the_comment_queue_and_the_peop
     reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
     assert len(reports) == 1, "one report, once"
     assert "🏠 Недвижимость" in reports[0] and "💼 Инвесторы" in reports[0]
-    assert "людей 1, контактов из поиска 0" in reports[0]
+    assert "людей 1, доставок из поиска 0" in reports[0]
 
 
 async def test_without_the_investor_report_flag_a_both_report_is_the_old_one_and_investors_get_none() -> None:
@@ -597,3 +597,51 @@ async def test_without_the_investor_report_flag_a_both_report_is_the_old_one_and
         reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
         assert not any("💼" in t or "По веткам" in t for t in reports)
         assert len(reports) == (1 if vertical == "both" else 0)
+
+
+async def _investors_with_flag(link: str = "", **config):
+    from bot.campaign.final_report import FinalReporter
+    from bot.campaign.spec import Place, Sources, TaskSpec
+
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids=set(), final_report=FinalReporter(),
+                            config=RunnerConfig(relevance_fail_closed=False, investor_report=True, **config))
+    goal = "Найди инвесторов в Мадриде"
+    spec = TaskSpec(mode="investors", place=Place(name="Spain", names={"ru": "Испания"}, level="region"),
+                    sources=Sources(required=[link] if link else []), post_link=bool(link))
+    plan = plan_campaign(goal, vertical="investors", place={"en": "Spain", "ru": "Испания"}, spec=spec)
+    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=8, source_text=goal, actor="test",
+                                 spec=spec.model_dump(mode="json"))
+    await campaigns.set_state(cid, "running", "test")
+    await campaigns.set_state(cid, "completed", "test")
+    clock.at = (await campaigns.get(cid)).finished_at + timedelta(minutes=1)
+    return store, messenger, runner, cid
+
+
+async def test_an_investor_report_names_a_failed_post_read_with_its_reason_and_cost() -> None:
+    from bot.campaign.runs import PostReadSummary
+
+    store, messenger, runner, cid = await _investors_with_flag("https://www.facebook.com/groups/1/posts/2/", post_reads=True)
+    store.post_read_rows[cid] = [PostReadSummary("https://www.facebook.com/groups/1/posts/2/", "failed", 0, 0, 0.05, "closed")]
+    await runner.step(cid)
+    reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    if not reports:  # the post-link campaign may need more steps to settle
+        await runner.step(cid)
+        reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    assert len(reports) == 1 and "closed" in reports[0] and "$0.05" in reports[0]
+
+
+async def test_an_investor_report_with_no_people_but_money_spent_is_still_sent() -> None:
+    from bot.utils import costs
+
+    _store, messenger, runner, cid = await _investors_with_flag()
+    costs.install(costs.MemoryLedger(), 0.0)
+    try:
+        with costs.scope(cid):
+            await costs.record("api", provider="apify", item="apify/facebook-comments-scraper", cost_usd=0.4)
+        await runner.step(cid)
+    finally:
+        costs.install(None, 0.0)
+    reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    assert len(reports) == 1 and "$0.40" in reports[0] and "инвесторы $0.40" in reports[0]

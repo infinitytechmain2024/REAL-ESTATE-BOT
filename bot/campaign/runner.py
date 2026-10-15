@@ -1008,8 +1008,10 @@ class CampaignRunner:
 
         Same guards as the summary: only for a campaign that ended within ``SUMMARY_WINDOW`` (older ones get none),
         claimed in the database before it is built (a restart never repeats it), given back when the store or
-        Telegram failed. Investor-only searches have no property cards to report; a cancelled search that found and
-        rejected nothing is not reported.
+        Telegram failed. A cancelled search that found and rejected nothing is not reported. With
+        ``investor_report`` an ``investors`` search gets the investor section only (people and reach deliveries sent,
+        every post read incl. a failed one, the money); it is skipped when it found and spent nothing. Without the
+        flag an ``investors`` search has no report (a post sent by link: the short count) and ``both`` the property one.
         """
         if ((self.final_report is None or not self.config.investor_report) and post_link_only(campaign)
                 and campaign.state in SUMMARY_STATES and campaign.finished_at is not None
@@ -1024,10 +1026,10 @@ class CampaignRunner:
             vertical = campaign.plan.vertical if self.config.investor_report else "real_estate"
             leads = await self._leads_summary(campaign) if vertical != "real_estate" else None
             if vertical == "investors":
-                if leads is not None and leads.empty:  # nothing found: nothing to report
-                    return
                 sink = costs.ledger()
                 spent = await sink.summary(campaign.id) if sink is not None else None
+                if leads is not None and leads.empty and not (spent is not None and spent.total > 0):
+                    return  # nothing found and nothing spent: nothing to report
                 text = await self.final_report.build(campaign.plan.goal, campaign_request(campaign), [], [], [], [],
                                                      costs=spent, budget=costs.budget(), leads=leads,
                                                      vertical="investors")
@@ -1073,7 +1075,9 @@ class CampaignRunner:
         people_sent = max(await self.store.people_sent(campaign.id) - reach, 0)
         if not reads:
             return LeadsSummary(people_sent=people_sent, reach_sent=reach)
-        return LeadsSummary(leads_saved=sum(r.leads for r in reads), people_sent=people_sent, reach_sent=reach,
+        lines = tuple(post_read_line(r) if r.state == "done" else f"{post_read_line(r)} Расход: ${r.cost_usd:.2f}"
+                      for r in reads)
+        return LeadsSummary(read_lines=lines, leads_saved=sum(r.leads for r in reads), people_sent=people_sent, reach_sent=reach,
                             posts_read=sum(1 for r in reads if r.state == "done"),
                             comments_read=sum(r.comments for r in reads))
 

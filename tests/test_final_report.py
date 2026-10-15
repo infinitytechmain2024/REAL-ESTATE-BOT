@@ -745,7 +745,7 @@ async def test_a_both_report_has_both_sections_and_the_money_by_branch() -> None
                                 leads=LeadsSummary(5, 3, 2, 1, 30), vertical="both")
     assert text.startswith(REPORT) and text.index("🏠 Недвижимость") < text.index("💼 Инвесторы")
     assert "Прочитано постов: 1, комментариев: 30" in text and "Лидов сохранено: 5" in text
-    assert "людей 3, контактов из поиска 2" in text
+    assert "людей 3, доставок из поиска 2" in text
     assert "Расход: $2.40 из $5.00" in text
     assert "По веткам: недвижимость $1.10 · инвесторы $0.30 · общее $1.00" in text
     assert text.index("💼 Инвесторы") < text.index("По веткам") and len(text) <= 3900
@@ -755,7 +755,7 @@ async def test_an_investors_report_is_the_investor_section_only() -> None:
     from bot.campaign.final_report import LeadsSummary
     text = await FinalReporter().build("Инвесторы", Request(), [], [], [], [], costs=_spent(),
                                        leads=LeadsSummary(None, 4, 1), vertical="investors")
-    assert "💼 Инвесторы" in text and "людей 4, контактов из поиска 1" in text and "По веткам" in text
+    assert "💼 Инвесторы" in text and "людей 4, доставок из поиска 1" in text and "По веткам" in text
     assert "🏠" not in text and "Лидов сохранено" not in text and "Прочитано постов" not in text
 
 

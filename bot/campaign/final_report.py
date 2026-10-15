@@ -670,10 +670,12 @@ class LeadsSummary:
     reach_sent: int = 0      # reach contacts sent
     posts_read: int | None = None
     comments_read: int | None = None
+    read_lines: tuple[str, ...] = ()  # one line per post read, a failed one with its reason and cost
 
     @property
     def empty(self) -> bool:
-        return not (self.leads_saved or self.people_sent or self.reach_sent or self.posts_read or self.comments_read)
+        return not (self.leads_saved or self.people_sent or self.reach_sent or self.posts_read or self.comments_read
+                    or self.read_lines)
 
 
 # Cost-ledger items (``Entry.item``) that identify a branch; every other item stays «общее» (models of the lead and
@@ -711,9 +713,10 @@ def investors_section(leads: LeadsSummary | None) -> list[str]:
         return [*lines, "Людей и контактов пока не найдено."]
     if leads.posts_read is not None:
         lines.append(f"Прочитано постов: {leads.posts_read}, комментариев: {leads.comments_read or 0}")
+    lines.extend(leads.read_lines)
     if leads.leads_saved is not None:
         lines.append(f"Лидов сохранено: {leads.leads_saved}")
-    lines.append(f"Отправлено вам: людей {leads.people_sent}, контактов из поиска {leads.reach_sent}")
+    lines.append(f"Отправлено вам: людей {leads.people_sent}, доставок из поиска {leads.reach_sent}")
     return lines
 
 
