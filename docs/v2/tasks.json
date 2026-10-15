@@ -272,7 +272,7 @@
       "stream": "architect",
       "agent": "builder+analyst",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "Вс",
       "hours": 5
     },
