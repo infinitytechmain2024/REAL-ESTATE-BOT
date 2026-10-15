@@ -22,9 +22,7 @@ def test_the_bots_own_runtime_directory_is_still_ignored() -> None:
         check=False,
     )
 
-    assert result.returncode == 0, (
-        "./data is no longer ignored — session cookies could be committed"
-    )
+    assert result.returncode == 0, "./data is no longer ignored — session cookies could be committed"
 
 
 def test_no_environment_file_is_tracked_except_the_example() -> None:
@@ -65,14 +63,8 @@ def test_vps_update_script_migrates_restarts_and_never_drops_data() -> None:
     text = script.read_text(encoding="utf-8")
     assert os.access(script, os.X_OK)
     assert "git merge --ff-only" in text and "./scripts/apply_migrations.sh" in text
-    assert (
-        "pull --ignore-buildable" in text
-        and "build --pull" in text
-        and "up -d --force-recreate" in text
-    )
-    assert text.index("apply_migrations") < text.index(
-        "up -d --force-recreate"
-    )  # schema first, then new code
+    assert "pull --ignore-buildable" in text and "build --pull" in text and "up -d --force-recreate" in text
+    assert text.index("apply_migrations") < text.index("up -d --force-recreate")  # schema first, then new code
     assert "down -v" not in text and "volume rm" not in text and "prune -a" not in text
 
 
@@ -107,12 +99,7 @@ def test_compose_passes_every_setting_to_its_service() -> None:
         for name in files:
             text = (repo / name).read_text(encoding="utf-8")
             names = set(re.findall(r'validation_alias="([A-Z0-9_]+)"', text))
-            names |= set(
-                re.findall(
-                    r'(?:_bounded_int|_bounded|_on_off|environ\.get|env\.get)\(\s*(?:env,\s*)?"([A-Z0-9_]+)"',
-                    text,
-                )
-            )
+            names |= set(re.findall(r'(?:_bounded_int|_bounded|_on_off|environ\.get|env\.get)\(\s*(?:env,\s*)?"([A-Z0-9_]+)"', text))
             missing += [f"{service}: {n}" for n in sorted(names - passed)]
     assert missing == [], f"settings never reach their service: {missing}"
 
@@ -136,15 +123,9 @@ def test_every_service_has_healthcheck_and_restart() -> None:
 
     repo = Path(__file__).resolve().parent.parent
     services = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
-    long_running = {
-        name: spec
-        for name, spec in services.items()
-        if "restart" in spec or not spec.get("profiles")
-    }
+    long_running = {name: spec for name, spec in services.items() if "restart" in spec or not spec.get("profiles")}
 
-    no_healthcheck = [
-        n for n, spec in long_running.items() if not (spec.get("healthcheck") or {}).get("test")
-    ]
+    no_healthcheck = [n for n, spec in long_running.items() if not (spec.get("healthcheck") or {}).get("test")]
     no_restart = [n for n, spec in long_running.items() if spec.get("restart") != "unless-stopped"]
     assert no_healthcheck == [], f"services without a healthcheck: {no_healthcheck}"
     assert no_restart == [], f"services without restart: unless-stopped: {no_restart}"
@@ -158,10 +139,7 @@ def test_compose_healthcheck_modules_exist() -> None:
     missing: list[str] = []
     for name, spec in services.items():
         test = (spec.get("healthcheck") or {}).get("test") or []
-        if (
-            test[:3] == ["CMD", "python", "-m"]
-            and not (repo / (test[3].replace(".", "/") + ".py")).exists()
-        ):
+        if test[:3] == ["CMD", "python", "-m"] and not (repo / (test[3].replace(".", "/") + ".py")).exists():
             missing.append(f"{name}: {test[3]}")
     assert missing == [], missing
 
