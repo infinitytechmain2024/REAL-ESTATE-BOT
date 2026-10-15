@@ -233,12 +233,13 @@ def render_card(
     if extra_fields and not investors:
         fields["Площадь"] = _area(payload)
         fields["Телефон"] = _phone(payload)
+        fields["Агентство"] = _trim(str(payload["advertiser"]).strip(), 120) if payload.get("advertiser") else None
     if investors:
         order = ["Кто", "Локация", "Цена"]
     else:
         order = ["Сделка", "Тип", "Цена", "Локация", "Район", "Комнаты", "Этаж", "Особенности"]
         if extra_fields:
-            order = ["Сделка", "Тип", "Цена", "Площадь", "Локация", "Район", "Комнаты", "Этаж", "Особенности", "Телефон"]
+            order = ["Сделка", "Тип", "Цена", "Площадь", "Локация", "Район", "Комнаты", "Этаж", "Особенности", "Телефон", "Агентство"]
         if task.deal:
             order = ["Сделка", "Тип"] + [f for f in order if f not in ("Сделка", "Тип")]
         if task.max_price:

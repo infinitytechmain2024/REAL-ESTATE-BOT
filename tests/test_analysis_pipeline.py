@@ -458,3 +458,33 @@ def test_the_prompt_lists_the_v6_keys():
     from bot.analysis_pipeline.openrouter import EXTRACTION_SCHEMA, INSTRUCTIONS
 
     assert all(key in INSTRUCTIONS for key in EXTRACTION_SCHEMA["required"])
+
+
+LD_LINE = ('JSON-LD: {"url": "https://x.es/a", "plot_m2": 2500.0, "phone": "+34 600 111 222", '
+           '"advertiser": "Inmo Sol", "area_m2": 180.0}')
+
+
+def _res(**kw):
+    return AnalysisResult(relevant=True, confidence=0.7, summary="s", location="Madrid", price_signals=[],
+                          related_links=[], category="real_estate", reason="x", **kw)
+
+
+def test_source_line_facts_reach_the_payload(monkeypatch):
+    from bot.analysis_pipeline.formatters import finding_payload
+    monkeypatch.setenv("CARD_EXTRA_FIELDS", "true")
+    p = finding_payload(_res(), evidence(text=f"{LD_LINE}\nFlat\nbody"))
+    assert (p["plot_m2"], p["phone"], p["advertiser"]) == (2500.0, "+34 600 111 222", "Inmo Sol")
+    assert p["area_m2"] == 180.0 and p["area_source"] == "listing"
+    kept = finding_payload(_res(area_m2=150), evidence(text=f"{LD_LINE}\nFlat"))
+    assert kept["area_m2"] == 150 and "area_source" not in kept
+
+
+def test_payload_is_unchanged_without_line_flag_or_with_broken_json(monkeypatch):
+    from bot.analysis_pipeline.formatters import finding_payload
+    monkeypatch.setenv("CARD_EXTRA_FIELDS", "true")
+    plain = finding_payload(_res(), evidence())
+    assert not {"plot_m2", "phone", "advertiser", "area_source"} & plain.keys()
+    assert finding_payload(_res(), evidence(text="JSON-LD: {broken\nFlat")) == plain | {}
+    monkeypatch.setenv("CARD_EXTRA_FIELDS", "false")
+    off = finding_payload(_res(), evidence(text=f"{LD_LINE}\nFlat"))
+    assert not {"plot_m2", "phone", "advertiser", "area_source"} & off.keys() and off["area_m2"] is None
