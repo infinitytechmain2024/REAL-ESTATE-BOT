@@ -22,8 +22,8 @@ from bot.acquisition.apify_facebook_comments import (
     comment_items,
 )
 from bot.campaign import MemoryCampaignStore
+from bot.campaign.fblinks import post_link_only
 from bot.campaign.leads import MemoryLeadStore, Person, Sighting, person_card
-from bot.campaign.models import Campaign
 from bot.campaign.post_leads import MemoryPostReadStore, PostLeadWorker, url_key
 from bot.campaign.runner import CampaignRunner, RunnerConfig, post_read_line
 from bot.campaign.runs import MemoryRunStore, PostReadSummary
@@ -329,16 +329,16 @@ def _person(n: int) -> Person:
                   (Sighting(POST, INTERESTED[n], "buyer", datetime(2026, 9, 25, 11, tzinfo=UTC)),))
 
 
-async def _runner(**config: Any):
+async def _runner(link: bool = True, discovery: Any = None, **config: Any):
     from bot.campaign import plan_campaign
     from bot.campaign.spec import Place, Sources, TaskSpec
 
     campaigns = MemoryCampaignStore()
     store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
-    runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids={7},
+    runner = CampaignRunner(campaigns, store, messenger, discovery, now=clock, owner_ids={7},
                             config=RunnerConfig(relevance_fail_closed=False, post_reads=True, **config))
     spec = TaskSpec(mode="investors", place=Place(name="Spain", names={"ru": "Испания"}, level="region"),
-                    sources=Sources(required=[POST]))
+                    sources=Sources(required=[POST]), post_link=link)
     plan = plan_campaign("лиды из комментариев под постом", vertical="investors", place={"en": "Spain", "ru": "Испания"},
                          spec=spec)
     cid = await campaigns.create(plan, chat_id=CHAT, requested_by=8, source_text="лиды", actor="telegram:8",
@@ -393,8 +393,75 @@ async def test_without_the_flag_the_runner_does_not_look_at_posts() -> None:
     assert (await campaigns.get(cid)).state == "completed" and not any("Профиль:" in t for _, _, t in messenger.sent)
 
 
-def test_the_campaign_type_is_unchanged() -> None:
-    assert "spec" in Campaign.__dataclass_fields__ or hasattr(Campaign, "model_fields")
+class NoCall:
+    """Raises on any use: proves a stage was not touched."""
+
+    def __getattr__(self, name: str):
+        raise AssertionError(f"must not be used: {name}")
+
+
+async def test_a_post_link_campaign_runs_only_the_comment_read() -> None:
+    campaigns, store, messenger, clock, runner, cid = await _runner(discovery=NoCall())  # discovery would raise
+    store.post_read_rows[cid] = [PostReadSummary(POST, "reading")]
+    await runner.step(cid)
+    assert (await campaigns.get(cid)).state == "running" and not store.batches, "no discovery, no windows"
+    store.post_read_rows[cid] = [PostReadSummary(POST, "done", 30, 5, 0.0925)]
+    store.post_people[cid] = [_person(0)]
+    for _ in range(4):
+        clock.advance(30)
+        await runner.step(cid)
+    campaign = await campaigns.get(cid)
+    assert campaign.state == "completed" and campaign.stop_reason == "post_reads_done"
+    assert "Комментариев: 30, лидов: 5, $0.09" in [t for _, _, t in messenger.sent]
+
+
+async def test_an_ordinary_investor_campaign_still_goes_through_discovery() -> None:
+    campaigns, _, _, _, runner, cid = await _runner(link=False)  # no discovery configured: the old pause
+    await runner.step(cid)
+    assert (await campaigns.get(cid)).stop_reason != "post_reads_done"
+    assert not post_link_only(await campaigns.get(cid))
+
+
+async def test_the_web_stage_skips_a_post_link_campaign_and_not_an_ordinary_one() -> None:
+    from types import SimpleNamespace
+
+    from bot.web_search.worker import WebSearchWorker
+
+    campaigns, _, _, _, _, cid = await _runner()
+    ordinary_campaigns, _, _, _, _, other = await _runner(link=False)
+    reached: list[str] = []
+
+    class Store:
+        async def get_run(self, _cid: str):
+            reached.append("run")
+            return None
+
+        async def start_run(self, _cid: str):
+            raise AssertionError("no web run for a post link")
+
+    for store, campaign_id, touched in ((campaigns, cid, False), (ordinary_campaigns, other, True)):
+        reached.clear()
+        me = SimpleNamespace(_listing_hosts={}, campaigns=store, store=Store())
+        try:
+            await WebSearchWorker.step(me, campaign_id)  # type: ignore[arg-type]
+        except AssertionError:
+            assert touched
+        assert bool(reached) is touched
+
+
+def test_post_link_only_needs_the_marker_investors_and_only_post_links() -> None:
+    from types import SimpleNamespace
+
+    def camp(vertical: str = "investors", **spec: Any):
+        return SimpleNamespace(plan=SimpleNamespace(vertical=vertical), spec=spec)
+
+    ok = {"post_link": True, "sources": {"required": [POST]}}
+    assert post_link_only(camp(**ok))
+    assert not post_link_only(camp("real_estate", **ok)) and not post_link_only(camp("both", **ok))
+    assert not post_link_only(camp(**{**ok, "post_link": False}))
+    assert not post_link_only(camp(**{**ok, "sources": {"required": [POST, "https://example.com/"]}}))
+    assert not post_link_only(camp(**{**ok, "sources": {"required": []}}))
+    assert not post_link_only(SimpleNamespace(plan=SimpleNamespace(vertical="investors"), spec=None))
 
 
 # --- Postgres: migration 048 and the stores (skipped without a disposable *_test database) --------------------------
@@ -435,10 +502,14 @@ async def test_migration_048_the_worker_and_the_runner_store_on_a_real_database(
 
     costs.install(costs.PostgresLedger(pool), budget_usd=5)
     spec = TaskSpec(mode="investors", place=Place(name="Spain"), sources=Sources(required=[POST, "https://example.com/x"]))
+    from bot.campaign.reach import PostgresReachStore
     plan = plan_campaign("лиды из комментариев под постом", vertical="investors", place={"en": "Spain"}, spec=spec)
     cid = await PostgresCampaignStore(pool).create(plan, chat_id=1, requested_by=1, source_text="лиды", actor="test",
                                                    spec=spec.model_dump(mode="json"))
     store = PostgresPostReadStore(pool)
+    assert [c.id for c in await PostgresReachStore(pool).open_campaigns()] == [cid]  # an ordinary investor search
+    await pool.execute("update campaigns set spec = jsonb_set(spec, '{post_link}', 'true') where id = $1::uuid", cid)
+    assert await PostgresReachStore(pool).open_campaigns() == []  # a post link campaign sets no reach query
     assert set(await store.candidates()) == {(cid, POST), (cid, "https://example.com/x")}
     api = Api(items=thirty())
     w = PostLeadWorker(store, source(api, WITH_POSTS), PostgresLeadStore(pool, SafetyLimits()))

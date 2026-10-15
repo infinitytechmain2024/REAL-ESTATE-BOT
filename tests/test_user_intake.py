@@ -654,6 +654,7 @@ async def test_a_post_link_is_an_investor_search_with_the_post_as_its_source() -
     [campaign] = campaigns.campaigns.values()
     assert campaign.plan.vertical == "investors"
     assert campaign.spec is not None and campaign.spec["sources"]["required"] == [POST_LINK]  # reaches campaigns.spec
+    assert campaign.spec["post_link"] is True
 
 
 @pytest.mark.asyncio

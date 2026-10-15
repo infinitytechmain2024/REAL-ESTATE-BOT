@@ -683,7 +683,8 @@ class PostgresReachStore:
             """with open as (
                    select c.id, c.plan from campaigns c
                     where c.state in ('planned', 'discovering', 'running', 'paused_verification')
-                      and c.plan->>'vertical' in ('investors', 'both') and coalesce(c.plan->>'location', '') <> ''),
+                      and c.plan->>'vertical' in ('investors', 'both') and coalesce(c.plan->>'location', '') <> ''
+                      and coalesce(c.spec->>'post_link', '') <> 'true'),
                created as (insert into campaign_reach (campaign_id) select id from open on conflict do nothing)
                select o.id::text, o.plan::text, (select source_text from campaigns c where c.id = o.id) as task,
                       (select spec::text from campaigns c where c.id = o.id) as spec

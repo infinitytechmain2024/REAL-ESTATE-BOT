@@ -449,7 +449,7 @@ class TaskIntake:
 
         The campaign needs a place; the post has none, so the country stands in (the post itself is the source).
         """
-        spec = TaskSpec(mode="investors", sources=Sources(required=[url]),
+        spec = TaskSpec(mode="investors", sources=Sources(required=[url]), post_link=True,
                         place=Place(name="Spain", country="ES", level="region",
                                     names={"es": "España", "ru": "Испания", "uk": "Іспанія"}))
         draft = replace(draft.fresh(), mode="investors", task=POST_TASK, message_id=message.message_id, spec=spec)

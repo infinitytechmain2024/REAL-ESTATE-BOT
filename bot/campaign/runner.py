@@ -62,6 +62,7 @@ from bot.utils import costs
 
 from . import offers, people
 from .dedup import Listing, listing_of, same_object, site_of
+from .fblinks import post_link_only
 from .final_report import FinalReporter, HeldEvidence, place_scope_of, task_title
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
@@ -425,6 +426,11 @@ class CampaignRunner:
     # -- phases --
 
     async def _advance(self, campaign: Campaign) -> str:
+        if self.config.post_reads and post_link_only(campaign):
+            # A post link: no Facebook discovery or windows, only the comment read, then it is over.
+            if campaign.state in ("planned", "discovering"):
+                await self.campaigns.set_state(campaign.id, "running", ACTOR)
+            return await self._drain(campaign, await self.store.get_run(campaign.id), "post_reads_done")
         if campaign.state in ("planned", "discovering"):
             return await self._discover(campaign)
         window = await self.store.open_window(campaign.id)
