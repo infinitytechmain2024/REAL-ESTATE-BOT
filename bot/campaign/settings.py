@@ -200,7 +200,11 @@ class CampaignRunnerSettings(BaseSettings):
                             relevance_fail_closed=self.relevance_fail_closed,
                             relevance_retry_limit=self.relevance_retry_limit,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
-                            max_people=self.lead_people_max, lead_days=self.lead_days)
+                            max_people=self.lead_people_max, lead_days=self.lead_days,
+                            investor_report=self.investor_report)
+
+    # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
+    investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")
 
     # Investor reach across platforms through the search engines (bot/campaign/reach.py).
     reach_enabled: bool = Field(default=True, validation_alias="INVESTOR_REACH_ENABLED")

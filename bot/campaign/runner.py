@@ -271,6 +271,8 @@ class RunnerConfig:
     # Posts sent by link (``post_leads``, v2 B1): their commenters are sent by campaign, and the campaign waits for the
     # read and ends with a short count. Off unless a post worker runs beside the runner (``main``).
     post_reads: bool = False
+    # The final report has the investor section (``final_report``, v2 B4); off: real estate only, as before.
+    investor_report: bool = False
     # The campaign's metrics row (``campaign_metrics``) is recomputed at most this often while it runs.
     metrics_seconds: float = 30
 
@@ -1009,16 +1011,18 @@ class CampaignRunner:
         Telegram failed. Investor-only searches have no property cards to report; a cancelled search that found and
         rejected nothing is not reported.
         """
-        if (self.final_report is None and self.config.post_reads and campaign.plan.vertical == "investors"
+        if ((self.final_report is None or not self.config.investor_report) and self.config.post_reads
+                and campaign.plan.vertical == "investors"
                 and campaign.state in SUMMARY_STATES and campaign.finished_at is not None
                 and await self.store.post_reads(campaign.id)):
             return await self._post_report(campaign)  # no reporter: a post sent by link gets a short count
-        if self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None:
+        if (self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None
+                or (campaign.plan.vertical == "investors" and not self.config.investor_report)):
             return
         if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_final_report(campaign.id):
             return
         try:
-            vertical = campaign.plan.vertical
+            vertical = campaign.plan.vertical if self.config.investor_report else "real_estate"
             leads = await self._leads_summary(campaign) if vertical != "real_estate" else None
             if vertical == "investors":
                 if leads is not None and leads.empty:  # nothing found: nothing to report

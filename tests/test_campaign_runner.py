@@ -552,7 +552,7 @@ async def test_a_both_campaign_runs_the_web_stage_the_comment_queue_and_the_peop
     runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids=set(), web=Web(),
                             final_report=FinalReporter(),
                             config=RunnerConfig(relevance_fail_closed=False, comment_leads="all", comment_max_posts=2,
-                                                max_people=3, post_reads=True))
+                                                max_people=3, post_reads=True, investor_report=True))
     cid = await campaigns.create(plan_campaign("Купить участок в Мадриде и найти инвесторов"), chat_id=CHAT,
                                  requested_by=8, source_text=GOAL, actor="test")
     assert (await campaigns.get(cid)).plan.vertical == "both"
@@ -579,3 +579,23 @@ async def test_a_both_campaign_runs_the_web_stage_the_comment_queue_and_the_peop
     assert len(reports) == 1, "one report, once"
     assert "🏠 Недвижимость" in reports[0] and "💼 Инвесторы" in reports[0]
     assert "Прочитано постов: 1, комментариев: 30" in reports[0] and "людей 1, контактов из поиска 0" in reports[0]
+
+
+async def test_without_the_investor_report_flag_a_both_report_is_the_old_one_and_investors_get_none() -> None:
+    from bot.campaign.final_report import FinalReporter
+
+    for goal, vertical in (("Купить участок в Мадриде и найти инвесторов", "both"), ("Найди инвесторов в Мадриде", "investors")):
+        campaigns = MemoryCampaignStore()
+        store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+        runner = CampaignRunner(campaigns, store, messenger, None, now=clock, owner_ids=set(),
+                                final_report=FinalReporter(), config=RunnerConfig(relevance_fail_closed=False))
+        assert runner.config.investor_report is False
+        cid = await campaigns.create(plan_campaign(goal), chat_id=CHAT, requested_by=8, source_text=goal, actor="test")
+        assert (await campaigns.get(cid)).plan.vertical == vertical
+        await campaigns.set_state(cid, "running", "test")
+        await campaigns.set_state(cid, "completed", "test")
+        clock.at = (await campaigns.get(cid)).finished_at + timedelta(minutes=1)
+        await runner.step(cid)
+        reports = [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+        assert not any("💼" in t or "По веткам" in t for t in reports)
+        assert len(reports) == (1 if vertical == "both" else 0)
