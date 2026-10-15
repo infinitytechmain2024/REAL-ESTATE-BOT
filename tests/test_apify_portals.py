@@ -371,7 +371,7 @@ async def test_pisos_launch_body_is_capped_pinned_and_row_mapped():
     assert launch.url.params["maxTotalChargeUsd"] == "0.05" and launch.url.params["maxItems"] == "5"
     assert json.loads(launch.content) == {
         "transactionType": "sale", "propertyType": "land", "location": "madrid_capital", "sortBy": "newest",
-        "maxListings": 5, "maxPages": 1, "fetchDetails": True, "maxPrice": 3000000, "minArea": 2000}
+        "maxListings": 5, "maxPages": 1, "fetchDetails": False, "maxPrice": 3000000, "minArea": 2000}
     assert len(listings) == 1  # Alcorcón is another municipality
     one = listings[0]
     assert one.url == PISOS_URL and one.price == 250000 and one.currency == "EUR" and one.deal == "sale"
@@ -418,7 +418,8 @@ async def test_milanuncios_launch_body_strips_seller_pii_and_row_is_mapped():
     assert launch.url.params["maxTotalChargeUsd"] == "0.05" and launch.url.params["maxItems"] == "5"
     assert json.loads(launch.content) == {
         "searchUrl": "https://www.milanuncios.com/venta-de-terrenos-en-las_palmas/", "maxItems": 5, "maxPages": 1,
-        "fetchDetails": False, "stripSellerPII": True}
+        "fetchDetails": False, "stripSellerPII": True,
+        "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"], "apifyProxyCountry": "ES"}}
     listing = adapter._normalize(milanuncios_row(), task(), None)
     assert listing.price == 250000 and listing.currency == "EUR" and listing.plot_m2 == 3200
     assert listing.area_m2 is None and listing.phone is None and listing.advertiser is None
@@ -497,3 +498,77 @@ async def test_portal_setting_builds_the_source_only_when_enabled(key, monkeypat
         await source.aclose()
     with pytest.raises(ValueError):
         WebSearchSettings(_env_file=None, **{f"APIFY_{key.upper()}_MAX_RESULTS": 51})
+
+
+@ALL
+@pytest.mark.parametrize("deal", ["SALE", "Venta"])
+def test_portal_deal_is_case_insensitive_and_accepts_spanish(key, deal):
+    adapter = build(key, [], [])
+    row = {**CASES[key][1](), "transactionType": deal}
+    assert adapter._normalize(row, task(), None).deal == "sale"
+    assert adapter._normalize({**row, "transactionType": "ALQUILER"}, task(), None) is None
+
+
+@ALL
+def test_portal_accepts_the_capital_spelling_of_a_place(key):
+    adapter = build(key, [], [])
+    row = {**CASES[key][1](), "city": "Madrid Capital", "cityName": "Madrid Capital"}
+    assert adapter._normalize(row, task(), None) is not None
+
+
+@pytest.mark.parametrize(("key", "change"), [
+    ("pisos", {"propertyType": "apartment"}), ("pisos", {"propertyType": "house"}),
+    ("habitaclia", {"propertyType": "house"}), ("habitaclia", {"propertySubtype": "Piso"}),
+    ("milanuncios", {"categorySlug": "venta-de-pisos"}),
+    ("milanuncios", {"url": "https://www.milanuncios.com/venta-de-pisos-en-madrid/piso-centro-123456789.htm"}),
+])
+def test_land_task_drops_other_property_types(key, change):
+    adapter = build(key, [], [])
+    assert adapter._normalize({**CASES[key][1](), **change}, task(), None) is None
+
+
+@pytest.mark.parametrize(("key", "change"), [
+    ("pisos", {"propertyType": "land"}), ("pisos", {"propertyType": "ruralEstate"}),
+    ("habitaclia", {"propertyType": "land", "propertySubtype": "Terreno urbano"}),
+    ("milanuncios", {"categorySlug": "venta-de-terrenos"}),
+])
+def test_land_task_keeps_land_rows(key, change):
+    adapter = build(key, [], [])
+    assert adapter._normalize({**CASES[key][1](), **change}, task(), None).plot_m2 == 3200
+
+
+@pytest.mark.parametrize("sell", ["demand", "busco", "unknown"])
+def test_milanuncios_drops_wanted_ads_and_unknown_sell_types(sell):
+    adapter = build("milanuncios", [], [])
+    assert adapter._normalize(milanuncios_row(sellType=sell), task(), None) is None
+    assert adapter._normalize(milanuncios_row(sellType="sell"), task(), None) is not None
+    assert adapter._normalize(milanuncios_row(), task(), None) is not None
+
+
+async def test_milanuncios_wanted_ads_are_counted_as_invalid(monkeypatch):
+    from bot.web_search.sources import apify as module
+
+    record = AsyncMock()
+    monkeypatch.setattr(module.costs, "record", record)
+    monkeypatch.setattr(module.costs, "over_budget", AsyncMock(return_value=False))
+    adapter = build("milanuncios", [milanuncios_row(sellType="demand")], [])
+    with source_run_scope(context("apify_milanuncios")):
+        assert await adapter.search(task(), limit=5) == []
+    assert any(c.kwargs.get("code") == "apify_invalid_listing" for c in record.await_args_list)
+    await adapter.aclose()
+
+
+async def test_milanuncios_search_url_uses_city_and_province_for_capitals():
+    adapter = build("milanuncios", [], [])
+    for location, level, expected in (("Madrid", "city", "venta-de-terrenos-en-madrid-madrid"),
+                                      ("Madrid", "province", "venta-de-terrenos-en-madrid"),
+                                      ("Alcalá de Henares", "city", "venta-de-terrenos-en-alcala_de_henares")):
+        _, body, _ = await adapter._plan(task(location=location, place_level=level), 5, None)
+        assert body["searchUrl"] == f"https://www.milanuncios.com/{expected}/"
+
+
+def test_slug_is_ascii_letters_digits_and_underscores_only():
+    from bot.web_search.sources.portals import _slug
+
+    assert _slug("A Coruña") == "a_coruna" and _slug("L'Hospitalet de Llobregat") == "l_hospitalet_de_llobregat"
+    assert _slug("  Sant-Cugat / Vallès! ") == "sant_cugat_valles"

@@ -13,7 +13,9 @@ lists euros only, a plot area only for land and only when the description does n
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 from bot.utils.listing_text import areas
 from bot.web_search.queries import QueryTask, task_kind
@@ -321,13 +323,31 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
 
 _EURO = frozenset({"eur", "euro", "euros", "\u20ac"})
+_OFFER_WORDS = frozenset({"sell", "sale", "offer", "oferta", "venta", "rent", "alquiler"})
 _PISOS_CITIES = frozenset({"madrid", "barcelona", "valencia", "sevilla", "malaga"})  # slug ``<name>_capital``
 _PISOS_PROVINCES = frozenset({"madrid", "barcelona", "valencia", "sevilla", "malaga", "alicante", "zaragoza", "cadiz"})
 
 
 def _slug(value: str) -> str:
     """Lowercase ASCII with ``_`` for spaces, the slug form the portal actors use."""
-    return "_".join(_fold(value).replace("-", " ").split())
+    return re.sub(r"[^a-z0-9]+", "_", _fold(value)).strip("_")
+
+
+def _place_name(value: str) -> str:
+    """A place name as the portals write it: ``Madrid Capital`` is Madrid."""
+    folded = _fold(value)
+    return folded[: -len(" capital")] if folded.endswith(" capital") and len(folded) > 8 else folded
+
+
+_SALE = frozenset({"sale", "venta"})
+_RENT = frozenset({"rent", "alquiler"})
+_LAND_WORDS = ("land", "terren", "solar", "parcel", "rural", "finca")
+
+
+def _landish(value: Any) -> bool:
+    """True for a missing value or one that names land (a plot, a rural estate); a house or a flat is not."""
+    text = _fold(_text(value))
+    return not text or any(word in text for word in _LAND_WORDS)
 
 
 def _pages(amount: int, per_page: int) -> int:
@@ -361,10 +381,14 @@ class _SchemaPortal(_PortalSource):
             return None
         url = self._url(item.get("detailUrl", item.get("url")), task)
         wanted = self._deal(task)
-        row_deal = _text(item.get("transactionType")).casefold()
-        if url is None or (row_deal and row_deal != wanted) or deal_conflict(url, wanted):
+        row_deal = _fold(_text(item.get("transactionType")))
+        if url is None or (row_deal and row_deal not in (_SALE if wanted == "sale" else _RENT)) or deal_conflict(url, wanted):
             return None
         return item, url
+
+    def _place_ok(self, task: QueryTask, center: tuple[float, float] | None, point: tuple[float, float] | None,
+                  municipality: str, province: str) -> bool:
+        return super()._place_ok(task, center, point, _place_name(municipality), _place_name(province))
 
     def _price(self, item: dict[str, Any]) -> Any:
         currency = _fold(_text(item.get("priceCurrency")))
@@ -381,7 +405,7 @@ class ApifyPisosSource(_SchemaPortal):
     Input (published schema): ``transactionType`` (sale/rent), ``propertyType`` (land, house, apartment, commercial),
     ``location`` slug (``madrid_capital`` for a city, ``madrid`` for a province; only the cities and provinces in
     ``_PISOS_CITIES``/``_PISOS_PROVINCES`` are served, any other place is not supported), ``sortBy``, ``maxListings``,
-    ``maxPages`` (about 33 per page), ``fetchDetails=true`` (the detail page adds ``usableAreaSqm``),
+    ``maxPages`` (about 33 per page), ``fetchDetails=false`` (the mapper needs nothing from the detail page, and a detail run is slower),
     ``minPrice``/``maxPrice``/``minArea``. Output: ``detailUrl``, ``price`` + ``priceCurrency``, ``areaSqm``,
     ``rooms``, ``city``, ``province``, ``fullAddress``, ``advertiserName``, ``shortDescription``. There is no phone
     in the output (``phone`` stays empty); ``terrainAreaSqm`` is always null today and is not used: a plot is
@@ -409,7 +433,7 @@ class ApifyPisosSource(_SchemaPortal):
         actor_input: dict[str, Any] = {
             "transactionType": self._deal(task), "propertyType": self.kinds[task_kind(task)],
             "location": self._location(task), "sortBy": "newest", "maxListings": amount,
-            "maxPages": _pages(amount, 30), "fetchDetails": True}
+            "maxPages": _pages(amount, 30), "fetchDetails": False}
         actor_input |= self._filters(task, ("minPrice", "maxPrice", "minArea"))
         return self.actor_id, actor_input, None
 
@@ -419,7 +443,8 @@ class ApifyPisosSource(_SchemaPortal):
             return None
         row, url = found
         city, province = _text(row.get("city")), _text(row.get("province"))
-        if not self._place_ok(task, None, None, city, province):
+        if (not self._place_ok(task, None, None, city, province)
+                or (task_kind(task) == "land" and not _landish(row.get("propertyType")))):
             return None
         return self._listing(
             task, url=url, title=self._title(row, task, city), price=self._price(row), area=row.get("areaSqm"),
@@ -461,7 +486,9 @@ class ApifyHabitacliaSource(_SchemaPortal):
             return None
         row, url = found
         city, province = _text(row.get("city")), _text(row.get("province"))
-        if not self._place_ok(task, None, None, city, province):
+        if (not self._place_ok(task, None, None, city, province)
+                or (task_kind(task) == "land" and not (_landish(row.get("propertyType"))
+                                                       and _landish(row.get("propertySubtype"))))):
             return None
         return self._listing(
             task, url=url, title=self._title(row, task, city), price=self._price(row), area=row.get("areaSqm"),
@@ -477,7 +504,9 @@ class ApifyMilanunciosSource(_SchemaPortal):
     not in parameters, so the price filters are not sent), ``maxItems``, ``maxPages`` (about 41 per page),
     ``fetchDetails=false`` and ``stripSellerPII=true`` always (no private seller ids, phones or e-mails). The
     ``searchUrl`` is ``https://www.milanuncios.com/<category>-en-<place>/`` with ``<place>`` the lowercase slug with
-    ``_`` for spaces (an assumption for towns; the actor's own ``province`` slug is documented only for provinces).
+    ``_`` for spaces: ``<city>-<province>`` for the five capitals, else the name alone. VERIFY ON THE FIRST SAMPLE (the
+    actor documents a slug only for provinces). ``proxyConfiguration`` is the actor's prefill (residential, ES). Offers
+    only: a row whose ``sellType`` is not an offer (a wanted ad) is dropped, and for land the category must be terrenos.
     Categories: ``venta-de-terrenos`` (sale of land), ``venta-de-pisos``/``alquiler-de-pisos``,
     ``venta-de-casas``/``alquiler-de-casas``, ``venta-de-locales``; a rent of land or of premises is not supported.
     Output (listing mode): ``url``, ``title``, ``price`` (euros, no currency field), ``description``,
@@ -499,12 +528,20 @@ class ApifyMilanunciosSource(_SchemaPortal):
         return (super().supports(task) and bool(_slug(task.location))
                 and (str(task.constraints.get("deal")), task_kind(task)) in self._CATEGORIES)
 
+    @staticmethod
+    def _place(task: QueryTask) -> str:
+        """``<city>-<province>`` for a city whose province is its own name (the five capitals), else the slug."""
+        slug = _slug(task.location)
+        return f"{slug}-{slug}" if task.place_level == "city" and slug in _PISOS_CITIES else slug
+
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
         category = self._CATEGORIES[(self._deal(task), task_kind(task))]
         actor_input: dict[str, Any] = {
-            "searchUrl": f"https://www.milanuncios.com/{category}-en-{_slug(task.location)}/", "maxItems": amount,
-            "maxPages": _pages(amount, 41), "fetchDetails": False, "stripSellerPII": True}
+            "searchUrl": f"https://www.milanuncios.com/{category}-en-{self._place(task)}/", "maxItems": amount,
+            "maxPages": _pages(amount, 41), "fetchDetails": False, "stripSellerPII": True,
+            "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"],
+                                   "apifyProxyCountry": "ES"}}
         return self.actor_id, actor_input, None
 
     def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
@@ -513,7 +550,12 @@ class ApifyMilanunciosSource(_SchemaPortal):
             return None
         row, url = found
         city, province = _text(row.get("cityName")), _text(row.get("provinceName"))
-        if not self._place_ok(task, None, None, city, province):
+        sell = _fold(_text(row.get("sellType")))
+        category = _fold(_text(row.get("categorySlug")))
+        first = urlsplit(url).path.strip("/").split("/")[0]
+        if (not self._place_ok(task, None, None, city, province)
+                or (sell and sell not in _OFFER_WORDS)  # a wanted-ad ("demand", "busco") is not an offer
+                or (task_kind(task) == "land" and ("terreno" not in first or (category and "terreno" not in category)))):
             return None
         return self._listing(
             task, url=url, title=self._title(row, task, city), price=row.get("price"), area=row.get("tag_sqm"),
