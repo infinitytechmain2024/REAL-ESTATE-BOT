@@ -463,9 +463,10 @@
         "C2",
         "D1a"
       ],
-      "status": "review",
+      "status": "done",
       "day": 4,
-      "hours": 1.5
+      "hours": 1.5,
+      "pr": 70
     },
     {
       "id": "B5d",
@@ -475,7 +476,7 @@
       "deps": [
         "B5c"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": 4,
       "hours": 1.5
     }
