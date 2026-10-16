@@ -218,9 +218,20 @@ def _ceil(value: int | None, allowed: tuple[int, ...]) -> str | None:
 
 
 class ApifyYaencontreSource(_PortalSource):
-    """``igolaizola/yaencontre-scraper``; rows follow the output schema the Store infers from its recent runs
-    (``url``, ``title``, ``price``, ``area``, ``rooms``, ``operation``, ``address.{qualifiedName,geoLocation}``,
-    ``owner.{name,phoneAvailable,virtualPhoneNumber}``, ``description``), not a run of ours."""
+    """``igolaizola/yaencontre-scraper``; the row shape is taken from a live run (4 plots around Madrid, 2026-10-16):
+    ``url``, ``title``, ``price`` (euros, no currency field), ``area`` (the plot for ``family=LAND``), ``family``
+    (``LAND``, ``FLAT``, ``HOUSE``), ``operation`` (``BUY``/``RENT``), ``address.{qualifiedName,geoLocation}`` (the
+    qualified name is ``district, borough, municipality``: the last part is the municipality),
+    ``owner.{name,type,phoneAvailable,virtualPhoneNumber,source}``, ``description``.
+
+    Input is by COORDINATES only: a text ``location`` makes the actor fail on the portal's autocomplete (HTTP 403,
+    DataDome). Every task is therefore geocoded (``_center``) and sent as ``latitude``, ``longitude``, ``radiusKm``
+    (+ ``operation``, ``propertyType``, ``maxItems``, ``sortBy``): the user's radius, else 15 km for a city and 60 km
+    for a province. Without a geocoder the source is not served. The circle spills over the border (15 km around
+    Madrid reaches Getafe), so a city task keeps only rows whose municipality is the city (or a named nearby place);
+    a province task trusts the circle (the rows name no province), so a large province is covered only around its
+    capital. ``owner.source=IDEALISTA`` marks an aggregated Idealista ad: expect duplicates of the Idealista source
+    (``SourceListing`` has no field for it; the owner name stays in ``advertiser``)."""
 
     name = "apify_yaencontre"
     hosts = frozenset({"yaencontre.com"})
@@ -230,24 +241,30 @@ class ApifyYaencontreSource(_PortalSource):
                                         "commercial": "commercial"}
     _OPERATIONS: ClassVar[dict[str, frozenset[str]]] = {"sale": frozenset({"sale", "venta", "buy"}),
                                                         "rent": frozenset({"rent", "alquiler"})}
+    _FAMILIES: ClassVar[dict[str, frozenset[str]]] = {"land": frozenset({"land"}), "house": frozenset({"house"}),
+                                                      "apartment": frozenset({"flat"})}  # commercial: not seen live
+    _CITY_RADIUS_KM = 15
+    _PROVINCE_RADIUS_KM = 60
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/yaencontre-scraper", **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
 
+    def supports(self, task: QueryTask) -> bool:
+        return self._geocoder is not None and super().supports(task)
+
+    def _radius(self, task: QueryTask) -> float:
+        if task.radius_km is not None:
+            return task.radius_km
+        return self._PROVINCE_RADIUS_KM if task.place_level == "province" else self._CITY_RADIUS_KM
+
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
         constraints = task.constraints
-        actor_input: dict[str, Any] = {"maxItems": amount, "operation": self._deal(task),
-                                       "propertyType": self.kinds[task_kind(task)], "sortBy": "newest"}
-        center = None
-        if task.radius_km is not None:
-            center = await self._center(task) if not run_id else None
-            if center is not None:
-                actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
-                                "radiusKm": max(1, min(100, round(task.radius_km)))}
-        else:
-            actor_input |= {"location": task.location.strip()[:120],
-                            "locationType": "province" if task.place_level == "province" else "municipality"}
+        center = await self._center(task)  # raises before any paid launch when the place cannot be geocoded
+        actor_input: dict[str, Any] = {
+            "maxItems": amount, "operation": self._deal(task), "propertyType": self.kinds[task_kind(task)],
+            "sortBy": "newest", "latitude": round(center[0], 6), "longitude": round(center[1], 6),
+            "radiusKm": max(1, min(100, round(self._radius(task))))}
         filters = {"minPrice": _floor(_whole(constraints.get("min_price")), _YAENCONTRE_PRICES),
                    "maxPrice": _ceil(_whole(constraints.get("max_price")), _YAENCONTRE_PRICES),
                    "minArea": _floor(_whole(constraints.get("min_area")), _YAENCONTRE_AREAS)}
@@ -259,17 +276,21 @@ class ApifyYaencontreSource(_PortalSource):
             return None
         url = self._url(item.get("url"), task)
         operation = _fold(_text(item.get("operation")))
-        if url is None or (operation and operation not in self._OPERATIONS[self._deal(task)]):
+        family = _fold(_text(item.get("family")))
+        wanted_families = self._FAMILIES.get(task_kind(task))
+        if (url is None or (operation and operation not in self._OPERATIONS[self._deal(task)])
+                or (family and wanted_families is not None and family not in wanted_families)):
             return None
         address = item.get("address") if isinstance(item.get("address"), dict) else {}
         place = _text(address.get("qualifiedName"))
         geo = address.get("geoLocation") if isinstance(address.get("geoLocation"), dict) else {}
-        if task.radius_km is not None:
-            if not self._place_ok(task, center, _point(geo.get("lat"), geo.get("lon")), "", ""):
+        if task.radius_km is not None or task.place_level == "province":
+            point = _point(geo.get("lat"), geo.get("lon"))
+            if center is None or point is None or _distance_km(center, point) > self._radius(task):
                 return None
-        elif task.place_level == "city":
-            parts = {_fold(p) for p in place.split(",")}
-            if not parts & {_fold(task.location), *(_fold(p) for p in task.nearby_places)}:
+        else:
+            municipality = _fold(place.rsplit(",", 1)[-1])
+            if municipality not in {_fold(task.location), *(_fold(p) for p in task.nearby_places)}:
                 return None
         owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
         phone = owner.get("virtualPhoneNumber") if owner.get("phoneAvailable") is not False else None
@@ -363,7 +384,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
 
 _EURO = frozenset({"eur", "euro", "euros", "\u20ac"})
-_OFFER_WORDS = frozenset({"sell", "sale", "offer", "oferta", "venta", "rent", "alquiler"})
+_OFFER_WORDS = frozenset({"supply", "sell", "sale", "offer", "oferta", "venta", "rent", "alquiler"})
 _PISOS_CITIES = frozenset({"madrid", "barcelona", "valencia", "sevilla", "malaga"})  # slug ``<name>_capital``
 _PISOS_PROVINCES = frozenset({"madrid", "barcelona", "valencia", "sevilla", "malaga", "alicante", "zaragoza", "cadiz"})
 
@@ -543,46 +564,51 @@ class ApifyHabitacliaSource(_SchemaPortal):
 class ApifyMilanunciosSource(_SchemaPortal):
     """Milanuncios through ``rastriq/milanuncios-scraper`` ($0.00125 per result, $0.005 per start).
 
-    Input (published schema): ``searchUrl`` (wins over the other fields; the category and the place are in the path,
-    not in parameters, so the price filters are not sent), ``maxItems``, ``maxPages`` (about 41 per page),
-    ``fetchDetails=false`` and ``stripSellerPII=true`` always (no private seller ids, phones or e-mails). The
-    ``searchUrl`` is ``https://www.milanuncios.com/<category>-en-<place>/`` with ``<place>`` the lowercase slug with
-    ``_`` for spaces: ``<city>-<province>`` for the five capitals, else the name alone. VERIFY ON THE FIRST SAMPLE (the
-    actor documents a slug only for provinces). ``proxyConfiguration`` is the actor's prefill (residential, ES). Offers
-    only: a row whose ``sellType`` is not an offer (a wanted ad) is dropped, and for land the category must be terrenos.
-    Categories: ``venta-de-terrenos`` (sale of land), ``venta-de-pisos``/``alquiler-de-pisos``,
-    ``venta-de-casas``/``alquiler-de-casas``, ``venta-de-locales``; a rent of land or of premises is not supported.
-    Output (listing mode): ``url``, ``title``, ``price`` (euros, no currency field), ``description``,
-    ``tag_sqm``, ``tag_bedrooms``, ``cityName``, ``provinceName``, ``sellerType`` (a type, not a name). No phone and no
-    advertiser name; a plot is ``plot_area(tag_sqm, description)``. Not run live.
+    Input (live runs, 2026-10-16): ``categorySlug`` + ``province`` (slug: ``madrid``, ``barcelona``, ``vizcaya``,
+    ``las_palmas``; an unknown slug stops the run), ``maxItems``, ``maxPages`` (about 41 per page), ``fetchDetails=false``
+    and ``stripSellerPII=true`` always (no private seller ids, phones or e-mails). ``searchUrl`` is NOT used: with
+    ``/terrenos/`` it ignored ``keywords`` and returned the whole country. The province is the task's place for a
+    province task, and for a city only when the city is its own province (the five capitals of ``_PISOS_CITIES``);
+    any other city has no known province, so it is not served. A city task keeps only rows of that ``cityName``.
+    ``proxyConfiguration`` is the actor's prefill (residential, ES). Offers only: ``sellType`` ``demand`` is dropped.
+    Categories: LAND is ``solares`` (urban, checked live); ``venta-de-fincas`` (rural land) exists but is NOT covered
+    (one run per campaign, one category; its rows are accepted if they ever arrive); ``venta-de-terrenos`` does not
+    exist (404). ``venta-de-pisos``/``alquiler-de-pisos``, ``venta-de-casas``/``alquiler-de-casas`` and
+    ``venta-de-locales`` are NOT CHECKED LIVE; a rent of land or of premises is not supported.
+    Output (live): ``url`` (``/solares-en-<city>-<province>/<slug>-<id>.htm``), ``title``, ``price`` (euros; 0 is
+    "precio a convenir" and becomes None), ``description``, ``tag_sqm`` (the plot), ``tag_bedrooms``, ``cityName``,
+    ``provinceName``, ``sellerType``, ``sellType``, ``categorySlug``, ``latitude``/``longitude``. No phone and no
+    advertiser name; a plot is ``plot_area(tag_sqm, description)``.
     """
 
     name = "apify_milanuncios"
     hosts = frozenset({"milanuncios.com"})
     _CATEGORIES: ClassVar[dict[tuple[str, str], str]] = {
-        ("sale", "land"): "venta-de-terrenos", ("sale", "apartment"): "venta-de-pisos",
+        ("sale", "land"): "solares", ("sale", "apartment"): "venta-de-pisos",
         ("rent", "apartment"): "alquiler-de-pisos", ("sale", "house"): "venta-de-casas",
         ("rent", "house"): "alquiler-de-casas", ("sale", "commercial"): "venta-de-locales"}
+    _LAND_CATEGORIES: ClassVar[tuple[str, ...]] = ("solares", "venta-de-fincas")
 
     def __init__(self, token: str, *, actor_id: str = "rastriq/milanuncios-scraper", **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
 
     def supports(self, task: QueryTask) -> bool:
-        return (super().supports(task) and bool(_slug(task.location))
+        return (super().supports(task) and self._province(task) is not None
                 and (str(task.constraints.get("deal")), task_kind(task)) in self._CATEGORIES)
 
     @staticmethod
-    def _place(task: QueryTask) -> str:
-        """``<city>-<province>`` for a city whose province is its own name (the five capitals), else the slug."""
+    def _province(task: QueryTask) -> str | None:
+        """The province slug: the place of a province task; a city only when it is its own province (the capitals)."""
         slug = _slug(task.location)
-        return f"{slug}-{slug}" if task.place_level == "city" and slug in _PISOS_CITIES else slug
+        if not slug:
+            return None
+        return slug if task.place_level == "province" or slug in _PISOS_CITIES else None
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
-        category = self._CATEGORIES[(self._deal(task), task_kind(task))]
         actor_input: dict[str, Any] = {
-            "searchUrl": f"https://www.milanuncios.com/{category}-en-{self._place(task)}/", "maxItems": amount,
-            "maxPages": _pages(amount, 41), "fetchDetails": False, "stripSellerPII": True,
+            "categorySlug": self._CATEGORIES[(self._deal(task), task_kind(task))], "province": self._province(task),
+            "maxItems": amount, "maxPages": _pages(amount, 41), "fetchDetails": False, "stripSellerPII": True,
             "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"],
                                    "apifyProxyCountry": "ES"}}
         return self.actor_id, actor_input, None
@@ -598,7 +624,9 @@ class ApifyMilanunciosSource(_SchemaPortal):
         first = urlsplit(url).path.strip("/").split("/")[0]
         if (not self._place_ok(task, None, None, city, province)
                 or (sell and sell not in _OFFER_WORDS)  # a wanted-ad ("demand", "busco") is not an offer
-                or (task_kind(task) == "land" and ("terreno" not in first or (category and "terreno" not in category)))):
+                or (task_kind(task) == "land"
+                    and (not first.startswith(tuple(f"{c}-en-" for c in self._LAND_CATEGORIES))
+                         or (category and category not in self._LAND_CATEGORIES)))):
             return None
         return self._listing(
             task, url=url, title=self._title(row, task, city), price=row.get("price"), area=row.get("tag_sqm"),
