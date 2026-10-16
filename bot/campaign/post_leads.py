@@ -204,9 +204,26 @@ class PostLeadWorker:
         return cost
 
     async def _post_text(self, read: PostRead) -> tuple[str | None, float]:
-        """The post's own text from the posts actor (one item); a failure costs nothing but the text."""
+        """The post's own text from the posts actor (one item); a failure costs nothing but the text.
+
+        Every launched run is booked: at its cap before the wait (a late real usage replaces it), so a timeout or an
+        unknown launch never leaves a paid run out of ``campaign_costs``.
+        """
+        key = f"post-text:{read.campaign_id}:{url_key(read.post_url)}"
+        item = self.source.config.actor_id
+        if await costs.over_budget(read.campaign_id):
+            await costs.skip("api", "budget_cap", item=item)
+            return None, 0.0
+        booked = 0.0
         try:
-            run_id = await self.source.launch(read.post_url, posts=True)
+            try:
+                run_id = await self.source.launch(read.post_url, posts=True)
+            except LaunchUnknown:
+                booked = POST_TEXT_MAX_USD  # a run may exist remotely
+                raise
+            booked = POST_TEXT_MAX_USD
+            await costs.record_unique("api", key=key, provider="apify", item=item, cost_usd=POST_TEXT_MAX_USD,
+                                      code="estimated", campaign_id=read.campaign_id)
             run = await self.source.wait(run_id)
             cost = await self._bill(read, run, key="post-text", estimate=POST_TEXT_MAX_USD)
             if run.get("status") != "SUCCEEDED":
@@ -214,7 +231,10 @@ class PostLeadWorker:
             return await self.source.post_text(str(run.get("defaultDatasetId") or "")), cost
         except ApifyError as exc:
             log.warning("campaign.post_reads.post_text_failed %s", exc.code, extra={"campaign_id": read.campaign_id})
-            return None, 0.0
+            if isinstance(exc, LaunchUnknown):
+                await costs.record_unique("api", key=key, provider="apify", item=item, cost_usd=booked,
+                                          code="estimated", campaign_id=read.campaign_id)
+            return None, booked
 
     async def _judge(self, context: PostContext, comments: list[Comment]) -> list[tuple[Verdict, str]]:
         """A verdict and the judge's name per comment: the model, a chunk at a time; the rules where it fails."""

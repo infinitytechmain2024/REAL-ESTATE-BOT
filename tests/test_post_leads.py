@@ -612,3 +612,20 @@ async def test_a_wait_that_never_succeeds_books_the_run_at_its_cap(ledger) -> No
     assert row["state"] == "failed" and len(api.launches()) == 1
     costs_rows = [e for e in ledger.entries if e.kind == "cost"]
     assert [(e.cost_usd, e.code) for e in costs_rows] == [(1.0, "estimated")]
+
+
+async def test_a_posts_actor_wait_that_fails_is_booked_at_its_cap_with_one_launch(ledger) -> None:
+    class PostsRunDown(Api):
+        def __call__(self, request):
+            if "/actor-runs/RUNP" in request.url.path:
+                self.calls.append(request)
+                return httpx.Response(503, json={"error": "x"})
+            return super().__call__(request)
+
+    api = PostsRunDown(items=thirty())
+    w, store, _ = worker(api, config=WITH_POSTS)
+    await w.step()
+    assert len(api.launches("posts-scraper")) == 1
+    estimated = [e for e in ledger.entries if e.kind == "cost" and e.code == "estimated"]
+    assert len(estimated) == 1 and estimated[0].cost_usd > 0
+    assert store.rows[(CID, POST)]["state"] == "done"
