@@ -153,7 +153,7 @@ PORTALS: dict[str, Portal] = {
     "pisos.com": Portal(_p(r"^/(?:comprar|alquilar)/[a-z0-9_-]+-\d{6,}(?:_\d+)?/?$"),
                         _p(r"^/(?:venta|alquiler|obra_nueva)/[a-z0-9_-]+(?:/[a-z0-9_-]+)*/?$")),
     "milanuncios.com": Portal(_p(r"-\d{6,}\.htm$"), _p(r"^/[a-z0-9-]+(?:-en-[a-z0-9_-]+)?/?$")),
-    "habitaclia.com": Portal(_p(r"-i\d{6,}\.htm$"), _p(r"^/[a-z0-9_-]+\.htm$")),
+    "habitaclia.com": Portal(_p(r"(?:-|^/)i\d{6,}\.htm$"), _p(r"^/[a-z0-9_-]+\.htm$")),
     "yaencontre.com": Portal(_p(r"/inmueble-[a-z0-9-]*\d{5,}"), _p(r"^/(?:venta|alquiler)/")),
     "kyero.com": Portal(_p(r"/property/\d{5,}"), _p(r"-(?:property|properties|land|plots)-for-sale")),
     "thinkspain.com": Portal(_p(r"/property-for-sale/\d{5,}"), _p(r"^/property-for-sale(?:/[a-z0-9-]+)*/?$")),

@@ -45,10 +45,18 @@ def _point(lat: Any, lon: Any) -> tuple[float, float] | None:
 
 
 def plot_area(reported: float | None, description: str) -> float | None:
-    """The portal's area as the plot, unless the description names a plot more than 10 % away from it."""
+    """The portal's area as the plot, unless the description names a plot more than 10 % away from it.
+
+    When the portal reports no area (``None``; the actors leave ``areaSqm`` empty for most plots) the plot is read
+    from the description, and only when that is unambiguous: one distinct area labelled as a plot, else one distinct
+    area without any label. A built area (``1280 m2 construidos``) never counts; two candidates mean ``None``."""
+    found = areas(description)
     if reported is None:
-        return None
-    described = [area.m2 for area in areas(description) if area.kind == "plot"]
+        plots = {a.m2 for a in found if a.kind == "plot"}
+        unlabelled = {a.m2 for a in found if a.kind is None}
+        chosen = plots or unlabelled
+        return next(iter(chosen)) if len(chosen) == 1 else None
+    described = [area.m2 for area in found if area.kind == "plot"]
     return reported if all(abs(value - reported) <= reported * .10 for value in described) else None
 
 
@@ -420,7 +428,8 @@ class ApifyPisosSource(_SchemaPortal):
     ``minPrice``/``maxPrice``/``minArea``. Output: ``detailUrl``, ``price`` + ``priceCurrency``, ``areaSqm``,
     ``rooms``, ``city``, ``province``, ``fullAddress``, ``advertiserName``, ``shortDescription``. There is no phone
     in the output (``phone`` stays empty); ``terrainAreaSqm`` is always null today and is not used: a plot is
-    ``plot_area(areaSqm, shortDescription)``. Not run live.
+    ``plot_area(areaSqm, shortDescription)``. Live run 2026-10-16 (plots, Madrid): ``areaSqm`` was null in 1 of 4 rows
+    (its text names no area), ``advertiserType`` may be null, ``city`` is ``Madrid Capital``.
     """
 
     name = "apify_pisos"
@@ -473,7 +482,8 @@ class ApifyHabitacliaSource(_SchemaPortal):
     ``fetchPropertyDetails=false``, ``minPrice``/``maxPrice``/``minArea``. Output: ``detailUrl``, ``price`` +
     ``priceCurrency``, ``areaSqm``, ``rooms``, ``city``, ``province``, ``location``, ``advertiserName``,
     ``description``/``shortDescription``. There is no phone and no separate plot area (``areaSqm`` + the text:
-    ``plot_area``). Not run live.
+    ``plot_area``). Live run 2026-10-16 (3 plots, Madrid): ``areaSqm`` was null in all of them, the area is only in the
+    text; ``city`` is ``Madrid Capital``, ``propertySubtype`` is ``industrialland``, ``residentialland`` or null.
     """
 
     name = "apify_habitaclia"

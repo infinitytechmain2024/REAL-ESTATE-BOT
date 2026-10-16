@@ -24,6 +24,7 @@ from bot.web_search.sources.portals import (
     ApifyYaencontreSource,
     plot_area,
 )
+from bot.web_search.urls import classify_url
 
 LIVE = Path(__file__).parent / "fixtures" / "portals_live"
 
@@ -127,7 +128,7 @@ def test_fotocasa_rejects_wrong_deal_foreign_host_and_search_pages(change):
 def test_fotocasa_never_guesses_missing_facts():
     adapter = fotocasa([], [])
     listing = adapter._normalize(fotocasa_row(transaction={"type": "SALE", "price": None}, surface=None, phone="",
-                                              agency=None, street=None), task(), None)
+                                              agency=None, street=None, description="Parcela urbana."), task(), None)
     assert listing.price is None and listing.currency is None and listing.plot_m2 is None
     assert listing.phone is None and listing.advertiser is None
     home = adapter._normalize(fotocasa_row(rooms=3, surface=95), task(task_text="piso", goal="piso"), None)
@@ -138,7 +139,12 @@ def test_plot_area_is_dropped_when_the_description_names_another_plot():
     assert plot_area(2519, "Parcela de 2.519 m²") == 2519
     assert plot_area(7714, "terreno ... en parcela de 2500m2") is None
     assert plot_area(1089, "Suelo disponible, edificabilidad total de 6.100 m2") == 1089
-    assert plot_area(None, "Parcela de 2.519 m²") is None
+    assert plot_area(None, "Parcela de 2.519 m²") == 2519  # no portal area: the text names exactly one
+    assert plot_area(None, "Parcela de 232 m² con un edificio de 1280 m2 construidos") == 232
+    assert plot_area(None, "este solar cuenta con una superficie de 4.140 m² y una edificabilidad de 3.519 m²t") == 4140
+    assert plot_area(None, "Terreno de 500 m2, o bien dos lotes de 300 m2 y 900 m2") is None  # ambiguous: no guess
+    assert plot_area(None, "Garsierra. En una de las zonas más exclusivas...") is None
+    assert plot_area(None, "") is None
 
 
 async def test_fotocasa_explicit_radius_searches_around_the_geocoded_centre():
@@ -498,12 +504,46 @@ def test_portal_rejects_a_rent_url_for_a_sale_task_and_a_search_page(key):
     assert adapter._normalize({**row, field: search}, task(), None) is None
 
 
+def test_pisos_live_rows_capital_city_null_fields_and_plot_from_the_text():
+    adapter = ApifyPisosSource("secret-token")
+    rows = live_rows("pisos")
+    listings = [adapter._normalize(row, task(), None) for row in rows]
+    assert len(rows) == 4 and all(listings)  # city "Madrid Capital" is the task's Madrid
+    assert all(classify_url(x.url) == "listing" and "/comprar/terreno-" in x.url for x in listings)
+    assert [x.plot_m2 for x in listings] == [None, 1063, 232, 860]  # null areaSqm and no area in the text: None
+    assert [x.advertiser for x in listings] == ["Garsierra", "Anna Serveis Inmobiliaris",
+                                                   "Inmobiliaria Internacional Cpm", None]  # advertiserName null stays empty
+    assert all(x.phone is None and x.area_m2 is None and x.currency == "EUR" for x in listings)
+    assert listings[0].price == 1550000 and listings[0].address == "El Plantío, Moncloa-Aravaca, Madrid Capital, Madrid"
+    assert rows[3]["advertiserType"] is None and rows[0]["terrainAreaSqm"] is None
+    # an area written in the text of a row that has no areaSqm is the plot
+    row = {**rows[0], "shortDescription": "Parcela urbana de 1.200 m2 en El Plantío."}
+    assert adapter._normalize(row, task(), None).plot_m2 == 1200
+    assert adapter._normalize({**rows[0], "city": "Getafe"}, task(), None) is None
+
+
+def test_habitaclia_live_rows_plot_comes_only_from_the_text_and_portal_place_is_kept():
+    adapter = ApifyHabitacliaSource("secret-token")
+    rows = live_rows("habitaclia")
+    listings = [adapter._normalize(row, task(), None) for row in rows]
+    assert len(rows) == 3 and all(listings)  # subtypes null / industrialland / residentialland are all plots
+    assert [r["propertySubtype"] for r in rows] == [None, "industrialland", "residentialland"]
+    assert all(r["areaSqm"] is None for r in rows)
+    assert all(classify_url(x.url) == "listing" for x in listings)
+    assert [x.plot_m2 for x in listings] == [2519, 232, 4140]  # not the 1280 built or the 3519 buildable
+    assert [x.advertiser for x in listings][:2] == ["GARSIERRA", "CPM INMOBILIARIA INTERNACIONAL - CASAS PISOS MADRID"]
+    assert all(x.phone is None and x.area_m2 is None for x in listings)
+    # the third ad is a plot in Mijas by its text, the portal files it under Madrid: kept as the portal gave it
+    assert "Mijas" in listings[2].description and listings[2].address.startswith("Barrio de Salamanca, Madrid Capital")
+
+
 @ALL
 def test_portal_never_guesses_missing_facts(key):
     adapter = build(key, [], [])
     row = CASES[key][1]()
-    listing = adapter._normalize({**row, "price": None, "areaSqm": None, "tag_sqm": None, "advertiserName": None,
-                                  "fullAddress": None, "location": None}, task(), None)
+    nothing = {"shortDescription": "Parcela urbana.", "description": "Parcela urbana."}
+    listing = adapter._normalize({**row, **nothing, "price": None, "areaSqm": None, "tag_sqm": None,
+                                  "advertiserName": None, "fullAddress": None, "location": None}, task(), None)
     assert listing.price is None and listing.currency is None and listing.plot_m2 is None
     assert listing.phone is None and listing.advertiser is None and listing.rooms is None
     for price in ("250.000 €", 0, "consultar"):
@@ -610,3 +650,11 @@ def test_slug_is_ascii_letters_digits_and_underscores_only():
 
     assert _slug("A Coruña") == "a_coruna" and _slug("L'Hospitalet de Llobregat") == "l_hospitalet_de_llobregat"
     assert _slug("  Sant-Cugat / Vallès! ") == "sant_cugat_valles"
+
+
+def test_live_portal_url_shapes_are_listings_and_their_search_pages_are_not():
+    for url in ("https://www.habitaclia.com/i15441000024727.htm",
+                "https://www.habitaclia.com/comprar-terreno-madrid-i500003456789.htm",
+                "https://www.pisos.com/comprar/terreno-san_blas_amposta-68412217734_101800/"):
+        assert classify_url(url) == "listing", url
+    assert classify_url("https://www.habitaclia.com/terrenos-madrid.htm") != "listing"
