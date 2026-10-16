@@ -451,6 +451,33 @@
       "day": 4,
       "hours": 1,
       "pr": 69
+    },
+    {
+      "id": "D2pre",
+      "title": "Предсдаточный аудит деплой-артефактов: DEPLOY/ROLLBACK/HANDOFF сверены с main, чек-лист перед D2",
+      "stream": "d2pre",
+      "agent": "deployer",
+      "deps": [
+        "C3",
+        "C4",
+        "C2",
+        "D1a"
+      ],
+      "status": "review",
+      "day": 4,
+      "hours": 1.5
+    },
+    {
+      "id": "B5d",
+      "title": "Milanuncios locales-comerciales (venta-de-locales = 404), живые фикстуры аренды/домов Milanuncios и Yaencontre (≈ $0.05)",
+      "stream": "portals3",
+      "agent": "sources",
+      "deps": [
+        "B5c"
+      ],
+      "status": "in_progress",
+      "day": 4,
+      "hours": 1.5
     }
   ]
 }
