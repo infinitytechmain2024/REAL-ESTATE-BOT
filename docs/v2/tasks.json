@@ -436,7 +436,8 @@
       ],
       "status": "review",
       "day": 4,
-      "hours": 1.5
+      "hours": 1.5,
+      "pr": 69
     },
     {
       "id": "B5c",
@@ -448,7 +449,8 @@
       ],
       "status": "review",
       "day": 4,
-      "hours": 1
+      "hours": 1,
+      "pr": 69
     }
   ]
 }
