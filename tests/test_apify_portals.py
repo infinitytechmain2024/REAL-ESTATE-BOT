@@ -902,3 +902,22 @@ async def test_yaencontre_live_rent_rows_are_rent_only_and_seasonal_is_not_filte
     assert [x.price for x in listings] == [6210, 2000, 6200] and all(x.deal == "rent" for x in listings)
     assert sum("temporada" in x.title for x in listings) == 2  # "alquiler de temporada": only in the title
     assert all(adapter._normalize(r, kind_task("piso"), center) is None for r in rows)  # rent row, sale task
+
+
+def test_milanuncios_live_rent_house_rows_pass_for_rent_and_drop_for_sale():
+    adapter = build("milanuncios", [], [])
+    rows = live_rows("milanuncios", "madrid_alquiler_casas")
+    listings = [adapter._normalize(r, kind_task("casa", "rent"), None) for r in rows]
+    assert rows and all(listings) and all(x.deal == "rent" and x.price and x.area_m2 for x in listings)
+    assert all(adapter._normalize(r, kind_task("casa"), None) is None for r in rows)
+
+
+@pytest.mark.parametrize(("periodicity", "kept"), [("WEEKLY", False), ("DAILY", False), ("MONTHLY", True), (None, True)])
+async def test_yaencontre_rent_keeps_only_monthly_prices(periodicity, kept):
+    adapter = yaencontre([], [])
+    row = json.loads((LIVE / "yaencontre_rent_flat_items.json").read_text(encoding="utf-8"))[2]
+    row.pop("periodicity", None)
+    if periodicity:
+        row["periodicity"] = periodicity
+    result = adapter._normalize(row, kind_task("piso", "rent"), (40.4168, -3.7038))
+    assert (result is not None) is kept

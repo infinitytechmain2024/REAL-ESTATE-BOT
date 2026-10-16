@@ -16,7 +16,11 @@
 | Idealista | `APIFY_IDEALISTA_ENABLED` + `APIFY_IDEALISTA_PROVIDER=igolaizola` | `igolaizola/idealista-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 3); `size` участка = площадь участка, описания в выдаче нет |
 | Pisos.com | `APIFY_PISOS_ENABLED` | `logiover/pisos-com-property-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 4); `areaSqm` часто пуст, площадь из описания: сначала с пометкой участка, иначе единственное число без построек (`m²t`, edificabilidad, nave и т. п. не считаются); `city` = «Madrid Capital»; без телефона. Города: Мадрид, Барселона, Валенсия, Севилья, Малага |
 | Habitaclia | `APIFY_HABITACLIA_ENABLED` | `trev0n/habitaclia-com-spain-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 3); `areaSqm` пуст у всех, площадь только из текста; без телефона; портал отнёс к Мадриду объявление из Mijas (Málaga) — оставлено как дал портал |
-| Milanuncios | `APIFY_MILANUNCIOS_ENABLED` | `rastriq/milanuncios-scraper` | живой запуск 16.10: вход `categorySlug` + `province` (slug: `madrid`, `barcelona`, `vizcaya`, `las_palmas`; неизвестный slug останавливает запуск); `searchUrl` не используется (с `/terrenos/` игнорирует `keywords`, отдаёт всю страну). Земля — только `solares` (urban); `venta-de-fincas` (rural) существует, но **не покрыта** (один запуск на кампанию), `venta-de-terrenos` не существует (404). Категория `venta-de-pisos` проверена живьём 16.10 (Мадрид, 5 объявлений: `tag_bedrooms`, `tag_bathrooms`, `tag_sqm` = площадь квартиры, `title` = город, не заголовок; в категории попадаются «local acondicionado a vivienda»). Категории (вход `categorySlug`; строка должна принадлежать категории задачи по `categorySlug` и префиксу URL, иначе отбрасывается):
+| Milanuncios | `APIFY_MILANUNCIOS_ENABLED` | `rastriq/milanuncios-scraper` | живой запуск 16.10: вход `categorySlug` + `province` (slug: `madrid`, `barcelona`, `vizcaya`, `las_palmas`; неизвестный slug останавливает запуск); `searchUrl` не используется (с `/terrenos/` игнорирует `keywords`, отдаёт всю страну). Земля — только `solares` (urban); `venta-de-fincas` (rural) существует, но **не покрыта** (один запуск на кампанию), `venta-de-terrenos` не существует (404). Категория `venta-de-pisos` проверена живьём 16.10 (Мадрид, 5 объявлений: `tag_bedrooms`, `tag_bathrooms`, `tag_sqm` = площадь квартиры, `title` = город, не заголовок; в категории попадаются «local acondicionado a vivienda»). Категории — в подразделе «Категории Milanuncios» ниже. Обслуживаются только проверенные slug провинций: `madrid`, `barcelona`, `valencia`, `sevilla`, `malaga`, `vizcaya`, `las_palmas` (расширять после живой проверки); для города — только если он сам провинция (столицы), прочее не обслуживается. `price=0` — «precio a convenir», цена `None`; `tag_sqm`: для `solares`/`venta-de-fincas` — участок (`plot_m2`), для `venta-de-pisos` — площадь квартиры (`area_m2`); тег важнее числа в описании; `sellType=demand` отбрасывается; `stripSellerPII=true` всегда: без телефона и имени продавца; нет аренды участков и локалов ($0.00125 за объявление) |
+
+### Категории Milanuncios
+
+Вход `categorySlug`; строка должна принадлежать категории задачи по `categorySlug` и префиксу URL, иначе отбрасывается.
 
 | Категория (вход) | Статус | Заметки |
 |---|---|---|
@@ -25,11 +29,9 @@
 | `alquiler-de-pisos` | проверено живьём 16.10 | `price` = евро в месяц; URL `/alquiler-de-pisos-en-madrid-madrid/…`; есть `sellerType=private` |
 | `venta-de-casas` | проверено живьём 16.10 | `tag_sqm` = дом; бывает `cityName=Madrid` при title «Las Rozas de Madrid» (берётся как дал портал) |
 | `locales-comerciales` | проверено живьём 16.10 | `venta-de-locales` даёт HTTP 404; в выдаче `categorySlug=venta-de-locales-comerciales`, URL `/venta-de-locales-comerciales-en-<city>-madrid/…`; `tag_sqm` есть, `tag_bedrooms`/`tag_bathrooms` null |
-| `alquiler-de-casas` | не проверено | slug не подтверждён живьём |
+| `alquiler-de-casas` | проверено живьём 16.10 | `categorySlug=alquiler-de-casas`, URL `/alquiler-de-casas-en-<city>-madrid/<slug>-<id>.htm`, `price` = евро в месяц |
 | `venta-de-fincas` | не проверено | не покрыта (один запуск на кампанию); строки принимаются, если придут |
 | `venta-de-terrenos` | не существует (404) | |
-
- Обслуживаются только проверенные slug провинций: `madrid`, `barcelona`, `valencia`, `sevilla`, `malaga`, `vizcaya`, `las_palmas` (расширять после живой проверки); для города — только если он сам провинция (столицы), прочее не обслуживается. `price=0` — «precio a convenir», цена `None`; `tag_sqm`: для `solares`/`venta-de-fincas` — участок (`plot_m2`), для `venta-de-pisos` — площадь квартиры (`area_m2`); тег важнее числа в описании; `sellType=demand` отбрасывается; `stripSellerPII=true` всегда: без телефона и имени продавца; нет аренды участков и локалов ($0.00125 за объявление) |
 
 Задачи, которые берут порталы: Испания, недвижимость, продажа или аренда, участок, жильё или коммерция; город,
 провинция или явный радиус. Комнаты, инвесторы и «только пригороды» идут обычным поиском.

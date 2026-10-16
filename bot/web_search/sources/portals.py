@@ -287,9 +287,11 @@ class ApifyYaencontreSource(_PortalSource):
             return None
         url = self._url(item.get("url"), task)
         operation = _fold(_text(item.get("operation")))
+        period = _fold(_text(item.get("periodicity")))
         family = _fold(_text(item.get("family")))
         wanted_families = self._FAMILIES.get(task_kind(task))
         if (url is None or (operation and operation not in self._OPERATIONS[self._deal(task)])
+                or (self._deal(task) == "rent" and period and period != "monthly")  # weekly/daily is not a month price
                 or (family and wanted_families is not None and family not in wanted_families)):
             return None
         address = item.get("address") if isinstance(item.get("address"), dict) else {}
@@ -584,9 +586,9 @@ class ApifyMilanunciosSource(_SchemaPortal):
     ``proxyConfiguration`` is the actor's prefill (residential, ES). Offers only: ``sellType`` ``demand`` is dropped.
     Categories: LAND is ``solares`` (urban, checked live); ``venta-de-fincas`` (rural land) exists but is NOT covered
     (one run per campaign, one category; its rows are accepted if they ever arrive); ``venta-de-terrenos`` does not
-    exist (404). ``venta-de-pisos``, ``alquiler-de-pisos``, ``venta-de-casas`` and premises are checked live; premises are
+    exist (404). ``venta-de-pisos``, ``alquiler-de-pisos``, ``venta-de-casas``, ``alquiler-de-casas`` and premises are checked live; premises are
     input ``locales-comerciales`` (``venta-de-locales`` is 404; rows say ``venta-de-locales-comerciales``).
-    ``alquiler-de-casas`` is NOT CHECKED LIVE; a rent of land or of premises is not supported. A row whose category
+    A rent of land or of premises is not supported. A row whose category
     (``categorySlug`` and URL prefix) is not the task's is dropped.
     Output (live): ``url`` (``/solares-en-<city>-<province>/<slug>-<id>.htm``), ``title``, ``price`` (euros; 0 is
     "precio a convenir" and becomes None), ``description``, ``tag_sqm`` (the plot), ``tag_bedrooms``, ``cityName``,
