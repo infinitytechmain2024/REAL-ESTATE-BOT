@@ -231,7 +231,10 @@ class ApifyYaencontreSource(_PortalSource):
     Madrid reaches Getafe), so a city task keeps only rows whose municipality is the city (or a named nearby place);
     a province task trusts the circle (the rows name no province), so a large province is covered only around its
     capital. ``owner.source=IDEALISTA`` marks an aggregated Idealista ad: expect duplicates of the Idealista source
-    (``SourceListing`` has no field for it; the owner name stays in ``advertiser``)."""
+    (``SourceListing`` has no field for it; the owner name stays in ``advertiser``). Live 2026-10-16: ``house`` rows are
+    ``family=HOUSE`` (``area`` is the house); flat rent rows are ``operation=RENT``, ``periodicity=MONTHLY`` (``price`` per
+    month; ``SourceListing`` has no period field); a "alquiler de temporada" ad is only marked in its title and is kept.
+    Not checked live: ``premises`` and house rent."""
 
     name = "apify_yaencontre"
     hosts = frozenset({"yaencontre.com"})
@@ -284,9 +287,11 @@ class ApifyYaencontreSource(_PortalSource):
             return None
         url = self._url(item.get("url"), task)
         operation = _fold(_text(item.get("operation")))
+        period = _fold(_text(item.get("periodicity")))
         family = _fold(_text(item.get("family")))
         wanted_families = self._FAMILIES.get(task_kind(task))
         if (url is None or (operation and operation not in self._OPERATIONS[self._deal(task)])
+                or (self._deal(task) == "rent" and period and period != "monthly")  # weekly/daily is not a month price
                 or (family and wanted_families is not None and family not in wanted_families)):
             return None
         address = item.get("address") if isinstance(item.get("address"), dict) else {}
@@ -581,8 +586,10 @@ class ApifyMilanunciosSource(_SchemaPortal):
     ``proxyConfiguration`` is the actor's prefill (residential, ES). Offers only: ``sellType`` ``demand`` is dropped.
     Categories: LAND is ``solares`` (urban, checked live); ``venta-de-fincas`` (rural land) exists but is NOT covered
     (one run per campaign, one category; its rows are accepted if they ever arrive); ``venta-de-terrenos`` does not
-    exist (404). ``venta-de-pisos``/``alquiler-de-pisos``, ``venta-de-casas``/``alquiler-de-casas`` and
-    ``venta-de-locales`` are NOT CHECKED LIVE; a rent of land or of premises is not supported.
+    exist (404). ``venta-de-pisos``, ``alquiler-de-pisos``, ``venta-de-casas``, ``alquiler-de-casas`` and premises are checked live; premises are
+    input ``locales-comerciales`` (``venta-de-locales`` is 404; rows say ``venta-de-locales-comerciales``).
+    A rent of land or of premises is not supported. A row whose category
+    (``categorySlug`` and URL prefix) is not the task's is dropped.
     Output (live): ``url`` (``/solares-en-<city>-<province>/<slug>-<id>.htm``), ``title``, ``price`` (euros; 0 is
     "precio a convenir" and becomes None), ``description``, ``tag_sqm`` (the plot), ``tag_bedrooms``, ``cityName``,
     ``provinceName``, ``sellerType``, ``sellType``, ``categorySlug``, ``latitude``/``longitude``. No phone and no
@@ -594,8 +601,14 @@ class ApifyMilanunciosSource(_SchemaPortal):
     _CATEGORIES: ClassVar[dict[tuple[str, str], str]] = {
         ("sale", "land"): "solares", ("sale", "apartment"): "venta-de-pisos",
         ("rent", "apartment"): "alquiler-de-pisos", ("sale", "house"): "venta-de-casas",
-        ("rent", "house"): "alquiler-de-casas", ("sale", "commercial"): "venta-de-locales"}
+        ("rent", "house"): "alquiler-de-casas", ("sale", "commercial"): "locales-comerciales"}
     _LAND_CATEGORIES: ClassVar[tuple[str, ...]] = ("solares", "venta-de-fincas")
+    # what a row of each task may carry in ``categorySlug`` / the URL prefix (the input slug of premises differs
+    # from the output one: live 2026-10-16, input ``locales-comerciales`` -> ``venta-de-locales-comerciales``)
+    _ROW_CATEGORIES: ClassVar[dict[tuple[str, str], tuple[str, ...]]] = {
+        ("sale", "land"): _LAND_CATEGORIES, ("sale", "apartment"): ("venta-de-pisos",),
+        ("rent", "apartment"): ("alquiler-de-pisos",), ("sale", "house"): ("venta-de-casas",),
+        ("rent", "house"): ("alquiler-de-casas",), ("sale", "commercial"): ("venta-de-locales-comerciales",)}
     # slugs seen in live runs or documented by the actor; extend only after a live check
     _PROVINCES: ClassVar[frozenset[str]] = frozenset({"madrid", "barcelona", "valencia", "sevilla", "malaga",
                                                       "vizcaya", "las_palmas"})
@@ -634,11 +647,11 @@ class ApifyMilanunciosSource(_SchemaPortal):
         sell = _fold(_text(row.get("sellType")))
         category = _fold(_text(row.get("categorySlug")))
         first = urlsplit(url).path.strip("/").split("/")[0]
+        wanted = self._ROW_CATEGORIES.get((self._deal(task), task_kind(task)), ())
         if (not self._place_ok(task, None, None, city, province)
                 or (sell and sell not in _OFFER_WORDS)  # a wanted-ad ("demand", "busco") is not an offer
-                or (task_kind(task) == "land"
-                    and (not first.startswith(tuple(f"{c}-en-" for c in self._LAND_CATEGORIES))
-                         or (category and category not in self._LAND_CATEGORIES)))):
+                or not first.startswith(tuple(f"{c}-en-" for c in wanted))
+                or (category and category not in wanted)):  # the row must belong to the task's category
             return None
         return self._listing(
             task, url=url, title=self._title(row, task, city), price=row.get("price"), area=row.get("tag_sqm"),

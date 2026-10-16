@@ -1,0 +1,95 @@
+[
+ {
+  "address": {
+   "qualifiedName": "Canillas, Hortaleza, Madrid",
+   "geoLocation": {
+    "lat": 40.4616071,
+    "lon": -3.6505055
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 110,
+  "bathrooms": 2,
+  "family": "HOUSE",
+  "id": "jht::real-estate::78727-112810932",
+  "isNewConstruction": false,
+  "operation": "BUY",
+  "owner": {
+   "id": "jht::real-estate-agency::x",
+   "type": "REAL_ESTATE_AGENCY",
+   "name": "AGENCIA E",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA",
+   "virtualPhoneNumber": "+34900000021"
+  },
+  "price": 482055,
+  "reference": "78727-112810932",
+  "rooms": 3,
+  "status": "ACTIVE",
+  "title": "Casa en venta en calle Tudela de Duero, Canillas en Hortaleza en Madrid",
+  "url": "https://yaencontre.com/venta/casa/inmueble-78727-112810932"
+ },
+ {
+  "address": {
+   "qualifiedName": "La Finca, Zona Prado de Somosaguas - La Finca, Pozuelo de Alarcón",
+   "geoLocation": {
+    "lat": 40.4162999,
+    "lon": -3.8007722
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 600,
+  "bathrooms": 5,
+  "family": "HOUSE",
+  "id": "jht::real-estate::62022-112832819",
+  "isNewConstruction": false,
+  "operation": "BUY",
+  "owner": {
+   "id": "jht::real-estate-agency::x",
+   "type": "REAL_ESTATE_AGENCY",
+   "name": "AGENCIA F",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA",
+   "virtualPhoneNumber": "+34900000022"
+  },
+  "price": 2990000,
+  "reference": "62022-112832819",
+  "rooms": 5,
+  "status": "ACTIVE",
+  "title": "Casa adosada en venta en paseo De Los Lagos, La Finca en Pozuelo de Alarcón",
+  "url": "https://yaencontre.com/venta/casa/inmueble-62022-112832819"
+ },
+ {
+  "address": {
+   "qualifiedName": "Peñagrande, Fuencarral, Madrid",
+   "geoLocation": {
+    "lat": 40.4785485,
+    "lon": -3.7337289
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 378,
+  "bathrooms": 5,
+  "family": "HOUSE",
+  "id": "jht::real-estate::40800-112832596",
+  "isNewConstruction": false,
+  "operation": "BUY",
+  "owner": {
+   "id": "jht::real-estate-agency::x",
+   "type": "REAL_ESTATE_AGENCY",
+   "name": "AGENCIA G",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA",
+   "virtualPhoneNumber": "+34900000023"
+  },
+  "price": 1695000,
+  "reference": "40800-112832596",
+  "rooms": 6,
+  "status": "ACTIVE",
+  "title": "Chalet en venta, Peñagrande en Fuencarral en Madrid",
+  "url": "https://yaencontre.com/venta/casa/inmueble-40800-112832596"
+ }
+]
