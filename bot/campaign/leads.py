@@ -23,6 +23,7 @@ import json
 import logging
 import random
 import re
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -460,6 +461,7 @@ class ApifyReadStore(LeadStore, Protocol):
 
     async def apify_reads_today(self) -> int: ...
     async def run_id(self, read: CommentRead) -> str | None: ...
+    async def mark_launching(self, read: CommentRead) -> None: ...
     async def save_run(self, read: CommentRead, run_id: str) -> bool: ...
 
 
@@ -668,6 +670,13 @@ class PostgresLeadStore:
             "select run_id from campaign_comment_reads where campaign_id = $1::uuid and finding_id = $2::uuid",
             read.campaign_id, read.finding_id)
 
+    async def mark_launching(self, read: CommentRead) -> None:
+        """Before the paid launch: a ``pending:`` placeholder, so a failure after it never repeats the launch."""
+        await self.pool.execute(
+            """update campaign_comment_reads set run_id = $3
+                where campaign_id = $1::uuid and finding_id = $2::uuid and state = 'reading' and run_id is null""",
+            read.campaign_id, read.finding_id, f"pending:{uuid.uuid4().hex}")
+
     async def save_run(self, read: CommentRead, run_id: str) -> bool:
         result = await self.pool.execute(
             """update campaign_comment_reads set run_id = $3
@@ -805,6 +814,9 @@ class MemoryLeadStore:
 
     async def run_id(self, read: CommentRead) -> str | None:
         return self.runs.get((read.campaign_id, read.finding_id))
+
+    async def mark_launching(self, read: CommentRead) -> None:
+        self.runs.setdefault((read.campaign_id, read.finding_id), f"pending:{uuid.uuid4().hex}")
 
     async def save_run(self, read: CommentRead, run_id: str) -> bool:
         self.runs[(read.campaign_id, read.finding_id)] = run_id

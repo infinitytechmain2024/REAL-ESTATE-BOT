@@ -54,10 +54,14 @@ class ApifyCommentReader:
     async def _read(self, read: CommentRead) -> tuple[str | None, list[Comment]]:
         cfg = self.source.config
         run_id = await self.store.run_id(read)
+        if run_id is not None and run_id.startswith("pending:"):  # a launch began, its run id was never stored
+            await self._estimate(read)
+            raise CommentReadFailed("launch_unconfirmed")
         if run_id is None:
             if await costs.over_budget(read.campaign_id):
                 await costs.skip("api", "budget_cap", item=cfg.actor_id)
                 raise CommentReadFailed("budget_cap")
+            await self.store.mark_launching(read)  # before the paid launch: a failure from here on never repeats it
             try:
                 run_id = await self.source.launch(read.post_url)
             except LaunchUnknown:  # a run may exist remotely: booked at its cap, never launched a second time
@@ -69,7 +73,7 @@ class ApifyCommentReader:
                 saved = False
             if not saved:
                 await self._estimate(read)
-                raise CommentReadFailed("run_id_not_saved")
+                raise CommentReadFailed("launch_unconfirmed")
         try:
             run = await self.source.wait(run_id)
         except Exception:

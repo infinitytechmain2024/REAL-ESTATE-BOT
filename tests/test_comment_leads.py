@@ -628,7 +628,20 @@ async def test_apify_a_run_id_that_is_not_saved_fails_without_a_second_run(ledge
     api = Api()
     store = Lost([_read(1)])
     await _apify_worker(api, store).step()
-    assert store.finished[_read(1).post_url][3] == "run_id_not_saved" and len(api.launches()) == 1
+    assert store.finished[_read(1).post_url][3] == "launch_unconfirmed" and len(api.launches()) == 1
+    assert [(e.cost_usd, e.code) for e in ledger.entries if e.kind == "cost"] == [(1.0, "estimated")]
+
+
+async def test_apify_a_restart_with_a_pending_launch_starts_no_run(ledger) -> None:
+    from tests.test_post_leads import Api
+
+    api = Api()
+    store = MemoryLeadStore([_read(1)])
+    store.runs[(_read(1).campaign_id, _read(1).finding_id)] = "pending:abc"
+    await store.recover()
+    await _apify_worker(api, store).step()
+    assert store.finished[_read(1).post_url][3] == "launch_unconfirmed" and api.launches() == []
+    assert [(e.cost_usd, e.code) for e in ledger.entries if e.kind == "cost"] == [(1.0, "estimated")]
 
 
 async def test_apify_an_empty_dataset_is_done_with_nothing(ledger) -> None:

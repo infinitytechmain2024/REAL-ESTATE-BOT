@@ -430,8 +430,20 @@ async def test_a_lost_run_id_fails_the_read_instead_of_a_second_paid_run(ledger)
 
     store.save_run = broken  # type: ignore[method-assign]
     await w.step()
-    assert store.rows[(CID, POST)]["state"] == "failed" and store.rows[(CID, POST)]["error"] == "run_id_not_saved"
+    assert store.rows[(CID, POST)]["state"] == "failed" and store.rows[(CID, POST)]["error"] == "launch_unconfirmed"
     assert await w.step() is False and len(api.launches()) == 1
+    assert [e.code for e in ledger.entries if e.kind == "cost"] == ["estimated"]
+
+
+async def test_a_restart_with_a_pending_launch_starts_no_run(ledger) -> None:
+    api = Api(items=thirty())
+    w, store, _ = worker(api)
+    await store.enqueue(CID, POST)
+    store.rows[(CID, POST)].update(state="reading", run_id="pending:abc")
+    assert await store.recover() == 1
+    await w.step()
+    assert store.rows[(CID, POST)]["state"] == "failed" and store.rows[(CID, POST)]["error"] == "launch_unconfirmed"
+    assert api.launches() == [] and [e.code for e in ledger.entries if e.kind == "cost"] == ["estimated"]
 
 
 class NoCall:
