@@ -832,16 +832,21 @@ class MemoryLeadStore:
 
     async def mark_launching(self, read: CommentRead) -> str | None:
         key = (read.campaign_id, read.finding_id)
-        if key in self.runs:
+        if key in self.runs or not self._reading(read):  # like Postgres: only a claimed row without a run id
             return None
         self.runs[key] = token = f"{PENDING}{uuid.uuid4().hex}"
         return token
 
+    def _reading(self, read: CommentRead) -> bool:
+        return any((r.campaign_id, r.finding_id) == (read.campaign_id, read.finding_id) for r in self.reading)
+
     async def unmark_launching(self, read: CommentRead, token: str) -> None:
-        if self.runs.get((read.campaign_id, read.finding_id)) == token:
+        if self._reading(read) and self.runs.get((read.campaign_id, read.finding_id)) == token:
             del self.runs[(read.campaign_id, read.finding_id)]
 
     async def save_run(self, read: CommentRead, run_id: str) -> bool:
+        if not self._reading(read):
+            return False
         self.runs[(read.campaign_id, read.finding_id)] = run_id
         self.apify_today += 1
         return True

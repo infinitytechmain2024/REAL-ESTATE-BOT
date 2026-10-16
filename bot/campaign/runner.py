@@ -1328,10 +1328,20 @@ def post_links_of(campaign: Campaign) -> list[str]:
     return [u for u in required if isinstance(u, str) and is_facebook_post(u)] if isinstance(required, list) else []
 
 
+READ_ERRORS = {
+    "launch_unconfirmed": "запуск чтения не подтвердился",
+    "apify_launch_unknown": "запуск чтения не подтвердился",
+    "budget_cap": "достигнут лимит бюджета",
+    "apify_run_failed": "чтение завершилось ошибкой",
+    "apify_run_timed_out": "чтение не уложилось во время",
+    "apify_run_aborted": "чтение было прервано",
+}
+
+
 def post_read_line(read: PostReadSummary) -> str:
     """One post's outcome for the person: the count, or that the post could not be read."""
     if read.state != "done":
-        return f"Пост недоступен или не прочитан ({read.error or read.state}): комментарии не получены."
+        return f"Пост недоступен или не прочитан ({READ_ERRORS.get(read.error or '', read.error or read.state)}): комментарии не получены."
     line = f"Комментариев: {read.comments}, лидов: {read.leads}, ${read.cost_usd:.2f}"
     return line if read.leads else f"{line}\nЛидов нет: подходящих комментариев не нашлось."
 

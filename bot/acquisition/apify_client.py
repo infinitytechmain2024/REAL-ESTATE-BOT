@@ -2,7 +2,8 @@
 
 Safety rules shared by all callers:
 
-* a **launch** (``POST acts/<actor>/runs``) is never repeated: if its answer is lost (network error, timeout, 5xx)
+* a **launch** (``POST acts/<actor>/runs``) is never repeated: if its answer is lost (network error, timeout, 5xx) or
+  a 2xx body is unusable (invalid JSON, wrong schema or id, too large)
   the run may exist remotely, so ``launch`` raises ``LaunchUnknown`` and the caller records that instead of starting
   a second paid run; a 4xx (429 included) means nothing was started;
 * reads (``GET``) are retried on 5xx and network errors (``retries`` times, backoff 2/4/8 s plus jitter) and on 429
@@ -140,10 +141,15 @@ class ApifyHttp:
             run = await self.data("POST", f"acts/{actor_path(actor_id)}/runs", retry=False, params=params,
                                   json=actor_input)
         except ApifyError as exc:
-            if exc.code == "apify_transport" or exc.code.startswith("apify_http_5"):
+            # Only an explicit 4xx/429 refusal proves nothing started; a lost answer or a broken 2xx body
+            # (invalid JSON, wrong schema, too large) may hide a created run.
+            if not exc.code.startswith("apify_http_") or exc.code.startswith("apify_http_5"):
                 raise LaunchUnknown("apify_launch_unknown") from None
             raise
-        valid_id(run.get("id"))
+        try:
+            valid_id(run.get("id"))
+        except ApifyError:
+            raise LaunchUnknown("apify_launch_unknown") from None
         return run
 
     async def run(self, run_id: str, *, wait_seconds: int = 0) -> dict[str, Any]:
