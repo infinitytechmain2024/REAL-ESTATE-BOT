@@ -145,6 +145,10 @@ def test_plot_area_is_dropped_when_the_description_names_another_plot():
     assert plot_area(None, "Terreno de 500 m2, o bien dos lotes de 300 m2 y 900 m2") is None  # ambiguous: no guess
     assert plot_area(None, "Garsierra. En una de las zonas más exclusivas...") is None
     assert plot_area(None, "") is None
+    for text in ("Solar. Edificabilidad 1.200 m2", "Terreno urbano con edificabilidad de 3.519 m²t",
+                 "Terreno con nave de 800 m2"):
+        assert plot_area(None, text) is None, text  # buildable or built area is not the plot
+    assert plot_area(None, "parcela en urbanización con una superficie gráfica de 2.519 m2") == 2519
 
 
 async def test_fotocasa_explicit_radius_searches_around_the_geocoded_centre():
@@ -447,7 +451,7 @@ async def test_habitaclia_launch_body_is_capped_pinned_and_row_mapped():
         "maxPages": 1, "fetchPropertyDetails": False, "maxPrice": 3000000, "minArea": 2000}
     one, = listings
     assert one.price == 250000 and one.plot_m2 == 3200 and one.phone is None and one.advertiser == "Inmobiliaria Ejemplo"
-    assert one.address == "Barajas, Madrid, Madrid" and one.description == "Parcela de 3.200 m2."  # shortDescription fallback
+    assert one.address == "Barajas, Madrid" and one.description == "Parcela de 3.200 m2."  # shortDescription fallback
     await adapter.aclose()
 
 
@@ -658,3 +662,13 @@ def test_live_portal_url_shapes_are_listings_and_their_search_pages_are_not():
                 "https://www.pisos.com/comprar/terreno-san_blas_amposta-68412217734_101800/"):
         assert classify_url(url) == "listing", url
     assert classify_url("https://www.habitaclia.com/terrenos-madrid.htm") != "listing"
+
+
+def test_text_area_is_a_plot_only_for_a_land_task_and_habitaclia_address_has_no_repeats():
+    adapter = ApifyHabitacliaSource("secret-token")
+    row = {**live_rows("habitaclia")[0], "shortDescription": "Parcela de 500 m² en venta.", "areaSqm": None}
+    house = adapter._normalize(row, task(task_text="casa", goal="casa"), None)
+    assert house is not None and house.plot_m2 is None
+    listing = adapter._normalize(row, task(), None)
+    assert listing.plot_m2 == 500
+    assert listing.address == "Moncloa - Aravaca, Madrid Capital"

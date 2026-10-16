@@ -12,10 +12,10 @@
 | Портал | Флаг | Актор | Проверено |
 |---|---|---|---|
 | Fotocasa | `APIFY_FOTOCASA_ENABLED` | `igolaizola/fotocasa-scraper` | живой запуск 13.10 (5 участков, Мадрид, ≈ $0.006) |
-| Yaencontre | `APIFY_YAENCONTRE_ENABLED` | `igolaizola/yaencontre-scraper` | живой запуск 16.10: актор заблокирован DataDome на autocomplete (HTTP 403 при поиске места); флаг держать выключенным, повторить позже; маппер по схеме |
-| Idealista | `APIFY_IDEALISTA_ENABLED` + `APIFY_IDEALISTA_PROVIDER=igolaizola` | `igolaizola/idealista-scraper` | живой запуск 16.10 (5 участков, Мадрид); `size` участка = площадь участка, описания в выдаче нет |
-| Pisos.com | `APIFY_PISOS_ENABLED` | `logiover/pisos-com-property-scraper` | живой запуск 16.10 (5 участков, Мадрид); `areaSqm` часто пуст, площадь берётся из `shortDescription` только если там одно число; `city` = «Madrid Capital»; без телефона. Города: Мадрид, Барселона, Валенсия, Севилья, Малага |
-| Habitaclia | `APIFY_HABITACLIA_ENABLED` | `trev0n/habitaclia-com-spain-scraper` | живой запуск 16.10 (5 участков, Мадрид); `areaSqm` пуст у всех, площадь только из текста; без телефона; район портала может не совпасть с текстом (один сэмпл про Mijas под Мадридом) — оставлен как дал портал |
+| Yaencontre | `APIFY_YAENCONTRE_ENABLED` | `igolaizola/yaencontre-scraper` | живой запуск 16.10: HTTP 403 на autocomplete (вероятно DataDome); флаг держать выключенным, повторить позже; маппер по схеме |
+| Idealista | `APIFY_IDEALISTA_ENABLED` + `APIFY_IDEALISTA_PROVIDER=igolaizola` | `igolaizola/idealista-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 3); `size` участка = площадь участка, описания в выдаче нет |
+| Pisos.com | `APIFY_PISOS_ENABLED` | `logiover/pisos-com-property-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 4); `areaSqm` часто пуст, площадь из описания: сначала с пометкой участка, иначе единственное число без построек (`m²t`, edificabilidad, nave и т. п. не считаются); `city` = «Madrid Capital»; без телефона. Города: Мадрид, Барселона, Валенсия, Севилья, Малага |
+| Habitaclia | `APIFY_HABITACLIA_ENABLED` | `trev0n/habitaclia-com-spain-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 3); `areaSqm` пуст у всех, площадь только из текста; без телефона; портал отнёс к Мадриду объявление из Mijas (Málaga) — оставлено как дал портал |
 | Milanuncios | `APIFY_MILANUNCIOS_ENABLED` | `rastriq/milanuncios-scraper` | живой запуск 16.10: два запуска, «Blocked by Milanuncios (HTTP 404)» и с `searchUrl`, и с `categorySlug`+`province`; флаг держать выключенным, повторить позже; маппер по схеме ($0.00125 за объявление); `stripSellerPII=true` всегда; без телефона и имени продавца; нет аренды участков и локалов |
 
 Задачи, которые берут порталы: Испания, недвижимость, продажа или аренда, участок, жильё или коммерция; город,

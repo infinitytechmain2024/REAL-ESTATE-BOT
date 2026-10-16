@@ -17,7 +17,7 @@ import re
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
-from bot.utils.listing_text import areas
+from bot.utils.listing_text import _AREA, _to_m2, areas, number
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.apify import ApifyListingSource, _distance_km, _fold, _number, _text
 from bot.web_search.sources.base import SourceListing
@@ -44,16 +44,37 @@ def _point(lat: Any, lon: Any) -> tuple[float, float] | None:
     return point if ok else None
 
 
+_NOT_PLOT_BEFORE = re.compile(r"(?<!\w)(?:edificab|nave|edificio|cortijo|vivienda|casa|construid)", re.IGNORECASE)
+_NOT_PLOT_AFTER = re.compile(r"t(?![a-z])|de\s+techo|(?:edificab|construid)", re.IGNORECASE)
+
+
+def _not_plot(description: str) -> set[float]:
+    """Areas the text gives to a building or to what may be built (``m²t``, ``de techo``, ``edificabilidad``,
+    ``nave``, ``edificio``, ``cortijo``, ``vivienda``, ``casa``, ``construid``): never a plot."""
+    out: set[float] = set()
+    for found in _AREA.finditer(description):
+        value = number(found.group(1))
+        if value is None:
+            continue
+        before = description[max(0, found.start() - 40):found.start()]
+        after = description[found.end():found.end() + 12].lstrip()
+        if _NOT_PLOT_BEFORE.search(before) or _NOT_PLOT_AFTER.match(after):
+            out.add(round(_to_m2(value, found.group(2)), 1))
+    return out
+
+
 def plot_area(reported: float | None, description: str) -> float | None:
     """The portal's area as the plot, unless the description names a plot more than 10 % away from it.
 
     When the portal reports no area (``None``; the actors leave ``areaSqm`` empty for most plots) the plot is read
     from the description, and only when that is unambiguous: one distinct area labelled as a plot, else one distinct
-    area without any label. A built area (``1280 m2 construidos``) never counts; two candidates mean ``None``."""
+    area without any label. An area of a building or a buildable one (``_not_plot``) never counts; two candidates
+    mean ``None``."""
     found = areas(description)
     if reported is None:
-        plots = {a.m2 for a in found if a.kind == "plot"}
-        unlabelled = {a.m2 for a in found if a.kind is None}
+        skip = _not_plot(description)
+        plots = {a.m2 for a in found if a.kind == "plot" and a.m2 not in skip}
+        unlabelled = {a.m2 for a in found if a.kind is None and a.m2 not in skip}
         chosen = plots or unlabelled
         return next(iter(chosen)) if len(chosen) == 1 else None
     described = [area.m2 for area in found if area.kind == "plot"]
@@ -272,7 +293,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
     """Idealista through ``igolaizola/idealista-scraper`` (``APIFY_IDEALISTA_PROVIDER=igolaizola``), any city or
     province by name; rows follow the output schema the Store infers from its recent runs (``url``, ``operation``,
     ``propertyType``, ``municipality``, ``province``, ``price``, ``size``, ``rooms``, ``latitude``/``longitude``,
-    ``contactInfo.{phone1,commercialName}``, ``suggestedTexts.title``). Checked against a live run (5 plots in
+    ``contactInfo.{phone1,commercialName}``, ``suggestedTexts.title``). Checked against a live run (3 plots in
     Madrid, 2026-10-16): ``size`` is the plot in m2 for ``propertyType=land``, the rows carry no ``description`` and
     the price is also in ``priceInfo.price.{amount,currencySuffix}``."""
 
@@ -428,8 +449,8 @@ class ApifyPisosSource(_SchemaPortal):
     ``minPrice``/``maxPrice``/``minArea``. Output: ``detailUrl``, ``price`` + ``priceCurrency``, ``areaSqm``,
     ``rooms``, ``city``, ``province``, ``fullAddress``, ``advertiserName``, ``shortDescription``. There is no phone
     in the output (``phone`` stays empty); ``terrainAreaSqm`` is always null today and is not used: a plot is
-    ``plot_area(areaSqm, shortDescription)``. Live run 2026-10-16 (plots, Madrid): ``areaSqm`` was null in 1 of 4 rows
-    (its text names no area), ``advertiserType`` may be null, ``city`` is ``Madrid Capital``.
+    ``plot_area(areaSqm, shortDescription)``. Live run 2026-10-16 (plots, Madrid; 4 rows received): ``areaSqm`` was null in 1 of 4
+    rows (its text names no area), ``advertiserType`` may be null, ``city`` is ``Madrid Capital``.
     """
 
     name = "apify_pisos"
@@ -482,7 +503,7 @@ class ApifyHabitacliaSource(_SchemaPortal):
     ``fetchPropertyDetails=false``, ``minPrice``/``maxPrice``/``minArea``. Output: ``detailUrl``, ``price`` +
     ``priceCurrency``, ``areaSqm``, ``rooms``, ``city``, ``province``, ``location``, ``advertiserName``,
     ``description``/``shortDescription``. There is no phone and no separate plot area (``areaSqm`` + the text:
-    ``plot_area``). Live run 2026-10-16 (3 plots, Madrid): ``areaSqm`` was null in all of them, the area is only in the
+    ``plot_area``). Live run 2026-10-16 (3 plots, Madrid; 3 rows received): ``areaSqm`` was null in all of them, the area is only in the
     text; ``city`` is ``Madrid Capital``, ``propertySubtype`` is ``industrialland``, ``residentialland`` or null.
     """
 
@@ -513,7 +534,8 @@ class ApifyHabitacliaSource(_SchemaPortal):
             return None
         return self._listing(
             task, url=url, title=self._title(row, task, city), price=self._price(row), area=row.get("areaSqm"),
-            rooms=row.get("rooms"), address=[_text(row.get("location")), city, province],
+            rooms=row.get("rooms"),
+            address=[place := _text(row.get("location")), *(p for p in (city, province) if _fold(p) not in _fold(place))],
             description=_text(row.get("description")) or _text(row.get("shortDescription")), phone=None,
             advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)))
 
