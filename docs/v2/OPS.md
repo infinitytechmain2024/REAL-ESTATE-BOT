@@ -36,7 +36,6 @@ stat -c %g /var/run/docker.sock        # номер группы docker, под�
 cat >> .env <<'ENV'
 COMPOSE_PROFILES=ops
 WATCHDOG_ENABLED=true
-OWNER_ALERT_CHAT_ID=<ваш chat id>
 WATCHDOG_DOCKER_SOCKET=/var/run/docker.sock
 WATCHDOG_DOCKER_GID=<число из stat>
 ENV
@@ -44,7 +43,10 @@ docker compose --env-file .env up -d --build watchdog
 docker compose --env-file .env logs --tail=20 watchdog     # "watchdog started"
 ```
 
-Без контроля контейнеров достаточно `COMPOSE_PROFILES=ops`, `WATCHDOG_ENABLED=true`, `OWNER_ALERT_CHAT_ID`
+Алерты и сводка идут всем владельцам из `TELEGRAM_OPERATOR_IDS` (они должны хоть раз написать боту `/start`). Отдельный id не нужен;
+`OWNER_ALERT_CHAT_ID=<chat id>` задавайте только чтобы слать в другой чат/группу (тогда только туда).
+
+Без контроля контейнеров достаточно `COMPOSE_PROFILES=ops`, `WATCHDOG_ENABLED=true`
 (`WATCHDOG_DOCKER_SOCKET` остаётся пустым: сокет примонтирован, но не используется).
 
 ### Откат

@@ -813,7 +813,7 @@ services:
     logging: *logging
     # Owner alerts (docs/v2/OPS.md): containers that are exited/restarting/unhealthy (Docker Engine API through the
     # socket below), failing Apify calls, a spent budget, campaigns without cards, a portal with no listings, and a
-    # daily summary, all sent to OWNER_ALERT_CHAT_ID in Telegram. Off twice over: the `ops` profile (enable with
+    # daily summary, all sent in Telegram to TELEGRAM_OPERATOR_IDS (or to OWNER_ALERT_CHAT_ID if set). Off twice over: the `ops` profile (enable with
     # COMPOSE_PROFILES=ops in .env, which update.sh honours) and WATCHDOG_ENABLED=false (the process then only logs).
     # The socket is mounted read-only, but the Docker API is not read-only for whoever holds the socket: this
     # container is host-level trusted, so it has no ports and runs no code but this repository's.
@@ -833,6 +833,7 @@ services:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN in .env}
       WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-false}
       OWNER_ALERT_CHAT_ID: ${OWNER_ALERT_CHAT_ID:-0}
+      TELEGRAM_OPERATOR_IDS: ${TELEGRAM_OPERATOR_IDS:-}
       WATCHDOG_POLL_SECONDS: ${WATCHDOG_POLL_SECONDS:-60}
       WATCHDOG_ALERT_COOLDOWN_MINUTES: ${WATCHDOG_ALERT_COOLDOWN_MINUTES:-30}
       WATCHDOG_DAILY_SUMMARY_HOUR: ${WATCHDOG_DAILY_SUMMARY_HOUR:-9}

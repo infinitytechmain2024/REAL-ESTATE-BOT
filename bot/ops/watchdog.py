@@ -5,7 +5,7 @@ Every ``WATCHDOG_POLL_SECONDS`` it looks at
     ``/var/run/docker.sock``; empty: skipped): ``exited``, ``restarting`` or ``unhealthy``;
   * the database: three Apify errors in a row, a campaign over ``CAMPAIGN_BUDGET_USD``, two finished campaigns in a
     row with no cards, a portal that returned no listings.
-Alerts go to ``OWNER_ALERT_CHAT_ID`` through ``sendMessage``. The same key is not repeated within
+Alerts go through ``sendMessage`` to every id of ``TELEGRAM_OPERATOR_IDS`` (or only to ``OWNER_ALERT_CHAT_ID`` if set). The same key is not repeated within
 ``WATCHDOG_ALERT_COOLDOWN_MINUTES`` (kept in memory: after a restart one repeat is possible); one-off events
 (an empty portal, empty campaigns) are sent once per process. The summary goes out once a day at
 ``WATCHDOG_DAILY_SUMMARY_HOUR`` (UTC). Off by default (``WATCHDOG_ENABLED=false``: the process only logs and sleeps).
@@ -178,10 +178,15 @@ class Watchdog:
 
     # -- delivery -------------------------------------------------------------------------------------------------
     async def send(self, text: str) -> bool:
+        """Send to every recipient; True if at least one got it (a failure for one does not stop the others)."""
+        results = [await self._send_to(chat_id, text) for chat_id in self.settings.recipients()]
+        return any(results)
+
+    async def _send_to(self, chat_id: int, text: str) -> bool:
         try:
             response = await self.telegram.post(
                 f"{TELEGRAM_API}/bot{self.settings.telegram_token}/sendMessage",
-                json={"chat_id": self.settings.owner_chat_id, "text": text, "disable_web_page_preview": True})
+                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
             if response.status_code == 200:
                 return True
             log.warning("telegram sendMessage refused: http %s", response.status_code)

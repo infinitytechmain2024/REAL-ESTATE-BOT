@@ -25,7 +25,7 @@
 | Закреплённый билд актора Facebook-групп (Apify Console, страница актора `apify/facebook-groups-scraper`, вкладка Builds, номер вида `0.1.23`, **не** `latest`) | блок (в) | записать |
 | То же для `apify/facebook-comments-scraper` | блок (г) | записать |
 | O4: `ANTHROPIC_API_KEY` (лимит трат в Anthropic Console); перед включением сверить id модели `claude-sonnet-5-5` в документации Anthropic и цену в `bot/utils/costs.py` | блок (е): ⛔ | есть / нет |
-| O8: ваш Telegram chat id для алертов | блок (ж) | число |
+| O8: получатели алертов | блок (ж) | не нужен: берутся из `TELEGRAM_OPERATOR_IDS` |
 | O7: ссылка на пост с 30 и более комментариями, одна открытая группа для первого прогона FB | блоки (в), (г) | есть |
 | Живые сэмплы B5 по порталам (O3, до $0.02 каждый) подтверждены | порталы Yaencontre и Idealista в блоке (б) | Fotocasa подтверждён живым запуском 13.10, остальные по схеме актора |
 | O9: окно на перезагрузку VPS | раздел 6 | дата |
@@ -492,7 +492,6 @@ stat -c %g /var/run/docker.sock                 # число = WATCHDOG_DOCKER_G
 cat >> .env <<'ENV'
 COMPOSE_PROFILES=ops
 WATCHDOG_ENABLED=true
-OWNER_ALERT_CHAT_ID=<ваш chat id>
 WATCHDOG_DOCKER_SOCKET=/var/run/docker.sock
 WATCHDOG_DOCKER_GID=<число из stat>
 ENV
@@ -513,8 +512,8 @@ docker compose --env-file .env up -d analysis-worker
 docker compose --env-file .env ps analysis-worker            # healthy
 ```
 
-Норма: сообщение пришло за 2 минуты или меньше. Не пришло: `logs --tail=50 watchdog`, проверить `OWNER_ALERT_CHAT_ID` и что вы
-писали боту `/start` хотя бы раз. Дневная сводка придёт в 09:00 UTC. Откат (мягкий, контейнер спит; полный см. раздел 5):
+Норма: сообщение пришло за 2 минуты или меньше. Не пришло: `logs --tail=50 watchdog`, проверить `TELEGRAM_OPERATOR_IDS` (или `OWNER_ALERT_CHAT_ID`, если задан) и что вы
+писали боту `/start` хотя бы раз. `OWNER_ALERT_CHAT_ID` больше не обязателен: алерты идут всем из `TELEGRAM_OPERATOR_IDS`. Дневная сводка придёт в 09:00 UTC. Откат (мягкий, контейнер спит; полный см. раздел 5):
 
 ```bash
 echo 'WATCHDOG_ENABLED=false' >> .env && docker compose --env-file .env up -d watchdog
