@@ -738,3 +738,9 @@ async def test_the_memory_store_follows_the_postgres_launch_guards() -> None:
     assert token and await store.mark_launching(read) is None
     await store.save_run(read, "RUN1")
     assert store.rows[(CID, POST)]["run_id"] == "RUN1"
+
+
+def test_the_report_words_a_read_error_code_for_the_person_and_keeps_an_unknown_one() -> None:
+    known = post_read_line(PostReadSummary(POST, "failed", error="budget_cap"))
+    assert "budget_cap" not in known and "лимит бюджета" in known
+    assert "(odd_code)" in post_read_line(PostReadSummary(POST, "failed", error="odd_code"))
