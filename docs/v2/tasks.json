@@ -492,6 +492,20 @@
       "status": "blocked",
       "day": 5,
       "hours": 7
+    },
+    {
+      "id": "H4",
+      "title": "Алерты watchdog всем владельцам из TELEGRAM_OPERATOR_IDS, OWNER_ALERT_CHAT_ID необязателен",
+      "stream": "h4-alerts",
+      "agent": "builder",
+      "deps": [
+        "C3",
+        "O8"
+      ],
+      "status": "review",
+      "day": 4,
+      "hours": 1,
+      "pr": 73
     }
   ]
 }
