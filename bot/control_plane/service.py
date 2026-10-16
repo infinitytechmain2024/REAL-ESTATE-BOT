@@ -11,6 +11,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from bot.campaign import offers as near
 from bot.campaign.architect import InvalidGoal, plan_campaign
@@ -291,6 +292,10 @@ class ControlPlane:
             return Reply(STALE_BUTTON)
         if not self._can_control(user_id):
             return Reply(JOIN_OPERATOR_ONLY if self._is_user(user_id) else STALE_BUTTON)
+        try:
+            UUID(group_id.partition(":")[0])  # the store casts it ``::uuid``: a malformed id is just a stale button
+        except ValueError:
+            return Reply(STALE_BUTTON)
         try:
             result = await self.confirm_join(group_id)
         except Exception:  # noqa: BLE001 - a bad id or a database hiccup must not break the bot; the button stays

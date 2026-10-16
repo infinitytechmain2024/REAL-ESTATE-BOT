@@ -222,14 +222,16 @@ async def test_group_joined_button_confirms_for_operators_only_and_needs_the_fla
 
     make = lambda **kw: ControlPlane(settings(), MemoryControlPlaneStore(), FakeTranscriber(TranscriptResult("", None, None, "small")), sink, **kw)  # noqa: E731
     control = make(confirm_join=confirm)
-    assert (await control.handle_callback(11, "group:joined:abc:g1")).text == "Проверю группу через браузер"
-    assert seen == ["abc:g1"]
-    assert (await control.handle_callback(11, "group:joined:abc:g1")).text == "Эта кнопка устарела."  # already queued
-    assert (await control.handle_callback(11, "group:joined:abc:g1")).text.startswith("Поиск уже завершён")
-    assert (await control.handle_callback(999, "group:joined:abc:g2")).text == "Эта кнопка устарела."
-    assert (await control.handle_callback(None, "group:joined:abc:g2")).text == "Эта кнопка устарела."
+    assert (await control.handle_callback(11, "group:joined:00000000-0000-4000-8000-000000000001:g1")).text == "Проверю группу через браузер"
+    assert seen == ["00000000-0000-4000-8000-000000000001:g1"]
+    assert (await control.handle_callback(11, "group:joined:00000000-0000-4000-8000-000000000001:g1")).text == "Эта кнопка устарела."  # already queued
+    assert (await control.handle_callback(11, "group:joined:00000000-0000-4000-8000-000000000001:g1")).text.startswith("Поиск уже завершён")
+    assert (await control.handle_callback(999, "group:joined:00000000-0000-4000-8000-000000000001:g2")).text == "Эта кнопка устарела."
+    assert (await control.handle_callback(None, "group:joined:00000000-0000-4000-8000-000000000001:g2")).text == "Эта кнопка устарела."
     assert len(seen) == 3
-    assert (await make().handle_callback(11, "group:joined:abc:g1")).text != "Проверю группу через браузер"  # flag off
+    assert (await control.handle_callback(11, "group:joined:not-a-uuid:g1")).text == "Эта кнопка устарела."
+    assert len(seen) == 3  # a malformed campaign id never reaches the store
+    assert (await make().handle_callback(11, "group:joined:00000000-0000-4000-8000-000000000001:g1")).text != "Проверю группу через браузер"  # flag off
 
 
 @pytest.mark.asyncio
@@ -244,4 +246,4 @@ async def test_group_joined_button_tells_the_campaign_author_that_an_operator_pr
     control = ControlPlane(settings(), MemoryControlPlaneStore(), FakeTranscriber(TranscriptResult("", None, None, "small")), sink,
                            confirm_join=confirm)
     control._is_user = lambda user_id: user_id == 55  # type: ignore[method-assign]
-    assert (await control.handle_callback(55, "group:joined:abc:g1")).text == "Нажать может оператор"
+    assert (await control.handle_callback(55, "group:joined:00000000-0000-4000-8000-000000000001:g1")).text == "Нажать может оператор"
