@@ -136,7 +136,7 @@
       "stream": "acquisition",
       "agent": "builder",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "Пт",
       "hours": 4
     },
@@ -146,7 +146,7 @@
       "stream": "acquisition",
       "agent": "builder+db",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "Пт",
       "hours": 5
     },
@@ -183,7 +183,7 @@
       "stream": "acquisition",
       "agent": "analyst",
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "day": "Пт",
       "hours": 1.5
     },
@@ -193,7 +193,7 @@
       "stream": "acquisition",
       "agent": "analyst",
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "day": "Пт",
       "hours": 2
     },
@@ -203,7 +203,7 @@
       "stream": "investors",
       "agent": "builder+sources+db+analyst",
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "day": "Сб",
       "hours": 9
     },
@@ -215,7 +215,7 @@
       "deps": [
         "B1"
       ],
-      "status": "blocked",
+      "status": "done",
       "day": "Сб",
       "hours": 2
     },
@@ -227,7 +227,7 @@
       "deps": [
         "B1"
       ],
-      "status": "blocked",
+      "status": "done",
       "day": "Сб",
       "hours": 3
     },
@@ -239,7 +239,7 @@
       "deps": [
         "B1"
       ],
-      "status": "blocked",
+      "status": "done",
       "day": "Пт-Вс",
       "hours": 5
     },
@@ -249,7 +249,7 @@
       "stream": "portals",
       "agent": "sources",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "Пт-Сб",
       "hours": 6
     },
@@ -272,7 +272,7 @@
       "stream": "architect",
       "agent": "builder+analyst",
       "deps": [],
-      "status": "ready",
+      "status": "done",
       "day": "Вс",
       "hours": 5
     },
@@ -285,7 +285,7 @@
         "B1",
         "B4"
       ],
-      "status": "blocked",
+      "status": "done",
       "day": "Вс",
       "hours": 4
     },
@@ -295,7 +295,7 @@
       "stream": "ops",
       "agent": "deployer+builder",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "Сб",
       "hours": 6
     },
@@ -305,7 +305,7 @@
       "stream": "ops",
       "agent": "deployer",
       "deps": [],
-      "status": "ready",
+      "status": "done",
       "day": "Сб",
       "hours": 2
     },
@@ -321,6 +321,16 @@
       "day": "—",
       "hours": 8,
       "optional": true
+    },
+    {
+      "id": "D1a",
+      "title": "Карточка объекта: площадь (участок отдельно), телефон, агентство из источника",
+      "stream": "release",
+      "agent": "analyst",
+      "deps": [],
+      "status": "done",
+      "day": "Сб",
+      "hours": 2
     },
     {
       "id": "D1",
@@ -341,7 +351,8 @@
         "O1",
         "O2",
         "O7",
-        "O10"
+        "O10",
+        "D1a"
       ],
       "status": "blocked",
       "day": "Пн",
