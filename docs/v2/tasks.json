@@ -382,6 +382,45 @@
       "status": "blocked",
       "day": "Пн",
       "hours": 2
+    },
+    {
+      "id": "H1",
+      "title": "Один платный запуск чтения даже при сбое БД (pending:<uuid>, launch_unconfirmed)",
+      "stream": "hardening",
+      "agent": "builder",
+      "deps": [
+        "B1",
+        "B2"
+      ],
+      "status": "in_progress",
+      "day": 4,
+      "hours": 2
+    },
+    {
+      "id": "H2",
+      "title": "Правки по security-ревью: post_link вне LLM-merge, учёт posts-актора, uuid в callback, cap_drop/umask/CI perms",
+      "stream": "docs3",
+      "agent": "builder",
+      "deps": [
+        "B1",
+        "C3"
+      ],
+      "status": "in_progress",
+      "day": 4,
+      "hours": 2
+    },
+    {
+      "id": "B5b",
+      "title": "Yaencontre по координатам, Milanuncios categorySlug+province (по живым прогонам)",
+      "stream": "portals2",
+      "agent": "sources",
+      "deps": [
+        "B5",
+        "A3"
+      ],
+      "status": "in_progress",
+      "day": 4,
+      "hours": 3
     }
   ]
 }
