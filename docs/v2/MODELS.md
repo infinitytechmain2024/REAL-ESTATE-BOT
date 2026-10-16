@@ -4,10 +4,10 @@
 Умолчания в коде и в `docker-compose.yml` **не меняются** (правило 2): без строки в `.env` бот работает на прежних
 моделях. Откат — вернуть прежнюю строку в `.env`.
 
-> **Цены Anthropic подтверждены 2026-10-16 по справочнику Claude API (первичный API); id и цены OpenRouter — сверить
-> владельцу до D2.** В среде разработки нет сети, поэтому id `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`,
-> `anthropic/claude-opus-5.5` на openrouter.ai/models и цены на openrouter.ai/pricing не проверены (обычно цены равны
-> первичным). При расхождении поправить `PRICES` и эту таблицу. **При 400 от OpenRouter вернуть прежний id**
+> **Цены Anthropic подтверждены 2026-10-16 по справочнику Claude API; id OpenRouter подтверждены 2026-10-16 поиском по
+> openrouter.ai** (страницы моделей `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`, `anthropic/claude-opus-5.5`;
+> цены там те же: 2/10, 0.1/0.5 (до 100K), 4/20). Прямой доступ к openrouter.ai из среды разработки закрыт, поэтому до D2
+> владельцу стоит один раз прогнать `curl https://openrouter.ai/api/v1/models | grep claude-` на VPS. **При 400 от OpenRouter вернуть прежний id**
 > (`anthropic/claude-sonnet-4.5`, `openai/gpt-4o-mini`). Неверный id не теряет молча: `analysis` закрывает пост с
 > `error`, но кампания выйдет пустой — поэтому D2 делает по одному проверочному вызову на каждом этапе.
 
