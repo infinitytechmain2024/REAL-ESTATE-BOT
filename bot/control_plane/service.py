@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from bot.campaign import offers as near
 from bot.campaign.architect import InvalidGoal, plan_campaign
@@ -291,6 +293,15 @@ class ControlPlane:
             return Reply(STALE_BUTTON)
         if not self._can_control(user_id):
             return Reply(JOIN_OPERATOR_ONLY if self._is_user(user_id) else STALE_BUTTON)
+        try:
+            # The store casts the group id ``::uuid``: a malformed one is just a stale button. In production the id is
+            # a bare UUID; the in-memory store (tests) uses ``<campaign id>:gNNN``, whose part before ``:`` is a UUID.
+            head, sep, tail = group_id.partition(":")
+            UUID(head)
+            if sep and not re.fullmatch(r"g\d+", tail):
+                raise ValueError(group_id)
+        except ValueError:
+            return Reply(STALE_BUTTON)
         try:
             result = await self.confirm_join(group_id)
         except Exception:  # noqa: BLE001 - a bad id or a database hiccup must not break the bot; the button stays

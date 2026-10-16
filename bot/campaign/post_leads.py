@@ -9,7 +9,7 @@ in ``investor_leads`` for the campaign. The runner then sends one card per perso
 
 Safe to repeat: the run id is stored BEFORE the run is awaited, so a second tick, a restart or a failed later step
 resumes the same run and never launches a second paid one (a lost launch answer is booked at its cap and the read
-fails). Its cost is booked once (``costs.record_unique``, key ``post-read:<campaign>:<url key>``). Only reading:
+fails). The posts actor's run is booked the same way under ``post-text``. Its cost is booked once (``costs.record_unique``, key ``post-read:<campaign>:<url key>``). Only reading:
 nothing is posted, liked or messaged.
 """
 
@@ -221,9 +221,29 @@ class PostLeadWorker:
         return cost
 
     async def _post_text(self, read: PostRead) -> tuple[str | None, float]:
-        """The post's own text from the posts actor (one item); a failure costs nothing but the text."""
+        """The post's own text from the posts actor (one item); a failure costs nothing but the text.
+
+        Every launched run is booked (key ``post-text:<campaign>:<url key>``): at its cap before the wait, replaced by
+        the real usage once known, so a timeout or an unknown launch never leaves a paid run out of ``campaign_costs``.
+        A failure after the real usage is booked returns that real cost.
+        """
+        key = f"post-text:{read.campaign_id}:{url_key(read.post_url)}"
+        item = self.source.config.actor_id
+        if await costs.over_budget(read.campaign_id):
+            await costs.skip("api", "budget_cap", item=item)
+            return None, 0.0
+        cost = 0.0  # what is booked so far: nothing, then the cap, then the real usage
         try:
-            run_id = await self.source.launch(read.post_url, posts=True)
+            try:
+                run_id = await self.source.launch(read.post_url, posts=True)
+            except LaunchUnknown:
+                cost = POST_TEXT_MAX_USD  # a run may exist remotely
+                await costs.record_unique("api", key=key, provider="apify", item=item, cost_usd=cost,
+                                          code="estimated", campaign_id=read.campaign_id)
+                raise
+            cost = POST_TEXT_MAX_USD
+            await costs.record_unique("api", key=key, provider="apify", item=item, cost_usd=cost,
+                                      code="estimated", campaign_id=read.campaign_id)
             run = await self.source.wait(run_id)
             cost = await self._bill(read, run, key="post-text", estimate=POST_TEXT_MAX_USD)
             if run.get("status") != "SUCCEEDED":
@@ -231,7 +251,7 @@ class PostLeadWorker:
             return await self.source.post_text(str(run.get("defaultDatasetId") or "")), cost
         except ApifyError as exc:
             log.warning("campaign.post_reads.post_text_failed %s", exc.code, extra={"campaign_id": read.campaign_id})
-            return None, 0.0
+            return None, cost
 
     async def _judge(self, context: PostContext, comments: list[Comment]) -> list[tuple[Verdict, str]]:
         """A verdict and the judge's name per comment: the model, a chunk at a time; the rules where it fails."""

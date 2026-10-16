@@ -844,6 +844,7 @@ services:
     # `backend` reaches PostgreSQL; `egress` sends the Telegram messages.
     networks: [backend, egress]
     security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     healthcheck:
       test: ["CMD", "python", "-m", "bot.ops.healthcheck"]
       interval: 60s

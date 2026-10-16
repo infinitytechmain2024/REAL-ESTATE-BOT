@@ -17,6 +17,7 @@ import pytest
 
 from bot.acquisition.apify_client import ApifyHttp
 from bot.acquisition.apify_facebook_comments import (
+    POST_TEXT_MAX_USD,
     ApifyCommentsSource,
     CommentsConfig,
     comment_items,
@@ -624,6 +625,63 @@ async def test_a_wait_that_never_succeeds_books_the_run_at_its_cap(ledger) -> No
     assert row["state"] == "failed" and len(api.launches()) == 1
     costs_rows = [e for e in ledger.entries if e.kind == "cost"]
     assert [(e.cost_usd, e.code) for e in costs_rows] == [(1.0, "estimated")]
+
+
+async def test_a_posts_actor_wait_that_fails_is_booked_at_its_cap_with_one_launch(ledger) -> None:
+    class PostsRunDown(Api):
+        def __call__(self, request):
+            if "/actor-runs/RUNP" in request.url.path:
+                self.calls.append(request)
+                return httpx.Response(503, json={"error": "x"})
+            return super().__call__(request)
+
+    api = PostsRunDown(items=thirty())
+    w, store, _ = worker(api, config=WITH_POSTS)
+    await w.step()
+    assert len(api.launches("posts-scraper")) == 1
+    estimated = [e for e in ledger.entries if e.kind == "cost" and e.code == "estimated"]
+    assert len(estimated) == 1 and estimated[0].cost_usd > 0
+    assert store.rows[(CID, POST)]["state"] == "done"
+
+
+async def test_a_lost_posts_launch_is_booked_at_its_cap_with_one_launch(ledger) -> None:
+    class PostsLaunchLost(Api):
+        def __call__(self, request):
+            if request.method == "POST" and "posts-scraper" in request.url.path:
+                self.calls.append(request)
+                raise httpx.ConnectError("lost")
+            return super().__call__(request)
+
+    api = PostsLaunchLost(items=thirty())
+    w, store, _ = worker(api, config=WITH_POSTS)
+    await w.step()
+    assert len(api.launches("posts-scraper")) == 1
+    estimated = [e for e in ledger.entries if e.kind == "cost" and e.code == "estimated"]
+    assert [e.cost_usd for e in estimated] == [POST_TEXT_MAX_USD]
+    assert store.rows[(CID, POST)]["state"] == "done"
+
+
+async def test_over_budget_before_the_posts_actor_skips_it_and_the_read_is_done(ledger, monkeypatch) -> None:
+    answers = iter([False, True])  # the comments run starts; the posts run does not
+    async def over_budget(_: str) -> bool:
+        return next(answers, True)
+
+    monkeypatch.setattr(costs, "over_budget", over_budget)
+    api = Api(items=thirty())
+    w, store, _ = worker(api, config=WITH_POSTS)
+    await w.step()
+    assert api.launches("posts-scraper") == [] and len(api.launches("comments-scraper")) == 1
+    assert [e.code for e in ledger.entries if e.kind == "skip" and e.code == "budget_cap"] == ["budget_cap"]
+    assert store.rows[(CID, POST)]["state"] == "done"
+
+
+async def test_a_successful_posts_run_leaves_one_real_post_text_row(ledger) -> None:
+    api = Api(items=thirty())
+    w, _, _ = worker(api, config=WITH_POSTS)
+    await w.step()
+    rows = [e for e in ledger.entries if e.kind == "cost"]
+    assert [(e.cost_usd, e.code) for e in rows] == [(0.0825, ""), (0.01, "")]  # the estimate was replaced
+    assert sorted(ledger.keys) == [f"post-read:{CID}:{url_key(POST)}", f"post-text:{CID}:{url_key(POST)}"]
 
 
 async def test_mark_launching_refused_starts_no_run(ledger) -> None:
