@@ -122,6 +122,20 @@ These are not engineering choices and should not be made by default or by omissi
    settled. The regulatory exposure is a separate question with a different owner, and it
    has never been raised with the client.
 
+### Decisions recorded 2026-10-16 (owner, in session)
+
+1. Lawful basis: legitimate interests. The owner decided **not** to write a legitimate interests
+   assessment or any other document ("nobody will know about it"). The developer explained that
+   without it the basis is undocumented and the exposure under GDPR art. 6(1)(f) and before the
+   AEPD rests with the client; the owner accepted that. Comment reading may be switched on.
+2. Auto-posting at commenters: not planned. Stays off.
+3. Data-subject rights: no named contact. Data is not shared with anyone; the operator only
+   contacts the seller or investor. Erasure by profile link exists in the bot.
+4. Supabase region: unchanged (see §3).
+5. Facebook account-ban risk for closed groups: accepted again, including the account used to join.
+6. Seller phone numbers from portals are shown in cards for all listings, private sellers included
+   (`CARD_EXTRA_FIELDS=true` at deploy).
+
 ---
 
 ## 5. What the software already does about it

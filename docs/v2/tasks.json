@@ -16,7 +16,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -26,7 +26,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -46,7 +46,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Сб",
       "hours": 0
     },
@@ -66,7 +66,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -76,7 +76,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Сб",
       "hours": 0
     },
@@ -86,7 +86,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Вс",
       "hours": 0
     },
@@ -96,7 +96,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Вс",
       "hours": 0
     },
@@ -106,7 +106,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -164,13 +164,13 @@
       "id": "A4",
       "title": "Включить Apify для FB на VPS: 1 группа, ≤ 50 постов",
       "stream": "acquisition",
-      "agent": "sources+deployer",
+      "agent": "owner (VPS)",
       "deps": [
         "O1",
         "O2",
         "O6"
       ],
-      "status": "blocked",
+      "status": "waiting_owner",
       "day": "Вс",
       "hours": 1
     },
@@ -333,7 +333,7 @@
       "id": "D1",
       "title": "Золотой набор на VPS, разметка, исправления",
       "stream": "release",
-      "agent": "analyst+reviewer",
+      "agent": "owner (VPS)",
       "deps": [
         "A1",
         "A2",
@@ -351,7 +351,7 @@
         "D1a",
         "A3"
       ],
-      "status": "blocked",
+      "status": "waiting_owner",
       "day": "Пн",
       "hours": 5
     },
@@ -359,7 +359,7 @@
       "id": "D2",
       "title": "Деплой, включение флагов, проверка алертов",
       "stream": "release",
-      "agent": "deployer",
+      "agent": "owner (VPS)",
       "deps": [
         "D1",
         "C4",
@@ -367,7 +367,7 @@
         "O8",
         "O9"
       ],
-      "status": "blocked",
+      "status": "waiting_owner",
       "day": "Пн",
       "hours": 2
     },
@@ -375,11 +375,11 @@
       "id": "D3",
       "title": "HANDOFF, ROLLBACK, инструкция клиенту",
       "stream": "release",
-      "agent": "architect",
+      "agent": "owner (VPS)",
       "deps": [
         "D2"
       ],
-      "status": "blocked",
+      "status": "waiting_owner",
       "day": "Пн",
       "hours": 2
     },
@@ -480,6 +480,18 @@
       "day": 4,
       "hours": 1.5,
       "pr": 71
+    },
+    {
+      "id": "E1",
+      "title": "/sources: реестр сайтов и FB-групп, проверка актуальности watchdog-ом, кнопки Удалить/Архивировать/Оставить (после D2, за флагом SOURCES_REGISTRY_ENABLED)",
+      "stream": "sources-registry",
+      "agent": "builder+db",
+      "deps": [
+        "D2"
+      ],
+      "status": "blocked",
+      "day": 5,
+      "hours": 7
     }
   ]
 }
