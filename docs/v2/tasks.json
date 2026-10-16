@@ -434,7 +434,7 @@
         "H1",
         "H2"
       ],
-      "status": "review",
+      "status": "done",
       "day": 4,
       "hours": 1.5,
       "pr": 69
@@ -447,7 +447,7 @@
       "deps": [
         "B5b"
       ],
-      "status": "review",
+      "status": "done",
       "day": 4,
       "hours": 1,
       "pr": 69
