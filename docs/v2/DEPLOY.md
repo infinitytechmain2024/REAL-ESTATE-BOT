@@ -33,6 +33,44 @@
 
 Если id на openrouter.ai отличается, подставляйте точный id в `.env`, а мне сообщите: поправлю `PRICES` в `bot/utils/costs.py`.
 
+## 0a. Проверка перед D2 (чек-лист, 10 минут)
+
+Только чтение: ничего не меняет и не запускает платных вызовов. Любое «не норма» означает остановиться и написать мне.
+
+```bash
+cd /opt/real-estate-bot
+# 1. Диск, память, Docker
+df -h / /var/lib/docker | tail -2                                  # свободно не меньше 5 ГБ
+free -m | sed -n 2p
+docker compose --env-file .env version --short
+# 2. Код: чистое дерево, какая ветка и коммит (запомнить коммит для отката)
+git status --short --untracked-files=no                            # пусто
+git rev-parse --abbrev-ref HEAD && git rev-parse --short HEAD
+git fetch origin main && git log --oneline HEAD..origin/main | wc -l   # сколько коммитов придёт
+# 3. Файл настроек читается, обязательные ключи на месте, значения секретов не печатаем
+docker compose --env-file .env config -q && echo "compose config ok"
+for k in POSTGRES_PASSWORD REDIS_PASSWORD DATABASE_URL TELEGRAM_TOKEN OPENROUTER_API_KEY APIFY_TOKEN; do
+  printf '%-20s %s\n' "$k" "$(grep -c "^$k=." .env)"                # 1 = задан (APIFY_TOKEN нужен для (б)-(г))
+done
+# 4. Все флаги v2 сейчас выключены (в .env пусто или значения «выкл»)
+grep -nE '^(ACQUISITION_MODE|APIFY_[A-Z]+_ENABLED|FEATURE_APIFY_FACEBOOK|CAMPAIGN_JOIN_NOTICES|LEADS_PROVIDER|CAMPAIGN_INVESTOR_REPORT|INTAKE_BOTH_MODE|CARD_EXTRA_FIELDS|ARCHITECT_PROVIDER|WATCHDOG_[A-Z_]+|OWNER_ALERT_CHAT_ID|COMPOSE_PROFILES)=' .env || echo "ни одной строки: действуют умолчания (всё выключено)"
+# 5. Сервисы сейчас здоровы, база доступна, миграции применены до 046 и выше
+docker compose --env-file .env ps --format 'table {{.Service}}\t{{.Status}}'
+docker compose --env-file .env exec -T postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select max(filename) from public.schema_migrations"'
+curl -fsS http://127.0.0.1:8080/healthz && echo " healthz ok"
+# 6. Бэкапы: последний свежий и не пустой; cron на месте
+ls -lh /root/backups | tail -3
+crontab -l | grep -E 'backup.sh|restore_check.sh' || echo "cron бэкапа не настроен (раздел 6)"
+# 7. Docker-сокет: номер группы (понадобится в (ж))
+stat -c %g /var/run/docker.sock
+```
+
+Норма: свободно 5 ГБ и больше; в п. 3 все шесть ключей дают `1` (`APIFY_TOKEN` может быть `0`, тогда блоки (б)-(г) пока
+пропускаем); п. 4 пусто или только значения «выкл» из таблицы раздела 5.1; п. 5 все сервисы `healthy`, последняя
+миграция `046_...` (или выше, если уже обновляли), `healthz ok`; п. 6 бэкап не старше суток. Если дерево не чистое, не
+выполнять `update.sh` (он остановится с кодом 3).
+
 ## 1. Бэкап (обязательно перед обновлением)
 
 ```bash
@@ -59,13 +97,16 @@ cd /opt/real-estate-bot
 git status --short --untracked-files=no          # должно быть пусто, иначе update.sh остановится (код 3)
 git rev-parse --short HEAD                       # запомнить: это коммит для отката кода
 BRANCH=main ./scripts/update.sh 2>&1 | grep -vE '^ =>|NOTICE|Already applied'
+echo "update.sh exit=${PIPESTATUS[0]}"      # 0; иначе дальше не идти
 ```
 
 `update.sh` по шагам: `git merge --ff-only` -> `pull` + `build --pull` -> `scripts/apply_migrations.sh` ->
 `up -d --force-recreate` -> `image prune` -> `ps` и `Caddy healthz`. Тома БД не удаляются.
 
-Норма в выводе: строки merge-коммитов, `Applied: 047_campaign_group_join.sql`, `Applied: 048_campaign_post_reads.sql`,
-`Applied: 049_campaign_comment_reads_run_id.sql` (или `Migrations are current`, если уже применены), `Caddy healthz: OK`.
+Норма в выводе: строки коммитов, `Applying: 047_campaign_group_join.sql`, `Applying: 048_campaign_post_reads.sql`,
+`Applying: 049_campaign_comment_reads_run_id.sql`, `Applying: 050_task_drafts_mode_both.sql` (уже применённые скрипт
+печатает как `Already applied` и фильтр выше их прячет), затем `Migrations are current.` и `Caddy healthz: OK`;
+`update.sh exit=0`.
 
 Проверка (одной серией):
 
@@ -80,7 +121,7 @@ docker compose --env-file .env logs --since=5m | grep -iE "traceback|critical|er
 curl -fsS http://127.0.0.1:8080/healthz && echo healthz ok
 ```
 
-Норма: в списке строки 046, 047, 048, 049; у каждого сервиса `Up ... (healthy)` (у `searxng`, `browser`, `campaign-runner`,
+Норма: в списке строки 046, 047, 048, 049, 050; у каждого сервиса `Up ... (healthy)` (у `searxng`, `browser`, `campaign-runner`,
 `analysis-worker`, `reduction-worker` тоже есть healthcheck); нет `unhealthy` и `Restarting`; `healthz ok`. Строки с
 `error` в логах разберите: безобидные (например `error` внутри текста поста) отличайте от `Traceback`. Если есть
 Traceback, перейти к разделу 5 (откат кода).
@@ -175,6 +216,21 @@ LLM-ошибок (должно быть 0 строк `http_400`) и расход
 psqlc "select item as model, count(*) calls, round(sum(cost_usd),4) usd from campaign_costs where stage='llm' and kind='cost' and created_at > now() - interval '1 hour' group by 1 order by 3 desc"
 ```
 
+Проверочный вызов каждой ступени (`docs/v2/MODELS.md`): после кампании каждый id должен встретиться в списке выше, а не в строках
+`kind='error'`. Кто какую ступень вызывает:
+
+| Ступень | Переменная | Где увидеть вызов | Что запустить |
+|---|---|---|---|
+| интервью | `OPENROUTER_INTERVIEW_MODEL` | (а1), лог `telegram` | новая задача в боте |
+| анализ страницы | `OPENROUTER_ANALYSIS_MODEL` | (а2), лог `analysis-worker` | любой новый пост или страница |
+| план, отбор, запросы web, итоговый отчёт | `OPENROUTER_PLAN_MODEL`, `_REVIEW_`, `_WEB_QUERY_`, `_FINAL_` | `campaign_costs`, `item` = id модели | одна кампания по недвижимости до отчёта |
+| лиды | `OPENROUTER_LEADS_MODEL` | то же | кампания с комментариями (FB-группа или ссылка на пост) |
+| reach (инвесторы) | `OPENROUTER_REACH_MODEL` | то же | кампания в режиме `investors` или `both` |
+| Claude API | `ANTHROPIC_INTERVIEW_MODEL` | блок (е) | новая задача при `ARCHITECT_PROVIDER=anthropic` |
+
+Если какой-то id в списке не появился, ступень ещё не проверена: запустите сценарий из столбца «Что запустить», пока откат этой
+ступени возможен одной строкой.
+
 Норма: в списке видны новые id; общая цена кампании на $0.2-0.4 выше прежней (MODELS.md). Один неверный id находится по
 `item` в строке ошибки: откатывайте только его. Откат всех шести:
 
@@ -225,7 +281,7 @@ printf '%s\n' 'ACQUISITION_MODE=legacy' 'APIFY_FOTOCASA_ENABLED=false' >> .env &
 
 **(б2) Yaencontre и Idealista (igolaizola). P2: только после живых сэмплов B5 и вашего «ок» (O3).**
 Эти два актора проверены по схеме выдачи из Apify Store, а не живым запуском; Pisos, Habitaclia и Milanuncios тоже без сэмпла
-(`docs/apify_portals.md`), их не включаем.
+(`docs/apify_portals.md`), их включает отдельный блок (б3).
 
 ```bash
 cat >> .env <<'ENV'
@@ -241,6 +297,22 @@ docker compose --env-file .env up -d campaign-runner
 
 ```bash
 printf '%s\n' 'APIFY_YAENCONTRE_ENABLED=false' 'APIFY_IDEALISTA_ENABLED=false' 'APIFY_IDEALISTA_PROVIDER=axlymxp' >> .env && docker compose --env-file .env up -d campaign-runner
+```
+
+**(б3) Pisos, Habitaclia, Milanuncios (B5, P2). Только после живых сэмплов и вашего «ок» (O3); по умолчанию остаются выключенными.**
+У Pisos и Milanuncios в выдаче нет телефона (`HANDOFF.md` §4 п. 1). Включать по одному, после каждого проверка как в (б1).
+
+```bash
+cat >> .env <<'ENV'
+APIFY_PISOS_ENABLED=true
+ENV
+docker compose --env-file .env up -d campaign-runner     # затем так же APIFY_HABITACLIA_ENABLED, APIFY_MILANUNCIOS_ENABLED
+```
+
+Откат всех трёх:
+
+```bash
+printf '%s\n' 'APIFY_PISOS_ENABLED=false' 'APIFY_HABITACLIA_ENABLED=false' 'APIFY_MILANUNCIOS_ENABLED=false' >> .env && docker compose --env-file .env up -d campaign-runner
 ```
 
 ### (в) Facebook-группы через Apify (⛔ O1)
@@ -366,9 +438,24 @@ docker compose --env-file .env up -d telegram campaign-runner
 printf '%s\n' 'CAMPAIGN_JOIN_NOTICES=false' 'CAMPAIGN_INVESTOR_REPORT=false' >> .env && docker compose --env-file .env up -d telegram campaign-runner
 ```
 
-`INTAKE_BOTH_MODE`: **появится в задаче C2, в этой ветке переменной нет** (ни в `.env.example`, ни в `docker-compose.yml`). Не добавлять
-в `.env` вручную. После мержа C2 строки включения и отката будут в его описании; шаблон: `cat >> .env`, `up -d telegram`,
-откат дописать прежнее значение. Режим `both` выбирается пользователем в меню; флаг только скрывает кнопку.
+**(д2) Режим «🏡💼 Недвижимость + инвесторы» (`INTAKE_BOTH_MODE`, C2).** Читает `telegram`; миграция 050 уже применена в разделе 2.
+Включать **вместе** с `CAMPAIGN_INVESTOR_REPORT=true` из блока выше, иначе в режиме `both` отчёт придёт только по недвижимости
+(`HANDOFF.md` §4 п. 9).
+
+```bash
+cat >> .env <<'ENV'
+INTAKE_BOTH_MODE=true
+ENV
+docker compose --env-file .env up -d telegram
+docker compose --env-file .env logs --tail=20 telegram | grep -iE "error|traceback" || echo ok
+```
+
+Проверка: в меню новой задачи появилась кнопка «🏡💼 Недвижимость + инвесторы»; выбрать её и дойти до карточки задачи.
+Откат (кнопка исчезает, начатый черновик `both` начнётся заново с меню):
+
+```bash
+echo 'INTAKE_BOTH_MODE=false' >> .env && docker compose --env-file .env up -d telegram
+```
 
 ### (е) Архитектор задач на Claude API (⛔ O4)
 
@@ -433,6 +520,26 @@ docker compose --env-file .env ps analysis-worker            # healthy
 echo 'WATCHDOG_ENABLED=false' >> .env && docker compose --env-file .env up -d watchdog
 ```
 
+### (з) Карточка: площадь, телефон, агентство (`CARD_EXTRA_FIELDS`, D1a; ⛔ O1)
+
+Читают `analysis-worker`, `campaign-runner` (и `analysis-pipeline` при профиле `analysis`). Телефон частного продавца это
+персональные данные: для клиента включать только после решения O1 (`HANDOFF.md` §4 п. 7). Для собственной проверки можно раньше.
+
+```bash
+cat >> .env <<'ENV'
+CARD_EXTRA_FIELDS=true
+ENV
+docker compose --env-file .env up -d analysis-worker campaign-runner
+# если в COMPOSE_PROFILES есть analysis, ещё: docker compose --env-file .env up -d analysis-pipeline
+```
+
+Проверка: в карточке нового объекта есть «Площадь» (участок отдельно), «Телефон» и «Агентство», если портал их отдал; нет «Traceback» в
+`logs --since=10m analysis-worker campaign-runner`. Откат (новые находки не пишут поля, карточка их не выводит):
+
+```bash
+echo 'CARD_EXTRA_FIELDS=false' >> .env && docker compose --env-file .env up -d analysis-worker campaign-runner
+```
+
 ## 4. Проверки после всего
 
 Тестовая кампания G1 из `docs/v2/GOLDEN_SET.md` (id: `psqlc "select id, left(source_text,60), state from campaigns order by created_at desc limit 5"`).
@@ -469,17 +576,19 @@ psqlc "select name, state, coalesce(error_code,'-') error_code, jsonb_array_leng
 | Анализ | `OPENROUTER_ANALYSIS_MODEL=anthropic/claude-sonnet-4.5` | analysis-worker (+ analysis-pipeline при профиле `analysis`) |
 | План / отбор / отчёт | `OPENROUTER_PLAN_MODEL=`, `OPENROUTER_REVIEW_MODEL=`, `OPENROUTER_FINAL_MODEL=` равны `anthropic/claude-sonnet-4.5` | campaign-runner |
 | Запросы web / лиды / reach | `OPENROUTER_WEB_QUERY_MODEL=`, `OPENROUTER_LEADS_MODEL=`, `OPENROUTER_REACH_MODEL=` равны `openai/gpt-4o-mini` | campaign-runner |
-| Apify-сначала | `ACQUISITION_MODE=legacy` | campaign-runner |
+| Apify-сначала | `ACQUISITION_MODE=legacy` (`APIFY_MIN_LISTINGS=5` при `legacy` не читается, откат не нужен) | campaign-runner |
 | Порталы | `APIFY_FOTOCASA_ENABLED=false`, `APIFY_YAENCONTRE_ENABLED=false`, `APIFY_IDEALISTA_ENABLED=false`, `APIFY_IDEALISTA_PROVIDER=axlymxp` | campaign-runner |
+| Порталы P2 | `APIFY_PISOS_ENABLED=false`, `APIFY_HABITACLIA_ENABLED=false`, `APIFY_MILANUNCIOS_ENABLED=false` | campaign-runner |
 | FB-группы через Apify | `FEATURE_APIFY_FACEBOOK=false` (и `APIFY_FACEBOOK_SCOPE=campaign`) | facebook-runner (+ facebook-collector при профиле `collector`) |
 | Комментарии под постом | `APIFY_FACEBOOK_COMMENTS_ENABLED=false` | telegram, campaign-runner |
 | Лиды через Apify | `LEADS_PROVIDER=browser` | campaign-runner |
 | Приглашения в закрытые группы | `CAMPAIGN_JOIN_NOTICES=false` | telegram, campaign-runner |
 | Отчёт по инвесторам | `CAMPAIGN_INVESTOR_REPORT=false` | campaign-runner |
-| Архитектор на Claude | `ARCHITECT_PROVIDER=openrouter` | telegram |
-| Watchdog (мягко) | `WATCHDOG_ENABLED=false` | watchdog |
+| Архитектор на Claude | `ARCHITECT_PROVIDER=openrouter` (ключ `ANTHROPIC_API_KEY` можно оставить: не читается) | telegram |
+| Watchdog (мягко) | `WATCHDOG_ENABLED=false` (`OWNER_ALERT_CHAT_ID`, `WATCHDOG_DOCKER_SOCKET`, `WATCHDOG_DOCKER_GID` можно оставить) | watchdog |
 | Watchdog (полностью) | убрать `ops` из `COMPOSE_PROFILES` в `.env`, затем `docker compose --env-file .env --profile ops rm -sf watchdog` | watchdog |
-| `INTAKE_BOTH_MODE` | появится в C2 | telegram |
+| Режим «Недвижимость + инвесторы» | `INTAKE_BOTH_MODE=false` | telegram |
+| Карточка: площадь, телефон, агентство | `CARD_EXTRA_FIELDS=false` | analysis-worker, campaign-runner (+ analysis-pipeline при профиле `analysis`) |
 
 Всё сразу к состоянию до флагов: `cp .env.bak.<метка из раздела 1> .env`, затем
 `docker compose --env-file .env up -d` (нужные профили берутся из `COMPOSE_PROFILES`; если сервис `watchdog` уже запущен, а профиль
@@ -503,8 +612,8 @@ curl -fsS http://127.0.0.1:8080/healthz && echo healthz ok
 
 ### 5.3 Откат миграций (`scripts/rollback/*`)
 
-Обычно **не нужен**: миграции добавляют колонки и таблицу. Нужен, только если требуется вернуть схему на 046. Порядок строго
-обратный: 049, затем 048, затем 047. Сначала бэкап (раздел 1) и откат кода (5.2) на коммит, где этих колонок/таблиц ещё нет.
+Обычно **не нужен**: миграции добавляют колонки, таблицу и расширяют check. Нужен, только если требуется вернуть схему на 046. Порядок строго
+обратный: 050, затем 049, 048, 047. Сначала бэкап (раздел 1) и откат кода (5.2) на коммит, где этих колонок/таблиц ещё нет.
 Каждый скрипт сам **отказывается** выполняться, если в данных что-то есть, и ничего не теряет:
 
 | Скрипт | Откажет, если |
@@ -512,12 +621,13 @@ curl -fsS http://127.0.0.1:8080/healthz && echo healthz ok
 | `scripts/rollback/049_campaign_comment_reads_run_id_down.sql` | в `campaign_comment_reads.run_id` есть значения (запись оплаченного запуска Apify) |
 | `scripts/rollback/048_campaign_post_reads_down.sql` | в `campaign_post_reads` есть строки |
 | `scripts/rollback/047_campaign_group_join_down.sql` | у групп заполнены `join_notice_at` / `join_confirmed_at` |
+| `scripts/rollback/050_task_drafts_mode_both_down.sql` | есть черновик с `mode = 'both'` (обнулить: `psqlc "update user_task_drafts set mode = null where mode = 'both'"`) |
 
 После каждого скрипта удалить его строку из `schema_migrations`, иначе миграция при следующем `update.sh` не применится заново:
 
 ```bash
 cd /opt/real-estate-bot
-for n in 049_campaign_comment_reads_run_id 048_campaign_post_reads 047_campaign_group_join; do
+for n in 050_task_drafts_mode_both 049_campaign_comment_reads_run_id 048_campaign_post_reads 047_campaign_group_join; do
   docker compose --env-file .env exec -T postgres sh -c \
     'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "scripts/rollback/${n}_down.sql" \
   && psqlc "delete from public.schema_migrations where filename = '${n}.sql'" || break
@@ -529,7 +639,8 @@ done
 
 Умолчания (если строки в `.env` нет): модели как в столбце «Было» `docs/v2/MODELS.md`; `ACQUISITION_MODE=legacy`; все
 `*_ENABLED=false`; `APIFY_IDEALISTA_PROVIDER=axlymxp`; `APIFY_FACEBOOK_SCOPE=campaign`; `LEADS_PROVIDER=browser`;
-`ARCHITECT_PROVIDER=openrouter`; `WATCHDOG_ENABLED=false`.
+`ARCHITECT_PROVIDER=openrouter`; `WATCHDOG_ENABLED=false`; `INTAKE_BOTH_MODE=false`; `CARD_EXTRA_FIELDS=false`;
+`CAMPAIGN_JOIN_NOTICES=false`; `CAMPAIGN_INVESTOR_REPORT=false`; `APIFY_FACEBOOK_COMMENTS_ENABLED=false`; `OWNER_ALERT_CHAT_ID=0`.
 
 ## 6. Cron и перезагрузка VPS
 
