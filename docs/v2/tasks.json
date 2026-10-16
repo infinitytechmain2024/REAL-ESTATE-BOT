@@ -392,9 +392,10 @@
         "B1",
         "B2"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": 4,
-      "hours": 2
+      "hours": 2,
+      "pr": 66
     },
     {
       "id": "H2",
