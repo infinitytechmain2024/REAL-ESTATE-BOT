@@ -152,11 +152,11 @@
     },
     {
       "id": "A3",
-      "title": "Живая проверка Yaencontre и Idealista-igolaizola, правка мапперов",
+      "title": "Живая проверка порталов (Idealista/Pisos/Habitaclia ок; Yaencontre 403, Milanuncios 404 — выкл)",
       "stream": "acquisition",
       "agent": "sources",
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "day": "Пт",
       "hours": 2
     },
@@ -337,7 +337,6 @@
       "deps": [
         "A1",
         "A2",
-        "A3",
         "A5",
         "A6",
         "B1",
@@ -349,7 +348,8 @@
         "O2",
         "O7",
         "O10",
-        "D1a"
+        "D1a",
+        "A3"
       ],
       "status": "blocked",
       "day": "Пн",
