@@ -247,7 +247,9 @@ def test_settings_defaults_are_off() -> None:
     s = WatchdogSettings.model_validate({})
     assert (s.enabled, s.owner_chat_id, s.poll_seconds, s.cooldown_minutes, s.summary_hour, s.docker_socket) == (
         False, 0, 60, 30, 9, "")
-    assert settings(owner_chat_id=0).missing() == ["OWNER_ALERT_CHAT_ID"]
+    assert settings(owner_chat_id=0).missing() == ["OWNER_ALERT_CHAT_ID|TELEGRAM_OPERATOR_IDS"]
+    assert settings(owner_chat_id=0, operator_ids="").missing() == ["OWNER_ALERT_CHAT_ID|TELEGRAM_OPERATOR_IDS"]
+    assert settings(owner_chat_id=0, operator_ids="11, 22").missing() == []
     assert settings().missing() == []
 
 
@@ -301,3 +303,43 @@ async def test_docker_api_failure_alerts_once() -> None:
     await rig.dog.tick()
     assert len(rig.messages) == 1
     assert "docker API недоступен" in rig.messages[0]["text"]
+
+
+async def test_alerts_and_summary_go_to_every_operator() -> None:
+    rig = Rig([container("a", "exited")], at=datetime(2026, 10, 15, 9, 0, tzinfo=UTC), owner_chat_id=0,
+              operator_ids="11, 22")
+    await rig.dog.tick()
+    assert sorted(m["chat_id"] for m in rig.messages if "Сервис a" in m["text"]) == [11, 22]
+    assert sorted(m["chat_id"] for m in rig.messages if "Сводка" in m["text"]) == [11, 22]
+    await rig.dog.tick()
+    assert len(rig.messages) == 4  # cooldown and once-a-day keys are per message, not per recipient
+
+
+async def test_owner_alert_chat_id_overrides_operators() -> None:
+    rig = Rig([container("a", "exited")], operator_ids="11 22")
+    await rig.dog.tick()
+    assert [m["chat_id"] for m in rig.messages] == [CHAT]
+
+
+async def test_failed_send_to_one_operator_does_not_block_the_other() -> None:
+    sent: list[int] = []
+
+    def telegram(request: httpx.Request) -> httpx.Response:
+        chat = json.loads(request.content)["chat_id"]
+        if chat == 11:
+            return httpx.Response(403, json={"ok": False})
+        sent.append(chat)
+        return httpx.Response(200, json={"ok": True})
+
+    rig = Rig([container("a", "exited")], owner_chat_id=0, operator_ids="11,22")
+    rig.dog.telegram = httpx.AsyncClient(transport=httpx.MockTransport(telegram))
+    await rig.dog.tick()
+    assert sent == [22]
+    await rig.dog.tick()
+    assert sent == [22]  # delivered to someone: the key cools down
+
+
+def test_operator_ids_typo_stops_startup() -> None:
+    with pytest.raises(ValueError) as error:
+        settings(operator_ids="11, abc")
+    assert "abc" in str(error.value) and "11" not in str(error.value).replace("TELEGRAM_OPERATOR_IDS", "")
