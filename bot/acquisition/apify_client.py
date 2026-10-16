@@ -2,7 +2,8 @@
 
 Safety rules shared by all callers:
 
-* a **launch** (``POST acts/<actor>/runs``) is never repeated: if its answer is lost (network error, timeout, 5xx)
+* a **launch** (``POST acts/<actor>/runs``) is never repeated: if its answer is lost (network error, timeout, 5xx) or
+  a 2xx body is unusable (invalid JSON, wrong schema or id, too large)
   the run may exist remotely, so ``launch`` raises ``LaunchUnknown`` and the caller records that instead of starting
   a second paid run; a 4xx (429 included) means nothing was started;
 * reads (``GET``) are retried on 5xx and network errors (``retries`` times, backoff 2/4/8 s plus jitter) and on 429

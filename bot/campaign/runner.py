@@ -1331,7 +1331,6 @@ def post_links_of(campaign: Campaign) -> list[str]:
 READ_ERRORS = {
     "launch_unconfirmed": "запуск чтения не подтвердился",
     "apify_launch_unknown": "запуск чтения не подтвердился",
-    "run_id_not_saved": "запуск чтения не подтвердился",
     "budget_cap": "достигнут лимит бюджета",
     "apify_run_failed": "чтение завершилось ошибкой",
     "apify_run_timed_out": "чтение не уложилось во время",
