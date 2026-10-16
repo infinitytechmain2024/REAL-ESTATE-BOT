@@ -71,6 +71,8 @@ class Api:
                 raise self.launch
             if isinstance(self.launch, int):
                 return httpx.Response(self.launch, json={"error": "x"})
+            if isinstance(self.launch, bytes):  # a 2xx whose body is broken: the run may exist
+                return httpx.Response(201, content=self.launch)
             posts = "posts-scraper" in path
             return httpx.Response(201, json={"data": {"id": "RUNP" if posts else "RUNC", "status": "READY",
                                                       "defaultDatasetId": "DSP" if posts else "DSC"}})
@@ -695,6 +697,17 @@ async def test_mark_launching_refused_starts_no_run(ledger) -> None:
     await w.step()
     assert api.launches() == [] and store.rows[(CID, POST)]["error"] == "launch_unconfirmed"
     assert [e for e in ledger.entries if e.kind == "cost"] == []
+
+
+@pytest.mark.parametrize("body", [b"<html>", b'{"data": []}', b'{"data": {"id": "bad id!"}}'])
+async def test_a_broken_2xx_launch_keeps_the_estimate_and_never_launches_again(body: bytes, ledger) -> None:
+    api = Api(launch=body)
+    w, store, _ = worker(api)
+    await w.step()
+    row = store.rows[(CID, POST)]
+    assert (row["state"], row["error"], row["cost"]) == ("failed", "apify_launch_unknown", 1.0)
+    assert [e.cost_usd for e in ledger.entries if e.kind == "cost"] == [1.0]
+    assert await w.step() is False and len(api.launches()) == 1
 
 
 async def test_a_refused_launch_drops_the_placeholder_and_books_no_estimate(ledger) -> None:

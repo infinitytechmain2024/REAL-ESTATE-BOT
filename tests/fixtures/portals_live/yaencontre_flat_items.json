@@ -1,0 +1,167 @@
+[
+ {
+  "address": {
+   "qualifiedName": "Canillejas, San Blas, Madrid",
+   "geoLocation": {
+    "lat": 40.4389952,
+    "lon": -3.611721
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 94,
+  "bathrooms": 2,
+  "family": "FLAT",
+  "id": "jht::real-estate::38957-112830117",
+  "isNewConstruction": false,
+  "operation": "BUY",
+  "owner": {
+   "id": "jht::real-estate-agency::38957",
+   "type": "REAL_ESTATE_AGENCY",
+   "commercialId": "38957",
+   "name": "AGENCIA A",
+   "virtualPhoneNumber": "+34900000011",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "web": "http://example.es/",
+   "source": "IDEALISTA"
+  },
+  "price": 390000,
+  "reference": "38957-112830117",
+  "rooms": 3,
+  "squareMeterPrice": 4148.94,
+  "status": "ACTIVE",
+  "title": "Piso en venta en calle Aquiles, Canillejas en San Blas en Madrid",
+  "url": "https://yaencontre.com/venta/piso/inmueble-38957-112830117"
+ },
+ {
+  "address": {
+   "qualifiedName": "Guindalera, Salamanca, Madrid",
+   "geoLocation": {
+    "lat": 40.4342817,
+    "lon": -3.6698464
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 169,
+  "bathrooms": 3,
+  "family": "FLAT",
+  "id": "jht::real-estate::89242-112826618",
+  "isNewConstruction": false,
+  "operation": "BUY",
+  "owner": {
+   "id": "jht::real-estate-agency::89242",
+   "type": "REAL_ESTATE_AGENCY",
+   "commercialId": "89242",
+   "name": "AGENCIA B",
+   "virtualPhoneNumber": "+34900000012",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA"
+  },
+  "price": 1250000,
+  "reference": "89242-112826618",
+  "rooms": 4,
+  "squareMeterPrice": 7396.45,
+  "status": "ACTIVE",
+  "title": "Piso en venta en calle Pilar de Zaragoza, Guindalera en Salamanca en Madrid",
+  "url": "https://yaencontre.com/venta/piso/inmueble-89242-112826618"
+ },
+ {
+  "address": {
+   "qualifiedName": "Virgen del Cortijo - Manoteras, Hortaleza, Madrid",
+   "geoLocation": {
+    "lat": 40.4864342,
+    "lon": -3.6668609
+   },
+   "addressVisibility": "HIDDEN"
+  },
+  "area": 120,
+  "bathrooms": 2,
+  "family": "FLAT",
+  "id": "jht::real-estate::89891-112831575",
+  "isNewConstruction": false,
+  "operation": "BUY",
+  "owner": {
+   "id": "jht::real-estate-agency::89891",
+   "type": "REAL_ESTATE_AGENCY",
+   "commercialId": "89891",
+   "name": "AGENCIA C",
+   "virtualPhoneNumber": "+34900000013",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA"
+  },
+  "price": 690000,
+  "reference": "89891-112831575",
+  "rooms": 3,
+  "squareMeterPrice": 5750,
+  "status": "ACTIVE",
+  "title": "Piso en venta, Virgen del Cortijo - Manoteras en Hortaleza en Madrid",
+  "url": "https://yaencontre.com/venta/piso/inmueble-89891-112831575"
+ },
+ {
+  "address": {
+   "qualifiedName": "Palacio, Centro, Madrid",
+   "geoLocation": {
+    "lat": 40.4123766,
+    "lon": -3.7120393
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 77,
+  "bathrooms": 2,
+  "family": "FLAT",
+  "id": "jht::real-estate::40226-112831589",
+  "isNewConstruction": false,
+  "operation": "BUY",
+  "owner": {
+   "id": "jht::real-estate-agency::40226",
+   "type": "REAL_ESTATE_AGENCY",
+   "commercialId": "40226",
+   "name": "AGENCIA D",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA"
+  },
+  "price": 629000,
+  "reference": "40226-112831589",
+  "rooms": 2,
+  "squareMeterPrice": 8168.83,
+  "status": "ACTIVE",
+  "title": "Piso en venta, Palacio en Centro en Madrid",
+  "url": "https://yaencontre.com/venta/piso/inmueble-40226-112831589"
+ },
+ {
+  "address": {
+   "qualifiedName": "San Isidro, Carabanchel, Madrid",
+   "geoLocation": {
+    "lat": 40.3973166,
+    "lon": -3.7328564
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 85,
+  "bathrooms": 1,
+  "family": "FLAT",
+  "id": "jht::real-estate::38957-112831415",
+  "isNewConstruction": false,
+  "operation": "BUY",
+  "owner": {
+   "id": "jht::real-estate-agency::38957",
+   "type": "REAL_ESTATE_AGENCY",
+   "commercialId": "38957",
+   "name": "AGENCIA A",
+   "virtualPhoneNumber": "+34900000011",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA"
+  },
+  "price": 299000,
+  "reference": "38957-112831415",
+  "rooms": 3,
+  "squareMeterPrice": 3517.65,
+  "status": "ACTIVE",
+  "title": "Piso en venta en calle Juana Fuentes, San Isidro en Carabanchel en Madrid",
+  "url": "https://yaencontre.com/venta/piso/inmueble-38957-112831415"
+ }
+]

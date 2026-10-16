@@ -140,10 +140,15 @@ class ApifyHttp:
             run = await self.data("POST", f"acts/{actor_path(actor_id)}/runs", retry=False, params=params,
                                   json=actor_input)
         except ApifyError as exc:
-            if exc.code == "apify_transport" or exc.code.startswith("apify_http_5"):
+            # Only an explicit 4xx/429 refusal proves nothing started; a lost answer or a broken 2xx body
+            # (invalid JSON, wrong schema, too large) may hide a created run.
+            if not exc.code.startswith("apify_http_") or exc.code.startswith("apify_http_5"):
                 raise LaunchUnknown("apify_launch_unknown") from None
             raise
-        valid_id(run.get("id"))
+        try:
+            valid_id(run.get("id"))
+        except ApifyError:
+            raise LaunchUnknown("apify_launch_unknown") from None
         return run
 
     async def run(self, run_id: str, *, wait_seconds: int = 0) -> dict[str, Any]:
