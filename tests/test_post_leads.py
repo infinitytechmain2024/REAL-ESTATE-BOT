@@ -25,7 +25,13 @@ from bot.acquisition.apify_facebook_comments import (
 from bot.campaign import MemoryCampaignStore
 from bot.campaign.fblinks import post_link_only
 from bot.campaign.leads import MemoryLeadStore, Person, Sighting, person_card
-from bot.campaign.post_leads import MemoryPostReadStore, PostLeadWorker, url_key
+from bot.campaign.post_leads import (
+    MemoryPostReadStore,
+    PostContext,
+    PostLeadWorker,
+    PostRead,
+    url_key,
+)
 from bot.campaign.runner import CampaignRunner, RunnerConfig, post_read_line
 from bot.campaign.runs import MemoryRunStore, PostReadSummary
 from bot.campaign.settings import CampaignRunnerSettings
@@ -717,3 +723,18 @@ async def test_a_refused_launch_drops_the_placeholder_and_books_no_estimate(ledg
     row = store.rows[(CID, POST)]
     assert len(api.launches()) == 1 and row["state"] == "queued" and row["run_id"] is None
     assert [e for e in ledger.entries if e.kind == "cost"] == []
+
+
+async def test_the_memory_store_follows_the_postgres_launch_guards() -> None:
+    store = MemoryPostReadStore()
+    await store.enqueue(CID, POST)
+    queued = PostRead(CID, POST, 0, None, PostContext("investors", ""))
+    assert await store.mark_launching(queued) is None  # not claimed: not ours to launch
+    with pytest.raises(RuntimeError, match="run_id_not_saved"):
+        await store.save_run(queued, "RUN1")
+    read = await store.claim()
+    assert read is not None
+    token = await store.mark_launching(read)
+    assert token and await store.mark_launching(read) is None
+    await store.save_run(read, "RUN1")
+    assert store.rows[(CID, POST)]["run_id"] == "RUN1"

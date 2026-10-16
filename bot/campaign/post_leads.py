@@ -395,18 +395,21 @@ class MemoryPostReadStore:
 
     async def mark_launching(self, read: PostRead) -> str | None:
         row = self.rows[(read.campaign_id, read.post_url)]
-        if row["run_id"] is not None:
+        if row["state"] != "reading" or row["run_id"] is not None:
             return None
         row["run_id"] = token = f"{PENDING}{uuid.uuid4().hex}"
         return token
 
     async def unmark_launching(self, read: PostRead, token: str) -> None:
         row = self.rows[(read.campaign_id, read.post_url)]
-        if row["run_id"] == token:
+        if row["state"] == "reading" and row["run_id"] == token:
             row["run_id"] = None
 
     async def save_run(self, read: PostRead, run_id: str) -> None:
-        self.rows[(read.campaign_id, read.post_url)]["run_id"] = run_id
+        row = self.rows[(read.campaign_id, read.post_url)]
+        if row["state"] != "reading":
+            raise RuntimeError("run_id_not_saved")
+        row["run_id"] = run_id
 
     async def requeue(self, read: PostRead) -> None:
         self.rows[(read.campaign_id, read.post_url)]["state"] = "queued"

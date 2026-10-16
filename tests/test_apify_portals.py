@@ -763,6 +763,48 @@ def test_milanuncios_live_national_rows_keep_only_the_task_province_and_fincas_a
     assert fincas[0].plot_m2 == 5256 and fincas[0].price == 210000
 
 
+def flat_task(**kwargs):
+    base = QueryTask("квартира", "квартира", "Madrid", {}, "real_estate", constraints={"deal": "sale"}, country_code="ES")
+    return replace(base, **kwargs)
+
+
+async def test_yaencontre_live_flat_rows_area_is_living_area_rooms_and_missing_phone():
+    adapter = yaencontre([], [])
+    _, body, center = await adapter._plan(flat_task(), 5, None)
+    assert body["propertyType"] == "flat" and body["operation"] == "sale" and body["maxItems"] == 5
+    assert center == (40.4168, -3.7038)
+    rows = live_rows("yaencontre", "flat")
+    listings = [adapter._normalize(row, flat_task(), center) for row in rows]
+    assert all(listings) and len(listings) == 5
+    assert [x.area_m2 for x in listings] == [94, 169, 120, 77, 85] and all(x.plot_m2 is None for x in listings)
+    assert [x.rooms for x in listings] == [3, 4, 3, 2, 3]
+    assert all(x.price and x.currency == "EUR" and x.deal == "sale" for x in listings)
+    assert listings[0].phone == "+34900000011" and listings[0].advertiser == "AGENCIA A"
+    assert listings[3].phone is None and listings[3].advertiser == "AGENCIA D"  # phoneAvailable, no virtual number
+    assert {r["family"] for r in rows} == {"FLAT"}
+    land = {**rows[0], "family": "LAND"}
+    assert adapter._normalize(land, flat_task(), center) is None
+
+
+def test_milanuncios_live_flat_rows_rooms_and_area_come_from_tags_and_title_is_the_city():
+    adapter = build("milanuncios", [], [])
+    rows = live_rows("milanuncios", "madrid_pisos")
+    for r in rows:
+        assert classify_url(r["url"]) == "listing", r["url"]
+    listings = [adapter._normalize(r, flat_task(), None) for r in rows]
+    assert all(listings) and len(listings) == 5
+    assert [x.rooms for x in listings] == [2, 1, 5, 2, 2] and [x.area_m2 for x in listings] == [60, 59, 139, 88, 44]
+    assert all(x.plot_m2 is None and x.deal == "sale" and x.currency == "EUR" for x in listings)
+    assert all(x.phone is None and x.advertiser is None for x in listings)
+    # current behaviour: the portal's title is the city ("Madrid Capital"), not an ad headline, and is kept as is
+    assert {x.title for x in listings} == {"Madrid Capital"}
+
+
+async def test_milanuncios_flat_plan_is_venta_de_pisos_in_madrid():
+    _, body, _ = await build("milanuncios", [], []) ._plan(flat_task(), 5, None)
+    assert body["categorySlug"] == "venta-de-pisos" and body["province"] == "madrid"
+
+
 def test_slug_is_ascii_letters_digits_and_underscores_only():
     from bot.web_search.sources.portals import _slug
 
