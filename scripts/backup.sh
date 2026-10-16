@@ -5,6 +5,7 @@
 # A dump of 10 KB or less is treated as broken: the file is removed and the exit code is 1.
 # The only thing ever deleted is old bot-*.sql.gz files inside BACKUP_DIR.
 set -euo pipefail
+umask 077  # dumps hold personal data: owner-only files
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_dir"
