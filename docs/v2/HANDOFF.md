@@ -96,7 +96,7 @@
 ### Миграции v2
 
 Все добавляющие (`ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`, расширение check); список —
-`scripts/apply_migrations.sh:78-81`; откат — `scripts/rollback/04x|050_*_down.sql`, порядок `ROLLBACK.md` §4.
+`scripts/apply_migrations.sh` (строки 78-81); откат — `scripts/rollback/04x|050_*_down.sql`, порядок `ROLLBACK.md` §4.
 
 | № | Файл | Что | Задача |
 |---|---|---|---|
@@ -205,6 +205,23 @@
     `GET /containers`; тогда у watchdog не будет прав уровня хоста.
 14. **Ссылки на посты от пользователя.** Через `asking="sources.required"` (`rules.py:402-403`) пользователь сам может
     добавить до 12 ссылок на посты; каждая это платное чтение в пределах `max_usd_per_post` и `over_budget`.
+
+15. **`cap_drop: [ALL]` у watchdog не проверен на реальном docker.sock.** В `docker-compose.yml` (`watchdog`) стоят
+    `cap_drop: [ALL]`, `read_only: true`, `no-new-privileges:true`, сокет `:ro` и `group_add` с `WATCHDOG_DOCKER_GID`.
+    Тесты проверяют только текст compose-файла. Не проверено живьём: хватает ли доступа к сокету процессу без
+    capabilities (доступ идёт по группе сокета, а не по `CAP_DAC_OVERRIDE`; если сокет не `root:docker 660`, а процесс
+    не root, чтение даст «permission denied»), и совпадает ли реальный GID с `WATCHDOG_DOCKER_GID` (умолчание 999).
+    Признак беды: в логе `watchdog` ошибка доступа к сокету или алерт «docker недоступен». Проверка при D2:
+    `DEPLOY.md` (ж), тест `stop analysis-worker`. Если не работает: сначала сверить GID (`stat -c %g /var/run/docker.sock`),
+    потом убрать `cap_drop` отдельным коммитом с «ок» владельца, либо оставить `WATCHDOG_DOCKER_SOCKET` пустым
+    (алерты БД и сводка работают без сокета).
+16. **`COMPOSE_PROFILES=ops` не проверен на VPS.** Предполагается, что `docker compose --env-file .env` берёт
+    `COMPOSE_PROFILES` из `.env`, поэтому `scripts/update.sh` (`up -d --force-recreate`) и `docker compose up -d`
+    поднимают `watchdog` без `--profile ops`. Это поведение Compose v2, но живьём на VPS оно не проверялось и версия не сверялась
+    (`docker compose version`). Если watchdog после `update.sh` не появился в `ps`, используйте
+    `docker compose --env-file .env --profile ops up -d watchdog`. Профиль также включает остальные сервисы под
+    `COMPOSE_PROFILES`, если значение содержит их имена (`collector`, `analysis` и др.): при дописывании `ops`
+    сохраняйте уже заданные профили в той же строке.
 
 ## 5. Как читать золотой набор и оценку
 
