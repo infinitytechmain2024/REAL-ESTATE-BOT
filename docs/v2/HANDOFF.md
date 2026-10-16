@@ -193,10 +193,17 @@
 11. **Лиды одного поста видны всем кампаниям с этой ссылкой.** `stored_people_of_campaign` (`bot/campaign/runs.py`)
     не фильтрует по `campaign_id`: два пользователя с одной ссылкой увидят одних и тех же комментаторов. Это
     публичные комментарии, но стоит знать (security-ревью v2).
-12. **`repr=False` нет у старых секретов.** `OPENROUTER_API_KEY`, `telegram_token`, `database_url` в settings до v2
-    объявлены без `repr=False`; объекты settings целиком не логируются, но при добавлении такого лога ключи утекут.
+12. **`repr=False` есть не везде.** `OPENROUTER_API_KEY` в `bot/campaign/settings.py:62` скрыт, но в ряде settings
+    секреты без `repr=False`: `bot/web_search/settings.py:88`, `bot/agents/settings.py:16`,
+    `bot/analysis_pipeline/settings.py:8` (ключи OpenRouter), `telegram_token`/`database_url` в
+    `bot/campaign/settings.py:18-19` и `bot/control_plane/settings.py:18-19`, `BROWSER_SESSION_API_TOKEN`
+    (`bot/campaign/settings.py:22`, `bot/agent_reach/settings.py:13`, `bot/facebook_collector/settings.py:20`,
+    `bot/browser_session/settings.py:28`), `REDIS_URL` (`bot/browser_session/settings.py:15`). Объекты settings целиком
+    не логируются, но при добавлении такого лога секреты утекут.
 13. **docker.sock (к п. 4).** При желании заменить прямой сокет на docker-socket-proxy, разрешающий один
     `GET /containers`; тогда у watchdog не будет прав уровня хоста.
+14. **Ссылки на посты от пользователя.** Через `asking="sources.required"` (`rules.py:402-403`) пользователь сам может
+    добавить до 12 ссылок на посты; каждая это платное чтение в пределах `max_usd_per_post` и `over_budget`.
 
 ## 5. Как читать золотой набор и оценку
 

@@ -211,7 +211,7 @@ def test_operator_ids_are_parsed_strictly(monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.mark.asyncio
 async def test_group_joined_button_confirms_for_operators_only_and_needs_the_flag() -> None:
     seen: list[str] = []
-    answers = iter(["queued", "stale", "ended"])
+    answers = iter(["queued", "stale", "ended", "queued"])
 
     async def confirm(group_id: str) -> str:
         seen.append(group_id)
@@ -230,7 +230,9 @@ async def test_group_joined_button_confirms_for_operators_only_and_needs_the_fla
     assert (await control.handle_callback(None, "group:joined:00000000-0000-4000-8000-000000000001:g2")).text == "Эта кнопка устарела."
     assert len(seen) == 3
     assert (await control.handle_callback(11, "group:joined:not-a-uuid:g1")).text == "Эта кнопка устарела."
-    assert len(seen) == 3  # a malformed campaign id never reaches the store
+    assert (await control.handle_callback(11, "group:joined:00000000-0000-4000-8000-000000000001:x")).text == "Эта кнопка устарела."
+    assert len(seen) == 3  # a malformed group id never reaches the store
+    assert (await control.handle_callback(11, "group:joined:00000000-0000-4000-8000-000000000001")).text == "Проверю группу через браузер"  # a bare production id reaches the store
     assert (await make().handle_callback(11, "group:joined:00000000-0000-4000-8000-000000000001:g1")).text != "Проверю группу через браузер"  # flag off
 
 
