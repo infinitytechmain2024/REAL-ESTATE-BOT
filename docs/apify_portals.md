@@ -12,11 +12,11 @@
 | Портал | Флаг | Актор | Проверено |
 |---|---|---|---|
 | Fotocasa | `APIFY_FOTOCASA_ENABLED` | `igolaizola/fotocasa-scraper` | живой запуск 13.10 (5 участков, Мадрид, ≈ $0.006) |
-| Yaencontre | `APIFY_YAENCONTRE_ENABLED` | `igolaizola/yaencontre-scraper` | по схеме выдачи из Apify Store |
-| Idealista | `APIFY_IDEALISTA_ENABLED` + `APIFY_IDEALISTA_PROVIDER=igolaizola` | `igolaizola/idealista-scraper` | по схеме выдачи из Apify Store |
-| Pisos.com | `APIFY_PISOS_ENABLED` | `logiover/pisos-com-property-scraper` | по схеме актора из Apify Store (вход/выход подтверждены схемой, $0.0035 за объявление), живой сэмпл не делался. Города: Мадрид, Барселона, Валенсия, Севилья, Малага; без телефона |
-| Habitaclia | `APIFY_HABITACLIA_ENABLED` | `trev0n/habitaclia-com-spain-scraper` | по схеме актора из Apify Store ($0.001 за объявление), живой сэмпл не делался; без телефона |
-| Milanuncios | `APIFY_MILANUNCIOS_ENABLED` | `rastriq/milanuncios-scraper` | по схеме актора из Apify Store ($0.00125 за объявление), живой сэмпл не делался; `stripSellerPII=true` всегда; без телефона и имени продавца; нет аренды участков и локалов |
+| Yaencontre | `APIFY_YAENCONTRE_ENABLED` | `igolaizola/yaencontre-scraper` | живой запуск 16.10: HTTP 403 на autocomplete (вероятно DataDome); флаг держать выключенным, повторить позже; маппер по схеме |
+| Idealista | `APIFY_IDEALISTA_ENABLED` + `APIFY_IDEALISTA_PROVIDER=igolaizola` | `igolaizola/idealista-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 3); `size` участка = площадь участка, описания в выдаче нет |
+| Pisos.com | `APIFY_PISOS_ENABLED` | `logiover/pisos-com-property-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 4); `areaSqm` часто пуст, площадь из описания: сначала с пометкой участка, иначе единственное число без построек (`m²t`, edificabilidad, nave и т. п. не считаются); `city` = «Madrid Capital»; без телефона. Города: Мадрид, Барселона, Валенсия, Севилья, Малага |
+| Habitaclia | `APIFY_HABITACLIA_ENABLED` | `trev0n/habitaclia-com-spain-scraper` | живой запуск 16.10 (участки, Мадрид; получено 5 строк, в фикстурах 3); `areaSqm` пуст у всех, площадь только из текста; без телефона; портал отнёс к Мадриду объявление из Mijas (Málaga) — оставлено как дал портал |
+| Milanuncios | `APIFY_MILANUNCIOS_ENABLED` | `rastriq/milanuncios-scraper` | живой запуск 16.10: два запуска, «Blocked by Milanuncios (HTTP 404)» и с `searchUrl`, и с `categorySlug`+`province`; флаг держать выключенным, повторить позже; маппер по схеме ($0.00125 за объявление); `stripSellerPII=true` всегда; без телефона и имени продавца; нет аренды участков и локалов |
 
 Задачи, которые берут порталы: Испания, недвижимость, продажа или аренда, участок, жильё или коммерция; город,
 провинция или явный радиус. Комнаты, инвесторы и «только пригороды» идут обычным поиском.
@@ -50,8 +50,8 @@ select name, state, error_code, jsonb_array_length(listings) from web_listing_so
 select item, code, sum(cost_usd) from campaign_costs where stage = 'api' group by 1, 2;
 ```
 
-Если у Yaencontre или Idealista `state = 'ready'`, а объявлений 0, пришлите одну строку выдачи актора (Apify Console
-→ Runs → Dataset): маппер написан по схеме, а не по нашему запуску.
+Если у Yaencontre или Milanuncios `state = 'ready'`, а объявлений 0, пришлите одну строку выдачи актора (Apify Console
+→ Runs → Dataset): маппер этих порталов написан по схеме, а не по живому запуску.
 
 ## Выключить
 
