@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from bot.acquisition.apify_client import ApifyError, LaunchUnknown, TemporaryApifyError
 from bot.utils import costs
 
-from .leads import CommentReadFailed
+from .leads import PENDING, CommentReadFailed
 
 if TYPE_CHECKING:
     from bot.acquisition.apify_facebook_comments import ApifyCommentsSource
@@ -54,22 +54,31 @@ class ApifyCommentReader:
     async def _read(self, read: CommentRead) -> tuple[str | None, list[Comment]]:
         cfg = self.source.config
         run_id = await self.store.run_id(read)
+        if run_id is not None and run_id.startswith(PENDING):  # a launch began, its run id was never stored
+            await self._estimate(read)
+            raise CommentReadFailed("launch_unconfirmed")
         if run_id is None:
             if await costs.over_budget(read.campaign_id):
                 await costs.skip("api", "budget_cap", item=cfg.actor_id)
                 raise CommentReadFailed("budget_cap")
+            token = await self.store.mark_launching(read)  # before the paid launch: a failure after it never repeats it
+            if token is None:  # not ours to launch (a run id appeared, or the row is no longer claimed)
+                raise CommentReadFailed("launch_unconfirmed")
             try:
                 run_id = await self.source.launch(read.post_url)
             except LaunchUnknown:  # a run may exist remotely: booked at its cap, never launched a second time
                 await self._estimate(read)
                 raise CommentReadFailed("apify_launch_unknown") from None
+            except ApifyError:  # refused outright (429, 4xx): no run exists, so no placeholder and no estimate
+                await self.store.unmark_launching(read, token)
+                raise
             try:
                 saved = await self.store.save_run(read, run_id)
             except Exception:  # noqa: BLE001 - the run exists but its id is lost: never queue a second paid one
                 saved = False
             if not saved:
                 await self._estimate(read)
-                raise CommentReadFailed("run_id_not_saved")
+                raise CommentReadFailed("launch_unconfirmed")
         try:
             run = await self.source.wait(run_id)
         except Exception:

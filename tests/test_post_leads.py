@@ -430,8 +430,20 @@ async def test_a_lost_run_id_fails_the_read_instead_of_a_second_paid_run(ledger)
 
     store.save_run = broken  # type: ignore[method-assign]
     await w.step()
-    assert store.rows[(CID, POST)]["state"] == "failed" and store.rows[(CID, POST)]["error"] == "run_id_not_saved"
+    assert store.rows[(CID, POST)]["state"] == "failed" and store.rows[(CID, POST)]["error"] == "launch_unconfirmed"
     assert await w.step() is False and len(api.launches()) == 1
+    assert [e.code for e in ledger.entries if e.kind == "cost"] == ["estimated"]
+
+
+async def test_a_restart_with_a_pending_launch_starts_no_run(ledger) -> None:
+    api = Api(items=thirty())
+    w, store, _ = worker(api)
+    await store.enqueue(CID, POST)
+    store.rows[(CID, POST)].update(state="reading", run_id="pending:abc")
+    assert await store.recover() == 1
+    await w.step()
+    assert store.rows[(CID, POST)]["state"] == "failed" and store.rows[(CID, POST)]["error"] == "launch_unconfirmed"
+    assert api.launches() == [] and [e.code for e in ledger.entries if e.kind == "cost"] == ["estimated"]
 
 
 class NoCall:
@@ -612,3 +624,25 @@ async def test_a_wait_that_never_succeeds_books_the_run_at_its_cap(ledger) -> No
     assert row["state"] == "failed" and len(api.launches()) == 1
     costs_rows = [e for e in ledger.entries if e.kind == "cost"]
     assert [(e.cost_usd, e.code) for e in costs_rows] == [(1.0, "estimated")]
+
+
+async def test_mark_launching_refused_starts_no_run(ledger) -> None:
+    api = Api(items=thirty())
+    w, store, _ = worker(api)
+
+    async def refused(*_a: Any) -> None:
+        return None
+
+    store.mark_launching = refused  # type: ignore[method-assign]
+    await w.step()
+    assert api.launches() == [] and store.rows[(CID, POST)]["error"] == "launch_unconfirmed"
+    assert [e for e in ledger.entries if e.kind == "cost"] == []
+
+
+async def test_a_refused_launch_drops_the_placeholder_and_books_no_estimate(ledger) -> None:
+    api = Api(launch=429)
+    w, store, _ = worker(api)
+    await w.step()
+    row = store.rows[(CID, POST)]
+    assert len(api.launches()) == 1 and row["state"] == "queued" and row["run_id"] is None
+    assert [e for e in ledger.entries if e.kind == "cost"] == []
