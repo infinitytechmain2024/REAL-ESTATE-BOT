@@ -1,0 +1,97 @@
+[
+ {
+  "address": {
+   "qualifiedName": "Almagro, Chamberí, Madrid",
+   "geoLocation": {
+    "lat": 40.4356255,
+    "lon": -3.6965426
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 148,
+  "bathrooms": 3,
+  "family": "FLAT",
+  "id": "jht::real-estate::39095-112833570",
+  "isNewConstruction": false,
+  "operation": "RENT",
+  "owner": {
+   "id": "jht::real-estate-agency::x",
+   "type": "REAL_ESTATE_AGENCY",
+   "name": "AGENCIA H",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA",
+   "virtualPhoneNumber": "+34900000031"
+  },
+  "price": 6210,
+  "reference": "39095-112833570",
+  "rooms": 3,
+  "status": "ACTIVE",
+  "title": "Piso en alquiler de temporada, Almagro en Chamberí en Madrid",
+  "url": "https://yaencontre.com/alquiler/piso/inmueble-39095-112833570",
+  "periodicity": "MONTHLY"
+ },
+ {
+  "address": {
+   "qualifiedName": "Recoletos, Salamanca, Madrid",
+   "geoLocation": {
+    "lat": 40.4226925,
+    "lon": -3.6878704
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 60,
+  "bathrooms": 1,
+  "family": "FLAT",
+  "id": "jht::real-estate::39612-112833554",
+  "isNewConstruction": false,
+  "operation": "RENT",
+  "owner": {
+   "id": "jht::real-estate-agency::x",
+   "type": "REAL_ESTATE_AGENCY",
+   "name": "AGENCIA I",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA",
+   "virtualPhoneNumber": "+34900000032"
+  },
+  "price": 2000,
+  "reference": "39612-112833554",
+  "rooms": 1,
+  "status": "ACTIVE",
+  "title": "Piso en alquiler de temporada, Recoletos en Salamanca en Madrid",
+  "url": "https://yaencontre.com/alquiler/piso/inmueble-39612-112833554",
+  "periodicity": "MONTHLY"
+ },
+ {
+  "address": {
+   "qualifiedName": "Jerónimos, Retiro, Madrid",
+   "geoLocation": {
+    "lat": 40.4155572,
+    "lon": -3.6898066
+   },
+   "addressVisibility": "APPROXIMATE"
+  },
+  "area": 235,
+  "bathrooms": 2,
+  "family": "FLAT",
+  "id": "jht::real-estate::38651-112833562",
+  "isNewConstruction": false,
+  "operation": "RENT",
+  "owner": {
+   "id": "jht::real-estate-agency::x",
+   "type": "REAL_ESTATE_AGENCY",
+   "name": "AGENCIA J",
+   "phoneAvailable": true,
+   "isWhatsAppAvailable": false,
+   "source": "IDEALISTA"
+  },
+  "price": 6200,
+  "reference": "38651-112833562",
+  "rooms": 3,
+  "status": "ACTIVE",
+  "title": "Piso en alquiler, Jerónimos en Retiro en Madrid",
+  "url": "https://yaencontre.com/alquiler/piso/inmueble-38651-112833562",
+  "periodicity": "MONTHLY"
+ }
+]

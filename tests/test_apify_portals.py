@@ -828,3 +828,77 @@ def test_text_area_is_a_plot_only_for_a_land_task_and_habitaclia_address_has_no_
     listing = adapter._normalize(row, task(), None)
     assert listing.plot_m2 == 500
     assert listing.address == "Moncloa - Aravaca, Madrid Capital"
+
+
+def kind_task(text, deal="sale", **kwargs):
+    base = QueryTask(text, text, "Madrid", {}, "real_estate", constraints={"deal": deal}, country_code="ES",
+                     place_level="province")
+    return replace(base, **kwargs)
+
+
+async def test_milanuncios_commercial_plan_uses_locales_comerciales_input_slug():
+    _, body, _ = await build("milanuncios", [], [])._plan(kind_task("local comercial"), 5, None)
+    assert body["categorySlug"] == "locales-comerciales" and body["province"] == "madrid"
+
+
+@pytest.mark.parametrize(("variant", "text", "deal"), [
+    ("madrid_locales", "local comercial", "sale"), ("madrid_alquiler_pisos", "piso", "rent"),
+    ("madrid_casas", "casa", "sale")])
+def test_milanuncios_live_rows_of_each_category_pass_for_their_task(variant, text, deal):
+    adapter = build("milanuncios", [], [])
+    rows = live_rows("milanuncios", variant)
+    listings = [adapter._normalize(r, kind_task(text, deal), None) for r in rows]
+    assert len(rows) == 3 and all(listings)
+    assert all(x.deal == deal and x.price and x.currency == "EUR" and x.plot_m2 is None for x in listings)
+    assert all(x.area_m2 for x in listings) and all(x.phone is None for x in listings)
+    for r in rows:
+        assert classify_url(r["url"]) == "listing", r["url"]
+
+
+def test_milanuncios_live_locales_rows_have_no_rooms_and_house_rows_are_dropped_for_other_tasks():
+    adapter = build("milanuncios", [], [])
+    locales = live_rows("milanuncios", "madrid_locales")
+    assert all(adapter._normalize(r, kind_task("local comercial"), None).rooms is None for r in locales)
+    houses = live_rows("milanuncios", "madrid_casas")
+    assert all(adapter._normalize(r, kind_task("piso"), None) is None for r in houses)  # venta-de-casas != pisos
+    assert all(adapter._normalize(r, kind_task("local comercial"), None) is None for r in houses)
+    assert all(adapter._normalize(r, kind_task("piso", "rent"), None) is None for r in
+               live_rows("milanuncios", "madrid_pisos"))  # a sale row for a rent task
+    assert all(adapter._normalize(r, kind_task("piso"), None) is None for r in
+               live_rows("milanuncios", "madrid_alquiler_pisos"))
+    assert all(adapter._normalize(r, kind_task("piso"), None) is None for r in locales)
+    # the city-level row with cityName Madrid and title "Las Rozas de Madrid" is kept as the portal gave it
+    city = [adapter._normalize(r, kind_task("casa", place_level="city"), None) for r in houses]
+    assert [x is not None for x in city] == [False, False, True]
+
+
+def test_milanuncios_live_rent_flat_price_is_the_monthly_amount_and_private_seller_is_kept():
+    rows = live_rows("milanuncios", "madrid_alquiler_pisos")
+    listings = [build("milanuncios", [], [])._normalize(r, kind_task("piso", "rent"), None) for r in rows]
+    assert [x.price for x in listings] == [860, 1550, 6200] and [x.area_m2 for x in listings] == [45, 65, 286]
+
+
+async def test_yaencontre_live_house_rows_area_is_the_house_not_the_plot():
+    adapter = yaencontre([], [])
+    rows = json.loads((LIVE / "yaencontre_house_items.json").read_text(encoding="utf-8"))
+    house = kind_task("casa")
+    _, body, center = await adapter._plan(house, 5, None)
+    assert body["propertyType"] == "house" and body["operation"] == "sale"
+    listings = [adapter._normalize(r, house, center) for r in rows]
+    assert all(listings) and {r["family"] for r in rows} == {"HOUSE"}
+    assert [x.area_m2 for x in listings] == [110, 600, 378] and all(x.plot_m2 is None for x in listings)
+    assert all(x.property_type == "house" for x in listings)
+    assert all(adapter._normalize(r, kind_task("piso"), center) is None for r in rows)  # HOUSE is not a flat
+
+
+async def test_yaencontre_live_rent_rows_are_rent_only_and_seasonal_is_not_filtered():
+    adapter = yaencontre([], [])
+    rows = json.loads((LIVE / "yaencontre_rent_flat_items.json").read_text(encoding="utf-8"))
+    rent = kind_task("piso", "rent")
+    _, body, center = await adapter._plan(rent, 5, None)
+    assert body["operation"] == "rent" and body["propertyType"] == "flat"
+    listings = [adapter._normalize(r, rent, center) for r in rows]
+    assert all(listings) and {r["operation"] for r in rows} == {"RENT"}
+    assert [x.price for x in listings] == [6210, 2000, 6200] and all(x.deal == "rent" for x in listings)
+    assert sum("temporada" in x.title for x in listings) == 2  # "alquiler de temporada": only in the title
+    assert all(adapter._normalize(r, kind_task("piso"), center) is None for r in rows)  # rent row, sale task
