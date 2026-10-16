@@ -34,13 +34,14 @@ docker compose --env-file .env logs --tail=30 <сервис> | grep -iE "error|t
 | 10 | Watchdog: алерты и дневная сводка (C3) | `WATCHDOG_ENABLED` (:389) | мягко: `WATCHDOG_ENABLED=false` (контейнер спит); полностью: убрать `COMPOSE_PROFILES=ops` (:388) и `docker compose --env-file .env --profile ops rm -sf watchdog` | `watchdog` (:829, профиль `ops` :815) | Нет | — |
 | 10a | Watchdog: проверка контейнеров через docker.sock | `WATCHDOG_DOCKER_SOCKET` (:396) | пусто | `watchdog` (:835) | Нет | Сокет остаётся смонтирован, пока включён профиль `ops` (`docker-compose.yml:838`); убрать доступ к нему полностью — только снятием профиля (строка 10) |
 | 11 | Модели по этапам (A5) — по одной строке на этап | см. §2 | прежний id | см. §2 | Нет | — |
+| 12 | Режим «🏡💼 Недвижимость + инвесторы» в меню Telegram (C2) | `INTAKE_BOTH_MODE` (:969) | `INTAKE_BOTH_MODE=false` | `telegram` (:133) | 050: check `user_task_drafts.mode` допускает `both`; черновики `both` (24 ч) | Да: при `false` кнопки нет, черновик `both` начинается заново с меню (`bot/control_plane/intake.py:398-401`). Перед откатом **кода** — раздел «C2» ниже |
+| 13 | Карточка объекта: «Площадь» (участок отдельно), «Телефон», «Агентство» (D1a) | `CARD_EXTRA_FIELDS` (:580) | `CARD_EXTRA_FIELDS=false` | `analysis-worker` (:447), `campaign-runner` (:531); `analysis-pipeline` (:350, профиль `analysis`) — если запускается | Поля `plot_m2`, `phone`, `advertiser` в `findings.structured_payload` уже сохранённых находок | Да: при `false` новые находки их не пишут, карточка их не выводит. ⛔ Включать только после O1 (телефон частника = ПДн) |
 
 Номера в скобках: `(:N)` в колонке переменной — строка `.env.example`; в колонке сервисов — строка
 `docker-compose.yml`.
 
 Без своего флага (не откатываются через `.env`):
 - **B3** живёт под `ACQUISITION_MODE` (строка 1) и `FEATURE_APIFY_FACEBOOK`/`APIFY_FACEBOOK_SCOPE` (строки 5, 5a).
-- **C2** (режим `both` в меню Telegram) в коде этой ветки не найден, флага нет — см. `docs/v2/HANDOFF.md` §3.
 - **C3 healthcheck** и **C4** (ротация логов `x-logging`, `scripts/backup.sh`, cron) — это не функции, а
   эксплуатация. Откат: строка `logging: *logging` у сервиса (`OPS.md` «Ротация логов»), строки в `crontab -e`
   (`OPS.md` «Расписание»). Healthcheck откатывается только откатом кода.
@@ -69,21 +70,24 @@ docker compose --env-file .env logs --tail=30 <сервис> | grep -iE "error|t
 Порядок и команды — `docs/v2/DEPLOY.md` (раздел отката) и скилл `.claude/skills/deploy-vps/SKILL.md` п. 5:
 бэкап (`scripts/backup.sh`) → `git checkout <коммит до v2>` → `docker compose --env-file .env up -d --build`.
 
-- Сначала флаги (§1) в значения отката, потом код. Старый код новые колонки и таблицу не видит, миграции 047–049
-  только добавляют (`ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`), поэтому **схему после отката кода
+- Сначала флаги (§1) в значения отката, потом код. Если откатываете на версию без C2 — сначала
+  `update user_task_drafts set mode = null where mode = 'both';` (раздел «C2» ниже). Старый код новые колонки и
+  таблицу не видит, миграции 047–050 только добавляют или расширяют check (`ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`), поэтому **схему после отката кода
   оставляем как есть**.
-- Не запускайте `scripts/update.sh` с веткой v2 после отката схемы: он снова применит 047–049
-  (`scripts/apply_migrations.sh:77-80`).
+- Не запускайте `scripts/update.sh` с веткой v2 после отката схемы: он снова применит 047–050
+  (`scripts/apply_migrations.sh:78-81`).
 
 ## 4. Откат миграций (только если без него нельзя)
 
-Не нужен для отката функций: все три миграции добавляющие, данные в них — журнал платных запусков и отметки
-пользователя. Если всё же нужно убрать схему: **сначала откат кода (§3), бэкап**, затем строго **049 → 048 → 047**.
-Скрипты не применяются автоматически.
+Не нужен для отката функций: все четыре миграции добавляющие, данные в них — журнал платных запусков и отметки
+пользователя. Если всё же нужно убрать схему: **сначала откат кода (§3), бэкап**, затем строго
+**050 → 049 → 048 → 047**. Скрипты не применяются автоматически.
 
 ```bash
 cd /opt/real-estate-bot && set -o pipefail && ./scripts/backup.sh
 psql_db() { docker compose --env-file .env exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; }
+psql_db < scripts/rollback/050_task_drafts_mode_both_down.sql
+echo "delete from schema_migrations where filename = '050_task_drafts_mode_both.sql';" | psql_db
 psql_db < scripts/rollback/049_campaign_comment_reads_run_id_down.sql
 echo "delete from schema_migrations where filename = '049_campaign_comment_reads_run_id.sql';" | psql_db
 psql_db < scripts/rollback/048_campaign_post_reads_down.sql
@@ -110,5 +114,5 @@ echo "delete from schema_migrations where filename = '047_campaign_group_join.sq
 Откат функции: `INTAKE_BOTH_MODE=false` в `.env` и перезапуск `telegram` (кнопки нет; уже начатый черновик `both`
 начинается заново с меню). Перед откатом **кода** на версию без C2: `update user_task_drafts set mode = null where
 mode = 'both';` (старый код не знает этот режим). Кампании `both` в `campaigns` остаются рабочими. Миграция 050
-расширяющая; откат схемы — `scripts/rollback/050_task_drafts_mode_both_down.sql` (строка в таблице выше), после
-всех остальных и только после отката кода.
+расширяющая; откат схемы — `scripts/rollback/050_task_drafts_mode_both_down.sql` (строка в таблице §4), первой в
+порядке §4 и только после отката кода.
