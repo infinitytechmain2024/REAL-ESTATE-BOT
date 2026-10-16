@@ -773,7 +773,7 @@ async def test_yaencontre_live_flat_rows_area_is_living_area_rooms_and_missing_p
     _, body, center = await adapter._plan(flat_task(), 5, None)
     assert body["propertyType"] == "flat" and body["operation"] == "sale" and body["maxItems"] == 5
     assert center == (40.4168, -3.7038)
-    rows = live_rows("yaencontre", "flat")
+    rows = json.loads((LIVE / "yaencontre_flat_items.json").read_text(encoding="utf-8"))
     listings = [adapter._normalize(row, flat_task(), center) for row in rows]
     assert all(listings) and len(listings) == 5
     assert [x.area_m2 for x in listings] == [94, 169, 120, 77, 85] and all(x.plot_m2 is None for x in listings)
@@ -801,7 +801,7 @@ def test_milanuncios_live_flat_rows_rooms_and_area_come_from_tags_and_title_is_t
 
 
 async def test_milanuncios_flat_plan_is_venta_de_pisos_in_madrid():
-    _, body, _ = await build("milanuncios", [], []) ._plan(flat_task(), 5, None)
+    _, body, _ = await build("milanuncios", [], [])._plan(flat_task(), 5, None)
     assert body["categorySlug"] == "venta-de-pisos" and body["province"] == "madrid"
 
 
