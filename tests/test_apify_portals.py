@@ -29,9 +29,9 @@ from bot.web_search.urls import classify_url
 LIVE = Path(__file__).parent / "fixtures" / "portals_live"
 
 
-def live_rows(name):
+def live_rows(name, variant=None):
     """Rows of the live runs of 2026-10-16 (task: plots for sale in Madrid, 5 items); phones are replaced."""
-    return json.loads((LIVE / f"{name}_items.json").read_text(encoding="utf-8"))
+    return json.loads((LIVE / (f"{name}_items_{variant}.json" if variant else f"{name}_items.json")).read_text(encoding="utf-8"))
 
 
 def task(**kwargs):
@@ -204,21 +204,29 @@ def yaencontre_row(**kwargs):
     return {**row, **kwargs}
 
 
+def geocoder_at(lat=40.4168, lon=-3.7038):
+    geocoder = AsyncMock()
+    geocoder.resolve.return_value = (lat, lon)
+    return geocoder
+
+
 def yaencontre(rows, requests, **kwargs):
+    kwargs.setdefault("geocoder", geocoder_at())
     return ApifyYaencontreSource("secret-token", client=api(rows, requests), sleep=AsyncMock(), **kwargs)
 
 
 async def test_yaencontre_launches_with_safe_filter_bounds_and_maps_rows():
     requests = []
     adapter = yaencontre([yaencontre_row(), yaencontre_row(address={"qualifiedName": "Getafe"})], requests)
+    assert adapter.supports(task()) and not ApifyYaencontreSource("secret-token").supports(task())  # no geocoder
     with source_run_scope(context("apify_yaencontre")):
         listings = await adapter.search(task(), limit=5)
     launch = next(r for r in requests if r.method == "POST")
     assert launch.url.path.endswith("/acts/igolaizola~yaencontre-scraper/runs")
     # min_area 2000 -> 1000 and max_price 3000000 -> 3000000: bounds never drop a matching listing
     assert json.loads(launch.content) == {"maxItems": 5, "operation": "sale", "propertyType": "land",
-                                          "sortBy": "newest", "location": "Madrid", "locationType": "municipality",
-                                          "maxPrice": "3000000", "minArea": "1000"}
+                                          "sortBy": "newest", "latitude": 40.4168, "longitude": -3.7038,
+                                          "radiusKm": 15, "maxPrice": "3000000", "minArea": "1000"}
     assert len(listings) == 1  # Getafe is not Madrid
     listing = listings[0]
     assert listing.plot_m2 == 2400 and listing.price == 1200000 and listing.currency == "EUR"
@@ -232,7 +240,7 @@ async def test_yaencontre_launches_with_safe_filter_bounds_and_maps_rows():
     {"url": "https://www.fotocasa.es/es/comprar/terreno/x/191059959/d"},
 ])
 def test_yaencontre_rejects_wrong_deal_and_non_listing_urls(change):
-    assert yaencontre([], [])._normalize(yaencontre_row(**change), task(), None) is None
+    assert yaencontre([], [])._normalize(yaencontre_row(**change), task(), (40.4168, -3.7038)) is None
 
 
 def test_yaencontre_relative_url_hidden_phone_and_unknown_operation():
@@ -242,6 +250,77 @@ def test_yaencontre_relative_url_hidden_phone_and_unknown_operation():
                                                        "virtualPhoneNumber": "910000003"}), task(), None)
     assert listing.url == "https://www.yaencontre.com/venta/terreno/inmueble-41123456"
     assert listing.phone is None and listing.advertiser == "Particular"
+
+
+async def test_yaencontre_plan_is_by_coordinates_for_city_province_and_radius():
+    adapter = yaencontre([], [])
+    for change, radius in (({}, 15), ({"place_level": "province"}, 60), ({"radius_km": 30.0}, 30)):
+        _, body, center = await adapter._plan(task(**change), 5, None)
+        assert center == (40.4168, -3.7038) and "location" not in body and "locationType" not in body
+        assert (body["latitude"], body["longitude"], body["radiusKm"]) == (40.4168, -3.7038, radius)
+
+
+async def test_yaencontre_without_a_geocoded_centre_does_not_launch():
+    requests = []
+    geocoder = AsyncMock()
+    geocoder.resolve.return_value = None
+    adapter = yaencontre([yaencontre_row()], requests, geocoder=geocoder)
+    with source_run_scope(context("apify_yaencontre")), pytest.raises(Exception, match="apify_geocode_unavailable"):
+        await adapter.search(task(), limit=5)
+    assert not [r for r in requests if r.method == "POST"]
+
+
+def test_yaencontre_capital_spelling_is_the_city():
+    row = yaencontre_row(address={"qualifiedName": "Aravaca, Madrid Capital", "geoLocation": {"lat": 40.46, "lon": -3.78}})
+    assert yaencontre([], [])._normalize(row, task(), (40.4168, -3.7038)) is not None
+
+
+async def test_yaencontre_resumed_run_without_geocoder_still_bills_and_reads_the_dataset():
+    requests = []
+    geocoder = AsyncMock()
+    geocoder.resolve.side_effect = RuntimeError("redis down")
+    def handler(request):
+        requests.append(request)
+        if "actor-runs" in request.url.path:
+            return httpx.Response(200, json={"data": {"id": "run1", "status": "SUCCEEDED",
+                                                      "defaultDatasetId": "data1", "usageTotalUsd": .01}})
+        return httpx.Response(200, json=[yaencontre_row()])
+
+    adapter = ApifyYaencontreSource("secret-token", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                                    sleep=AsyncMock(), geocoder=geocoder)
+    ctx = context("apify_yaencontre", run_id="run1")
+    with source_run_scope(ctx):
+        listings = await adapter.search(task(), limit=5)  # a city task: filtered by the qualified name only
+        assert len(listings) == 1
+        province = await adapter.search(task(place_level="province"), limit=5)  # no circle: nothing is trusted
+        assert province == []
+    assert not [r for r in requests if r.method == "POST"]
+    assert any(r.url.path.endswith("/datasets/data1/items") for r in requests)
+    ctx.reconcile_usage.assert_awaited()
+    await adapter.aclose()
+
+
+def test_yaencontre_live_rows_getafe_dropped_plot_area_and_phone():
+    adapter = yaencontre([], [])
+    rows = live_rows("yaencontre")
+    centre = (40.4168, -3.7038)
+    listings = [adapter._normalize(row, task(), centre) for row in rows]
+    assert [x is not None for x in listings] == [True, True, False, True]  # row 3 is Getafe
+    assert [x.plot_m2 for x in listings if x] == [67, 317, 509] and all(x.area_m2 is None for x in listings if x)
+    assert all(x.price and x.currency == "EUR" and x.deal == "sale" for x in listings if x)
+    assert listings[0].advertiser == "SELHOM" and listings[0].phone == "+34900000001"
+    hidden = {**rows[0], "owner": {**rows[0]["owner"], "phoneAvailable": False}}
+    assert adapter._normalize(hidden, task(), centre).phone is None
+    # the same rows around a province task: only the circle decides, Getafe is inside 60 km
+    province = task(place_level="province")
+    assert all(adapter._normalize(row, province, centre) for row in rows)
+    assert adapter._normalize(rows[2], task(nearby_places=("Getafe",)), centre) is not None
+
+
+@pytest.mark.parametrize("change", [{"family": "FLAT"}, {"family": "HOUSE"}, {"operation": "RENT"}])
+def test_yaencontre_live_row_drops_family_and_operation_mismatch(change):
+    row = {**live_rows("yaencontre")[0], **change}
+    assert yaencontre([], [])._normalize(row, task(), (40.4168, -3.7038)) is None
 
 
 def idealista_row(**kwargs):
@@ -335,7 +414,7 @@ async def test_idealista_provider_setting_picks_the_actor_family(monkeypatch):
 
 PISOS_URL = "https://www.pisos.com/comprar/terreno-madrid_capital-45678901_100500/"
 HAB_URL = "https://www.habitaclia.com/comprar-terreno-madrid-i500003456789.htm"
-MIL_URL = "https://www.milanuncios.com/venta-de-terrenos-en-madrid/parcela-urbana-123456789.htm"
+MIL_URL = "https://www.milanuncios.com/solares-en-madrid-madrid/parcela-urbana-123456789.htm"
 
 
 def pisos_row(**kwargs):
@@ -356,7 +435,7 @@ def habitaclia_row(**kwargs):
 
 def milanuncios_row(**kwargs):
     row = {"url": MIL_URL, "title": "Parcela urbana", "price": 250000, "description": "Parcela de 3.200 m2 urbana.",
-           "cityName": "Madrid", "provinceName": "Madrid", "categorySlug": "venta-de-terrenos", "sellerType": "private",
+           "cityName": "Madrid", "provinceName": "Madrid", "categorySlug": "solares", "sellerType": "private",
            "tag_sqm": 3200, "tag_bedrooms": None}
     return {**row, **kwargs}
 
@@ -459,13 +538,13 @@ async def test_milanuncios_launch_body_strips_seller_pii_and_row_is_mapped():
     requests = []
     adapter = build("milanuncios", [milanuncios_row()], requests)
     with source_run_scope(context("apify_milanuncios")):
-        listings = await adapter.search(task(location="Las Palmas"), limit=5)
+        listings = await adapter.search(task(location="Las Palmas", place_level="province"), limit=5)
     assert listings == []  # the row is Madrid, not Las Palmas
     launch = next(r for r in requests if r.method == "POST")
     assert launch.url.path.endswith("/acts/rastriq~milanuncios-scraper/runs")
     assert launch.url.params["maxTotalChargeUsd"] == "0.05" and launch.url.params["maxItems"] == "5"
     assert json.loads(launch.content) == {
-        "searchUrl": "https://www.milanuncios.com/venta-de-terrenos-en-las_palmas/", "maxItems": 5, "maxPages": 1,
+        "categorySlug": "solares", "province": "las_palmas", "maxItems": 5, "maxPages": 1,
         "fetchDetails": False, "stripSellerPII": True,
         "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"], "apifyProxyCountry": "ES"}}
     listing = adapter._normalize(milanuncios_row(), task(), None)
@@ -501,7 +580,7 @@ def test_portal_rejects_a_rent_url_for_a_sale_task_and_a_search_page(key):
             "milanuncios": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid/piso-centro-123456790.htm"}[key]
     search = {"pisos": "https://www.pisos.com/venta/terrenos-madrid/",
               "habitaclia": "https://www.habitaclia.com/terrenos-madrid.htm",
-              "milanuncios": "https://www.milanuncios.com/venta-de-terrenos-en-madrid/"}[key]
+              "milanuncios": "https://www.milanuncios.com/solares-en-madrid/"}[key]
     row = CASES[key][1]()
     row.pop("transactionType", None)
     assert adapter._normalize({**row, field: rent}, task(), None) is None
@@ -612,7 +691,7 @@ def test_land_task_drops_other_property_types(key, change):
 @pytest.mark.parametrize(("key", "change"), [
     ("pisos", {"propertyType": "land"}), ("pisos", {"propertyType": "ruralEstate"}),
     ("habitaclia", {"propertyType": "land", "propertySubtype": "Terreno urbano"}),
-    ("milanuncios", {"categorySlug": "venta-de-terrenos"}),
+    ("milanuncios", {"categorySlug": "venta-de-fincas"}),
 ])
 def test_land_task_keeps_land_rows(key, change):
     adapter = build(key, [], [])
@@ -640,13 +719,48 @@ async def test_milanuncios_wanted_ads_are_counted_as_invalid(monkeypatch):
     await adapter.aclose()
 
 
-async def test_milanuncios_search_url_uses_city_and_province_for_capitals():
+async def test_milanuncios_plan_uses_category_and_province_not_search_url():
     adapter = build("milanuncios", [], [])
-    for location, level, expected in (("Madrid", "city", "venta-de-terrenos-en-madrid-madrid"),
-                                      ("Madrid", "province", "venta-de-terrenos-en-madrid"),
-                                      ("Alcalá de Henares", "city", "venta-de-terrenos-en-alcala_de_henares")):
+    for location, level, expected in (("Madrid", "city", "madrid"), ("Madrid", "province", "madrid"),
+                                      ("Las Palmas", "province", "las_palmas"), ("Vizcaya", "province", "vizcaya")):
         _, body, _ = await adapter._plan(task(location=location, place_level=level), 5, None)
-        assert body["searchUrl"] == f"https://www.milanuncios.com/{expected}/"
+        assert body["categorySlug"] == "solares" and body["province"] == expected and "searchUrl" not in body
+        assert body["fetchDetails"] is False and body["stripSellerPII"] is True and body["maxItems"] == 5
+
+
+def test_milanuncios_does_not_guess_the_province_of_a_city():
+    adapter = build("milanuncios", [], [])
+    assert not adapter.supports(task(location="Alcalá de Henares"))  # province unknown
+    assert not adapter.supports(task(location="Alcalá de Henares", place_level="province"))  # slug not verified
+    assert not adapter.supports(task(location="Alicante", place_level="province"))
+    assert adapter.supports(task(location="Vizcaya", place_level="province"))
+
+
+def test_milanuncios_live_solares_rows_zero_price_demand_and_plot():
+    adapter = build("milanuncios", [], [])
+    rows = live_rows("milanuncios", "madrid_solares")
+    city = [adapter._normalize(r, task(), None) for r in rows]
+    assert [x is not None for x in city] == [True, False, False, True, False]  # only cityName Madrid
+    assert city[0].price == 225000 and city[0].plot_m2 == 144 and city[0].area_m2 is None
+    assert city[3].price is None and city[3].currency is None and city[3].plot_m2 == 279  # price 0: to agree
+    assert city[0].phone is None and city[0].advertiser is None
+    province = [adapter._normalize(r, task(place_level="province"), None) for r in rows]
+    assert all(province)
+    assert adapter._normalize({**rows[0], "sellType": "demand"}, task(), None) is None
+
+
+def test_milanuncios_live_national_rows_keep_only_the_task_province_and_fincas_are_accepted():
+    adapter = build("milanuncios", [], [])
+    rows = live_rows("milanuncios", "national")
+    for r in rows:
+        assert classify_url(r["url"]) == "listing", r["url"]
+    assert [adapter._normalize(r, task(), None) for r in rows] == [None] * 3  # none is Madrid
+    assert [adapter._normalize(r, task(place_level="province"), None) for r in rows] == [None] * 3
+    barcelona = task(location="Barcelona", place_level="province")
+    kept = [adapter._normalize(r, barcelona, None) for r in rows]
+    fincas = [x for x in kept if x is not None]
+    assert fincas and all("/venta-de-fincas-en-" in x.url for x in fincas)
+    assert fincas[0].plot_m2 == 5256 and fincas[0].price == 210000
 
 
 def test_slug_is_ascii_letters_digits_and_underscores_only():

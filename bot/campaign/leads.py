@@ -23,6 +23,7 @@ import json
 import logging
 import random
 import re
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -441,6 +442,9 @@ class Profile:
     name: str
 
 
+PENDING = "pending:"  # run_id placeholder written before a paid launch (v2 H1): no real id came back, never launch again
+
+
 class LeadStore(Protocol):
     async def recover(self) -> int: ...
     async def has_reads(self) -> bool: ...
@@ -460,6 +464,8 @@ class ApifyReadStore(LeadStore, Protocol):
 
     async def apify_reads_today(self) -> int: ...
     async def run_id(self, read: CommentRead) -> str | None: ...
+    async def mark_launching(self, read: CommentRead) -> str | None: ...
+    async def unmark_launching(self, read: CommentRead, token: str) -> None: ...
     async def save_run(self, read: CommentRead, run_id: str) -> bool: ...
 
 
@@ -668,6 +674,24 @@ class PostgresLeadStore:
             "select run_id from campaign_comment_reads where campaign_id = $1::uuid and finding_id = $2::uuid",
             read.campaign_id, read.finding_id)
 
+    async def mark_launching(self, read: CommentRead) -> str | None:
+        """Before the paid launch: a ``pending:`` placeholder (returned), so a failure after it never repeats the launch.
+
+        None when the row was not claimed by this worker or already has a run id: then nothing is launched."""
+        token = f"{PENDING}{uuid.uuid4().hex}"
+        result = await self.pool.execute(
+            """update campaign_comment_reads set run_id = $3
+                where campaign_id = $1::uuid and finding_id = $2::uuid and state = 'reading' and run_id is null""",
+            read.campaign_id, read.finding_id, token)
+        return token if result.split()[-1] == "1" else None
+
+    async def unmark_launching(self, read: CommentRead, token: str) -> None:
+        """Apify refused the launch outright (no run exists): drop our own placeholder."""
+        await self.pool.execute(
+            """update campaign_comment_reads set run_id = null
+                where campaign_id = $1::uuid and finding_id = $2::uuid and state = 'reading' and run_id = $3""",
+            read.campaign_id, read.finding_id, token)
+
     async def save_run(self, read: CommentRead, run_id: str) -> bool:
         result = await self.pool.execute(
             """update campaign_comment_reads set run_id = $3
@@ -805,6 +829,17 @@ class MemoryLeadStore:
 
     async def run_id(self, read: CommentRead) -> str | None:
         return self.runs.get((read.campaign_id, read.finding_id))
+
+    async def mark_launching(self, read: CommentRead) -> str | None:
+        key = (read.campaign_id, read.finding_id)
+        if key in self.runs:
+            return None
+        self.runs[key] = token = f"{PENDING}{uuid.uuid4().hex}"
+        return token
+
+    async def unmark_launching(self, read: CommentRead, token: str) -> None:
+        if self.runs.get((read.campaign_id, read.finding_id)) == token:
+            del self.runs[(read.campaign_id, read.finding_id)]
 
     async def save_run(self, read: CommentRead, run_id: str) -> bool:
         self.runs[(read.campaign_id, read.finding_id)] = run_id
