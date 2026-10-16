@@ -7,6 +7,7 @@ for ``igolaizola/yaencontre-scraper`` and ``igolaizola/idealista-scraper`` (no r
 
 import json
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import httpx
@@ -23,6 +24,13 @@ from bot.web_search.sources.portals import (
     ApifyYaencontreSource,
     plot_area,
 )
+
+LIVE = Path(__file__).parent / "fixtures" / "portals_live"
+
+
+def live_rows(name):
+    """Rows of the live runs of 2026-10-16 (task: plots for sale in Madrid, 5 items); phones are replaced."""
+    return json.loads((LIVE / f"{name}_items.json").read_text(encoding="utf-8"))
 
 
 def task(**kwargs):
@@ -254,6 +262,36 @@ async def test_idealista_igolaizola_searches_any_city_and_maps_rows():
     assert listing.plot_m2 == 2600 and listing.price == 2100000 and listing.title == "Terreno en Aravaca"
     assert listing.phone == "+34910000004" and listing.advertiser == "Agencia Tres"
     await adapter.aclose()
+
+
+def test_idealista_live_rows_plot_is_size_and_phone_and_agency_come_from_the_portal():
+    adapter = ApifyIdealistaPortalSource("secret-token")
+    rows = live_rows("idealista")
+    assert len(rows) == 3 and all("description" not in row for row in rows)
+    listings = [adapter._normalize(row, task(), None) for row in rows]
+    assert all(listings)
+    first = listings[0]
+    assert first.url == "https://www.idealista.com/inmueble/112824748/"
+    assert first.plot_m2 == 67 and first.area_m2 is None  # a plot: size is the plot, never the house
+    assert first.price == 339000 and first.currency == "EUR"
+    assert first.phone == "+34900000001" and first.advertiser == "SELHOM"
+    assert first.address == "Terreno en Calle de las Islas Palaos, Tres Olivos - Valverde, Madrid"
+    assert [x.advertiser for x in listings][1] == "VIVEI Real Estate Urgel"
+    assert all(x.phone and x.phone.startswith("+349000000") and x.deal == "sale" for x in listings)
+
+
+def test_idealista_price_falls_back_to_the_euro_price_block_only():
+    adapter = ApifyIdealistaPortalSource("secret-token")
+    row = live_rows("idealista")[0]
+    block = {"price": {"amount": 339000, "currencySuffix": "€"}}
+    assert adapter._normalize({**row, "price": None, "priceInfo": block}, task(), None).price == 339000
+    other = {"price": {"amount": 339000, "currencySuffix": "£"}}
+    assert adapter._normalize({**row, "price": None, "priceInfo": other}, task(), None).price is None
+    assert adapter._normalize({**row, "price": None, "priceInfo": None}, task(), None).price is None
+    phone = {"phone1": {"phoneNumber": "900000001"}, "commercialName": None, "contactName": "Selhom"}
+    listing = adapter._normalize({**row, "contactInfo": phone}, task(), None)
+    assert listing.phone == "900000001" and listing.advertiser == "Selhom"
+    assert adapter._normalize({**row, "contactInfo": None, "size": None}, task(), None).plot_m2 is None
 
 
 @pytest.mark.parametrize("change", [

@@ -264,7 +264,9 @@ class ApifyIdealistaPortalSource(_PortalSource):
     """Idealista through ``igolaizola/idealista-scraper`` (``APIFY_IDEALISTA_PROVIDER=igolaizola``), any city or
     province by name; rows follow the output schema the Store infers from its recent runs (``url``, ``operation``,
     ``propertyType``, ``municipality``, ``province``, ``price``, ``size``, ``rooms``, ``latitude``/``longitude``,
-    ``contactInfo.{phone1,commercialName}``, ``suggestedTexts.title``), not a run of ours."""
+    ``contactInfo.{phone1,commercialName}``, ``suggestedTexts.title``). Checked against a live run (5 plots in
+    Madrid, 2026-10-16): ``size`` is the plot in m2 for ``propertyType=land``, the rows carry no ``description`` and
+    the price is also in ``priceInfo.price.{amount,currencySuffix}``."""
 
     name = "apify_idealista"
     hosts = frozenset({"idealista.com"})
@@ -313,11 +315,20 @@ class ApifyIdealistaPortalSource(_PortalSource):
         contact = item.get("contactInfo") if isinstance(item.get("contactInfo"), dict) else {}
         phone = contact.get("phone1") if isinstance(contact.get("phone1"), dict) else {}
         texts = item.get("suggestedTexts") if isinstance(item.get("suggestedTexts"), dict) else {}
+        street = _text(item.get("address"))  # already "Terreno en <calle>, <barrio>, <municipio>"
+        shown = (item.get("priceInfo") or {}).get("price") if isinstance(item.get("priceInfo"), dict) else None
+        shown = shown if isinstance(shown, dict) else {}
+        suffix = _text(shown.get("currencySuffix")).casefold()
+        price = item.get("price")
+        if price is None and suffix in _EURO:  # the portal's own price block, only when it says euros
+            price = shown.get("amount")
         return self._listing(
             task, url=url, title=_text(texts.get("title")) or f"Inmueble en {municipality}".strip(),
-            price=item.get("price"), area=item.get("size"), rooms=item.get("rooms"),
-            address=[_text(item.get("address")), municipality, province], description=_text(item.get("description")),
-            phone=phone.get("phoneNumberForMobileDialing") or phone.get("formattedPhone"),
+            price=price, area=item.get("size"), rooms=item.get("rooms"),
+            address=[street, *(p for p in (municipality, province) if _fold(p) not in _fold(street))],
+            description=_text(item.get("description")),
+            phone=(phone.get("phoneNumberForMobileDialing") or phone.get("phoneNumber")
+                   or phone.get("formattedPhone")),
             advertiser=contact.get("commercialName") or contact.get("contactName"),
             property_type=self._TYPES.get(task_kind(task)))
 
