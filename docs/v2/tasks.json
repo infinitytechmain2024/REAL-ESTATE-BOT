@@ -406,9 +406,10 @@
         "B1",
         "C3"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": 4,
-      "hours": 2
+      "hours": 2,
+      "pr": 67
     },
     {
       "id": "B5b",
@@ -419,7 +420,7 @@
         "B5",
         "A3"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": 4,
       "hours": 3
     }
