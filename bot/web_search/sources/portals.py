@@ -260,11 +260,19 @@ class ApifyYaencontreSource(_PortalSource):
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
         constraints = task.constraints
-        center = await self._center(task)  # raises before any paid launch when the place cannot be geocoded
+        if run_id:  # resuming a paid run: never lose its dataset because the geocoder is down now
+            try:
+                center = await self._center(task)
+            except Exception:  # noqa: BLE001 - rows are then filtered without the circle (see ``_normalize``)
+                center = None
+        else:
+            center = await self._center(task)  # raises before any paid launch when the place cannot be geocoded
         actor_input: dict[str, Any] = {
             "maxItems": amount, "operation": self._deal(task), "propertyType": self.kinds[task_kind(task)],
-            "sortBy": "newest", "latitude": round(center[0], 6), "longitude": round(center[1], 6),
-            "radiusKm": max(1, min(100, round(self._radius(task))))}
+            "sortBy": "newest"}
+        if center is not None:
+            actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
+                            "radiusKm": max(1, min(100, round(self._radius(task))))}
         filters = {"minPrice": _floor(_whole(constraints.get("min_price")), _YAENCONTRE_PRICES),
                    "maxPrice": _ceil(_whole(constraints.get("max_price")), _YAENCONTRE_PRICES),
                    "minArea": _floor(_whole(constraints.get("min_area")), _YAENCONTRE_AREAS)}
@@ -289,8 +297,8 @@ class ApifyYaencontreSource(_PortalSource):
             if center is None or point is None or _distance_km(center, point) > self._radius(task):
                 return None
         else:
-            municipality = _fold(place.rsplit(",", 1)[-1])
-            if municipality not in {_fold(task.location), *(_fold(p) for p in task.nearby_places)}:
+            municipality = _place_name(place.rsplit(",", 1)[-1])
+            if municipality not in {_place_name(task.location), *(_place_name(p) for p in task.nearby_places)}:
                 return None
         owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
         phone = owner.get("virtualPhoneNumber") if owner.get("phoneAvailable") is not False else None
@@ -588,6 +596,9 @@ class ApifyMilanunciosSource(_SchemaPortal):
         ("rent", "apartment"): "alquiler-de-pisos", ("sale", "house"): "venta-de-casas",
         ("rent", "house"): "alquiler-de-casas", ("sale", "commercial"): "venta-de-locales"}
     _LAND_CATEGORIES: ClassVar[tuple[str, ...]] = ("solares", "venta-de-fincas")
+    # slugs seen in live runs or documented by the actor; extend only after a live check
+    _PROVINCES: ClassVar[frozenset[str]] = frozenset({"madrid", "barcelona", "valencia", "sevilla", "malaga",
+                                                      "vizcaya", "las_palmas"})
 
     def __init__(self, token: str, *, actor_id: str = "rastriq/milanuncios-scraper", **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
@@ -598,9 +609,10 @@ class ApifyMilanunciosSource(_SchemaPortal):
 
     @staticmethod
     def _province(task: QueryTask) -> str | None:
-        """The province slug: the place of a province task; a city only when it is its own province (the capitals)."""
+        """The province slug when it is a known one: the place of a province task; a city only when it is its own
+        province (the capitals). Any other slug is not guessed."""
         slug = _slug(task.location)
-        if not slug:
+        if slug not in ApifyMilanunciosSource._PROVINCES:
             return None
         return slug if task.place_level == "province" or slug in _PISOS_CITIES else None
 

@@ -270,6 +270,36 @@ async def test_yaencontre_without_a_geocoded_centre_does_not_launch():
     assert not [r for r in requests if r.method == "POST"]
 
 
+def test_yaencontre_capital_spelling_is_the_city():
+    row = yaencontre_row(address={"qualifiedName": "Aravaca, Madrid Capital", "geoLocation": {"lat": 40.46, "lon": -3.78}})
+    assert yaencontre([], [])._normalize(row, task(), (40.4168, -3.7038)) is not None
+
+
+async def test_yaencontre_resumed_run_without_geocoder_still_bills_and_reads_the_dataset():
+    requests = []
+    geocoder = AsyncMock()
+    geocoder.resolve.side_effect = RuntimeError("redis down")
+    def handler(request):
+        requests.append(request)
+        if "actor-runs" in request.url.path:
+            return httpx.Response(200, json={"data": {"id": "run1", "status": "SUCCEEDED",
+                                                      "defaultDatasetId": "data1", "usageTotalUsd": .01}})
+        return httpx.Response(200, json=[yaencontre_row()])
+
+    adapter = ApifyYaencontreSource("secret-token", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                                    sleep=AsyncMock(), geocoder=geocoder)
+    ctx = context("apify_yaencontre", run_id="run1")
+    with source_run_scope(ctx):
+        listings = await adapter.search(task(), limit=5)  # a city task: filtered by the qualified name only
+        assert len(listings) == 1
+        province = await adapter.search(task(place_level="province"), limit=5)  # no circle: nothing is trusted
+        assert province == []
+    assert not [r for r in requests if r.method == "POST"]
+    assert any(r.url.path.endswith("/datasets/data1/items") for r in requests)
+    ctx.reconcile_usage.assert_awaited()
+    await adapter.aclose()
+
+
 def test_yaencontre_live_rows_getafe_dropped_plot_area_and_phone():
     adapter = yaencontre([], [])
     rows = live_rows("yaencontre")
@@ -701,7 +731,9 @@ async def test_milanuncios_plan_uses_category_and_province_not_search_url():
 def test_milanuncios_does_not_guess_the_province_of_a_city():
     adapter = build("milanuncios", [], [])
     assert not adapter.supports(task(location="Alcalá de Henares"))  # province unknown
-    assert adapter.supports(task(location="Alcalá de Henares", place_level="province"))
+    assert not adapter.supports(task(location="Alcalá de Henares", place_level="province"))  # slug not verified
+    assert not adapter.supports(task(location="Alicante", place_level="province"))
+    assert adapter.supports(task(location="Vizcaya", place_level="province"))
 
 
 def test_milanuncios_live_solares_rows_zero_price_demand_and_plot():
