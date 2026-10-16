@@ -16,7 +16,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -26,17 +26,17 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
     {
       "id": "O3",
-      "title": "«Ок» на живые сэмплы ≤ $0.05 (A3) и ≤ $0.02×3 (B5)",
+      "title": "«Ок» на живые сэмплы — владелец: «делай как считаешь нужным» (16.10)",
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -46,7 +46,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Сб",
       "hours": 0
     },
@@ -66,7 +66,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -76,7 +76,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Сб",
       "hours": 0
     },
@@ -86,7 +86,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Вс",
       "hours": 0
     },
@@ -96,7 +96,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Вс",
       "hours": 0
     },
@@ -106,7 +106,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -152,14 +152,11 @@
     },
     {
       "id": "A3",
-      "title": "Живая проверка Yaencontre и Idealista-igolaizola, правка мапперов",
+      "title": "Живая проверка порталов (Idealista/Pisos/Habitaclia ок; Yaencontre 403, Milanuncios 404 — выкл)",
       "stream": "acquisition",
       "agent": "sources",
-      "deps": [
-        "O2",
-        "O3"
-      ],
-      "status": "blocked",
+      "deps": [],
+      "status": "done",
       "day": "Пт",
       "hours": 2
     },
@@ -167,13 +164,13 @@
       "id": "A4",
       "title": "Включить Apify для FB на VPS: 1 группа, ≤ 50 постов",
       "stream": "acquisition",
-      "agent": "sources+deployer",
+      "agent": "owner (VPS)",
       "deps": [
         "O1",
         "O2",
         "O6"
       ],
-      "status": "blocked",
+      "status": "waiting_owner",
       "day": "Вс",
       "hours": 1
     },
@@ -336,11 +333,10 @@
       "id": "D1",
       "title": "Золотой набор на VPS, разметка, исправления",
       "stream": "release",
-      "agent": "analyst+reviewer",
+      "agent": "owner (VPS)",
       "deps": [
         "A1",
         "A2",
-        "A3",
         "A5",
         "A6",
         "B1",
@@ -352,9 +348,10 @@
         "O2",
         "O7",
         "O10",
-        "D1a"
+        "D1a",
+        "A3"
       ],
-      "status": "blocked",
+      "status": "waiting_owner",
       "day": "Пн",
       "hours": 5
     },
@@ -362,7 +359,7 @@
       "id": "D2",
       "title": "Деплой, включение флагов, проверка алертов",
       "stream": "release",
-      "agent": "deployer",
+      "agent": "owner (VPS)",
       "deps": [
         "D1",
         "C4",
@@ -370,7 +367,7 @@
         "O8",
         "O9"
       ],
-      "status": "blocked",
+      "status": "waiting_owner",
       "day": "Пн",
       "hours": 2
     },
@@ -378,13 +375,123 @@
       "id": "D3",
       "title": "HANDOFF, ROLLBACK, инструкция клиенту",
       "stream": "release",
-      "agent": "architect",
+      "agent": "owner (VPS)",
+      "deps": [
+        "D2"
+      ],
+      "status": "waiting_owner",
+      "day": "Пн",
+      "hours": 2
+    },
+    {
+      "id": "H1",
+      "title": "Один платный запуск чтения даже при сбое БД (pending:<uuid>, launch_unconfirmed)",
+      "stream": "hardening",
+      "agent": "builder",
+      "deps": [
+        "B1",
+        "B2"
+      ],
+      "status": "done",
+      "day": 4,
+      "hours": 2,
+      "pr": 66
+    },
+    {
+      "id": "H2",
+      "title": "Правки по security-ревью: post_link вне LLM-merge, учёт posts-актора, uuid в callback, cap_drop/umask/CI perms",
+      "stream": "docs3",
+      "agent": "builder",
+      "deps": [
+        "B1",
+        "C3"
+      ],
+      "status": "done",
+      "day": 4,
+      "hours": 2,
+      "pr": 67
+    },
+    {
+      "id": "B5b",
+      "title": "Yaencontre по координатам, Milanuncios categorySlug+province (по живым прогонам)",
+      "stream": "portals2",
+      "agent": "sources",
+      "deps": [
+        "B5",
+        "A3"
+      ],
+      "status": "done",
+      "day": 4,
+      "hours": 3,
+      "pr": 68
+    },
+    {
+      "id": "H3",
+      "title": "Остатки ревью: битый 2xx на launch → LaunchUnknown, memory-сторы = Postgres, русские коды ошибок чтения",
+      "stream": "hardening2",
+      "agent": "builder",
+      "deps": [
+        "H1",
+        "H2"
+      ],
+      "status": "done",
+      "day": 4,
+      "hours": 1.5,
+      "pr": 69
+    },
+    {
+      "id": "B5c",
+      "title": "Живые фикстуры квартир: Yaencontre FLAT, Milanuncios venta-de-pisos (≈ $0.01)",
+      "stream": "hardening2",
+      "agent": "sources",
+      "deps": [
+        "B5b"
+      ],
+      "status": "done",
+      "day": 4,
+      "hours": 1,
+      "pr": 69
+    },
+    {
+      "id": "D2pre",
+      "title": "Предсдаточный аудит деплой-артефактов: DEPLOY/ROLLBACK/HANDOFF сверены с main, чек-лист перед D2",
+      "stream": "d2pre",
+      "agent": "deployer",
+      "deps": [
+        "C3",
+        "C4",
+        "C2",
+        "D1a"
+      ],
+      "status": "done",
+      "day": 4,
+      "hours": 1.5,
+      "pr": 70
+    },
+    {
+      "id": "B5d",
+      "title": "Milanuncios locales-comerciales (venta-de-locales = 404), живые фикстуры аренды/домов Milanuncios и Yaencontre (≈ $0.05)",
+      "stream": "portals3",
+      "agent": "sources",
+      "deps": [
+        "B5c"
+      ],
+      "status": "done",
+      "day": 4,
+      "hours": 1.5,
+      "pr": 71
+    },
+    {
+      "id": "E1",
+      "title": "/sources: реестр сайтов и FB-групп, проверка актуальности watchdog-ом, кнопки Удалить/Архивировать/Оставить (после D2, за флагом SOURCES_REGISTRY_ENABLED)",
+      "stream": "sources-registry",
+      "agent": "builder+db",
       "deps": [
         "D2"
       ],
       "status": "blocked",
-      "day": "Пн",
-      "hours": 2
+      "day": 5,
+      "hours": 7
     }
   ]
 }
