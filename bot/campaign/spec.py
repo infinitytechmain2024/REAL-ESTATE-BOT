@@ -576,14 +576,16 @@ class TaskSpec(_Model):
         """A new spec with ``partial`` (a dict, as an LLM returns it) applied over this one.
 
         Scalars override, nested objects merge, a non-empty list replaces the list, ``null`` and empty values
-        change nothing, ``unspecified`` accumulates; the mode is never changed. A key that would make the spec
+        change nothing, ``unspecified`` accumulates; the mode and ``post_link`` are never changed (nor ``sources.required`` of a post-link task). A key that would make the spec
         invalid is skipped. A field that now has a value leaves ``unspecified``.
         """
         base = self.model_dump()
         if isinstance(partial, dict):
             for key, value in partial.items():
-                if key in ("mode", "unspecified") or key not in base:
-                    continue
+                if key in ("mode", "unspecified", "post_link") or key not in base:
+                    continue  # ``post_link`` is set only by the intake's link normalisation, never by the LLM
+                if key == "sources" and isinstance(value, dict) and self.post_link:
+                    value = {k: v for k, v in value.items() if k != "required"}  # the post link stays the source
                 if key == "context":
                     value = _append_answers(base[key], value)
                 trial = {**base, key: _overlay(base[key], value)}

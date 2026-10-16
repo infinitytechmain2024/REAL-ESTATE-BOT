@@ -983,3 +983,15 @@ async def test_main_installs_the_ledger_so_claude_costs_reach_campaign_costs() -
     assert rows and rows[0][0] is None and rows[0][1] == "llm" and rows[0][3] == "anthropic"
     install_interview_costs(None)
     assert costs.ledger() is None
+
+
+def test_merged_never_takes_post_link_or_required_sources_from_llm() -> None:
+    url = "https://facebook.com/x/posts/1"
+    spec = TaskSpec(mode="investors").merged({"post_link": True})
+    assert spec.post_link is False
+    linked = TaskSpec(mode="investors", post_link=True, sources={"required": [url]})
+    merged = linked.merged({"post_link": False, "sources": {"required": ["https://evil.example/"]}})
+    assert merged.post_link is True
+    assert merged.sources.required == [url]
+    # an ordinary task still lets the interviewer record a required source
+    assert TaskSpec(mode="investors").merged({"sources": {"required": ["idealista"]}}).sources.required == ["idealista"]
