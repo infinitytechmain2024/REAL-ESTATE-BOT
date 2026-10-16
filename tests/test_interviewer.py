@@ -889,8 +889,8 @@ async def test_anthropic_books_the_cost_with_provider_anthropic() -> None:
         costs.install(None)
     (entry,) = ledger.entries
     assert (entry.stage, entry.provider, entry.item, entry.units) == ("llm", "anthropic", "claude-sonnet-5-5", 1_100_000)
-    assert entry.cost_usd == pytest.approx(3.0 + 1.5)
-    assert costs.price("claude-sonnet-5-5") == (3.0, 15.0) and costs.price("anthropic/claude-sonnet-5.5") == (3.0, 15.0)
+    assert entry.cost_usd == pytest.approx(2.0 + 1.0)
+    assert costs.price("claude-sonnet-5-5") == (2.0, 10.0) and costs.price("anthropic/claude-sonnet-5.5") == (2.0, 10.0)
 
 
 def test_the_key_is_not_in_repr_or_logs(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:

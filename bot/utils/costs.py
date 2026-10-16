@@ -41,14 +41,20 @@ KINDS = ("cost", "error", "skip")
 # USD per million tokens (input, output) when OpenRouter's answer carries no ``usage.cost``; a model is matched by
 # the longest key it starts with. Deliberately on the high side: an estimate must not let a run overspend.
 PRICES: dict[str, tuple[float, float]] = {
-    # v2 stage models (docs/v2/MODELS.md); prices from memory -- check openrouter.ai/pricing before D2.
-    "anthropic/claude-opus-5.5": (15.0, 75.0),
-    "anthropic/claude-sonnet-5.5": (3.0, 15.0),
-    "anthropic/claude-haiku-5.5": (1.0, 5.0),
+    # Anthropic prices for the 5.5 models confirmed 2026-10-16 from the Claude API reference (cache dated 2026-10-06).
+    # Haiku 5.5 is 0.10/0.50 for prompts up to 100K tokens (0.50/2.50 above; our prompts are far smaller).
+    # OpenRouter ids and prices: owner to check before D2 (docs/v2/MODELS.md); they normally equal the primary API's.
+    "anthropic/claude-opus-5.5": (4.0, 20.0),
+    "anthropic/claude-sonnet-5.5": (2.0, 10.0),
+    "anthropic/claude-haiku-5.5": (0.1, 0.5),
+    # Older Claude models keep the old prices under the generic prefixes (the longest matching prefix wins).
     "anthropic/claude-opus": (15.0, 75.0),
     "anthropic/claude-sonnet": (3.0, 15.0),
     "anthropic/claude-haiku": (1.0, 5.0),
-    # The Claude API's own ids (ARCHITECT_PROVIDER=anthropic); same prices as the OpenRouter ids until checked.
+    # The Claude API's own ids (ARCHITECT_PROVIDER=anthropic).
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-haiku-5-5": (0.1, 0.5),
     "claude-opus": (15.0, 75.0),
     "claude-sonnet": (3.0, 15.0),
     "claude-haiku": (1.0, 5.0),
