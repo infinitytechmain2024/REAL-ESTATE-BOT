@@ -32,11 +32,11 @@
     },
     {
       "id": "O3",
-      "title": "«Ок» на живые сэмплы ≤ $0.05 (A3) и ≤ $0.02×3 (B5)",
+      "title": "«Ок» на живые сэмплы — владелец: «делай как считаешь нужным» (16.10)",
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "Пт",
       "hours": 0
     },
@@ -155,11 +155,8 @@
       "title": "Живая проверка Yaencontre и Idealista-igolaizola, правка мапперов",
       "stream": "acquisition",
       "agent": "sources",
-      "deps": [
-        "O2",
-        "O3"
-      ],
-      "status": "blocked",
+      "deps": [],
+      "status": "in_progress",
       "day": "Пт",
       "hours": 2
     },
