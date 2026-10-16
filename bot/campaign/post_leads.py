@@ -32,6 +32,7 @@ from bot.utils import costs
 
 from .leads import (
     MAX_COMMENTS,
+    PENDING,
     Comment,
     CommentRead,
     Lead,
@@ -51,7 +52,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 ACTOR = "campaign:post_reads"
-PENDING = "pending:"  # run_id placeholder written before a paid launch: no real id came back, never launch again
 MAX_ATTEMPTS = 3
 _STOPPED = "('completed', 'cancelled', 'failed')"
 
@@ -75,7 +75,8 @@ class PostReadStore(Protocol):
     async def candidates(self) -> list[tuple[str, str]]: ...
     async def enqueue(self, campaign_id: str, post_url: str) -> bool: ...
     async def claim(self) -> PostRead | None: ...
-    async def mark_launching(self, read: PostRead) -> None: ...
+    async def mark_launching(self, read: PostRead) -> str | None: ...
+    async def unmark_launching(self, read: PostRead, token: str) -> None: ...
     async def save_run(self, read: PostRead, run_id: str) -> None: ...
     async def requeue(self, read: PostRead) -> None: ...
     async def finish(self, read: PostRead, state: str, *, comments: int = 0, leads: int = 0, cost_usd: float = 0.0,
@@ -147,7 +148,10 @@ class PostLeadWorker:
                 await costs.skip("api", "budget_cap", item=cfg.actor_id)
                 await self.store.finish(read, "failed", error="budget_cap")
                 return
-            await self.store.mark_launching(read)  # before the paid launch: a failure from here on never repeats it
+            token = await self.store.mark_launching(read)  # before the paid launch: a failure after it never repeats it
+            if token is None:  # not ours to launch (a run id appeared, or the row is no longer claimed)
+                await self.store.finish(read, "failed", error="launch_unconfirmed")
+                return
             try:
                 run_id = await self.source.launch(read.post_url)
             except LaunchUnknown:
@@ -155,6 +159,9 @@ class PostLeadWorker:
                 await self._estimate(read)
                 await self.store.finish(read, "failed", cost_usd=cfg.max_usd_per_post, error="apify_launch_unknown")
                 return
+            except ApifyError:  # refused outright (429, 4xx): no run exists, so no placeholder and no estimate
+                await self.store.unmark_launching(read, token)
+                raise
             try:
                 await self.store.save_run(read, run_id)
             except Exception:  # noqa: BLE001 - the run exists but its id is lost: never queue a second paid one
@@ -296,17 +303,29 @@ class PostgresPostReadStore:
         context = PostContext(str(plan.get("vertical") or "investors"), str(plan.get("goal") or ""))
         return PostRead(row["campaign_id"], row["post_url"], row["attempts"], row["run_id"], context)
 
-    async def mark_launching(self, read: PostRead) -> None:
-        await self.pool.execute(
+    async def mark_launching(self, read: PostRead) -> str | None:
+        """Before the paid launch: a ``pending:`` placeholder (returned); None when the row is not ours to launch."""
+        token = f"{PENDING}{uuid.uuid4().hex}"
+        result = await self.pool.execute(
             """update campaign_post_reads set run_id = $3, provider = 'apify'
                 where campaign_id = $1::uuid and post_url = $2 and state = 'reading' and run_id is null""",
-            read.campaign_id, read.post_url, f"{PENDING}{uuid.uuid4().hex}")
+            read.campaign_id, read.post_url, token)
+        return token if result.split()[-1] == "1" else None
+
+    async def unmark_launching(self, read: PostRead, token: str) -> None:
+        """Apify refused the launch outright (no run exists): drop our own placeholder."""
+        await self.pool.execute(
+            """update campaign_post_reads set run_id = null
+                where campaign_id = $1::uuid and post_url = $2 and state = 'reading' and run_id = $3""",
+            read.campaign_id, read.post_url, token)
 
     async def save_run(self, read: PostRead, run_id: str) -> None:
-        await self.pool.execute(
+        result = await self.pool.execute(
             """update campaign_post_reads set run_id = $3, provider = 'apify'
                 where campaign_id = $1::uuid and post_url = $2 and state = 'reading'""",
             read.campaign_id, read.post_url, run_id[:100])
+        if result.split()[-1] != "1":
+            raise RuntimeError("run_id_not_saved")
 
     async def requeue(self, read: PostRead) -> None:
         await self.pool.execute(
@@ -354,10 +373,17 @@ class MemoryPostReadStore:
                 return PostRead(cid, url, row["attempts"], row["run_id"], PostContext("investors", self.goal))
         return None
 
-    async def mark_launching(self, read: PostRead) -> None:
+    async def mark_launching(self, read: PostRead) -> str | None:
         row = self.rows[(read.campaign_id, read.post_url)]
-        if row["run_id"] is None:
-            row["run_id"] = f"{PENDING}{uuid.uuid4().hex}"
+        if row["run_id"] is not None:
+            return None
+        row["run_id"] = token = f"{PENDING}{uuid.uuid4().hex}"
+        return token
+
+    async def unmark_launching(self, read: PostRead, token: str) -> None:
+        row = self.rows[(read.campaign_id, read.post_url)]
+        if row["run_id"] == token:
+            row["run_id"] = None
 
     async def save_run(self, read: PostRead, run_id: str) -> None:
         self.rows[(read.campaign_id, read.post_url)]["run_id"] = run_id

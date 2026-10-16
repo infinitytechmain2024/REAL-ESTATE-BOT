@@ -660,3 +660,13 @@ async def test_apify_a_run_that_did_not_succeed_fails_the_read(status, ledger) -
     await _apify_worker(Api(items=thirty(), status=status), store).step()
     assert store.finished[_read(1).post_url][0] == "failed"
     assert store.finished[_read(1).post_url][3] == f"apify_run_{status.lower()}" and not store.leads
+
+
+async def test_apify_a_refused_launch_drops_the_placeholder_and_requeues(ledger) -> None:
+    from tests.test_post_leads import Api
+
+    api = Api(launch=429)
+    store = MemoryLeadStore([_read(1)])
+    await _apify_worker(api, store, max_attempts=3).step()
+    assert len(api.launches()) == 1 and len(store.queued) == 1 and not store.runs
+    assert [e for e in ledger.entries if e.kind == "cost"] == []
