@@ -424,6 +424,31 @@
       "day": 4,
       "hours": 3,
       "pr": 68
+    },
+    {
+      "id": "H3",
+      "title": "Остатки ревью: битый 2xx на launch → LaunchUnknown, memory-сторы = Postgres, русские коды ошибок чтения",
+      "stream": "hardening2",
+      "agent": "builder",
+      "deps": [
+        "H1",
+        "H2"
+      ],
+      "status": "review",
+      "day": 4,
+      "hours": 1.5
+    },
+    {
+      "id": "B5c",
+      "title": "Живые фикстуры квартир: Yaencontre FLAT, Milanuncios venta-de-pisos (≈ $0.01)",
+      "stream": "hardening2",
+      "agent": "sources",
+      "deps": [
+        "B5b"
+      ],
+      "status": "review",
+      "day": 4,
+      "hours": 1
     }
   ]
 }
