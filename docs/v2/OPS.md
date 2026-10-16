@@ -45,6 +45,8 @@ docker compose --env-file .env logs --tail=20 watchdog     # "watchdog started"
 
 Алерты и сводка идут всем владельцам из `TELEGRAM_OPERATOR_IDS` (они должны хоть раз написать боту `/start`). Отдельный id не нужен;
 `OWNER_ALERT_CHAT_ID=<chat id>` задавайте только чтобы слать в другой чат/группу (тогда только туда).
+Заказчик должен быть ролью user (одобрен из бота), а не в `TELEGRAM_OPERATOR_IDS`; если заказчик всё же там, задайте `OWNER_ALERT_CHAT_ID`, чтобы алерты шли только вам.
+Опечатка в `TELEGRAM_OPERATOR_IDS` роняет watchdog даже при `WATCHDOG_ENABLED=false` (как и telegram).
 
 Без контроля контейнеров достаточно `COMPOSE_PROFILES=ops`, `WATCHDOG_ENABLED=true`
 (`WATCHDOG_DOCKER_SOCKET` остаётся пустым: сокет примонтирован, но не используется).

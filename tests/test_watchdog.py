@@ -340,5 +340,6 @@ async def test_failed_send_to_one_operator_does_not_block_the_other() -> None:
 
 
 def test_operator_ids_typo_stops_startup() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as error:
         settings(operator_ids="11, abc")
+    assert "abc" in str(error.value) and "11" not in str(error.value).replace("TELEGRAM_OPERATOR_IDS", "")

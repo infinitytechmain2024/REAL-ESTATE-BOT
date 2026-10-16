@@ -58,7 +58,7 @@
 ## O4, O8, O9, O10 — блокируют D2 (деплой)
 
 - [ ] **O4** `ANTHROPIC_API_KEY` в `.env` VPS с лимитом трат в Console (`ARCHITECT_PROVIDER=anthropic` включаем только после этого; без ключа остаётся OpenRouter).
-- [ ] **O8** Telegram chat id для алертов → `OWNER_ALERT_CHAT_ID`.
+- [x] **O8** Алерты: автоматически из `TELEGRAM_OPERATOR_IDS`, отдельный id не нужен (`OWNER_ALERT_CHAT_ID` только для другого чата).
 - [ ] **O9** Окно перезагрузки VPS (10–15 мин) для `COMPOSE_PROFILES=ops` и healthcheck-ов.
 - [ ] **O10** Бюджет кампании по умолчанию: оставить `CAMPAIGN_BUDGET_USD=5`? Потолок на период D1: `$30` (совпадает с лимитом Apify в O2).
 

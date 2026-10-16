@@ -481,7 +481,7 @@ echo 'ARCHITECT_PROVIDER=openrouter' >> .env && docker compose --env-file .env u
 
 Ключ можно оставить в `.env`; убрать совсем: `sed -i '/^ANTHROPIC_API_KEY=/d' .env` и `up -d telegram`.
 
-### (ж) Watchdog: алерты владельцу (⛔ O8, O11)
+### (ж) Watchdog: алерты владельцу (O11)
 
 Подробности и риски сокета: `docs/v2/OPS.md` (сокет `:ro` даёт процессу полный доступ к Docker API, это решение O11).
 Если в `.env` уже есть `COMPOSE_PROFILES`, **добавьте** `ops` через запятую в существующую строку, а не дописывайте вторую.
@@ -513,7 +513,8 @@ docker compose --env-file .env ps analysis-worker            # healthy
 ```
 
 Норма: сообщение пришло за 2 минуты или меньше. Не пришло: `logs --tail=50 watchdog`, проверить `TELEGRAM_OPERATOR_IDS` (или `OWNER_ALERT_CHAT_ID`, если задан) и что вы
-писали боту `/start` хотя бы раз. `OWNER_ALERT_CHAT_ID` больше не обязателен: алерты идут всем из `TELEGRAM_OPERATOR_IDS`. Дневная сводка придёт в 09:00 UTC. Откат (мягкий, контейнер спит; полный см. раздел 5):
+писали боту `/start` хотя бы раз. `OWNER_ALERT_CHAT_ID` больше не обязателен: алерты идут всем из `TELEGRAM_OPERATOR_IDS`.
+Заказчик должен быть ролью user (одобрен из бота), а не в `TELEGRAM_OPERATOR_IDS`; если заказчик всё же там, задайте `OWNER_ALERT_CHAT_ID`, чтобы алерты шли только вам. Дневная сводка придёт в 09:00 UTC. Откат (мягкий, контейнер спит; полный см. раздел 5):
 
 ```bash
 echo 'WATCHDOG_ENABLED=false' >> .env && docker compose --env-file .env up -d watchdog

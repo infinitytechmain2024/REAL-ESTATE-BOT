@@ -7,9 +7,12 @@ from typing import Annotated
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from bot.control_plane.settings import parse_user_ids
+
 
 class WatchdogSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True,
+                                      hide_input_in_errors=True)
 
     enabled: bool = Field(default=False, validation_alias="WATCHDOG_ENABLED")
     # Optional override: one Telegram chat (e.g. a group) that receives alerts and the daily summary instead of the
@@ -33,13 +36,7 @@ class WatchdogSettings(BaseSettings):
         """Strict ``123, 456`` as in control_plane: a typo must stop startup, not silence the alerts."""
         if not isinstance(value, str):
             return value
-        ids: list[int] = []
-        for part in value.replace(",", " ").split():
-            if not part.isdigit():
-                raise ValueError(f"TELEGRAM_OPERATOR_IDS must be numeric Telegram user IDs, got {part!r}")
-            if int(part) not in ids:
-                ids.append(int(part))
-        return tuple(ids)
+        return tuple(sorted(parse_user_ids(value)))
 
     def recipients(self) -> tuple[int, ...]:
         """OWNER_ALERT_CHAT_ID when set (manual override), else every id of TELEGRAM_OPERATOR_IDS."""
