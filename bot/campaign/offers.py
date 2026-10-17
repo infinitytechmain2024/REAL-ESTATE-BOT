@@ -56,6 +56,17 @@ class Deviation:
     requested: str | None = None
     phrase: str | None = None
     land: bool = False  # «участки» instead of «варианты»
+    unknown: tuple[str, ...] = ()  # kind == unverified: the criteria that could not be confirmed («площадь», «район»)
+
+
+UNKNOWN_PREFIX = "Не подтверждено: "
+
+
+def unknown_of(hold_reason: str | None) -> tuple[str, ...]:
+    """The unconfirmed criteria named in a stored hold note «Не подтверждено: площадь, район» (empty otherwise)."""
+    if not hold_reason or not hold_reason.startswith(UNKNOWN_PREFIX):
+        return ()
+    return tuple(p.strip() for p in hold_reason[len(UNKNOWN_PREFIX):].split(",") if p.strip())
 
 
 def similar_question(deviation: Deviation | None = None, *, exact_found: bool) -> str:
@@ -68,6 +79,11 @@ def similar_question(deviation: Deviation | None = None, *, exact_found: bool) -
     what = "участки" if deviation is not None and deviation.land else "варианты"
     if deviation is not None and deviation.kind == "unverified":  # neutral: the owner-only note stays in logs
         lead = "варианты, которые не удалось проверить автоматически"
+        if deviation.unknown:
+            what_ = ", ".join(deviation.unknown)
+            if exact_found:
+                return f"Есть ещё варианты, у которых не подтверждено: {what_}. Показать?"
+            return f"По вашим критериям пока ничего не нашёл, но есть варианты, у которых не подтверждено: {what_}. Показать?"
         if exact_found:
             return "Есть ещё варианты, которые не удалось проверить автоматически. Показать?"
         return f"По вашим критериям пока ничего не нашёл, но есть {lead}. Показать?"
@@ -99,6 +115,8 @@ def card_line(deviation: Deviation) -> str | None:
     if deviation.kind == "area_unknown":
         return "≈ Не подтверждено: площадь не указана"
     if deviation.kind == "unverified":
+        if deviation.unknown:
+            return f"≈ Не подтверждено: {', '.join(deviation.unknown)}"
         return "≈ Не подтверждено: не удалось проверить автоматически"
     if deviation.phrase:
         return f"≈ Отличается: {deviation.phrase}"

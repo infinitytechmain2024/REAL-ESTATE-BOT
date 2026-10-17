@@ -821,7 +821,7 @@ class CampaignRunner:
         if match.why == "area_unknown":
             return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
         if self.config.relevance_fail_closed and closest.hold_reason:  # held unverified (stored note: owners only)
-            return offers.Deviation("unverified", land=land)
+            return offers.Deviation("unverified", land=land, unknown=offers.unknown_of(closest.hold_reason))
         stored = await self.store.relevance(campaign.id, closest.id)
         return offers.Deviation("other", phrase=stored.deviation if stored is not None else None, land=land)
 
@@ -995,7 +995,13 @@ class CampaignRunner:
         if not await self.store.open_offer(campaign.id, bucket):
             return
         if bucket == "similar":
-            text = offers.similar_question(await self._deviation(campaign, request, closest), exact_found=exact_found)
+            deviation = await self._deviation(campaign, request, closest)
+            if deviation.kind == "unverified":  # name every unconfirmed criterion across the held similar findings
+                names = dict.fromkeys(deviation.unknown)
+                for other in await self.store.held_findings(campaign.id, "similar", 50):
+                    names.update(dict.fromkeys(offers.unknown_of(other.hold_reason)))
+                deviation = replace(deviation, unknown=tuple(names))
+            text = offers.similar_question(deviation, exact_found=exact_found)
         else:
             text = offers.OTHER_QUESTION
         try:
