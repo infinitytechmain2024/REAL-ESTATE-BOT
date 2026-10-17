@@ -529,6 +529,31 @@
       "day": 5,
       "hours": 1,
       "pr": 76
+    },
+    {
+      "id": "E2",
+      "title": "TikTok: ссылка на видео → описание объекта + комментарии через Apify → лиды-инвесторы (флаг TIKTOK_COMMENTS_ENABLED, таблица чтений); вопросы к клиенту про процесс",
+      "stream": "tiktok",
+      "agent": "sources+builder+db",
+      "deps": [
+        "D1"
+      ],
+      "status": "blocked",
+      "day": 6,
+      "hours": 9
+    },
+    {
+      "id": "E3",
+      "title": "LinkedIn: поиск публичных постов/профилей инвесторов через Apify без аккаунта клиента (правило 10) → лиды (флаг LINKEDIN_LEADS_ENABLED)",
+      "stream": "linkedin",
+      "agent": "sources+builder",
+      "deps": [
+        "D1",
+        "O1"
+      ],
+      "status": "blocked",
+      "day": 6,
+      "hours": 9
     }
   ]
 }
