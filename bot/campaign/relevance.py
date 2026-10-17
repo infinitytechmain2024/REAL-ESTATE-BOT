@@ -357,7 +357,7 @@ CATEGORY = {"price": "budget", "currency": "budget", "location": "place", "forei
 CRITERION_WHY = {"place": "location", "deal": "deal", "type": "type", "budget": "price", "rooms": "rooms",
                  "area": "area"}
 CRITERION_RU = {"place": "место", "deal": "тип сделки", "type": "тип объекта", "budget": "бюджет",
-                "rooms": "комнаты", "area": "площадь"}
+                "rooms": "комнаты", "area": "площадь", "price": "бюджет", "location": "место"}
 NUMERIC = frozenset({"budget", "rooms", "area"})
 
 

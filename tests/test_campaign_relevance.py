@@ -705,3 +705,19 @@ async def test_terminal_step_with_a_paused_judge_holds_findings_before_the_summa
     await runner.step(cid)
     assert store.buckets["a"][0] == "similar" and messenger.findings() == []
     assert (await reasons(store))["a"] == "Не проверено ИИ: сбой проверки"
+
+
+def test_cards_and_question_name_the_unconfirmed_criteria() -> None:
+    from bot.campaign import offers
+    assert offers.unknown_of("Не подтверждено: площадь, место") == ("площадь", "место")
+    assert offers.unknown_of("Не проверено ИИ: лимит") == () and offers.unknown_of(None) == ()
+    one, two = offers.Deviation("unverified", unknown=("площадь",)), offers.Deviation("unverified", unknown=("площадь", "место"))
+    assert offers.card_line(one) == "≈ Не подтверждено: площадь"
+    assert offers.card_line(two) == "≈ Не подтверждено: площадь, место"
+    assert offers.similar_question(two, exact_found=True) == (
+        "Есть ещё варианты, у которых не подтверждено: площадь, место. Показать?")
+    assert offers.similar_question(one, exact_found=False).endswith("у которых не подтверждено: площадь. Показать?")
+    old = offers.Deviation("unverified")
+    assert offers.card_line(old) == "≈ Не подтверждено: не удалось проверить автоматически"
+    assert offers.similar_question(old, exact_found=True) == (
+        "Есть ещё варианты, которые не удалось проверить автоматически. Показать?")
