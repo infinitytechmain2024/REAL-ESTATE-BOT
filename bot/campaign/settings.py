@@ -84,6 +84,8 @@ class CampaignRunnerSettings(BaseSettings):
     relevance_max_calls: int = Field(default=2000, ge=0, le=10_000, validation_alias="CAMPAIGN_RELEVANCE_MAX_CALLS")
     # No AI verdict (cap reached, model down, no key): an exact finding is held as similar instead of sent.
     relevance_fail_closed: bool = Field(default=True, validation_alias="CAMPAIGN_RELEVANCE_FAIL_CLOSED")
+    # H11: a finding whose must-have criterion is not mentioned is held and never offered as «similar».
+    mandatory_unknown_hold: bool = Field(default=False, validation_alias="CAMPAIGN_MANDATORY_UNKNOWN_HOLD")
     # A failed AI call is retried on later steps; after this many misses the finding is held as unverified.
     relevance_retry_limit: int = Field(default=5, ge=1, le=100, validation_alias="CAMPAIGN_RELEVANCE_RETRY_LIMIT")
     # Who judges a finding against the task: the reviewer (a strong model, a hard-criteria matrix with a quote each,
@@ -209,6 +211,7 @@ class CampaignRunnerSettings(BaseSettings):
                             social_grace_seconds=self.social_grace_seconds,
                             max_relevance_calls=self.relevance_max_calls,
                             relevance_fail_closed=self.relevance_fail_closed,
+                            mandatory_unknown_hold=self.mandatory_unknown_hold,
                             relevance_retry_limit=self.relevance_retry_limit,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
                             max_people=self.lead_people_max, lead_days=self.lead_days,
