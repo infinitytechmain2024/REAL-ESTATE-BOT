@@ -413,9 +413,12 @@ echo 'APIFY_FACEBOOK_COMMENTS_ENABLED=false' >> .env && docker compose --env-fil
 ```bash
 cat >> .env <<'ENV'
 LEADS_PROVIDER=apify
+APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0
 ENV
 docker compose --env-file .env up -d campaign-runner
 ```
+
+При `CAMPAIGN_BUDGET_USD=0` потолка в боте нет вообще, остаются $1/пост и лимит Apify Console; дневного потолка по всем кампаниям больше нет — сумма = бюджет кампании × число кампаний.
 
 Проверка: после кампании с отправленными карточками из Facebook `psqlc "select count(*) from campaign_comment_reads where run_id is not null"`
 больше 0, расходы в `campaign_costs`. Если `COMMENTS_ENABLED` не включён, бот пишет предупреждение и читает браузером. Откат:

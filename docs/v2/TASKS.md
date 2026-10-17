@@ -604,3 +604,4 @@ O4 ──► C5 (cut)        O5 ──► C1-full (cut)
 2. Ответы по O11 и O12 (рекомендации: docker.sock read-only; C1-lite).
 3. Среда для субагентов: в контейнере сессии Python 3.13 без pytest — первым шагом ставлю `.venv` (3.11/uv) и
    проверяю `ruff check .` и `pytest -q` зелёные на `main` до любых правок.
+- [x] H5 (facebook-runner egress, закреплённый билд Apify) и H6 (`APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0` = без дневной квоты) — хотфиксы 16–17.10.
