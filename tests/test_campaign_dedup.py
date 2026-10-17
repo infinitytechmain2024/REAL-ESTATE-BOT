@@ -508,3 +508,54 @@ async def test_postgres_stores_the_card_number_and_attach_rolls_back_for_a_sent_
     assert (row["state"], row["duplicate_of"]) == ("sent", None)
     links = json.loads(await pool.fetchval("select cluster_links::text from campaign_findings where finding_id = $1::uuid", head))
     assert links == [{"url": FOTOCASA, "site": "fotocasa.es"}]
+
+
+# H8: the same object on two portals, districts named differently (pairs from the G2 Valencia campaign)
+def _fact(site: str, price: float, area: float, rooms: int | None, location: str, *, phone: str = "", agency: str = "",
+          features: tuple[str, ...] = (), floor: int | None = None, city: str = "Valencia") -> Listing:
+    payload = {"price_amount": price, "price_currency": "EUR", "area_m2": area, "rooms": rooms, "deal_type": "sale",
+               "location": f"{location}, {city}", "phone": phone, "agency": agency, "features": list(features),
+               "floor": floor}
+    return listing_of(payload, url=f"https://www.{site}/inmueble/{abs(hash((site, location)))}/")
+
+
+FACT_PAIRS = [
+    (_fact("fotocasa.es", 215_000, 82, 3, "L'Hort de Senabre", phone="+34 936 641 101"),
+     _fact("milanuncios.com", 215_000, 82, 3, "Estación de Patraix", phone="936641101")),
+    (_fact("fotocasa.es", 177_000, 80, 2, "Mont-Olivet", agency="Tecnocasa Ruzafa S.L."),
+     _fact("habitaclia.com", 177_000, 80, 2, "Quatre Carreres", agency="TECNOCASA RUZAFA")),
+    (_fact("fotocasa.es", 81_700, 107, 3, "Malvarrosa", agency="Bhorus"),
+     _fact("milanuncios.com", 81_700, 107, 3, "Cabanyal", agency="Bhorus, S.L.U.")),
+    (_fact("fotocasa.es", 129_000, 63, 3, "Els Orriols", agency="MOLMAR"),
+     _fact("habitaclia.com", 129_000, 63, 3, "Rascanya", agency="Molmar")),
+    (_fact("fotocasa.es", 145_000, 100, 3, "Torrefiel", agency="Prodeinmo", features=("exterior", "reformado", "terraza")),
+     _fact("habitaclia.com", 145_000, 100, 3, "Rascanya", agency="Palanca Fontestad", features=("exterior", "reformado"))),
+    (_fact("fotocasa.es", 104_500, 56, None, "Torrefiel", agency="PUNTO PUBILLA", features=("terraza", "planta baja"),
+           floor=0),
+     _fact("habitaclia.com", 104_500, 56, None, "Rascanya", agency="LA CASA AGENCY", features=("terraza", "planta baja"),
+           floor=0)),
+    (_fact("fotocasa.es", 249_000, 82, 2, "Torrefiel", agency="La Casa Agency", floor=6),
+     _fact("yaencontre.com", 249_000, 82, 2, "Tormos", agency="LA CASA AGENCY")),
+]
+
+
+@pytest.mark.parametrize("a,b", FACT_PAIRS)
+def test_same_facts_on_two_portals_merge_despite_different_districts(a: Listing, b: Listing) -> None:
+    assert same_object(a, b) and same_object(b, a)
+
+
+def test_strong_facts_do_not_merge_wrong_pairs() -> None:
+    nou = _fact("fotocasa.es", 253_000, 82, 2, "Nou Benicalap", agency="La Casa Agency")
+    other = _fact("habitaclia.com", 249_000, 82, 2, "Torrefiel", agency="La Casa Agency")
+    assert not same_object(nou, other)
+    # equal facts, but no shared phone / agency and fewer than two shared features
+    a = _fact("fotocasa.es", 145_000, 100, 3, "Torrefiel", phone="936641101", agency="Prodeinmo", features=("exterior",))
+    b = _fact("habitaclia.com", 145_000, 100, 3, "Rascanya", phone="961234567", agency="Palanca", features=("exterior",))
+    assert not same_object(a, b)
+    # equal facts and agency, other city
+    assert not same_object(_fact("fotocasa.es", 145_000, 100, 3, "Centro", agency="X", city="Valencia"),
+                           _fact("habitaclia.com", 145_000, 100, 3, "Casco", agency="X", city="Madrid"))
+    # one portal never lists a flat twice
+    c = _fact("fotocasa.es", 249_000, 82, 2, "Torrefiel", agency="La Casa")
+    d = _fact("fotocasa.es", 249_000, 82, 2, "Rascanya", agency="La Casa")
+    assert not same_object(c, d)

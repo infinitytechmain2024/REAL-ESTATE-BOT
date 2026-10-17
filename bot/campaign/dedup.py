@@ -30,6 +30,9 @@ wins) and work across platforms (group A vs group B, Facebook vs a portal):
   no text rule applies; two addresses without a common street never merge, by any rule;
 * text Jaccard >= 0.60, the price within 2 % and the same rooms (both known): the same object.
 
+Across two different sites the same price (within 1 %), area (3 %), rooms (or none on both) and city merge when the
+phone, the agency or at least two features are shared too, even if the districts are named differently.
+
 Two ads of one portal are not merged by text (only Facebook, where one flat is posted in many groups, is).
 
 ``object_key`` is an index hint (same key = very likely the same object), built from the
@@ -51,6 +54,8 @@ from .architect import find_places
 
 PRICE_TOLERANCE = 0.02
 AREA_TOLERANCE = 0.03
+FACTS_PRICE_TOLERANCE = 0.01  # the cross-portal «same facts» rule is stricter than ``PRICE_TOLERANCE``
+FACTS_MIN_FEATURES = 2
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
 
@@ -98,6 +103,8 @@ class Listing:
     words: int = 0
     phones: frozenset[str] = frozenset()
     numbers: tuple[int, ...] = ()  # the small numbers of the body (floor, door, m2, rooms ...), sorted
+    agency: str = ""  # normalised advertiser / agency name (``agency_key``), "" when unknown
+    features: frozenset[str] = frozenset()  # lower-case features of the payload (terraza, exterior ...)
 
 
 def _positive(value: object) -> float | None:
@@ -123,6 +130,11 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
     title = str(payload.get("title") or payload.get("summary_ru") or payload.get("summary") or text or "")
     currency = payload.get("price_currency")
     deal = payload.get("deal_type")
+    raw_agency = next((payload[k] for k in ("agency", "advertiser") if isinstance(payload.get(k), str)), "")
+    raw_features = payload.get("features")
+    features = frozenset(_fold(f).strip() for f in raw_features if isinstance(f, str) and f.strip()) \
+        if isinstance(raw_features, list | tuple) else frozenset()
+    stated_phones = phones_of(" ".join(str(payload[k]) for k in ("phone", "contact_phone") if payload.get(k)))
     return Listing(
         price=price,
         currency=currency.strip().upper() if isinstance(currency, str) and currency.strip() else None,
@@ -137,9 +149,20 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         district=str(payload["district"]).strip() if isinstance(payload.get("district"), str) else "",
         shingles=shingles,
         words=words,
-        phones=phones_of(excerpt),
+        phones=phones_of(excerpt) | stated_phones,
         numbers=numbers_of(excerpt),
+        agency=agency_key(raw_agency),
+        features=features,
     )
+
+
+_LEGAL_FORM = re.compile(r"\b(?:s\.?\s?l\.?\s?u\.?|s\.?\s?l\.?|s\.?\s?a\.?)(?=\W|$)", re.IGNORECASE)
+
+
+def agency_key(name: str | None) -> str:
+    """An agency name for comparison: lower case, accent-free, without «S.L.» / «S.L.U.» / «S.A.» and punctuation."""
+    text = _LEGAL_FORM.sub(" ", _fold(name or ""))
+    return " ".join(_WORD.findall(text))
 
 
 def _fold(text: str) -> str:
@@ -300,6 +323,8 @@ def same_object(a: Listing, b: Listing) -> bool:
     both_addressed = bool(a.address.strip() and b.address.strip())
     if both_addressed and not (street_a & street_b):
         return False  # a district alone does not identify a flat: the street must be shared (every rule, text included)
+    if _same_facts(a, b):
+        return True
     if _same_text(a, b, price, area):
         return True
     if price is None and area is None:
@@ -323,6 +348,27 @@ def same_object(a: Listing, b: Listing) -> bool:
     if price is None or area is None:  # one dimension unconfirmed: the rest must agree explicitly
         return bool(a.rooms and b.rooms and shared_place)
     return True
+
+
+def _cities(listing: Listing) -> frozenset[str]:
+    return frozenset(find_places(" ".join((listing.location, listing.address, listing.district))))
+
+
+def _same_facts(a: Listing, b: Listing) -> bool:
+    """Strong match of facts across two portals, whatever the districts are called: the price within 1 %, the area
+    within 3 % (both known), the same rooms (or both unknown), one city (or none named on both sides), and a shared
+    phone, the same agency or at least two shared features. Two ads of one portal never merge here."""
+    host_a, host_b = _host(a.url), _host(b.url)
+    if not host_a or not host_b or host_a == host_b:
+        return False
+    if _close(a.price, b.price, FACTS_PRICE_TOLERANCE) is not True or _close(a.area, b.area, AREA_TOLERANCE) is not True:
+        return False
+    if a.rooms != b.rooms:
+        return False
+    if _cities(a) != _cities(b):
+        return False
+    return bool(a.phones & b.phones) or bool(a.agency and a.agency == b.agency) \
+        or len(a.features & b.features) >= FACTS_MIN_FEATURES
 
 
 def _same_text(a: Listing, b: Listing, price: bool | None, area: bool | None) -> bool:
