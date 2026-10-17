@@ -612,9 +612,10 @@
    "deps": [
     "H7"
    ],
-   "status": "review",
+   "status": "done",
    "day": 6,
-   "hours": 2
+   "hours": 2,
+   "pr": 81
   }
  ]
 }
