@@ -576,9 +576,10 @@
    "deps": [
     "H7"
    ],
-   "status": "review",
+   "status": "done",
    "day": 6,
-   "hours": 3
+   "hours": 3,
+   "pr": 79
   },
   {
    "id": "H9",
@@ -586,9 +587,10 @@
    "stream": "h9-retry",
    "agent": "builder",
    "deps": [],
-   "status": "review",
+   "status": "done",
    "day": 6,
-   "hours": 2
+   "hours": 2,
+   "pr": 80
   },
   {
    "id": "H10",
