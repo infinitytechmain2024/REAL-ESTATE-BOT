@@ -53,7 +53,8 @@ for k in POSTGRES_PASSWORD REDIS_PASSWORD DATABASE_URL TELEGRAM_TOKEN OPENROUTER
   printf '%-20s %s\n' "$k" "$(grep -c "^$k=." .env)"                # 1 = задан (APIFY_TOKEN нужен для (б)-(г))
 done
 # 4. Все флаги v2 сейчас выключены (в .env пусто или значения «выкл»)
-grep -nE '^(ACQUISITION_MODE|APIFY_[A-Z]+_ENABLED|FEATURE_APIFY_FACEBOOK|CAMPAIGN_JOIN_NOTICES|LEADS_PROVIDER|CAMPAIGN_INVESTOR_REPORT|INTAKE_BOTH_MODE|CARD_EXTRA_FIELDS|ARCHITECT_PROVIDER|WATCHDOG_[A-Z_]+|OWNER_ALERT_CHAT_ID|COMPOSE_PROFILES)=' .env || echo "ни одной строки: действуют умолчания (всё выключено)"
+grep -nE '^(ACQUISITION_MODE|APIFY_[A-Z]+_ENABLED|FEATURE_APIFY_FACEBOOK|CAMPAIGN_JOIN_NOTICES|LEADS_PROVIDER|CAMPAIGN_INVESTOR_REPORT|CAMPAIGN_AUCTION_DEVIATION|AGENT_REDUCTION_ENABLED|INTAKE_BOTH_MODE|CARD_EXTRA_FIELDS|ARCHITECT_PROVIDER|WATCHDOG_[A-Z_]+|OWNER_ALERT_CHAT_ID|COMPOSE_PROFILES)=' .env || echo "ни одной строки: действуют умолчания (всё выключено)"
+# `AGENT_REDUCTION_ENABLED=false` — гибрид Claude→Jev (reduction-worker) остаётся выключенным: в тени он дублирует анализ на Opus (17.10: $7 за две кампании)
 # 5. Сервисы сейчас здоровы, база доступна, миграции применены до 046 и выше
 docker compose --env-file .env ps --format 'table {{.Service}}\t{{.Status}}'
 docker compose --env-file .env exec -T postgres sh -c \

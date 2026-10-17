@@ -199,6 +199,20 @@ _CATALOG = re.compile(
 )
 
 
+_DEAL_KINDS = (("аукцион", re.compile(r"\b(?:subastas?|puja)\b")),
+               ("nuda propiedad", re.compile(r"\b(?:nuda propiedad|usufructo)\b")))
+
+
+def deal_kind_of(*texts: object) -> str | None:
+    """«аукцион» / «nuda propiedad» when the listing's text names an auction or a bare-ownership sale, else None.
+
+    A different kind of deal from an ordinary purchase: such a finding is never exact (``CAMPAIGN_AUCTION_DEVIATION``).
+    """
+    folded = "".join(ch for ch in unicodedata.normalize("NFD", " ".join(str(t or "") for t in texts).casefold())
+                     if not unicodedata.combining(ch))
+    return next((label for label, pattern in _DEAL_KINDS if pattern.search(folded)), None)
+
+
 def not_an_offer(payload: dict[str, Any], *, vertical: str | None = None) -> bool:
     """A catalog page, a «wanted» post or anything but one concrete offer (analysis-v4, or the summary's words)."""
     kind = payload.get("listing_kind")

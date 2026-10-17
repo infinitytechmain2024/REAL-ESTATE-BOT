@@ -36,6 +36,7 @@ docker compose --env-file .env logs --tail=30 <сервис> | grep -iE "error|t
 | 11 | Модели по этапам (A5) — по одной строке на этап | см. §2 | прежний id | см. §2 | Нет | — |
 | 12 | Режим «🏡💼 Недвижимость + инвесторы» в меню Telegram (C2) | `INTAKE_BOTH_MODE` (:971) | `INTAKE_BOTH_MODE=false` | `telegram` (:133) | 050: check `user_task_drafts.mode` допускает `both`; черновики `both` (24 ч) | Да: при `false` кнопки нет, черновик `both` начинается заново с меню (`bot/control_plane/intake.py:398-401`). Перед откатом **кода** — раздел «C2» ниже |
 | 13 | Карточка объекта: «Площадь» (участок отдельно), «Телефон», «Агентство» (D1a) | `CARD_EXTRA_FIELDS` (:582) | `CARD_EXTRA_FIELDS=false` | `analysis-worker` (:447), `campaign-runner` (:531); `analysis-pipeline` (:350, профиль `analysis`) — если запускается | Поля `plot_m2`, `phone`, `advertiser` в `findings.structured_payload` уже сохранённых находок | Да: при `false` новые находки их не пишут, карточка их не выводит. ⛔ Включать только после O1 (телефон частника = ПДн) |
+| 14 | Аукцион / nuda propiedad / usufructo в покупке: не «точный», а «похожий» с «≈ Отличается: аукцион» (H10) | `CAMPAIGN_AUCTION_DEVIATION` | `CAMPAIGN_AUCTION_DEVIATION=false` | `campaign-runner` | Нет; в `campaign_findings.why` остаётся категория `deal_kind` у уже отложенных находок | Да: при `false` код её не пишет, отчёт показывает её как есть |
 
 Номера в скобках: `(:N)` в колонке переменной — строка `.env.example`; в колонке сервисов — строка
 `docker-compose.yml`.

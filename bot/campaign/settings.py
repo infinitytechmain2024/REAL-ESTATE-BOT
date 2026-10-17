@@ -86,6 +86,8 @@ class CampaignRunnerSettings(BaseSettings):
     relevance_fail_closed: bool = Field(default=True, validation_alias="CAMPAIGN_RELEVANCE_FAIL_CLOSED")
     # A failed AI call is retried on later steps; after this many misses the finding is held as unverified.
     relevance_retry_limit: int = Field(default=5, ge=1, le=100, validation_alias="CAMPAIGN_RELEVANCE_RETRY_LIMIT")
+    # Auction / nuda propiedad / usufructo in a purchase listing: never exact, held as «similar» («≈ Отличается: аукцион»).
+    auction_deviation: bool = Field(default=False, validation_alias="CAMPAIGN_AUCTION_DEVIATION")
     # Who judges a finding against the task: the reviewer (a strong model, a hard-criteria matrix with a quote each,
     # bot/agents/reviewer.py) or the legacy one-word judge above. The caps and fail-closed rules apply to both.
     judge: str = Field(default="reviewer", pattern="^(reviewer|legacy)$", validation_alias="CAMPAIGN_JUDGE")
@@ -210,6 +212,7 @@ class CampaignRunnerSettings(BaseSettings):
                             max_relevance_calls=self.relevance_max_calls,
                             relevance_fail_closed=self.relevance_fail_closed,
                             relevance_retry_limit=self.relevance_retry_limit,
+                            auction_deviation=self.auction_deviation,
                             comment_leads=self.comment_leads, comment_max_posts=self.comment_max_posts,
                             max_people=self.lead_people_max, lead_days=self.lead_days,
                             investor_report=self.investor_report,

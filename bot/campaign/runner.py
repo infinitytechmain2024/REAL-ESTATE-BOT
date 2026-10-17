@@ -112,6 +112,7 @@ from .tolerance import (
     Request,
     area_text,
     classify,
+    deal_kind_of,
     money,
     price_of,
     request_for,
@@ -264,6 +265,8 @@ class RunnerConfig:
     relevance_fail_closed: bool = True
     # A failed AI call (not a pause) is retried on a later step; after this many misses for one finding it is held.
     relevance_retry_limit: int = 5
+    # An auction / nuda propiedad / usufructo listing is never exact for a purchase: held as «similar», «аукцион».
+    auction_deviation: bool = False
     # Which campaigns queue their sent Facebook posts for a comment read (``leads``): all | investors | off,
     # at most ``comment_max_posts`` per campaign. Off unless a comment worker runs beside the runner (``main``).
     comment_leads: str = "off"
@@ -633,6 +636,8 @@ class CampaignRunner:
             if match is None:  # transient miss: neither held nor streamed, retried on a later step
                 deferred += 1
                 continue
+            if match.bucket == "exact" and self._deal_kind(request, finding) is not None:
+                match = Match("similar", match.distance, "deal_kind")
             if match.bucket != "exact":
                 reason = match.note if match.why in NOTED_WHYS else None
                 if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance, reason,
@@ -762,6 +767,13 @@ class CampaignRunner:
             return Match("excluded", float("inf"), "ai")
         return match if match.bucket != "exact" else Match("similar", match.distance, "ai")
 
+    def _deal_kind(self, request: Request, finding: StreamFinding) -> str | None:
+        """«аукцион» / «nuda propiedad» for a purchase listing that names one (``CAMPAIGN_AUCTION_DEVIATION``)."""
+        if not self.config.auction_deviation or request.deal != "sale" or finding.vertical == "investors":
+            return None
+        payload = finding.payload or {}
+        return deal_kind_of(finding.original, finding.text, payload.get("summary_ru"), payload.get("summary"))
+
     def _miss(self, finding_id: str, add: int) -> int:
         """Failed AI calls of one finding so far (``add`` more); the table is bounded."""
         if finding_id not in self._relevance_misses and len(self._relevance_misses) >= MAX_TRACKED_MISSES:
@@ -820,6 +832,9 @@ class CampaignRunner:
             return offers.Deviation("area", area_text(match.area), requested, land=land)
         if match.why == "area_unknown":
             return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
+        kind = self._deal_kind(request, closest)
+        if kind is not None:
+            return offers.Deviation("deal_kind", phrase=kind, land=land)
         if self.config.relevance_fail_closed and closest.hold_reason:  # held unverified (stored note: owners only)
             return offers.Deviation("unverified", land=land, unknown=offers.unknown_of(closest.hold_reason))
         stored = await self.store.relevance(campaign.id, closest.id)
@@ -1093,6 +1108,7 @@ class CampaignRunner:
                     held.append(HeldEvidence(finding, verdict.review if verdict else None))
             sink = costs.ledger()
             spent = await sink.summary(campaign.id) if sink is not None else None
+            spent = await self._with_off_campaign(campaign, sink, spent)
             text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals,
                                                  offers=offers, costs=spent, budget=costs.budget(),
                                                  task_text=campaign.source_text, held=held, scope=scope,
@@ -1104,6 +1120,18 @@ class CampaignRunner:
             return
         self._below_status.add(campaign.id)  # the status message moves below the report
         log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
+
+    async def _with_off_campaign(self, campaign: Campaign, sink: Any, spent: costs.CostSummary | None
+                                 ) -> costs.CostSummary | None:
+        """The summary with the LLM spend booked to no campaign while this one ran (a failed read changes nothing)."""
+        lookup = getattr(sink, "off_campaign", None)
+        if spent is None or lookup is None:
+            return spent
+        try:
+            return replace(spent, off_campaign=await lookup(campaign.created_at, campaign.finished_at or self.now()))
+        except Exception:  # noqa: BLE001 - an extra line of the report, never a reason to lose the report
+            log.warning("campaign.off_campaign_costs_failed", extra={"campaign_id": campaign.id})
+            return spent
 
     async def _leads_summary(self, campaign: Campaign) -> LeadsSummary:
         """The investor branch for the report: people and reach contacts sent, and (a post sent by link) its read."""

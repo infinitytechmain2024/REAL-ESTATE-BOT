@@ -30,7 +30,7 @@ from bot.web_search.urls import PORTALS, SPAIN_BANK_PORTALS, SPAIN_PORTALS_BY_KI
 
 from .runs import OutcomeCount, SentFinding, SourceCount, StreamFinding
 from .summary import Site, plural, site_lines, site_name, site_stats
-from .tolerance import BUDGET_TOLERANCE, Request, currency_code, price_of
+from .tolerance import BUDGET_TOLERANCE, Request, classify, currency_code, price_of
 
 log = logging.getLogger(__name__)
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
@@ -50,6 +50,7 @@ REASONS: dict[str, str] = {
     "area": "не та площадь",
     "criteria": "не выполнены обязательные условия",
     "kind": "не объявление (каталог, статистика, поиск жилья)",
+    "deal_kind": "аукцион или nuda propiedad (другой вид сделки)",
     "unverified": "не удалось подтвердить",
     "area_unknown": "площадь не указана",
     "ai_failed": "ИИ-проверка не сработала",
@@ -71,6 +72,8 @@ _RELAX_ADVICE = re.compile(
     r"(?:сниз|уменьш|ослаб|допуст|подним|повыс)\w*.{0,50}(?:бюджет|площад|комнат|радиус)"
     r"|(?:бюджет|площад|комнат|радиус).{0,50}(?:сниз|уменьш|ослаб|допуст|подним|повыс)"
     r"|соседн\w*.{0,40}(?:район|пригород)|расшир\w*.{0,40}(?:район|географ)", re.IGNORECASE)
+_RAISE_BUDGET = re.compile(r"(?:подним|повыс|увелич)\w*.{0,50}бюджет|бюджет.{0,50}(?:подним|повыс|увелич)", re.IGNORECASE)
+APPROVED_BUDGET_PCT = 10  # an approved budget deviation from this makes «raise the budget by 10 %» pointless
 _DIGIT = re.compile(r"\d")
 MIN_RECOMMENDATIONS = 2
 DEAL_NOTE_MIN = 10  # rejected for the deal type: from this many the report explains where they came from
@@ -213,7 +216,7 @@ def card_score(payload: dict[str, Any] | None, request: Request) -> float:
     same_currency = (currency_code(payload.get("price_currency")) or request.currency) == request.currency
     if request.amount and price is not None and same_currency:
         over = (price - request.amount) / request.amount
-        budget = 1 - 0.5 * abs(over) if over <= 0 else max(0.0, 1 - 4 * over)
+        budget = 1.0 if over <= 0 else max(0.0, 1 - 4 * over)  # under a maximum the cheaper one is not worse
         if not request.is_max and over <= 0:
             budget = 1 - abs(over)
         budget = max(0.0, min(1.0, budget))
@@ -242,9 +245,16 @@ def card_score(payload: dict[str, Any] | None, request: Request) -> float:
 
 
 def rank_cards(sent: Sequence[SentFinding], request: Request, limit: int = TOP) -> list[Ranked]:
-    """The best ``limit`` sent cards: highest score first, ties by the card's own number (the earlier one)."""
+    """The best ``limit`` sent cards: exact ones before similar, highest score first, then the cheaper one,
+    then the card's own number (the earlier one)."""
     scored = [Ranked(card, card_score(card.finding.payload, request)) for card in sent]
-    return sorted(scored, key=lambda r: (-r.score, r.card.number, r.card.finding.id))[:limit]
+
+    def key(r: Ranked) -> tuple[int, float, float, int, str]:
+        payload = r.card.finding.payload
+        exact = classify(payload, request, vertical=r.card.finding.vertical).bucket == "exact"
+        return (0 if exact else 1, -r.score, price_of(payload) or float("inf"), r.card.number, r.card.finding.id)
+
+    return sorted(scored, key=key)[:limit]
 
 
 def _amount(value: float, currency: str) -> str:
@@ -334,6 +344,12 @@ def facts_for_model(task: dict[str, Any], counts: Tally, sites: Sequence[Site], 
     }
 
 
+def _budget_covered(facts: dict[str, Any]) -> bool:
+    """The task already approves a budget deviation of 10 % or more."""
+    pct = (facts.get("task") or {}).get("budget_pct")
+    return isinstance(pct, int | float) and not isinstance(pct, bool) and pct >= APPROVED_BUDGET_PCT
+
+
 def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
     """A few rule-based recommendations from the same numbers (no model, or the model failed).
 
@@ -345,7 +361,7 @@ def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
     only_exact = bool((facts.get("task") or {}).get("only_exact"))
     sent = counts.get("sent_exact", 0) + counts.get("sent_after_approval", 0)
     tips: list[str] = []
-    if not only_exact and by_reason.get("budget", 0) >= 2 and sent < 10:
+    if not only_exact and by_reason.get("budget", 0) >= 2 and sent < 10 and not _budget_covered(facts):
         tips.append(f"Часть вариантов отклонена из-за цены ({by_reason['budget']}): поднимите бюджет на 10 %, "
                     "и их станет больше.")
     if not only_exact and by_reason.get("place", 0) >= 3:
@@ -386,7 +402,8 @@ def clean_recommendations(items: Sequence[str], facts: dict[str, Any]) -> list[s
     without those that cite no number; topped up from the rules to at least two when fewer are left."""
     only_exact = bool((facts.get("task") or {}).get("only_exact"))
     kept = [t for t in items if not _FORBIDDEN_ADVICE.search(t) and _DIGIT.search(t)
-            and not (only_exact and _RELAX_ADVICE.search(t))][:MAX_RECOMMENDATIONS]
+            and not (only_exact and _RELAX_ADVICE.search(t))
+            and not (_budget_covered(facts) and _RAISE_BUDGET.search(t))][:MAX_RECOMMENDATIONS]
     if len(kept) < MIN_RECOMMENDATIONS:
         have = {t.casefold() for t in kept}
         for tip in fallback_recommendations(facts):
@@ -490,6 +507,7 @@ def task_facts(request: Request) -> dict[str, Any]:
              "budget": request.amount, "budget_is_maximum": request.is_max if request.amount else None,
              "currency": request.currency if request.amount else None, "rooms_min": request.rooms,
              "area_min_m2": request.min_area, "area_max_m2": request.max_area,
+             "budget_pct": request.budget_pct if request.amount else None,
              "only_exact": (True if request.budget_pct == 0 and request.area_pct == 0
                             and request.rooms_delta in (None, 0) and not request.nearby else None)}
     return {k: v for k, v in facts.items() if v is not None}
@@ -602,6 +620,8 @@ def evidence_actions(held: Sequence[HeldEvidence]) -> list[str]:
             if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
                 continue
             name = entry["name"]
+            if name in ("budget", "price"):
+                continue  # the price is on the card: nothing to ask the seller
             unknown = entry.get("verdict") == "unknown" or (
                 entry.get("verdict") == "pass" and name.startswith("must_have:")
                 and _LEGAL.search(name) and review.get("prompt") != "reviewer-v3")
@@ -641,6 +661,10 @@ def cost_lines(spent: CostSummary | None, budget: float = 0.0) -> list[str]:
                         if v > 0)
     limit = f" из {_usd(budget)}" if budget > 0 else ""
     lines.append(f"💶 Расход: {_usd(spent.total)}{limit}" + (f" ({stages})" if stages else ""))
+    outside = sum(spent.off_campaign.values())
+    if outside > 0:
+        models = ", ".join(f"{item} {_usd(v)}" for item, v in sorted(spent.off_campaign.items(), key=lambda kv: -kv[1])[:3])
+        lines.append(f"Вне кампании за это время: {_usd(outside)} (модели: {models})")
     if spent.estimates:
         estimate = sum(spent.estimates.values())
         lines.append(f"Из них оценка без подтверждения провайдера: {_usd(estimate)}")

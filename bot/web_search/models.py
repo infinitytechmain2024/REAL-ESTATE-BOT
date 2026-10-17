@@ -74,6 +74,7 @@ class SiteReport:
     refused: int = 0
     unverified: bool = False   # the site asked for a person's check and nobody passed it («проверку никто не прошёл»)
     read_api: int = 0  # actual structured API reads, a subset of read
+    api_empty: bool = False  # its API source run finished and returned no listing at all
 
 
 @dataclass(frozen=True, slots=True)
