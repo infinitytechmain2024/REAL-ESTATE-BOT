@@ -347,11 +347,13 @@ def review_reason(review: Any) -> str:
     return ("; ".join(parts) or "Все жёсткие критерии подтверждены")[:300]
 
 
+# A finding held because a must-have criterion is not mentioned (H11): never offered, only counted in the report.
+MANDATORY_UNKNOWN = "unverified_must"
 # Match.why -> the category the final report counts a held or excluded finding under (``campaign_findings.why``).
 CATEGORY = {"price": "budget", "currency": "budget", "location": "place", "foreign": "place", "deal": "deal",
             "type": "type", "rooms": "rooms", "area": "area", "area_max": "area", "area_unknown": "area_unknown",
             "kind": "kind", "unverified": "unverified", "ai": "ai", "criteria": "criteria",
-            "ai_failed": "ai_failed", "cost_cap": "cost_cap",
+            "ai_failed": "ai_failed", "cost_cap": "cost_cap", MANDATORY_UNKNOWN: MANDATORY_UNKNOWN,
             "approved_deviation": "approved"}
 # The reviewer's criterion -> the rules' ``Match.why``.
 CRITERION_WHY = {"place": "location", "deal": "deal", "type": "type", "budget": "price", "rooms": "rooms",
@@ -371,7 +373,7 @@ def _criterion_label(name: str) -> str:
     return CRITERION_RU.get(name) or (f"{'обязательно' if head == 'must_have' else 'исключить'}: {tail}" if tail else name)
 
 
-def review_match(rules: Match, review: dict[str, Any]) -> Match:
+def review_match(rules: Match, review: dict[str, Any], *, hold_mandatory: bool = False) -> Match:
     """The bucket of a finding from the rules' bucket and the reviewer's matrix (``review.to_dict``).
 
     * an approved deviation (``rules.why == "approved_deviation"``) is not a fail: a failed criterion the deviation
@@ -381,6 +383,8 @@ def review_match(rules: Match, review: dict[str, Any]) -> Match:
       ``area``): the near-match question is kept; a second or another failed criterion excludes;
     * the reviewer's ``reject`` without a failed criterion (not one concrete offer) -> excluded;
     * any hard ``unknown`` -> not exact: held as similar, «Не подтверждено: <criteria>»;
+    * ``hold_mandatory`` (H11): a ``must_have:`` criterion among the unknown ones -> ``MANDATORY_UNKNOWN``: the finding
+      is held the same way but never offered with the «similar» question;
     * ``near`` -> at least similar; all ``pass`` -> the rules' bucket.
     The result is never better than the rules' bucket.
     """
@@ -403,8 +407,12 @@ def review_match(rules: Match, review: dict[str, Any]) -> Match:
     if review.get("overall") == "reject":
         return Match("excluded", float("inf"), "ai")
     if unknown:
-        return worse(rules, Match("similar", rules.distance, "unverified",
-                                  note="Не подтверждено: " + ", ".join(_criterion_label(n) for n in unknown)))
+        why = MANDATORY_UNKNOWN if hold_mandatory and any(n.startswith("must_have:") for n in unknown) else "unverified"
+        note = "Не подтверждено: " + ", ".join(_criterion_label(n) for n in unknown)
+        result = worse(rules, Match("similar", rules.distance, why, note=note))
+        if why == MANDATORY_UNKNOWN and result.bucket == "similar":  # even when the rules held it as similar already
+            return Match("similar", result.distance, why, note=note)
+        return result
     if review.get("overall") == "near":
         return worse(rules, Match("similar", rules.distance, "ai"))
     return rules

@@ -238,7 +238,8 @@ class RunStore(Protocol):
     # exact / similar / other (migration 019, ``tolerance`` and ``offers``)
     async def hold_finding(self, campaign_id: str, finding_id: str, bucket: str, distance: float | None,
                            reason: str | None = None, why: str | None = None) -> bool: ...
-    async def held_findings(self, campaign_id: str, bucket: str, limit: int) -> list[StreamFinding]: ...
+    async def held_findings(self, campaign_id: str, bucket: str, limit: int,
+                            exclude_why: str | None = None) -> list[StreamFinding]: ...
     async def claim_held(self, campaign_id: str, finding_id: str) -> int | None: ...
     async def exact_count(self, campaign_id: str) -> int: ...
     async def offer_state(self, campaign_id: str, bucket: str) -> str | None: ...
@@ -776,7 +777,8 @@ class PostgresRunStore:
             why[:40] if why else None,
         ))
 
-    async def held_findings(self, campaign_id: str, bucket: str, limit: int) -> list[StreamFinding]:
+    async def held_findings(self, campaign_id: str, bucket: str, limit: int,
+                            exclude_why: str | None = None) -> list[StreamFinding]:
         """Held findings of one bucket, closest to the request first."""
         rows = await self.pool.fetch(
             f"""select f.id::text as id,
@@ -788,8 +790,9 @@ class PostgresRunStore:
                   join findings f on f.id = cf.finding_id
                   join collected_posts p on p.id = f.post_id
                  where cf.campaign_id = $1::uuid and cf.bucket = $2 and cf.state = 'held'
+                   and cf.why is distinct from $3
                  order by cf.distance nulls last, f.created_at, f.id limit {int(limit)}""",
-            campaign_id, bucket,
+            campaign_id, bucket, exclude_why,
         )
         return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
                               r["confidence"], r["vertical"], r["url"], r["hold_reason"]) for r in rows]
@@ -1407,10 +1410,11 @@ class MemoryRunStore:
         self.held.setdefault(campaign_id, {})[finding_id] = None
         return True
 
-    async def held_findings(self, campaign_id: str, bucket: str, limit: int) -> list[StreamFinding]:
+    async def held_findings(self, campaign_id: str, bucket: str, limit: int,
+                            exclude_why: str | None = None) -> list[StreamFinding]:
         order = list(self.held.get(campaign_id, {}))
         by_id = {f.id: f for f in self.findings.get(campaign_id, [])}
-        ids = [i for i in order if self.buckets[i][0] == bucket]
+        ids = [i for i in order if self.buckets[i][0] == bucket and (exclude_why is None or self.whys.get(i) != exclude_why)]
         ids.sort(key=lambda i: (self.buckets[i][1] is None, self.buckets[i][1] or 0.0, order.index(i)))
         return [replace(by_id[i], hold_reason=self.hold_reasons.get(i)) for i in ids[:limit]]
 
