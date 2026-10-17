@@ -600,7 +600,7 @@
    "deps": [
     "H8"
    ],
-   "status": "ready",
+   "status": "in_progress",
    "day": 6,
    "hours": 4
   },
@@ -612,7 +612,7 @@
    "deps": [
     "H7"
    ],
-   "status": "in_progress",
+   "status": "review",
    "day": 6,
    "hours": 2
   }
