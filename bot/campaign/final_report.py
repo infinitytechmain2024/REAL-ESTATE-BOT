@@ -28,6 +28,7 @@ from bot.agents.llm import LLMError, OpenRouterJSON
 from bot.utils.costs import CostSummary
 from bot.web_search.urls import PORTALS, SPAIN_BANK_PORTALS, SPAIN_PORTALS_BY_KIND, UKRAINE_PORTALS
 
+from .relevance import MANDATORY_UNKNOWN
 from .runs import OutcomeCount, SentFinding, SourceCount, StreamFinding
 from .summary import Site, plural, site_lines, site_name, site_stats
 from .tolerance import BUDGET_TOLERANCE, Request, classify, currency_code, price_of
@@ -97,6 +98,7 @@ class Tally:
     duplicates: int = 0
     excluded: dict[str, int] = field(default_factory=dict)  # reason category -> count
     unchecked: dict[str, int] = field(default_factory=dict)  # of ``held_unverified``: ``UNCHECKED`` reason -> count
+    held_must: int = 0  # of the held ones: a must-have criterion is not mentioned, never offered (H11)
 
     @property
     def sent(self) -> int:
@@ -129,7 +131,7 @@ class Tally:
 
 def tally(outcomes: Sequence[OutcomeCount]) -> Tally:
     """``RunStore.outcome_counts`` rows -> a ``Tally``; a finding still being sent counts as sent."""
-    sent_exact = sent_approved = similar = other = unverified = duplicates = 0
+    sent_exact = sent_approved = similar = other = unverified = duplicates = must = 0
     excluded: Counter[str] = Counter()
     unchecked: Counter[str] = Counter()
     for row in outcomes:
@@ -145,10 +147,12 @@ def tally(outcomes: Sequence[OutcomeCount]) -> Tally:
         elif row.bucket in ("similar", "other"):
             similar += row.count if row.bucket == "similar" else 0
             other += row.count if row.bucket == "other" else 0
+            if row.why == MANDATORY_UNKNOWN:
+                must += row.count
             if row.why in UNCHECKED:
                 unverified += row.count
                 unchecked[row.why] += row.count
-    return Tally(sent_exact, sent_approved, similar, other, unverified, duplicates, dict(excluded), dict(unchecked))
+    return Tally(sent_exact, sent_approved, similar, other, unverified, duplicates, dict(excluded), dict(unchecked), must)
 
 
 # --- the ranking -------------------------------------------------------------------------------------------------------
@@ -747,7 +751,7 @@ def investors_section(leads: LeadsSummary | None) -> list[str]:
 def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequence[str], unreadable: Sequence[Site],
                 recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None,
                 costs: Sequence[str] = (), evidence: Sequence[str] = (), task_text: str = "", section: str = "",
-                reserve: int = 0) -> str:
+                reserve: int = 0, must_note: str | None = None) -> str:
     """The Russian report (see the module notes), fitted to one Telegram message. ``costs``: ``cost_lines``.
     ``section``: a heading above the counts (the ``both`` report); ``reserve``: characters left for what follows."""
     limit = MAX_REPORT_CHARS - reserve
@@ -773,6 +777,8 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
                            f"Похожие, не показаны: {counts.held} (соответствие всем условиям не подтверждено)")
             if similar_note and counts.sent == 0:
                 summary.append(similar_note)
+            if must_note:
+                summary.append(must_note)
         if counts.rejected:
             summary.append(f"Отклонено: {counts.rejected}")
         if counts.duplicates:
@@ -802,6 +808,20 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
         if len(text) <= limit:
             return text
     return text[:limit].rstrip()
+
+
+def mandatory_note(counts: Tally, held: Sequence[HeldEvidence]) -> str | None:
+    """«Ещё N без упоминания: терраса»: the held findings whose must-have is not mentioned (H11)."""
+    if not counts.held_must:
+        return None
+    names: dict[str, None] = {}
+    for item in held:
+        review = item.review if isinstance(item.review, dict) else {}
+        for entry in review.get("criteria") or []:
+            if (isinstance(entry, dict) and entry.get("verdict") == "unknown"
+                    and str(entry.get("name")).startswith("must_have:")):
+                names[_criterion_label(str(entry["name"]))] = None
+    return f"Ещё {counts.held_must} без упоминания" + (": " + ", ".join(names) if names else "")
 
 
 def similar_note(counts: Tally, offers: Mapping[str, str | None] | None) -> str | None:
@@ -856,13 +876,15 @@ class FinalReporter:
         advice.extend(tip for tip in await self._advice(facts, counts) if tip not in advice)
         if vertical != "both":
             return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
-                               other_sites, note, cost_lines(costs, budget), evidence, task_text)
+                               other_sites, note, cost_lines(costs, budget), evidence, task_text,
+                               must_note=mandatory_note(counts, held))
         tail = "\n\n" + "\n".join(investors_section(leads))
         money = cost_lines(costs, budget) + branch_cost_line(costs)
         if money:
             tail += "\n\n" + "\n".join(money)
         return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
-                           other_sites, note, (), evidence, task_text, "🏠 Недвижимость", len(tail)) + tail
+                           other_sites, note, (), evidence, task_text, "🏠 Недвижимость", len(tail),
+                           mandatory_note(counts, held)) + tail
 
     async def _advice(self, facts: dict[str, Any], counts: Tally) -> list[str]:
         if facts["task"].get("only_exact"):

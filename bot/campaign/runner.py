@@ -69,6 +69,7 @@ from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
 from .reach import contact_card, contact_extras
 from .relevance import (
+    MANDATORY_UNKNOWN,
     Relevance,
     RelevanceJudge,
     finding_data,
@@ -245,7 +246,7 @@ UNVERIFIED_CAP = "Не проверено ИИ: лимит проверок ис
 UNVERIFIED_FAILED = "Не проверено ИИ: сбой проверки"
 UNVERIFIED_BUDGET = "Не проверено ИИ: бюджет прогона исчерпан"
 # Held findings whose owner-facing note is stored (``hold_reason``): the AI check could not run or could not confirm.
-NOTED_WHYS = frozenset({"unverified", "ai_failed", "cost_cap"})
+NOTED_WHYS = frozenset({"unverified", "ai_failed", "cost_cap", MANDATORY_UNKNOWN})
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,8 @@ class RunnerConfig:
     max_relevance_calls: int = 2000
     # No AI verdict (cap reached, paused after an error, no judge, failed call): an exact finding becomes similar.
     relevance_fail_closed: bool = True
+    # A must-have criterion the reviewer could not confirm: the finding is held and never offered (H11).
+    mandatory_unknown_hold: bool = False
     # A failed AI call (not a pause) is retried on a later step; after this many misses for one finding it is held.
     relevance_retry_limit: int = 5
     # An auction / nuda propiedad / usufructo listing is never exact for a purchase: held as «similar», «аукцион».
@@ -760,7 +763,7 @@ class CampaignRunner:
                 return Match("similar", match.distance, why, note=note or UNVERIFIED_FAILED)
             return match
         if verdict.review:  # the reviewer's criteria matrix decides (see ``relevance.review_match``)
-            return review_match(match, verdict.review)
+            return review_match(match, verdict.review, hold_mandatory=self.config.mandatory_unknown_hold)
         if verdict.verdict == "match":
             return match
         if verdict.verdict == "reject":
@@ -979,7 +982,8 @@ class CampaignRunner:
         for bucket in HELD_BUCKETS:
             state = states[bucket] = await self.store.offer_state(campaign.id, bucket)
             if state == "approved":
-                for finding in await self.store.held_findings(campaign.id, bucket, self.config.max_stream_per_step):
+                for finding in await self.store.held_findings(campaign.id, bucket, self.config.max_stream_per_step,
+                                                              exclude_why=self._unoffered(bucket)):
                     count = await self.store.claim_held(campaign.id, finding.id)
                     if count is None:
                         continue
@@ -992,7 +996,7 @@ class CampaignRunner:
                 continue
             if state is not None:  # asked and waiting, or declined: never sent
                 continue
-            held = await self.store.held_findings(campaign.id, bucket, 1)
+            held = await self.store.held_findings(campaign.id, bucket, 1, exclude_why=self._unoffered(bucket))
             if not held:
                 continue
             exact = await self.store.exact_count(campaign.id)
@@ -1000,10 +1004,15 @@ class CampaignRunner:
                 ask = True  # as soon as the first similar finding is held, not only at the end
             else:  # farther ones: after the search, once the similar question is out of the way
                 ask = not active and states["similar"] != "asked" and not (
-                    states["similar"] is None and await self.store.held_findings(campaign.id, "similar", 1))
+                    states["similar"] is None and await self.store.held_findings(
+                        campaign.id, "similar", 1, exclude_why=self._unoffered("similar")))
             if ask:
                 await self._ask(campaign, bucket, request, held[0], exact_found=exact > 0)
                 states[bucket] = await self.store.offer_state(campaign.id, bucket)
+
+    def _unoffered(self, bucket: str) -> str | None:
+        """The ``why`` of held findings that are never offered or streamed (H11), None when the flag is off."""
+        return MANDATORY_UNKNOWN if self.config.mandatory_unknown_hold and bucket == "similar" else None
 
     async def _ask(self, campaign: Campaign, bucket: offers.OfferBucket, request: Request, closest: StreamFinding,
                    *, exact_found: bool) -> None:
@@ -1013,7 +1022,8 @@ class CampaignRunner:
             deviation = await self._deviation(campaign, request, closest)
             if deviation.kind == "unverified":  # name every unconfirmed criterion across the held similar findings
                 names = dict.fromkeys(deviation.unknown)
-                for other in await self.store.held_findings(campaign.id, "similar", 50):
+                for other in await self.store.held_findings(campaign.id, "similar", 50,
+                                                            exclude_why=self._unoffered("similar")):
                     names.update(dict.fromkeys(offers.unknown_of(other.hold_reason)))
                 deviation = replace(deviation, unknown=tuple(names))
             text = offers.similar_question(deviation, exact_found=exact_found)
