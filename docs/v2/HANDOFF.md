@@ -222,6 +222,14 @@
     `docker compose --env-file .env --profile ops up -d watchdog`. Профиль также включает остальные сервисы под
     `COMPOSE_PROFILES`, если значение содержит их имена (`collector`, `analysis` и др.): при дописывании `ops`
     сохраняйте уже заданные профили в той же строке.
+17. **`facebook-runner` не выходил в интернет (исправлено 17.10).** Сервис был только в `backend` (`internal: true`),
+    поэтому на проде при `FEATURE_APIFY_FACEBOOK=true` запуск актора давал `apify_launch_unknown` ×2 и оценку $0.50 ×2
+    (`ConnectError: Temporary failure in name resolution`), запусков в Apify не было. Теперь `facebook-runner` и
+    `facebook-collector` в `[backend, egress]` (`docker-compose.yml`); `tests/test_deployment.py` требует `egress` у
+    каждого сервиса с `APIFY_TOKEN`. Нужен `up -d` с новым compose. Оценки $0.50 в `campaign_costs` по тем кампаниям
+    остаются как есть. Там же `.env` содержал заглушку `APIFY_FACEBOOK_ACTOR_BUILD=ВСТАВЬТЕ_НОМЕР_БИЛДА`, и она ушла в
+    `apify_runs.actor_build`: теперь билд обязан быть вида `0.1.23` или тегом (`beta`), не `latest`; иначе сервис падает
+    на старте (то же для `APIFY_FACEBOOK_COMMENTS_ACTOR_BUILD`).
 
 ## 5. Как читать золотой набор и оценку
 

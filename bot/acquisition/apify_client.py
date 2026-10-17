@@ -58,6 +58,18 @@ def valid_id(value: object) -> str:
     return text
 
 
+_BUILD_NUMBER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_BUILD_TAG = re.compile(r"[a-z][a-z0-9-]{0,39}")
+
+
+def check_pinned_build(name: str, build: str) -> None:
+    """A pinned build is a number like 0.1.23 or a tag like beta; a placeholder, spaces or «latest» are not."""
+    value = build.strip()
+    ok = value.isascii() and (_BUILD_NUMBER.fullmatch(value) or _BUILD_TAG.fullmatch(value)) and value != "latest"
+    if not ok:
+        raise ValueError(f"{name} must be a pinned build like 0.1.23")
+
+
 def actor_path(actor_id: str) -> str:
     """``owner/name`` -> ``owner~name`` (the URL form); anything else is refused."""
     if not _ACTOR.fullmatch(actor_id or ""):

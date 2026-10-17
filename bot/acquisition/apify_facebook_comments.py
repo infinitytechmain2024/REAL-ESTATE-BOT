@@ -29,6 +29,7 @@ from bot.acquisition.apify_client import (
     ApifyHttp,
     TemporaryApifyError,
     actor_path,
+    check_pinned_build,
 )
 from bot.campaign.leads import Comment, parse_comments
 
@@ -51,8 +52,7 @@ class CommentsConfig:
         actor_path(self.actor_id)
         if self.posts_actor_id:
             actor_path(self.posts_actor_id)
-        if not self.build.strip() or self.build.strip().lower() == "latest":
-            raise ValueError("APIFY_FACEBOOK_COMMENTS_ACTOR_BUILD must name a pinned build")
+        check_pinned_build("APIFY_FACEBOOK_COMMENTS_ACTOR_BUILD", self.build)
         if not (1 <= self.max_comments <= 1000 and 1 <= self.page_size <= 1000
                 and math.isfinite(self.max_usd_per_post) and 0 < self.max_usd_per_post <= 100
                 and 30 <= self.timeout_seconds <= 3600):

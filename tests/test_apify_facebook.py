@@ -276,7 +276,7 @@ def test_the_config_requires_a_pinned_build() -> None:
     with pytest.raises(ValueError, match="pinned build"):
         ApifyFacebookConfig(build="latest")
     with pytest.raises(ValueError, match="unsafe"):
-        ApifyFacebookConfig(build="1.0", max_usd_per_run=20, max_usd_per_campaign=10)
+        ApifyFacebookConfig(build="1.0.0", max_usd_per_run=20, max_usd_per_campaign=10)
 
 
 async def test_closed_groups_go_to_the_browser_collector_once(ledger) -> None:

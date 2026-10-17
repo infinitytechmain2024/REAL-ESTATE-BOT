@@ -19,8 +19,8 @@
 
 | Что | Нужно для | Статус |
 |---|---|---|
-| O2: `APIFY_TOKEN` уже в `.env`; тариф Apify **Free, потолок $8/мес** (решение 16.10, Starter не берём): после каждых 2–3 кампаний смотреть Usage в Console, при $7 остановиться; `APIFY_FACEBOOK_SCOPE=all` не включать | блоки (б), (в), (г) | проверить: `grep -c '^APIFY_TOKEN=.' .env` даёт `1` |
-| O10: бюджет кампании `CAMPAIGN_BUDGET_USD=5`; потолок на D1 **$7** суммарно (оценка золотого набора $4–6) | все проверочные кампании | решено 16.10 |
+| O2: `APIFY_TOKEN` уже в `.env`; Apify на **автооплате** (Starter или auto-recharge), лимит в Console по выбору владельца, например $50 (решение 17.10; прежний потолок $8 и правило «смотреть Usage после 2–3 кампаний» сняты); `APIFY_FACEBOOK_SCOPE=all` (группы) без отдельного решения не включать | блоки (б), (в), (г) | проверить: `grep -c '^APIFY_TOKEN=.' .env` даёт `1` |
+| O10: бюджет кампании `CAMPAIGN_BUDGET_USD=5`; потолок D1 $7 снят 17.10 (лимит задаёт Apify Console; `CAMPAIGN_BUDGET_USD=5` остаётся защитой от сбоя) | все проверочные кампании | решено 17.10 |
 | O1: письменное решение клиента по `COMPLIANCE.md` §4 (отправка содержимого групп в Apify) | блоки (в), (г): ⛔ без него не включать | есть / нет |
 | Закреплённый билд актора Facebook-групп (Apify Console, страница актора `apify/facebook-groups-scraper`, вкладка Builds, номер вида `0.1.23`, **не** `latest`) | блок (в) | записать |
 | То же для `apify/facebook-comments-scraper` | блок (г) | записать |
@@ -324,6 +324,11 @@ printf '%s\n' 'APIFY_PISOS_ENABLED=false' 'APIFY_HABITACLIA_ENABLED=false' 'APIF
 Первая чистка и крон описаны в разделе 6; перед первым включением прогнать:
 `docker compose --env-file .env run --rm facebook-runner python -m bot.facebook_collector.apify.retention --dry-run`.
 
+Перед включением проверить: (1) compose обновлён, `facebook-runner` в сети `egress`:
+`docker inspect $(docker compose --env-file .env ps -q facebook-runner) --format '{{json .NetworkSettings.Networks}}'`
+показывает `backend` и `egress` (иначе Apify недоступен: `apify_launch_unknown`); (2) билд вида `0.1.23` (или тег
+вроде `beta`), не заглушка и не `latest`: иначе сервис не стартует.
+
 **(в1) Один прогон, `scope=campaign`.**
 
 ```bash
@@ -401,7 +406,11 @@ psqlc "select stage, kind, code, sum(units), sum(cost_usd) from campaign_costs w
 echo 'APIFY_FACEBOOK_COMMENTS_ENABLED=false' >> .env && docker compose --env-file .env up -d telegram campaign-runner
 ```
 
-**(г2) Лиды под объектами кампании через Apify (`LEADS_PROVIDER`).** Дневной лимит `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=40` (умолчание).
+**(г2) Лиды под объектами кампании через Apify (`LEADS_PROVIDER`).** Дневной лимит `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY` по умолчанию 40; по решению 17.10 ставим 500 (максимум поля), потолок одного чтения `max_usd_per_post` ($1) остаётся:
+
+```bash
+echo 'APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=500' >> .env
+```
 
 ```bash
 cat >> .env <<'ENV'
