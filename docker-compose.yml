@@ -228,7 +228,8 @@ services:
       APIFY_FACEBOOK_SCOPE: ${APIFY_FACEBOOK_SCOPE:-campaign}
       APIFY_FACEBOOK_BROWSER_FALLBACK: ${APIFY_FACEBOOK_BROWSER_FALLBACK:-true}
       CAMPAIGN_BUDGET_USD: ${CAMPAIGN_BUDGET_USD:-5}
-    networks: [backend]
+    # Apify API (api.apify.com) is reached from here; `browser` stays on `backend` only.
+    networks: [backend, egress]
     security_opt: [no-new-privileges:true]
     read_only: true
     tmpfs: [/tmp]
@@ -270,7 +271,8 @@ services:
       APIFY_FACEBOOK_SCOPE: ${APIFY_FACEBOOK_SCOPE:-campaign}
       APIFY_FACEBOOK_BROWSER_FALLBACK: ${APIFY_FACEBOOK_BROWSER_FALLBACK:-true}
       CAMPAIGN_BUDGET_USD: ${CAMPAIGN_BUDGET_USD:-5}
-    networks: [backend]
+    # Apify API (api.apify.com) is reached from here; `browser` stays on `backend` only.
+    networks: [backend, egress]
     security_opt: [no-new-privileges:true]
     healthcheck:
       test: ["CMD", "python", "-m", "bot.facebook_collector.healthcheck"]

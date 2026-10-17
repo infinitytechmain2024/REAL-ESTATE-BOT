@@ -49,3 +49,27 @@ def test_on_with_everything_gives_the_provider_config(monkeypatch: pytest.Monkey
     config = s.apify_config()
     assert config is not None and (config.build, config.max_usd_per_run, config.timeout_seconds) == ("1.2.3", 2.0, 600)
     assert "apify_api_SECRET" not in repr(s)
+
+
+@pytest.mark.parametrize("build", ["ВСТАВЬТЕ_НОМЕР_БИЛДА", "latest", "LATEST", "", " ", "0.1", "1.2.3 beta", "-x"])
+def test_a_placeholder_or_unpinned_build_is_rejected(build: str) -> None:
+    from bot.acquisition.apify_facebook_comments import CommentsConfig
+    from bot.facebook_collector.apify.provider import ApifyFacebookConfig
+
+    with pytest.raises(ValueError, match=r"pinned build like 0\.1\.23"):
+        ApifyFacebookConfig(build=build)
+    with pytest.raises(ValueError, match=r"pinned build like 0\.1\.23"):
+        CommentsConfig(build=build)
+
+
+@pytest.mark.parametrize("build", ["0.1.23", "beta"])
+def test_a_numbered_or_tagged_build_is_accepted(build: str) -> None:
+    from bot.acquisition.apify_facebook_comments import CommentsConfig
+    from bot.facebook_collector.apify.provider import ApifyFacebookConfig
+
+    assert ApifyFacebookConfig(build=build).build == build and CommentsConfig(build=build).build == build
+
+
+def test_the_placeholder_build_stops_the_service_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError, match=r"pinned build like 0\.1\.23"):
+        settings(monkeypatch, FEATURE_APIFY_FACEBOOK="true", APIFY_TOKEN="x", APIFY_FACEBOOK_ACTOR_BUILD="ВСТАВЬТЕ_НОМЕР_БИЛДА")
