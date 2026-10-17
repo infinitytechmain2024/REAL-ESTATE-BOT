@@ -19,7 +19,7 @@
 
 | Что | Нужно для | Статус |
 |---|---|---|
-| O2: `APIFY_TOKEN` уже в `.env`; тариф Apify **Free, потолок $8/мес** (решение 16.10, Starter не берём): после каждых 2–3 кампаний смотреть Usage в Console, при $7 остановиться; `APIFY_FACEBOOK_SCOPE=all` не включать | блоки (б), (в), (г) | проверить: `grep -c '^APIFY_TOKEN=.' .env` даёт `1` |
+| O2: `APIFY_TOKEN` уже в `.env`; Apify с автооплатой, лимит в Console по выбору владельца; квота комментариев `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0`; после каждых 2–3 кампаний смотреть Usage в Console; `APIFY_FACEBOOK_SCOPE=all` не включать | блоки (б), (в), (г) | проверить: `grep -c '^APIFY_TOKEN=.' .env` даёт `1` |
 | O10: бюджет кампании `CAMPAIGN_BUDGET_USD=5`; потолок на D1 **$7** суммарно (оценка золотого набора $4–6) | все проверочные кампании | решено 16.10 |
 | O1: письменное решение клиента по `COMPLIANCE.md` §4 (отправка содержимого групп в Apify) | блоки (в), (г): ⛔ без него не включать | есть / нет |
 | Закреплённый билд актора Facebook-групп (Apify Console, страница актора `apify/facebook-groups-scraper`, вкладка Builds, номер вида `0.1.23`, **не** `latest`) | блок (в) | записать |
@@ -337,6 +337,8 @@ CAMPAIGN_BUDGET_USD=1
 ENV
 docker compose --env-file .env up -d facebook-runner
 docker compose --env-file .env logs --tail=20 facebook-runner      # не должно быть отказа про build / token
+# сеть facebook-runner (после up -d); то же для facebook-collector при профиле collector
+docker inspect "$(docker compose --env-file .env ps -q facebook-runner)" --format '{{json .NetworkSettings.Networks}}'
 ```
 
 Создать кампанию с одной открытой группой и перевести её на Apify (SQL из `docs/apify_adapter.md`):
@@ -401,7 +403,7 @@ psqlc "select stage, kind, code, sum(units), sum(cost_usd) from campaign_costs w
 echo 'APIFY_FACEBOOK_COMMENTS_ENABLED=false' >> .env && docker compose --env-file .env up -d telegram campaign-runner
 ```
 
-**(г2) Лиды под объектами кампании через Apify (`LEADS_PROVIDER`).** Дневной лимит `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=40` (умолчание); по решению владельца 17.10 в `.env` ставим `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0` (0 = без дневной квоты; потолок `APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST` и бюджет кампании остаются).
+**(г2) Лиды под объектами кампании через Apify (`LEADS_PROVIDER`).** Дневной лимит `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=40` (умолчание); по решению владельца 17.10 в `.env` ставим `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0` (0 = без дневной квоты). Худший случай при `0`: ограничивают только `APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST` ($1 на пост), `CAMPAIGN_BUDGET_USD` ($5 на кампанию) и лимит в Apify Console.
 
 ```bash
 cat >> .env <<'ENV'
@@ -414,7 +416,7 @@ docker compose --env-file .env up -d campaign-runner
 больше 0, расходы в `campaign_costs`. Если `COMMENTS_ENABLED` не включён, бот пишет предупреждение и читает браузером. Откат:
 
 ```bash
-echo 'LEADS_PROVIDER=browser' >> .env && docker compose --env-file .env up -d campaign-runner
+printf 'LEADS_PROVIDER=browser\nAPIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=40\n' >> .env && docker compose --env-file .env up -d campaign-runner
 ```
 
 ### (д) Приглашения в закрытые группы, отчёт по инвесторам, режим «оба»
