@@ -46,7 +46,7 @@ REPLIES: dict[str, str] = {
 class Deviation:
     """What the closest held listing has outside the criteria, for the «Одобрить» question.
 
-    ``kind``: price | area | area_unknown | unverified | other. ``example`` / ``requested``: «~60 000 €» / «~50 000 €» (price),
+    ``kind``: price | area | area_unknown | unverified | deal_kind | other. ``example`` / ``requested``: «~60 000 €» / «~50 000 €» (price),
     «~1 600 м²» / «от 2 000 м²» (area). ``phrase``: a short Russian phrase that completes
     «есть варианты …» («дальше от метро»), from the relevance check.
     """
@@ -87,6 +87,10 @@ def similar_question(deviation: Deviation | None = None, *, exact_found: bool) -
         if exact_found:
             return "Есть ещё варианты, которые не удалось проверить автоматически. Показать?"
         return f"По вашим критериям пока ничего не нашёл, но есть {lead}. Показать?"
+    if deviation is not None and deviation.kind == "deal_kind" and deviation.phrase:
+        if exact_found:
+            return f"Есть ещё варианты другого вида сделки ({deviation.phrase}). Показать?"
+        return f"По вашим критериям пока ничего не нашёл, но есть варианты другого вида сделки ({deviation.phrase}). Показать?"
     if deviation is not None and deviation.kind == "area_unknown":
         if exact_found:
             return "Есть ещё похожие варианты (площадь не указана). Показать?"
@@ -118,6 +122,8 @@ def card_line(deviation: Deviation) -> str | None:
         if deviation.unknown:
             return f"≈ Не подтверждено: {', '.join(deviation.unknown)}"
         return "≈ Не подтверждено: не удалось проверить автоматически"
+    if deviation.kind == "deal_kind" and deviation.phrase:
+        return f"≈ Отличается: {deviation.phrase}"
     if deviation.phrase:
         return f"≈ Отличается: {deviation.phrase}"
     return None

@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -77,6 +78,7 @@ class Entry:
     code: str = ""
     units: int = 1
     cost_usd: float = 0.0
+    at: datetime | None = None  # when it was booked (the in-memory ledger's ``off_campaign`` window); the database has its own
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +90,8 @@ class CostSummary:
     errors: dict[str, int] = field(default_factory=dict)   # "stage:code" -> count
     skips: dict[str, int] = field(default_factory=dict)    # "stage:code" -> count
     estimates: dict[str, float] = field(default_factory=dict)  # stage -> unconfirmed USD already included in by_stage
+    # Model -> USD of LLM calls made by nobody's campaign (no ``campaign_id``) while this one ran; not in ``total``.
+    off_campaign: dict[str, float] = field(default_factory=dict)
 
     @property
     def total(self) -> float:
@@ -147,6 +151,15 @@ class MemoryLedger:
     async def summary(self, campaign_id: str) -> CostSummary:
         return _summary([e for e in self.entries if e.campaign_id == campaign_id])
 
+    async def off_campaign(self, since: datetime, until: datetime) -> dict[str, float]:
+        """LLM spend without a campaign between ``since`` and ``until``, by model."""
+        found: Counter[str] = Counter()
+        for e in self.entries:
+            if (e.campaign_id is None and e.stage == "llm" and e.kind == "cost" and e.cost_usd > 0
+                    and (e.at is None or since <= e.at <= until)):
+                found[e.item or "?"] += e.cost_usd
+        return dict(found)
+
 
 class PostgresLedger:
     def __init__(self, pool: asyncpg.Pool[asyncpg.Record]) -> None:
@@ -186,6 +199,14 @@ class PostgresLedger:
                  from campaign_costs where campaign_id = $1::uuid group by 1, 2, 3, 4""", campaign_id)
         return _summary([Entry(campaign_id, r["stage"], r["kind"], "", r["item"], r["code"], r["units"], r["cost"])
                          for r in rows])
+
+    async def off_campaign(self, since: datetime, until: datetime) -> dict[str, float]:
+        """LLM spend without a campaign between ``since`` and ``until``, by model (the hybrid agents' calls)."""
+        rows = await self.pool.fetch(
+            """select coalesce(item, '') as item, sum(cost_usd)::float8 as cost from campaign_costs
+                where campaign_id is null and stage = 'llm' and kind = 'cost'
+                  and created_at between $1 and $2 group by 1""", since, until)
+        return {r["item"] or "?": float(r["cost"]) for r in rows if r["cost"] and r["cost"] > 0}
 
 
 # --- the process-wide sink and the current campaign ------------------------------------------------------------------

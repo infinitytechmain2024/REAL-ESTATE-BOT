@@ -40,6 +40,7 @@ class Site:
     held: int = 0
     unverified: bool = False   # the site asked for a person's check and nobody passed it
     read_api: int = 0
+    api_empty: bool = False    # its API source run finished and returned no listing
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -74,13 +75,15 @@ def _sites(sources: Sequence[SourceCount], reports: Sequence[object], portals: S
         for name in ("links", "read", "read_api", "from_search", "refused", "queries", "results"):
             row[name] = row.get(name, 0) + int(getattr(report, name, 0) or 0)
         row["unverified"] = row.get("unverified", 0) or int(bool(getattr(report, "unverified", False)))
+        row["api_empty"] = row.get("api_empty", 0) or int(getattr(report, "api_empty", False) is True)
     for source in sources:
         if source.platform != "website":
             continue
         row = merged.setdefault(_portal_of(source.name, portals) or source.name, {})
         for name, value in (("posts", source.posts), ("sent", source.sent), ("held", source.held)):
             row[name] = row.get(name, 0) + value
-    return {host: Site(host, **{**row, "unverified": bool(row.get("unverified"))}) for host, row in merged.items()}
+    return {host: Site(host, **{**row, "unverified": bool(row.get("unverified")), "api_empty": bool(row.get("api_empty"))})
+            for host, row in merged.items()}
 
 
 def site_stats(sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = ()) -> dict[str, Site]:
@@ -110,7 +113,9 @@ def _site_line(site: Site) -> str:
 
 def _nothing_line(site: Site) -> str:
     """A portal with no links: why, from its ``site:`` queries."""
-    if site.queries and not site.results:
+    if site.api_empty:
+        why = "0 объявлений по запросу"
+    elif site.queries and not site.results:
         why = f"поиск ничего не вернул ({plural(site.queries, 'запрос', 'запроса', 'запросов')})"
     elif site.queries:
         why = "в поиске были только чужие или уже прочитанные ссылки"

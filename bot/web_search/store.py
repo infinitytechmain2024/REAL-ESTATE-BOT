@@ -148,11 +148,23 @@ def _site_queries(rows: list[tuple[str, int]]) -> dict[str, tuple[int, int]]:
     return out
 
 
+# The portal behind each structured source (``ListingSource.name``), for «its API run found nothing».
+_SOURCE_HOSTS = {"apify_idealista": "idealista.com", "apify_fotocasa": "fotocasa.es", "apify_yaencontre": "yaencontre.com",
+                 "apify_pisos": "pisos.com", "apify_habitaclia": "habitaclia.com", "apify_milanuncios": "milanuncios.com"}
+
+
+def _empty_hosts(runs: list[SourceRun]) -> frozenset[str]:
+    """Portals whose source run completed with no listing (a run that failed or is still going says nothing)."""
+    return frozenset(_SOURCE_HOSTS[r.name] for r in runs if r.state == "completed" and not r.listings
+                     and r.name in _SOURCE_HOSTS)
+
+
 def _reports(queries: dict[str, tuple[int, int]], urls: dict[str, list[int]],
-             unverified: frozenset[str] = frozenset(), api_reads: dict[str, int] | None = None) -> list[SiteReport]:
-    hosts = sorted(set(queries) | set(urls))
+             unverified: frozenset[str] = frozenset(), api_reads: dict[str, int] | None = None,
+             api_empty: frozenset[str] = frozenset()) -> list[SiteReport]:
+    hosts = sorted(set(queries) | set(urls) | api_empty)
     return [SiteReport(h, *queries.get(h, (0, 0)), *urls.get(h, [0, 0, 0, 0]), h in unverified,
-                       (api_reads or {}).get(h, 0)) for h in hosts]
+                       (api_reads or {}).get(h, 0), h in api_empty) for h in hosts]
 
 
 def _url_bucket(state: str, detail: str | None) -> int | None:
@@ -636,7 +648,7 @@ class PostgresWebStore:
             if r["state"] == "fetched" and r["layer"] == "api" and r["detail"] != "search_snippet":
                 api_reads[r["host"]] = api_reads.get(r["host"], 0) + r["n"]
         return _reports(_site_queries([(r["query_text"], r["results"]) for r in queries]), counts,
-                        frozenset(unverified), api_reads)
+                        frozenset(unverified), api_reads, _empty_hosts(await self.source_runs(campaign_id)))
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         row = await self.pool.fetchrow(
@@ -1306,7 +1318,8 @@ class MemoryWebStore:
                 unverified.add(u.host)
             if u.state == "fetched" and u.layer == "api" and u.detail != "search_snippet":
                 api_reads[u.host] = api_reads.get(u.host, 0) + 1
-        return _reports(_site_queries(queries), counts, frozenset(unverified), api_reads)
+        return _reports(_site_queries(queries), counts, frozenset(unverified), api_reads,
+                        _empty_hosts(await self.source_runs(campaign_id)))
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         state = self._campaign_state(campaign_id)

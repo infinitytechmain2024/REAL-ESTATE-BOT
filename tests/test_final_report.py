@@ -275,12 +275,12 @@ async def test_the_best_cards_come_first_by_budget_rooms_area_and_evidence() -> 
     sent = await store.recent_sent_findings(cid)
     assert {s.finding.id for s in sent} == {"f1", "f2", "f3", "f4"}
     ranked = rank_cards(sent, request)
-    assert [r.card.finding.id for r in ranked] == ["f3", "f1", "f2", "f4"]  # nearest the budget with the asked rooms first
+    assert [r.card.finding.id for r in ranked] == ["f2", "f3", "f1", "f4"]  # the asked rooms first, the cheaper of equals first (150 000 before 199 000)
     assert all(0 <= r.score <= 1 for r in ranked) and ranked[0].score > ranked[-1].score
     assert len(rank_cards(sent, request, limit=2)) == 2
 
     # the pieces of the score
-    assert card_score(flat(200_000, 2, 60, "x", 1), request) > card_score(flat(150_000, 2, 60, "x", 1), request)
+    assert card_score(flat(200_000, 2, 60, "x", 1), request) == card_score(flat(150_000, 2, 60, "x", 1), request)
     assert card_score(flat(220_000, 2, 60, "x", 1), request) < card_score(flat(150_000, 2, 60, "x", 1), request)
     assert card_score(flat(190_000, 2, 60, "x", 1), request) > card_score(flat(190_000, None, 60, "x", 1), request)
     assert card_score(flat(190_000, 2, 60, "x", 1), request) > card_score({"price_amount": 190_000}, request)
@@ -312,9 +312,9 @@ async def test_the_user_gets_one_report_with_counts_reasons_top_sites_and_advice
     # the ten best sent cards, ranked, each with its link
     best = lines[lines.index("Лучшие варианты (4):") + 1:lines.index("Не удалось прочитать:")]
     numbered = [line for line in best if line[:2] in ("1.", "2.", "3.", "4.")]
-    places = ("Campanar", "Ruzafa", "Benimaclet", "El Cabanyal")
+    places = ("Benimaclet", "Campanar", "Ruzafa", "El Cabanyal")  # equal fit: the cheaper one first
     assert [next(w for w in places if w in n) for n in numbered] == list(places)
-    assert numbered[0].startswith("1. 199 000 € · 2 комн. · 60 м² · Campanar, Valencia · карточка №")
+    assert numbered[1].startswith("2. 199 000 € · 2 комн. · 60 м² · Campanar, Valencia · карточка №")
     assert "   https://www.idealista.com/inmueble/3/" in lines
     # the funnel of each site and the sites that could not be read, with why
     assert any(line.startswith("• Idealista — 14 ссылок в поиске") for line in lines)
