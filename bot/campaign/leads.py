@@ -501,7 +501,7 @@ class CommentConfig:
     apify_reads_per_day: int = 40  # its own day quota: ``reads_per_day`` is the browser's
 
     def __post_init__(self) -> None:
-        if (not 0 <= self.reads_per_day <= 500 or not 0 <= self.apify_reads_per_day <= 500 or not 1 <= self.reads_per_round <= 10 or self.max_attempts < 1
+        if (not 0 <= self.reads_per_day <= 500 or not 0 <= self.apify_reads_per_day <= 100_000 or not 1 <= self.reads_per_round <= 10 or self.max_attempts < 1
                 or self.pause_min_seconds < 0 or self.pause_max_seconds < self.pause_min_seconds
                 or not 1_000 <= self.snapshot_timeout_ms <= 60_000):
             raise ValueError("unsafe comment reader settings")
@@ -589,7 +589,8 @@ class CommentLeadWorker:
     async def _step_reader(self, reader: CommentReader) -> int:
         """``LEADS_PROVIDER=apify``: no Facebook profile, no browser; one paid run per post, ``apify_reads_per_day``."""
         store = cast("ApifyReadStore", self.store)
-        left = self.config.apify_reads_per_day - await store.apify_reads_today()
+        quota = self.config.apify_reads_per_day  # 0 = no day quota (the per-post USD cap and the campaign budget stay)
+        left = self.config.reads_per_round if quota == 0 else quota - await store.apify_reads_today()
         if left <= 0:
             return 0
         done = 0

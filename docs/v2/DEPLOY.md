@@ -401,7 +401,7 @@ psqlc "select stage, kind, code, sum(units), sum(cost_usd) from campaign_costs w
 echo 'APIFY_FACEBOOK_COMMENTS_ENABLED=false' >> .env && docker compose --env-file .env up -d telegram campaign-runner
 ```
 
-**(г2) Лиды под объектами кампании через Apify (`LEADS_PROVIDER`).** Дневной лимит `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=40` (умолчание).
+**(г2) Лиды под объектами кампании через Apify (`LEADS_PROVIDER`).** Дневной лимит `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=40` (умолчание); по решению владельца 17.10 в `.env` ставим `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0` (0 = без дневной квоты; потолок `APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST` и бюджет кампании остаются).
 
 ```bash
 cat >> .env <<'ENV'

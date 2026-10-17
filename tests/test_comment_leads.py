@@ -542,6 +542,33 @@ async def test_apify_day_quota_is_its_own(ledger) -> None:
     assert await _apify_worker(api, store, apify_reads_per_day=2).step() == 1  # the browser's 500 does not count
 
 
+async def test_apify_day_quota_zero_means_no_quota(ledger) -> None:
+    from tests.test_post_leads import Api, thirty
+
+    api = Api(items=thirty())
+    store = MemoryLeadStore([_read(1)], apify_today=1000)
+    assert await _apify_worker(api, store, apify_reads_per_day=0).step() == 1
+    assert len(api.launches()) == 1
+
+
+async def test_apify_day_quota_40_skips_the_41st(ledger) -> None:
+    from tests.test_post_leads import Api, thirty
+
+    api = Api(items=thirty())
+    store = MemoryLeadStore([_read(1)], apify_today=40)
+    assert await _apify_worker(api, store, apify_reads_per_day=40).step() == 0
+    assert api.launches() == [] and len(store.queued) == 1
+
+
+def test_apify_day_quota_negative_is_a_settings_error() -> None:
+    from pydantic import ValidationError
+
+    from bot.campaign.settings import CampaignRunnerSettings
+
+    with pytest.raises(ValidationError):
+        CampaignRunnerSettings(APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=-1)
+
+
 async def test_apify_a_lost_launch_answer_fails_the_read_with_an_estimate(ledger) -> None:
     import httpx
 

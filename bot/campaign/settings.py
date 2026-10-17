@@ -158,7 +158,7 @@ class CampaignRunnerSettings(BaseSettings):
     # Who reads the comments under sent objects (v2 B2): browser (default, unchanged) or apify (needs the flag above,
     # else a warning and browser). Its day quota is its own: SAFETY_MAX_FACEBOOK_COMMENT_READS_PER_DAY is the browser's.
     leads_provider: str = Field(default="browser", pattern="^(browser|apify)$", validation_alias="LEADS_PROVIDER")
-    apify_comments_max_per_day: int = Field(default=40, ge=0, le=500, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY")
+    apify_comments_max_per_day: int = Field(default=40, ge=0, le=100_000, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY")
 
     @model_validator(mode="after")
     def _comments_ready(self) -> CampaignRunnerSettings:
