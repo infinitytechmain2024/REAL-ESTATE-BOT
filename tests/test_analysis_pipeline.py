@@ -490,3 +490,74 @@ def test_payload_is_unchanged_without_line_flag_website_or_with_broken_json(monk
     assert not keys & finding_payload(_res(), evidence(text=f"{LD_LINE}\nFlat", platform="facebook")).keys()
     monkeypatch.setenv("CARD_EXTRA_FIELDS", "false")
     assert not keys & finding_payload(_res(), evidence(text=f"{LD_LINE}\nFlat", platform="website")).keys()
+
+
+def _scripted_openrouter(monkeypatch, contents):
+    """Answers the n-th call with ``contents[n]`` (the last one repeats); returns the sent payloads."""
+    sent: list[dict] = []
+
+    def handler(request: httpx_module.Request) -> httpx_module.Response:
+        sent.append(json.loads(request.content))
+        content = contents[min(len(sent) - 1, len(contents) - 1)]
+        return httpx_module.Response(200, json={"choices": [{"message": {"content": content}}],
+                                                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001}})
+
+    monkeypatch.setattr(httpx_module, "AsyncClient", lambda **kw: _REAL_CLIENT(transport=httpx_module.MockTransport(handler), **kw))
+    return sent
+
+
+async def _run_invalid_retry(monkeypatch, contents, **analyzer_kw):
+    from bot.analysis_pipeline.main import analyse_batch
+    from bot.analysis_pipeline.openrouter import OpenRouterAnalyzer
+    from bot.utils import costs
+
+    sent = _scripted_openrouter(monkeypatch, contents)
+    ledger = costs.MemoryLedger()
+    monkeypatch.setitem(costs._state, "ledger", ledger)
+    monkeypatch.setitem(costs._state, "budget", 0.0)
+    store = _BatchStore()
+    formatted, _ = await analyse_batch(store, AnalysisPipeline(OpenRouterAnalyzer("k", "main/model", **analyzer_kw)),
+                                       batch_size=5, claim_seconds=60, model="main/model")
+    return sent, [(e.kind, e.code) for e in ledger.entries], formatted
+
+
+GARBAGE = "not json at all"
+
+
+@pytest.mark.asyncio
+async def test_invalid_answer_is_not_retried_while_the_flag_is_off(monkeypatch):
+    sent, entries, formatted = await _run_invalid_retry(monkeypatch, [GARBAGE, json.dumps(V6)], fallback_model="fb/model")
+    assert len(sent) == 1 and formatted["real_estate"] == []
+    assert [e for e in entries if e[0] == "error"] == [("error", "invalid_structured_model_response")]
+
+
+@pytest.mark.asyncio
+async def test_invalid_answer_is_retried_once_and_the_finding_is_saved(monkeypatch):
+    sent, entries, formatted = await _run_invalid_retry(monkeypatch, [GARBAGE, json.dumps(V6)], invalid_retry=True)
+    assert [p["model"] for p in sent] == ["main/model", "main/model"] and len(formatted["real_estate"]) == 1
+    assert [e for e in entries if e[0] == "error"] == [("error", "invalid_structured_model_response")]
+    assert sum(1 for e in entries if e[0] == "cost") == 2
+
+
+@pytest.mark.asyncio
+async def test_a_second_invalid_answer_goes_to_the_fallback_model(monkeypatch):
+    sent, entries, formatted = await _run_invalid_retry(
+        monkeypatch, [GARBAGE, GARBAGE, json.dumps(V6)], invalid_retry=True, fallback_model="fb/model")
+    assert [p["model"] for p in sent] == ["main/model", "main/model", "fb/model"]
+    assert len(formatted["real_estate"]) == 1
+    assert [e[1] for e in entries if e[0] == "error"] == ["invalid_structured_model_response", "invalid_structured_model_response_retry"]
+
+
+@pytest.mark.asyncio
+async def test_two_invalid_answers_without_a_fallback_model_are_an_error(monkeypatch):
+    sent, entries, formatted = await _run_invalid_retry(monkeypatch, [GARBAGE], invalid_retry=True)
+    assert len(sent) == 2 and formatted["real_estate"] == []
+    assert [e[1] for e in entries if e[0] == "error"] == ["invalid_structured_model_response", "invalid_structured_model_response_retry"]
+
+
+@pytest.mark.asyncio
+async def test_every_invalid_answer_including_the_fallback_is_booked(monkeypatch):
+    sent, entries, _ = await _run_invalid_retry(monkeypatch, [GARBAGE], invalid_retry=True, fallback_model="fb/model")
+    assert len(sent) == 3
+    assert [e[1] for e in entries if e[0] == "error"] == [
+        "invalid_structured_model_response", "invalid_structured_model_response_retry", "invalid_structured_model_response_fallback"]

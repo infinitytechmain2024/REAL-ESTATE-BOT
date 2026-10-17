@@ -9,6 +9,10 @@ class AnalysisSettings(BaseSettings):
     openrouter_model: str = Field(
         default="anthropic/claude-sonnet-4.5", validation_alias="OPENROUTER_ANALYSIS_MODEL"
     )
+    # One more try with the same request when the model answers outside the schema, then one call to the fallback
+    # model (empty: none). Off by default: an invalid answer is booked as an error and the page is closed.
+    invalid_retry: bool = Field(default=False, validation_alias="ANALYSIS_INVALID_RETRY")
+    fallback_model: str = Field(default="", validation_alias="ANALYSIS_FALLBACK_MODEL")
     batch_size: PositiveInt = Field(default=10, ge=1, le=50, validation_alias="ANALYSIS_BATCH_SIZE")
     timeout_seconds: PositiveInt = Field(
         default=60, ge=5, le=120, validation_alias="OPENROUTER_ANALYSIS_TIMEOUT_SECONDS"

@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import date
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import ValidationError
@@ -399,11 +400,40 @@ def parse_result(content: str) -> AnalysisResult:
     return AnalysisResult.model_validate(fixed)
 
 
+INVALID = "invalid_structured_model_response"
+
+
 class OpenRouterAnalyzer:
-    def __init__(self, api_key: str, model: str, *, timeout_seconds: int = 30) -> None:
+    def __init__(self, api_key: str, model: str, *, timeout_seconds: int = 30, invalid_retry: bool = False,
+                 fallback_model: str = "") -> None:
         self.api_key, self.model, self.timeout_seconds = api_key, model, timeout_seconds
+        self.invalid_retry, self.fallback_model = invalid_retry, fallback_model.strip()
 
     async def analyze(self, evidence: Evidence, vertical: str, task_hint: dict[str, Any] | None = None) -> AnalysisResult:
+        if not self.invalid_retry:
+            return await self._analyze_once(evidence, vertical, task_hint, self.model)
+        # An answer outside the schema: one more try with the same request, then one with the fallback model.
+        # Every failed attempt is booked with its own code; the last one is raised and booked by the caller.
+        item = (urlsplit(evidence.canonical_url or "").hostname or "").removeprefix("www.")
+        try:
+            return await self._analyze_once(evidence, vertical, task_hint, self.model)
+        except ValueError as exc:
+            if str(exc) != INVALID:
+                raise
+        await costs.error("llm", INVALID, item=item)
+        try:
+            return await self._analyze_once(evidence, vertical, task_hint, self.model)
+        except ValueError as exc:
+            if str(exc) != INVALID or not self.fallback_model:
+                raise ValueError(f"{INVALID}_retry" if str(exc) == INVALID else str(exc)) from exc
+        await costs.error("llm", f"{INVALID}_retry", item=item)
+        try:
+            return await self._analyze_once(evidence, vertical, task_hint, self.fallback_model)
+        except ValueError as exc:
+            raise ValueError(f"{INVALID}_fallback" if str(exc) == INVALID else str(exc)) from exc
+
+    async def _analyze_once(self, evidence: Evidence, vertical: str, task_hint: dict[str, Any] | None,
+                            model: str) -> AnalysisResult:
         # Limit evidence, do not accept any untrusted prompt controls or raw task instruction.
         data = {
             "vertical": vertical,
@@ -416,7 +446,7 @@ class OpenRouterAnalyzer:
         if task_hint:
             data["task_hint"] = task_hint
         payload = {
-            "model": self.model,
+            "model": model,
             "temperature": 0,
             "max_tokens": 1800,
             "usage": costs.USAGE,
@@ -443,7 +473,7 @@ class OpenRouterAnalyzer:
                 log.warning("analysis.request_refused %s", response.status_code)
                 raise ValueError(f"model_request_refused_{response.status_code}")
             response.raise_for_status()
-        await costs.llm_response(self.model, response)
+        await costs.llm_response(model, response)
         try:
             content = response.json()["choices"][0]["message"]["content"]
             return verify_facts(parse_result(content), evidence)
@@ -451,7 +481,7 @@ class OpenRouterAnalyzer:
             # Field names and error types only: the content may quote the post.
             problems = [f"{'.'.join(str(p) for p in e['loc'])}:{e['type']}" for e in exc.errors()]
             log.warning("analysis.schema_mismatch %s", problems)
-            raise ValueError("invalid_structured_model_response") from exc
+            raise ValueError(INVALID) from exc
         except Exception as exc:
             log.warning("analysis.unreadable_model_response %s", type(exc).__name__)
-            raise ValueError("invalid_structured_model_response") from exc
+            raise ValueError(INVALID) from exc

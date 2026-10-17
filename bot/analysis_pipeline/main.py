@@ -158,7 +158,8 @@ async def run_once(store=None, pipeline: AnalysisPipeline | None = None, send: S
         await store.connect()
     try:
         p = pipeline or AnalysisPipeline(
-            OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds)
+            OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds,
+                               invalid_retry=s.invalid_retry, fallback_model=s.fallback_model)
         )
         formatted, processed = await analyse_batch(store, p, batch_size=s.batch_size, claim_seconds=s.claim_seconds, model=s.openrouter_model)
         saved = [fid for entries in formatted.values() for fid, _ in entries]
@@ -186,7 +187,8 @@ async def serve() -> None:
     store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms)
     await store.connect()
     costs.install(costs.PostgresLedger(store._pool()), s.budget_usd)
-    pipeline = AnalysisPipeline(OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds))
+    pipeline = AnalysisPipeline(OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds,
+                               invalid_retry=s.invalid_retry, fallback_model=s.fallback_model))
     log.info("analysis.started", extra={"poll_seconds": s.poll_seconds, "digests": bool(s.telegram_chat_id)})
     try:
         while True:
