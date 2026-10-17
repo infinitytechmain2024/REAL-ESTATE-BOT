@@ -342,6 +342,8 @@ CAMPAIGN_BUDGET_USD=1
 ENV
 docker compose --env-file .env up -d facebook-runner
 docker compose --env-file .env logs --tail=20 facebook-runner      # не должно быть отказа про build / token
+# сеть facebook-runner (после up -d); то же для facebook-collector при профиле collector
+docker inspect "$(docker compose --env-file .env ps -q facebook-runner)" --format '{{json .NetworkSettings.Networks}}'
 ```
 
 Создать кампанию с одной открытой группой и перевести её на Apify (SQL из `docs/apify_adapter.md`):
@@ -406,24 +408,23 @@ psqlc "select stage, kind, code, sum(units), sum(cost_usd) from campaign_costs w
 echo 'APIFY_FACEBOOK_COMMENTS_ENABLED=false' >> .env && docker compose --env-file .env up -d telegram campaign-runner
 ```
 
-**(г2) Лиды под объектами кампании через Apify (`LEADS_PROVIDER`).** Дневной лимит `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY` по умолчанию 40; по решению 17.10 ставим 500 (максимум поля), потолок одного чтения `max_usd_per_post` ($1) остаётся:
-
-```bash
-echo 'APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=500' >> .env
-```
+**(г2) Лиды под объектами кампании через Apify (`LEADS_PROVIDER`).** Дневной лимит `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=40` (умолчание); по решению владельца 17.10 в `.env` ставим `APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0` (0 = без дневной квоты). Худший случай при `0`: ограничивают только `APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST` ($1 на пост), `CAMPAIGN_BUDGET_USD` ($5 на кампанию) и лимит в Apify Console.
 
 ```bash
 cat >> .env <<'ENV'
 LEADS_PROVIDER=apify
+APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0
 ENV
 docker compose --env-file .env up -d campaign-runner
 ```
+
+При `CAMPAIGN_BUDGET_USD=0` потолка в боте нет вообще, остаются $1/пост и лимит Apify Console; дневного потолка по всем кампаниям больше нет — сумма = бюджет кампании × число кампаний.
 
 Проверка: после кампании с отправленными карточками из Facebook `psqlc "select count(*) from campaign_comment_reads where run_id is not null"`
 больше 0, расходы в `campaign_costs`. Если `COMMENTS_ENABLED` не включён, бот пишет предупреждение и читает браузером. Откат:
 
 ```bash
-echo 'LEADS_PROVIDER=browser' >> .env && docker compose --env-file .env up -d campaign-runner
+printf 'LEADS_PROVIDER=browser\nAPIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=40\n' >> .env && docker compose --env-file .env up -d campaign-runner
 ```
 
 ### (д) Приглашения в закрытые группы, отчёт по инвесторам, режим «оба»

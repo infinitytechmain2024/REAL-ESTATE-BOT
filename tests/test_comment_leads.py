@@ -542,6 +542,49 @@ async def test_apify_day_quota_is_its_own(ledger) -> None:
     assert await _apify_worker(api, store, apify_reads_per_day=2).step() == 1  # the browser's 500 does not count
 
 
+async def test_apify_day_quota_zero_means_no_quota(ledger) -> None:
+    from tests.test_post_leads import Api, thirty
+
+    api = Api(items=thirty())
+    store = MemoryLeadStore([_read(1)], apify_today=1000)
+    calls = []
+    original = store.apify_reads_today
+
+    async def counted() -> int:
+        calls.append(1)
+        return await original()
+
+    store.apify_reads_today = counted  # type: ignore[method-assign]
+    assert await _apify_worker(api, store, apify_reads_per_day=0).step() == 1
+    assert len(api.launches()) == 1 and calls == []  # the day count is not even asked
+
+
+def test_apify_day_quota_1000_is_accepted() -> None:
+    from bot.campaign.leads import CommentConfig
+    from bot.campaign.settings import CampaignRunnerSettings
+
+    assert CampaignRunnerSettings(_env_file=None, DATABASE_URL="postgresql://x", TELEGRAM_TOKEN="t", APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=1000).apify_comments_max_per_day == 1000
+    assert CommentConfig(apify_reads_per_day=1000).apify_reads_per_day == 1000
+
+
+async def test_apify_day_quota_40_skips_the_41st(ledger) -> None:
+    from tests.test_post_leads import Api, thirty
+
+    api = Api(items=thirty())
+    store = MemoryLeadStore([_read(1)], apify_today=40)
+    assert await _apify_worker(api, store, apify_reads_per_day=40).step() == 0
+    assert api.launches() == [] and len(store.queued) == 1
+
+
+def test_apify_day_quota_negative_is_a_settings_error() -> None:
+    from pydantic import ValidationError
+
+    from bot.campaign.settings import CampaignRunnerSettings
+
+    with pytest.raises(ValidationError, match="APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY"):
+        CampaignRunnerSettings(_env_file=None, DATABASE_URL="postgresql://x", TELEGRAM_TOKEN="t", APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=-1)
+
+
 async def test_apify_a_lost_launch_answer_fails_the_read_with_an_estimate(ledger) -> None:
     import httpx
 
