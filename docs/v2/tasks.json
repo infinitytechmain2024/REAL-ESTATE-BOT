@@ -357,18 +357,15 @@
     },
     {
       "id": "D2",
-      "title": "Деплой, включение флагов, проверка алертов",
-      "stream": "release",
+      "title": "Деплой v2 на VPS: код, миграции 047–050, порталы, модели 5.5, watchdog включены 16–17.10",
+      "stream": "deploy",
       "agent": "owner (VPS)",
       "deps": [
-        "D1",
-        "C4",
-        "O4",
-        "O8",
-        "O9"
+        "C3",
+        "C4"
       ],
-      "status": "waiting_owner",
-      "day": "Пн",
+      "status": "done",
+      "day": 5,
       "hours": 2
     },
     {
@@ -506,6 +503,32 @@
       "day": 4,
       "hours": 1,
       "pr": 73
+    },
+    {
+      "id": "H5",
+      "title": "facebook-runner/collector в сети egress (DNS к Apify), строгая проверка номера билда актора",
+      "stream": "h5-fb-egress",
+      "agent": "builder",
+      "deps": [
+        "A4"
+      ],
+      "status": "done",
+      "day": 5,
+      "hours": 1.5,
+      "pr": 75
+    },
+    {
+      "id": "H6",
+      "title": "APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY=0 — без дневной квоты (решение владельца 17.10)",
+      "stream": "h6-no-quota",
+      "agent": "builder",
+      "deps": [
+        "B2"
+      ],
+      "status": "done",
+      "day": 5,
+      "hours": 1,
+      "pr": 76
     }
   ]
 }
