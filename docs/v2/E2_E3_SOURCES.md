@@ -9,7 +9,7 @@ cookie или аккаунта клиента (правило 10 CLAUDE.md: Link
 |---|---|---|---|---|
 | Карточка объекта (видео) | `clockworks/tiktok-video-scraper` (Apify, 15k пользователей, 4.6) | $0.003 за видео; транскрипт +$0.048/мин (не включать) | `postURLs[]` | `text` (описание), `hashtags[]`, `authorMeta{name, nickName, profileUrl, signature, fans, verified}`, `playCount/diggCount/commentCount/shareCount`, `createTimeISO`, `locationCreated`, `textLanguage`, `videoMeta.coverUrl`, `webVideoUrl` |
 | Комментарии | `clockworks/tiktok-comments-scraper` (Apify, 48k пользователей, 4.73) | $0.00125 за комментарий ($0.125 за 100) | `postURLs[]`, `commentsPerPost` (prefill 100), `maxRepliesPerComment` (0) | `text`, `uniqueId` (username), `uid`, `cid`, `createTimeISO`, `diggCount`, `repliesToId`, `videoWebUrl`, `avatarThumbnail`; имени-профиля-URL нет, строится как `https://www.tiktok.com/@{uniqueId}` |
-| Дешёвая альтернатива | `apidojo/tiktok-comments-scraper` | $0.0003 за комментарий | `startUrls[]`, `maxItems` | схема не изучена; 3.8k пользователей, 4.95 |
+| **Предпочтительный** вариант комментариев | `apidojo/tiktok-comments-scraper` (3.8k пользователей, 4.95) | $0.0003 за комментарий ($0.03 за 100), в 4 раза дешевле | `startUrls[]`, `maxItems`, `includeReplies` | `text`, `createdAt`, `likeCount`, `replyCount`, `parentId`, `commentLanguage`, `user{username, displayName, url, bio, region, language, hasEmail/hasPhone (bool)}` — профиль уже с URL и именем, что удобнее clockworks |
 
 Схема в боте (копия B1 `post_leads.py`):
 1. Intake: ссылка `tiktok.com/@…/video/<id>` или `vm.tiktok.com/…` → `post_link=True`, платформа `tiktok` (новое поле или префикс в `sources.required`).
@@ -19,9 +19,9 @@ cookie или аккаунта клиента (правило 10 CLAUDE.md: Link
 5. Отчёт: раздел «💼 Инвесторы» уже умеет источники; добавить подпись платформы.
 
 Флаги (все off): `TIKTOK_COMMENTS_ENABLED=false`, `APIFY_TIKTOK_VIDEO_ACTOR=clockworks/tiktok-video-scraper`,
-`APIFY_TIKTOK_COMMENTS_ACTOR=clockworks/tiktok-comments-scraper`, `APIFY_TIKTOK_COMMENTS_ACTOR_BUILD=` (pinned),
+`APIFY_TIKTOK_COMMENTS_ACTOR=apidojo/tiktok-comments-scraper` (запасной `clockworks/tiktok-comments-scraper`), `APIFY_TIKTOK_COMMENTS_ACTOR_BUILD=` (pinned),
 `APIFY_TIKTOK_COMMENTS_MAX_PER_POST=200`, `APIFY_TIKTOK_MAX_USD_PER_POST=0.5`. Цены в `costs.PRICES`: оба актора.
-Оценка: 9 ч (sources 4, builder 3, db 0.5 — индекс/CHECK provider в 048, тесты/доки 1.5). Живой сэмпл: 1 видео ≈ $0.13.
+Оценка: 9 ч (sources 4, builder 3, db 0.5 — индекс/CHECK provider в 048, тесты/доки 1.5). Живой сэмпл: 1 видео ≈ $0.04 (apidojo) или $0.13 (clockworks).
 
 Открытые вопросы к клиенту: откуда ссылки (присылает сам / бот ищет по теме через `powerai/tiktok-videos-search-scraper`
 $0.005 за видео + $0.09 старт); критерий «заинтересованный» (любой вопрос о цене/контакте или только явное намерение
