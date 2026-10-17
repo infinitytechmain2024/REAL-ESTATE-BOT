@@ -324,6 +324,11 @@ printf '%s\n' 'APIFY_PISOS_ENABLED=false' 'APIFY_HABITACLIA_ENABLED=false' 'APIF
 Первая чистка и крон описаны в разделе 6; перед первым включением прогнать:
 `docker compose --env-file .env run --rm facebook-runner python -m bot.facebook_collector.apify.retention --dry-run`.
 
+Перед включением проверить: (1) compose обновлён, `facebook-runner` в сети `egress`:
+`docker inspect $(docker compose --env-file .env ps -q facebook-runner) --format '{{json .NetworkSettings.Networks}}'`
+показывает `backend` и `egress` (иначе Apify недоступен: `apify_launch_unknown`); (2) билд вида `0.1.23` (или тег
+вроде `beta`), не заглушка и не `latest`: иначе сервис не стартует.
+
 **(в1) Один прогон, `scope=campaign`.**
 
 ```bash
