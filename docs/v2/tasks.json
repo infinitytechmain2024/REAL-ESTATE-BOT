@@ -600,9 +600,10 @@
    "deps": [
     "H8"
    ],
-   "status": "review",
+   "status": "done",
    "day": 6,
-   "hours": 4
+   "hours": 4,
+   "pr": 82
   },
   {
    "id": "H11",
