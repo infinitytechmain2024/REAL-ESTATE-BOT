@@ -216,3 +216,14 @@ def test_every_compose_service_rotates_its_logs() -> None:
         n for n, spec in compose["services"].items() if spec.get("logging") != compose["x-logging"]
     ]
     assert missing == [], f"services without log rotation: {missing}"
+
+
+def test_every_service_with_an_apify_token_can_reach_the_internet() -> None:
+    """api.apify.com is outside the internal `backend` network: such a service must also join `egress`."""
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    services = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+    isolated = [name for name, spec in services.items()
+                if "APIFY_TOKEN" in (spec.get("environment") or {}) and "egress" not in (spec.get("networks") or [])]
+    assert not isolated
