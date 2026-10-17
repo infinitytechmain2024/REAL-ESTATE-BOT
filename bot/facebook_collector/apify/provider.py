@@ -42,6 +42,7 @@ from bot.acquisition.apify_client import (
     PermanentApifyError,
     TemporaryApifyError,
     actor_path,
+    check_pinned_build,
 )
 from bot.utils import costs
 
@@ -71,8 +72,7 @@ class ApifyFacebookConfig:
 
     def __post_init__(self) -> None:
         actor_path(self.actor_id)
-        if not self.build or self.build.lower() == "latest":
-            raise ValueError("APIFY_FACEBOOK_ACTOR_BUILD must name a pinned build")
+        check_pinned_build("APIFY_FACEBOOK_ACTOR_BUILD", self.build)
         if not (1 <= self.max_posts_per_run <= 5000 and 1 <= self.page_size <= 1000 and self.checkpoint_every >= 1
                 and math.isfinite(self.max_usd_per_campaign) and self.max_usd_per_campaign > 0
                 and math.isfinite(self.max_usd_per_run) and 0 < self.max_usd_per_run <= self.max_usd_per_campaign
