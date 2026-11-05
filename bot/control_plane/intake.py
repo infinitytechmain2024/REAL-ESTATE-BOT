@@ -22,7 +22,8 @@ double tap queues one campaign.
 The command keeps the free-text goal for the planner (``goal_text``) and carries the confirmed requirements as
 leading tokens: ``mode=<vertical> city=<name>|place=<names> spec=<TaskSpec JSON>``; the Orchestra plans from
 the spec (constraints) and stores it on the campaign. A voice task is shown back once: «Я услышал: «…»».
-Owners also see the technical details: the planner's goal line, search languages, group windows, queue id.
+Nobody sees technical details here, the owner included (no planner goal, languages, queue id): those stay in
+/campaign status and the owners' notices.
 A draft untouched for 24 hours is treated as gone. Owners get a one-line notice when a user launches.
 """
 
@@ -372,10 +373,9 @@ def stop_button() -> Button:
 class TaskIntake:
     def __init__(self, store: IntakeStore, sink: CommandSink, notify_owners: OwnerNotice | None = None,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC),
-                 technical: Callable[[int], bool] = lambda _user_id: False,
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
                  post_links: bool = False, both_mode: bool = False) -> None:
-        """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
+        """The replies carry no technical details for anyone, the owner's own tasks included.
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
         investor search over that post's comments (no interview); off, the link is an ordinary task text.
@@ -387,7 +387,7 @@ class TaskIntake:
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
         """
         self.store, self.sink = store, sink
-        self.notify_owners, self.now, self.technical = notify_owners, now, technical
+        self.notify_owners, self.now = notify_owners, now
         self.interviewer = interviewer
         self.rules = RuleInterviewer()
         self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
@@ -442,7 +442,7 @@ class TaskIntake:
         if _norm(text) in CANCEL_WORDS:
             return await self._cancel(draft)
         reply = await self._on_text(draft, message, text)
-        if message.transcript and not self.technical(message.user_id):
+        if message.transcript:
             heard = " ".join(message.transcript.split())
             heard = heard if len(heard) <= MAX_HEARD_CHARS else heard[:MAX_HEARD_CHARS].rstrip() + "…"
             reply = replace(reply, text=f"Я услышал: «{heard}»\n\n{reply.text}")
@@ -696,17 +696,9 @@ class TaskIntake:
             return Reply(f"{exc}\nОпишите задачу иначе, например {EXAMPLES.get(draft.mode or '', EXAMPLES['real_estate'])}.")
         draft.step, draft.asking, draft.editing = "summary", None, None
         await self.store.save(draft)
+        log.info("telegram.intake.card", extra={"user_id": draft.user_id, "goal": plan.goal,
+                                                "languages": list(plan.languages)})
         lines = ["Проверьте задачу:", draft.spec.summary_ru()]
-        if self.technical(draft.user_id):
-            limits = plan.limits
-            model = getattr(self.interviewer, "model", "")
-            lines += [
-                "",
-                f"Разбор задачи: интервьюер ({model})" if model else "Разбор задачи: правила",
-                f"Цель: {plan.goal}",
-                f"Языки поиска: {', '.join(lang.upper() for lang in plan.languages)}",
-                f"Группы: до {limits.max_groups}, окнами по {limits.window_size}",
-            ]
         lines += ["", "Всё верно? Нажмите «Запустить» внизу, чтобы начать поиск."]
         return Reply("\n".join(lines), keyboard=TASK_KEYBOARD)
 
@@ -743,9 +735,6 @@ class TaskIntake:
                 await self.notify_owners(f"Пользователь {who} запустил кампанию: {plan.goal}")
             except Exception:  # noqa: BLE001 - the launch stands even if the notice fails
                 log.warning("telegram.intake.owner_notice_failed", extra={"user_id": user_id})
-        if self.technical(user_id):
-            return Reply(f"{LAUNCHED}\nQueue id: {command_id}. Статус: /campaign status. Остановить: /campaign cancel <id>.",
-                         keyboard=SEARCH_KEYBOARD)
         return Reply(f"{LAUNCHED}\n{STOP_HINT}", keyboard=SEARCH_KEYBOARD)
 
 

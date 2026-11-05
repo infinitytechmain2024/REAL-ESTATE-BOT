@@ -139,10 +139,10 @@ class ControlPlane:
         self.auto = AutoMode(settings_store or MemorySettingsStore(), default=settings.auto_mode,
                              operators=self.operators, auto_operator_ids=settings.auto_operator_user_ids)
         # Mode choice and task intake (bot/control_plane/intake.py); launching always needs "Запустить".
-        # Only the owner sees planner details and queue ids in intake replies.
+        # Intake replies carry no planner details or queue ids for anyone, the owner included.
         # ``interviewer`` interviews with AI; None (tests, no key) keeps the deterministic rules.
         self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners,
-                                 technical=self._is_owner, interviewer=interviewer,
+                                 interviewer=interviewer,
                                  max_rounds=settings.interview_max_rounds, post_links=settings.apify_comments_enabled,
                                  both_mode=settings.intake_both_mode)
 
@@ -406,7 +406,8 @@ class ControlPlane:
         command = spoken_command(text) if self._can_control(message.user_id) else None
         # The intake shows a user's voice task back to them once («Я услышал: «…»»).
         command_reply = await self._handle_command(replace(message, transcript=text) if not command else message, command or text)
-        if not owner:
+        # A voice task (not a spoken command) is answered like anyone's: «Я услышал», no transcript block.
+        if not owner or (not command and await self.intake.mode(message.user_id) is not None):
             # Users hear their words back once from the intake («Я услышал»); only the owner gets the transcript block.
             # Operators still see which command a short phrase was mapped to.
             heard = f"Understood as: {command}\n\n" if command else ""

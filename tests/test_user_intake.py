@@ -212,7 +212,7 @@ async def test_what_the_task_states_is_not_asked_again_and_the_card_is_structure
     assert card.text.startswith("Проверьте задачу")
     for line in ("Город: Мадрид", "Сделка: аренда", "Тип: квартира", "Бюджет: до 1200 €", "Комнаты: не указаны"):
         assert line in card.text, line
-    # A user sees no planner internals; the owner does.
+    # Nobody sees planner internals, the owner included.
     for noise in ("Языки поиска", "окнами", "Цель:", "real_estate", "Madrid", "/"):
         assert noise not in card.text, noise
     assert card.keyboard == TASK_KEYBOARD
@@ -221,8 +221,9 @@ async def test_what_the_task_states_is_not_asked_again_and_the_card_is_structure
     await press(control, OWNER, "mode:real_estate")
     await say(control, OWNER, "квартиры в аренду в Мадриде до 1200 €")
     owner = await enough(control, OWNER)
-    for line in ("Город: Мадрид", "Цель: real_estate · Madrid", "Языки поиска: ES, EN, RU, UK", "Группы: до 40, окнами по 20"):
-        assert line in owner.text, line
+    assert "Город: Мадрид" in owner.text
+    for noise in ("Языки поиска", "окнами", "Цель:", "real_estate", "Madrid", "Разбор задачи"):
+        assert noise not in owner.text, noise
 
 
 @pytest.mark.asyncio

@@ -106,12 +106,12 @@ async def test_each_voice_note_is_echoed_once_and_an_unusable_answer_is_not_unde
 
 
 @pytest.mark.asyncio
-async def test_the_owner_still_sees_the_transcript() -> None:
+async def test_the_owners_voice_task_is_heard_back_like_anyones() -> None:
     control, _, _ = plane(FakeTranscriber(VOICE_TASK))
     await press(control, OWNER, "mode:real_estate")
     reply = await control.handle_voice(voice_note(OWNER), download)
-    assert reply is not None and reply.text.startswith("Transcript (ru") and SECRET in reply.text
-    assert "Я услышал" not in reply.text and "Сколько комнат" in reply.text and reply.keyboard == DRAFT_KEYBOARD
+    assert reply is not None and reply.text.startswith(f"Я услышал: «{SECRET}") and reply.text.count(SECRET) == 1
+    assert "Transcript" not in reply.text and "Сколько комнат" in reply.text and reply.keyboard == DRAFT_KEYBOARD
 
 
 @pytest.mark.asyncio
@@ -210,12 +210,13 @@ async def test_launch_queues_the_campaign_and_the_user_reply_is_plain_russian() 
     assert_clean(launched)
     [envelope] = sink.envelopes
     assert envelope.command == "campaign" and envelope.arguments.startswith("mode=real_estate city=Madrid spec=")
-    # The owner keeps the technical trace.
+    # The owner's own task is answered the same way: no technical trace.
     await press(control, OWNER, "mode:real_estate")
     await say(control, OWNER, "снять квартиру в Мадриде до 1200 €")
-    await enough(control, OWNER)
+    assert_clean(await enough(control, OWNER))
     owner = await press(control, OWNER, "task:launch")
-    assert owner.text.startswith("Принято. Начинаю поиск.") and "Queue id: cmd-2" in owner.text
+    assert owner.text == launched.text
+    assert_clean(owner)
 
 
 @pytest.mark.asyncio

@@ -467,11 +467,12 @@ async def test_a_voice_task_is_shown_back_before_the_first_question() -> None:
     assert reply.text == "Я услышал: «шукаю квартиру в Мадрид»\n\nПонял: Мадрид\n\nАренда или покупка?"
     typed = await say(control, USER, "аренда")  # typed text is not echoed
     assert "Я услышал" not in typed.text
-    # The owner already sees the transcript block, so no second echo.
+    # The owner's voice task is heard back the same way, once, without the technical transcript block.
     await press(control, OWNER, "mode:real_estate")
     owner = await control.handle_voice(IncomingMessage(OWNER, OWNER, 901, voice_file_id="v", voice_size=10,
                                                        voice_duration_seconds=3), audio)
-    assert owner is not None and owner.text.count("шукаю квартиру в Мадрид") == 1 and "Я услышал" not in owner.text
+    assert owner is not None and owner.text.count("шукаю квартиру в Мадрид") == 1 and owner.text.startswith("Я услышал")
+    assert "Transcript" not in owner.text
 
 
 @pytest.mark.asyncio
