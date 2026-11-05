@@ -34,7 +34,8 @@ class ControlPlaneSettings:
     interview_max_rounds: int = 14
     # A Facebook post link as the task (v2 B1, needs the same flag as the campaign-runner's post reader): off = plain text.
     apify_comments_enabled: bool = False
-    # INTAKE_BOTH_MODE: the mode «Недвижимость + инвесторы» in the task intake (off: no such button).
+    # INTAKE_BOTH_MODE: a property task that also asks for investors becomes «Недвижимость + инвесторы» by itself
+    # (no menu button either way; off: such a task stays a property task).
     intake_both_mode: bool = False
     # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
     # OpenRouter stays its fallback. The key is never logged or echoed.

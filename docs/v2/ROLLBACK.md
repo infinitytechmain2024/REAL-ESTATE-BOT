@@ -34,7 +34,7 @@ docker compose --env-file .env logs --tail=30 <сервис> | grep -iE "error|t
 | 10 | Watchdog: алерты и дневная сводка (C3) | `WATCHDOG_ENABLED` (:389); `OWNER_ALERT_CHAT_ID` (:392, `0` = алерты всем из `TELEGRAM_OPERATOR_IDS`), `WATCHDOG_DOCKER_GID` (:399, закомментирован, умолчание 999) отката не требуют | мягко: `WATCHDOG_ENABLED=false` (контейнер спит); полностью: убрать `COMPOSE_PROFILES=ops` (:388) и `docker compose --env-file .env --profile ops rm -sf watchdog` | `watchdog` (:834, профиль `ops` :820) | Нет | — |
 | 10a | Watchdog: проверка контейнеров через docker.sock | `WATCHDOG_DOCKER_SOCKET` (:398) | пусто | `watchdog` (:841) | Нет | Сокет остаётся смонтирован, пока включён профиль `ops` (`docker-compose.yml:844`); убрать доступ к нему полностью — только снятием профиля (строка 10) |
 | 11 | Модели по этапам (A5) — по одной строке на этап | см. §2 | прежний id | см. §2 | Нет | — |
-| 12 | Режим «🏡💼 Недвижимость + инвесторы» в меню Telegram (C2) | `INTAKE_BOTH_MODE` (:971) | `INTAKE_BOTH_MODE=false` | `telegram` (:133) | 050: check `user_task_drafts.mode` допускает `both`; черновики `both` (24 ч) | Да: при `false` кнопки нет, черновик `both` начинается заново с меню (`bot/control_plane/intake.py:398-401`). Перед откатом **кода** — раздел «C2» ниже |
+| 12 | Режим «🏡💼 Недвижимость + инвесторы» в меню Telegram (C2) | `INTAKE_BOTH_MODE` (:971) | `INTAKE_BOTH_MODE=false` | `telegram` (:133) | 050: check `user_task_drafts.mode` допускает `both`; черновики `both` (24 ч) | Да: кнопки нет никогда; при `false` режим не определяется из текста, черновик `both` начинается заново как объекты (`bot/control_plane/intake.py:407-412`). Перед откатом **кода** — раздел «C2» ниже |
 | 13 | Карточка объекта: «Площадь» (участок отдельно), «Телефон», «Агентство» (D1a) | `CARD_EXTRA_FIELDS` (:582) | `CARD_EXTRA_FIELDS=false` | `analysis-worker` (:447), `campaign-runner` (:531); `analysis-pipeline` (:350, профиль `analysis`) — если запускается | Поля `plot_m2`, `phone`, `advertiser` в `findings.structured_payload` уже сохранённых находок | Да: при `false` новые находки их не пишут, карточка их не выводит. ⛔ Включать только после O1 (телефон частника = ПДн) |
 | 14 | Аукцион / nuda propiedad / usufructo в покупке: не «точный», а «похожий» с «≈ Отличается: аукцион» (H10) | `CAMPAIGN_AUCTION_DEVIATION` | `CAMPAIGN_AUCTION_DEVIATION=false` | `campaign-runner` | Нет; в `campaign_findings.why` остаётся категория `deal_kind` у уже отложенных находок | Да: при `false` код её не пишет, отчёт показывает её как есть |
 
@@ -112,8 +112,8 @@ echo "delete from schema_migrations where filename = '047_campaign_group_join.sq
 
 ## C2: режим «Недвижимость + инвесторы»
 
-Откат функции: `INTAKE_BOTH_MODE=false` в `.env` и перезапуск `telegram` (кнопки нет; уже начатый черновик `both`
-начинается заново с меню). Перед откатом **кода** на версию без C2: `update user_task_drafts set mode = null where
+Откат функции: `INTAKE_BOTH_MODE=false` в `.env` и перезапуск `telegram` (режим не определяется из текста; уже начатый
+черновик `both` начинается заново как объекты). Перед откатом **кода** на версию без C2: `update user_task_drafts set mode = null where
 mode = 'both';` (старый код не знает этот режим). Кампании `both` в `campaigns` остаются рабочими. Миграция 050
 расширяющая; откат схемы — `scripts/rollback/050_task_drafts_mode_both_down.sql` (строка в таблице §4), первой в
 порядке §4 и только после отката кода.

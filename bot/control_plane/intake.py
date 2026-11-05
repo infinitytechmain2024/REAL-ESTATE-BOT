@@ -1,7 +1,8 @@
 """Task intake for people with the ``user`` role (also open to operators and owners).
 
 The person picks a mode like the old bot did (🏡 objects -> ``real_estate``, 💼 investors -> ``investors``),
-then writes or says the task. The bot then interviews them like a good agent ("grill me") until the task is
+then writes or says the task. There is no third button: a property task that also asks for investors («… и найти
+инвесторов») becomes ``both`` by itself (``INTAKE_BOTH_MODE``), the bot decides under the hood. The bot then interviews them like a good agent ("grill me") until the task is
 fully specified: every user message goes to the interviewer (``interviewer.py``, one AI call; the rules in
 ``rules.py`` take over when there is no key or a call fails), which fills a ``TaskSpec``
 (``bot/campaign/spec.py``) and asks exactly ONE next question: the most important missing hard field first.
@@ -108,6 +109,16 @@ FIELDS: dict[str, dict[str, tuple[str, str]]] = {
 FIELDS["both"] = {**FIELDS["real_estate"], "who": FIELDS["investors"]["who"], "ticket": FIELDS["investors"]["ticket"],
                   "role": FIELDS["investors"]["role"], "geo": FIELDS["investors"]["geo"]}
 _WORD = re.compile(r"\w+")
+# a property task that also asks for investors (people or funds, not «квартира под инвестицию»): the mode «both»
+_INVESTOR_ASK = re.compile(r"инвестор|інвестор|\binvestors?\b|\binversor(?:es)?\b|\binversionistas?\b"
+                           r"|business[\s-]+angels?|бизнес[\s-]*ангел|бізнес[\s-]*ангел|венчурн|\bvc\b", re.IGNORECASE)
+MENU_MODES = ("real_estate", "investors")  # the buttons; «both» is never chosen, only detected
+AUTO_BOTH_NOTE = "Ищу и объекты, и инвесторов: в задаче есть и то и другое."
+
+
+def asks_for_investors(text: str) -> bool:
+    """The task text asks for investors as well (the property task then becomes «both»)."""
+    return bool(_INVESTOR_ASK.search(text))
 
 
 @dataclass(slots=True)
@@ -293,10 +304,9 @@ class PostgresIntakeStore:
                           json.loads(row[3]) if row[3] else None) if row else None
 
 
-def mode_menu(text: str = "Выберите режим:", *, both: bool = False) -> Reply:
-    """The mode buttons; «Недвижимость + инвесторы» only with ``both`` (INTAKE_BOTH_MODE)."""
-    return Reply(text, tuple(Button(title, callback_data=f"mode:{mode}") for mode, title in MODES.items()
-                             if both or mode != "both"))
+def mode_menu(text: str = "Выберите режим:") -> Reply:
+    """The mode buttons: objects and investors. «Недвижимость + инвесторы» is detected from the task, not chosen."""
+    return Reply(text, tuple(Button(MODES[mode], callback_data=f"mode:{mode}") for mode in MENU_MODES))
 
 
 # The bottom (reply) keyboard: the control buttons stay at hand below the chat, not under one message.
@@ -370,8 +380,8 @@ class TaskIntake:
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
         investor search over that post's comments (no interview); off, the link is an ordinary task text.
 
-        ``both_mode`` (``INTAKE_BOTH_MODE``): the mode «Недвижимость + инвесторы» is offered and accepted; off,
-        the menu has no such button and the choice is refused.
+        ``both_mode`` (``INTAKE_BOTH_MODE``): a property task whose text also asks for investors becomes
+        «Недвижимость + инвесторы» by itself; off, it stays a property task. The menu never has a third button.
 
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
@@ -383,7 +393,7 @@ class TaskIntake:
         self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
-        return mode_menu(text, both=self.both_mode)
+        return mode_menu(text)
 
     async def _draft(self, user_id: int, chat_id: int) -> Draft:
         draft = await self._stored(user_id)
@@ -395,10 +405,10 @@ class TaskIntake:
         return draft
 
     async def _stored(self, user_id: int) -> Draft | None:
-        """The saved draft; with the flag off a «both» draft counts as no mode chosen (the menu comes back)."""
+        """The saved draft; with the flag off a «both» draft starts over as a property task (its base mode)."""
         draft = await self.store.get(user_id)
         if draft is not None and draft.mode == "both" and not self.both_mode:
-            draft = replace(draft.fresh(), mode=None)
+            draft = replace(draft.fresh(), mode="real_estate")
         return draft
 
     async def mode(self, user_id: int) -> str | None:
@@ -411,14 +421,14 @@ class TaskIntake:
         return draft is not None and draft.step != "idle" and not draft.expired(self.now())
 
     async def choose_mode(self, user_id: int, chat_id: int, mode: str) -> Reply:
-        if mode not in MODES or (mode == "both" and not self.both_mode):
+        if mode not in MENU_MODES:  # «both» is not a button any more (an old message may still have one)
             return Reply(STALE)
         draft = await self._draft(user_id, chat_id)
         draft.mode = mode
         if draft.task:  # a task written before the mode was chosen, or a mode switch mid-task
             task, message_id = draft.task, draft.message_id
             draft = replace(draft.fresh(), task=task, message_id=message_id)
-            return await self._interview(draft, task)
+            return await self._new_task(draft)
         await self.store.save(draft)
         return Reply(f"Режим: {MODES[mode]}.\nОпишите задачу текстом или голосом, например {EXAMPLES[mode]}.",
                      keyboard=DRAFT_KEYBOARD)
@@ -459,7 +469,18 @@ class TaskIntake:
         if draft.mode is None:
             await self.store.save(draft)
             return self.menu("Сначала выберите режим — задача сохранена:")
-        return await self._interview(draft, text)
+        return await self._new_task(draft)
+
+    async def _new_task(self, draft: Draft) -> Reply:
+        """The first message of a task; a property task that also asks for investors becomes «both» here."""
+        if draft.mode == "both":  # the previous task was detected as both: the person's own choice was objects
+            draft.mode = "real_estate"
+        auto = self.both_mode and draft.mode == "real_estate" and asks_for_investors(draft.task)
+        if auto:
+            draft.mode = "both"
+            log.info("telegram.intake.auto_both", extra={"user_id": draft.user_id})
+        reply = await self._interview(draft, draft.task)
+        return replace(reply, text=f"{AUTO_BOTH_NOTE}\n\n{reply.text}") if auto else reply
 
     async def _post_task(self, draft: Draft, message: IncomingMessage, url: str) -> Reply:
         """A Facebook post link as the whole task: an investor search over its comments, straight to the card.

@@ -10,7 +10,7 @@ import pytest
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.spec import MODE_TITLES, TaskSpec
 from bot.control_plane.anthropic_interviewer import system_prompt, task_prompt
-from bot.control_plane.intake import STALE, MemoryIntakeStore, TaskIntake, mode_menu
+from bot.control_plane.intake import AUTO_BOTH_NOTE, STALE, MemoryIntakeStore, TaskIntake, mode_menu
 from bot.control_plane.interviewer import SYSTEM
 from bot.control_plane.service import ControlPlane
 from bot.control_plane.settings import ControlPlaneSettings
@@ -66,13 +66,18 @@ async def launch(control: ControlPlane, sink: Sink, mode: str):
     return campaign
 
 
+async def choose(control: ControlPlane, mode: str) -> None:
+    """«both» has no button: the person picks objects and the task text asks for investors too."""
+    await press(control, USER, f"mode:{'real_estate' if mode == 'both' else mode}")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("voice", [False, True])
 @pytest.mark.parametrize("mode", ["real_estate", "investors", "both"])
 async def test_a_task_goes_from_the_first_message_to_a_queued_campaign(mode: str, voice: bool) -> None:
     control, sink, _ = plane(FakeTranscriber(FIRST[mode]) if voice else None)
     control.intake.both_mode = True
-    await press(control, USER, f"mode:{mode}")
+    await choose(control, mode)
     await to_card(control, FIRST[mode], voice)
     draft = await control.intake.store.get(USER)
     assert draft is not None and draft.spec is not None and draft.spec.mode == mode
@@ -88,9 +93,10 @@ async def test_a_task_goes_from_the_first_message_to_a_queued_campaign(mode: str
 async def test_a_voice_transcript_is_shown_back_once_as_heard() -> None:
     control, _, _ = plane(FakeTranscriber(FIRST["both"]))
     control.intake.both_mode = True
-    await press(control, USER, "mode:both")
+    await choose(control, "both")
     reply = await control.handle_voice(voice_note(USER), download)
     assert reply is not None and reply.text.startswith("Я услышал: «купить квартиру")
+    assert AUTO_BOTH_NOTE in reply.text
 
 
 @pytest.mark.asyncio
@@ -105,34 +111,70 @@ async def test_a_post_link_goes_to_an_investors_campaign_with_the_post_as_the_so
 
 
 @pytest.mark.asyncio
-async def test_both_works_through_the_intake_class_alone() -> None:
+async def test_both_is_detected_through_the_intake_class_alone() -> None:
     sink = Sink()
     intake = TaskIntake(MemoryIntakeStore(), sink, both_mode=True)
-    assert "mode:both" in callbacks(intake.menu())
-    reply = await intake.choose_mode(USER, USER, "both")
-    assert reply.text.startswith("Режим: " + MODE_TITLES["both"])
+    assert callbacks(intake.menu()) == ["mode:real_estate", "mode:investors"]
+    await intake.choose_mode(USER, USER, "real_estate")
     reply = await intake.on_text(text(USER, FIRST["both"]), FIRST["both"])
-    assert "Сколько комнат" in reply.text
+    assert reply.text.startswith(AUTO_BOTH_NOTE) and "Сколько комнат" in reply.text
+    assert await intake.mode(USER) == "both"
 
 
 @pytest.mark.asyncio
-async def test_without_the_flag_there_is_no_both_button_and_the_choice_is_refused() -> None:
+@pytest.mark.parametrize("both_mode", [False, True])
+async def test_the_menu_never_has_a_both_button_and_an_old_one_is_stale(both_mode: bool) -> None:
     control, _, _ = plane()
-    assert control.intake.both_mode is False
+    control.intake.both_mode = both_mode
     for menu in (await say(control, USER, "/mode"), mode_menu(), control.intake.menu()):
         assert callbacks(menu) == ["mode:real_estate", "mode:investors"]
     assert (await press(control, USER, "mode:both")).text == STALE
     assert await control.intake.mode(USER) is None
     reply = await say(control, USER, FIRST["both"])  # no mode is chosen: the menu, still without both
-    assert "mode:both" not in callbacks(reply) and callbacks(reply) == ["mode:real_estate", "mode:investors"]
+    assert callbacks(reply) == ["mode:real_estate", "mode:investors"]
 
 
 @pytest.mark.asyncio
-async def test_with_the_flag_the_menu_has_the_third_button() -> None:
+async def test_without_the_flag_a_property_task_with_investors_stays_a_property_task() -> None:
+    control, _, _ = plane()
+    assert control.intake.both_mode is False
+    await choose(control, "both")
+    reply = await say(control, USER, FIRST["both"])
+    assert AUTO_BOTH_NOTE not in reply.text and await control.intake.mode(USER) == "real_estate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task", [
+    "купить квартиру в Валенсии до 300000 евро под инвестицию",  # an investment flat, nobody to find
+    FIRST["real_estate"],
+])
+async def test_a_property_task_without_investors_to_find_is_not_both(task: str) -> None:
     control, _, _ = plane()
     control.intake.both_mode = True
-    assert callbacks(await say(control, USER, "/mode")) == ["mode:real_estate", "mode:investors", "mode:both"]
-    assert callbacks(mode_menu(both=True))[-1] == "mode:both"
+    await choose(control, "real_estate")
+    reply = await say(control, USER, task)
+    assert AUTO_BOTH_NOTE not in reply.text and await control.intake.mode(USER) == "real_estate"
+
+
+@pytest.mark.asyncio
+async def test_an_investor_task_about_property_stays_an_investor_task() -> None:
+    control, _, _ = plane()
+    control.intake.both_mode = True
+    await choose(control, "investors")
+    await say(control, USER, "инвесторы в недвижимость в Валенсии")
+    assert await control.intake.mode(USER) == "investors"
+
+
+@pytest.mark.asyncio
+async def test_the_next_task_after_a_detected_both_is_a_property_task_again() -> None:
+    control, _, _ = plane()
+    control.intake.both_mode = True
+    await choose(control, "both")
+    await say(control, USER, FIRST["both"])
+    assert await control.intake.mode(USER) == "both"
+    await say(control, USER, "отмена")
+    await say(control, USER, FIRST["real_estate"])
+    assert await control.intake.mode(USER) == "real_estate"
 
 
 def test_the_flag_is_read_from_the_environment_and_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,22 +214,22 @@ async def test_the_orchestra_takes_mode_both_whatever_the_intake_flag_says() -> 
 
 
 @pytest.mark.asyncio
-async def test_a_both_draft_is_dropped_when_the_flag_is_turned_off() -> None:
+async def test_a_both_draft_starts_over_as_a_property_task_when_the_flag_is_turned_off() -> None:
     control, _, _ = plane()
     control.intake.both_mode = True
-    await press(control, USER, "mode:both")
+    await choose(control, "both")
     await say(control, USER, FIRST["both"])
     control.intake.both_mode = False
-    assert await control.intake.mode(USER) is None and not await control.intake.drafting(USER)
-    reply = await say(control, USER, "ещё одна задача в Мадриде")
-    assert callbacks(reply) == ["mode:real_estate", "mode:investors"]
+    assert await control.intake.mode(USER) == "real_estate" and not await control.intake.drafting(USER)
+    reply = await say(control, USER, FIRST["both"])
+    assert AUTO_BOTH_NOTE not in reply.text and await control.intake.mode(USER) == "real_estate"
 
 
 @pytest.mark.asyncio
 async def test_the_ticket_answer_keeps_the_property_budget_in_both() -> None:
     control, _, _ = plane()
     control.intake.both_mode = True
-    await press(control, USER, "mode:both")
+    await choose(control, "both")
     await say(control, USER, FIRST["both"])
     draft = await control.intake.store.get(USER)
     assert draft is not None and draft.spec is not None and draft.spec.budget.max == 300000
