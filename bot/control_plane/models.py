@@ -87,6 +87,11 @@ class Reply:
     text: str
     buttons: tuple[Button, ...] = ()
     keyboard: tuple[tuple[str, ...], ...] | None = None
+    # With both inline buttons and a keyboard: Telegram takes one markup per message, so the keyboard goes with this
+    # short note as a second message (only when it changed, see ``delivery.py``); empty: the keyboard is dropped.
+    keyboard_note: str = ""
+    # A tap that only changes the buttons of the message it came from (a multi-select toggle): edit, not send.
+    edit_buttons: bool = False
 
 
 @dataclass(frozen=True, slots=True)

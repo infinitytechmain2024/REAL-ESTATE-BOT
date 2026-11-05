@@ -30,6 +30,7 @@ from bot.control_plane import menu
 from bot.control_plane.access import AccessDesk, PostgresAccessStore
 from bot.control_plane.anthropic_interviewer import AnthropicInterviewer, FallbackInterviewer
 from bot.control_plane.auto import PostgresSettingsStore
+from bot.control_plane.delivery import KeyboardTracker
 from bot.control_plane.intake import PostgresIntakeStore
 from bot.control_plane.interviewer import Interviewer, OpenRouterInterviewer
 from bot.control_plane.live_view import (
@@ -106,8 +107,11 @@ async def run() -> None:
     async def notify(chat_id: int, text: str) -> None:
         await bot.send_message(chat_id, text)
 
+    keyboards = KeyboardTracker()
+
     async def send(chat_id: int, reply: Reply) -> None:
-        await bot.send_message(chat_id, reply.text, reply_markup=_markup(reply))
+        for part in keyboards.parts(chat_id, reply):
+            await bot.send_message(chat_id, part.text, reply_markup=_markup(part))
 
     # Owners from .env plus the helpers/operators they approved, shared by every check.
     operators = OperatorSet(settings.operator_user_ids)
@@ -196,8 +200,15 @@ async def run() -> None:
             chat_id=query.message.chat.id if query.message is not None else None,
         )
         await query.answer()
-        if query.message is not None:
-            await bot.send_message(query.message.chat.id, reply.text, reply_markup=_markup(reply))
+        if query.message is not None and reply.edit_buttons:  # a multi-select toggle: the same message, new ticks
+            markup = _markup(reply)
+            try:
+                await bot.edit_message_reply_markup(chat_id=query.message.chat.id, message_id=query.message.message_id,
+                                                    reply_markup=markup if isinstance(markup, InlineKeyboardMarkup) else None)
+            except Exception:  # noqa: BLE001 - e.g. the message is too old to edit; the tick is saved anyway
+                logging.getLogger(__name__).warning("telegram.control.edit_buttons_failed")
+        elif query.message is not None:
+            await send(query.message.chat.id, reply)
 
     @router.message(lambda message: bool(message.voice))
     async def voice(message: Message) -> None:
@@ -211,13 +222,13 @@ async def run() -> None:
 
         reply = await control.handle_voice(_incoming(message), download)
         if reply:
-            await message.answer(reply.text, reply_markup=_markup(reply))
+            await send(message.chat.id, reply)
 
     @router.message()
     async def text(message: Message) -> None:
         reply = await control.handle_text(_incoming(message))
         if reply:
-            await message.answer(reply.text, reply_markup=_markup(reply))
+            await send(message.chat.id, reply)
 
     # Replies intentionally use Telegram's plain-text default: transcribed
     # speech is untrusted user content and must not be parsed as HTML.

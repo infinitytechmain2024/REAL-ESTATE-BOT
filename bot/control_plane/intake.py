@@ -59,9 +59,11 @@ from bot.control_plane.rules import (
     AI_SKIP_WORDS,
     DEVIATION_OPTIONS,
     DEVIATION_PATH,
+    MULTI_PATHS,
     SKIP_WORDS,
     TASK_PATH,
     RuleInterviewer,
+    choices_for,
     gazetteer_place,
     geo_ru,
     next_path,
@@ -138,9 +140,11 @@ class Draft:
     editing: str | None = None  # the spec field being changed from «Изменить»
     forced: bool = False  # «Хватит, ищи» was pressed: no more questions for this task (except a missing place)
     choices: list[str] = field(default_factory=list)  # the model's suggested answers on screen (buttons «task:opt:<i>»)
+    picked: list[int] = field(default_factory=list)  # a multi-select question: the choices ticked so far
 
     def copy(self, **changes: Any) -> Draft:
         return replace(self, dialogue=[dict(t) for t in self.dialogue], choices=list(self.choices),
+                       picked=list(self.picked),
                        spec=self.spec.model_copy(deep=True) if self.spec is not None else None, **changes)
 
     def goal_text(self) -> str:
@@ -211,7 +215,7 @@ class Draft:
     def payload(self) -> dict[str, Any]:
         return {"task": self.task, "message_id": self.message_id, "dialogue": self.dialogue, "rounds": self.rounds,
                 "asking": self.asking, "editing": self.editing, "forced": bool(self.forced),
-                "choices": list(self.choices)}
+                "choices": list(self.choices), "picked": list(self.picked)}
 
     def spec_json(self) -> str | None:
         return self.spec.model_dump_json() if self.spec is not None else None
@@ -230,7 +234,8 @@ class Draft:
                    updated_at, loaded, dialogue,
                    int(payload.get("rounds") or 0), payload.get("asking"), payload.get("editing"),
                    bool(payload.get("forced")),
-                   [str(c) for c in payload.get("choices") or [] if isinstance(c, str)])
+                   [str(c) for c in payload.get("choices") or [] if isinstance(c, str)],
+                   [int(i) for i in payload.get("picked") or [] if isinstance(i, int) and not isinstance(i, bool)])
 
     def expired(self, now: datetime) -> bool:
         return self.updated_at is not None and now - self.updated_at > DRAFT_TTL
@@ -316,13 +321,22 @@ LAUNCH_KEY = "▶️ Запустить"
 EDIT_KEY = "✏️ Изменить"
 CANCEL_KEY = "❌ Отмена"
 STOP_KEY = "⏹ Остановить поиск"
+SKIP_KEY = "🤷 Не важно"
+ENOUGH_KEY = "✅ Хватит, ищи"
 NEW_SEARCH_KEY = "🔍 Новый поиск"
 DRAFT_KEYBOARD: tuple[tuple[str, ...], ...] = ((CANCEL_KEY,),)
+# INTAKE_ANSWER_BUTTONS: under a question only the answer variants; «Не важно», «Хватит, ищи», «Отмена» live below
+ASK_KEYBOARD: tuple[tuple[str, ...], ...] = ((SKIP_KEY, ENOUGH_KEY), (CANCEL_KEY,))
+PLACE_KEYBOARD: tuple[tuple[str, ...], ...] = ((ENOUGH_KEY,), (CANCEL_KEY,))  # the place cannot be waved away
+KEYS_NOTE = "«Не важно», «Хватит, ищи» и «Отмена» — на кнопках внизу."
+OWN_ANSWER_HINT = "Нет подходящего варианта — напишите свой текстом или голосом."
+MULTI_HINT = "Можно выбрать несколько и нажать «Готово»."
+UNDECIDED = "Пока не решил"
 TASK_KEYBOARD: tuple[tuple[str, ...], ...] = ((LAUNCH_KEY, EDIT_KEY), (CANCEL_KEY,))
 SEARCH_KEYBOARD: tuple[tuple[str, ...], ...] = ((STOP_KEY,),)
 IDLE_KEYBOARD: tuple[tuple[str, ...], ...] = ((NEW_SEARCH_KEY,),)
 _KEY_COMMANDS = {LAUNCH_KEY: "запустить", EDIT_KEY: "изменить", CANCEL_KEY: "отмена", STOP_KEY: "остановить поиск",
-                 NEW_SEARCH_KEY: "новый поиск"}
+                 NEW_SEARCH_KEY: "новый поиск", SKIP_KEY: "не важно", ENOUGH_KEY: "хватит, ищи"}
 
 
 def key_command(text: str) -> str | None:
@@ -374,7 +388,7 @@ class TaskIntake:
     def __init__(self, store: IntakeStore, sink: CommandSink, notify_owners: OwnerNotice | None = None,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC),
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
-                 post_links: bool = False, both_mode: bool = False) -> None:
+                 post_links: bool = False, both_mode: bool = False, answer_buttons: bool = False) -> None:
         """The replies carry no technical details for anyone, the owner's own tasks included.
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -382,6 +396,10 @@ class TaskIntake:
 
         ``both_mode`` (``INTAKE_BOTH_MODE``): a property task whose text also asks for investors becomes
         «Недвижимость + инвесторы» by itself; off, it stays a property task. The menu never has a third button.
+
+        ``answer_buttons`` (``INTAKE_ANSWER_BUTTONS``): under a question only answer variants (the interviewer's or
+        typical ones, several at once for list fields); «Не важно» «Хватит, ищи» «Отмена» are on the bottom keyboard.
+        Off, all of them are inline buttons under the question as before.
 
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
@@ -391,6 +409,7 @@ class TaskIntake:
         self.interviewer = interviewer
         self.rules = RuleInterviewer()
         self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
+        self.answer_buttons = answer_buttons
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
         return mode_menu(text)
@@ -457,10 +476,15 @@ class TaskIntake:
                 return await self._enough(draft)
             if word in self._skip_words() and draft.asking and draft.asking != "place":
                 return await self._skip(draft)
+            if picked := self._picked_texts(draft):  # ticked variants plus the person's own words
+                text = ", ".join([*picked, text])
             return await self._interview(draft, text)
         if draft.spec is not None and draft.step == "summary":
             return await self._interview(draft, text)  # a correction typed under the card
         # idle (or a stale step from an older version): a new task
+        if self.answer_buttons and (_norm(text) in ENOUGH_WORDS or _norm(text) in AI_SKIP_WORDS):
+            # a bottom key («Не важно», «Хватит, ищи») tapped with no question on screen is not a task
+            return Reply("Сейчас нет вопроса. Опишите задачу текстом или голосом.")
         if len(text) > MAX_TASK_CHARS:
             return Reply(f"Слишком длинная задача (больше {MAX_TASK_CHARS} символов). Сократите её.")
         if self.post_links and (url := post_link(text)) is not None:
@@ -522,6 +546,14 @@ class TaskIntake:
             return await self._interview(draft, "Только точные" if value == "0" else f"±{value} %")
         if action == "opt" and value.isdigit() and int(value) < len(draft.choices):
             return await self._interview(draft, draft.choices[int(value)])
+        if action == "pick" and value.isdigit() and int(value) < len(draft.choices) and self._multi(draft):
+            index = int(value)
+            draft.picked = [i for i in draft.picked if i != index] if index in draft.picked else [*draft.picked, index]
+            await self.store.save(draft)
+            return Reply("", self._answer_buttons(draft, draft.asking, ()), edit_buttons=True)
+        if action == "done" and self._multi(draft):
+            picked = self._picked_texts(draft)
+            return await self._interview(draft, ", ".join(picked)) if picked else await self._skip(draft)
         if action == "deal" and value in ("rent", "sale") and draft.asking == "deal":
             return await self._interview(draft, f"Сделка: {DEAL_TEXT[value]}")
         if action == "role" and value in ("raising", "deploying") and draft.asking == "investor.user_role":
@@ -675,16 +707,47 @@ class TaskIntake:
     async def _ask(self, draft: Draft, understood: str, question: str, asking: str | None,
                    options: tuple[tuple[str, str], ...], choices: tuple[str, ...] = ()) -> Reply:
         draft.step, draft.asking, draft.rounds = "ask", asking, draft.rounds + 1
-        draft.choices = list(choices)
+        if self.answer_buttons and not choices and not options:
+            choices = choices_for(draft.spec or TaskSpec(), asking)
+        draft.choices, draft.picked = list(choices), []
         draft.dialogue = [*draft.dialogue, {"role": "assistant", "text": question[:600]}][-MAX_DIALOGUE:]
         await self.store.save(draft)
+        text = f"Понял: {understood}\n\n{question}" if understood else question
+        if self.answer_buttons:
+            answers = self._answer_buttons(draft, asking, options)
+            hints = [MULTI_HINT] if answers and self._multi(draft) else []
+            hints += [OWN_ANSWER_HINT] if answers else []
+            text = "\n\n".join([text, " ".join(hints)]) if hints else text
+            keyboard = PLACE_KEYBOARD if asking == "place" else ASK_KEYBOARD
+            return Reply(text, answers, keyboard=keyboard, keyboard_note=KEYS_NOTE)
         buttons = [Button(label, callback_data=f"task:{code}") for label, code in options]
         buttons += [Button(text, callback_data=f"task:opt:{i}") for i, text in enumerate(choices)]
         if asking and asking != "place":
             buttons.append(Button("Не важно", callback_data="task:skip"))
         buttons += [Button("Хватит, ищи", callback_data="task:enough"), Button("Отмена", callback_data="task:cancel")]
-        text = f"Понял: {understood}\n\n{question}" if understood else question
         return Reply(text, tuple(buttons), keyboard=DRAFT_KEYBOARD)
+
+    @staticmethod
+    def _multi(draft: Draft) -> bool:
+        return draft.asking in MULTI_PATHS and bool(draft.choices)
+
+    @staticmethod
+    def _picked_texts(draft: Draft) -> list[str]:
+        return [draft.choices[i] for i in draft.picked if 0 <= i < len(draft.choices)] if draft.asking in MULTI_PATHS else []
+
+    def _answer_buttons(self, draft: Draft, asking: str | None,
+                        options: tuple[tuple[str, str], ...]) -> tuple[Button, ...]:
+        """Only answers: the shortcuts, the variants (ticked ones marked in a multi-select, then «Готово»)."""
+        buttons = [Button(label, callback_data=f"task:{code}") for label, code in options]
+        if asking == "deal":
+            buttons.append(Button(UNDECIDED, callback_data="task:skip"))
+        if self._multi(draft):
+            buttons += [Button(f"{'✅' if i in draft.picked else '▫️'} {text}", callback_data=f"task:pick:{i}")
+                        for i, text in enumerate(draft.choices)]
+            buttons.append(Button("Готово", callback_data="task:done"))
+        else:
+            buttons += [Button(text, callback_data=f"task:opt:{i}") for i, text in enumerate(draft.choices)]
+        return tuple(buttons)
 
     async def _card(self, draft: Draft) -> Reply:
         """«Проверьте задачу»: the structured card with «Запустить» «Изменить» «Отмена» (the bottom keyboard)."""

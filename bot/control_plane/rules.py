@@ -231,6 +231,29 @@ def options_for(path: str) -> tuple[tuple[str, str], ...]:
     return ()
 
 
+# Answer variants offered as buttons when the interviewer gave none (INTAKE_ANSWER_BUTTONS). The person may also
+# write their own. A path in MULTI_PATHS takes several at once (toggle, then «Готово»).
+MULTI_PATHS = frozenset({"must_have", "wishes", "exclude", "investor.who", "investor.geography", "place.districts",
+                         "sources.required"})
+_PRESET_CHOICES: dict[str, tuple[str, ...]] = {
+    "property_type": ("Квартира", "Дом", "Участок", "Коммерческая недвижимость"),
+    "rooms.min": ("1", "2", "3", "4 и больше"),
+    "area_m2.min": ("от 50 м²", "от 80 м²", "от 120 м²"),
+    "must_have": ("Парковка", "Терраса", "Лифт", "Бассейн", "Кондиционер"),
+    "investor.who": ("Частные инвесторы", "Фонды", "Семейные офисы", "Девелоперы"),
+    "investor.ticket": ("до 100 тыс. €", "от 100 до 500 тыс. €", "от 500 тыс. €"),
+}
+_BUDGET_CHOICES = {"rent": ("до 1 000 €", "до 1 500 €", "до 2 000 €"),
+                   "sale": ("до 150 000 €", "до 300 000 €", "до 500 000 €")}
+
+
+def choices_for(spec: TaskSpec, path: str | None) -> tuple[str, ...]:
+    """Typical answers to the question about ``path`` (the budget ones follow the deal), else none."""
+    if path == "budget.max":
+        return _BUDGET_CHOICES["rent" if spec.deal == "rent" else "sale"]
+    return _PRESET_CHOICES.get(path or "", ())
+
+
 def next_path(spec: TaskSpec, mode: str, *, soft: bool = True) -> str | None:
     """The next field to ask about: a missing hard one, then the optional ones (real estate), else None."""
     if missing := spec.missing_hard(mode):

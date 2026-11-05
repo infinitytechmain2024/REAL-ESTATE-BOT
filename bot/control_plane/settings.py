@@ -37,6 +37,9 @@ class ControlPlaneSettings:
     # INTAKE_BOTH_MODE: a property task that also asks for investors becomes «Недвижимость + инвесторы» by itself
     # (no menu button either way; off: such a task stays a property task).
     intake_both_mode: bool = False
+    # INTAKE_ANSWER_BUTTONS: under a question only answer variants (several at once for list fields); «Не важно»,
+    # «Хватит, ищи», «Отмена» on the bottom keyboard. Off: all of them inline under the question.
+    intake_answer_buttons: bool = False
     # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
     # OpenRouter stays its fallback. The key is never logged or echoed.
     architect_provider: str = "openrouter"
@@ -94,6 +97,7 @@ class ControlPlaneSettings:
             interview_max_rounds=_bounded_int("INTERVIEW_MAX_ROUNDS", 14, 1, 30),
             apify_comments_enabled=os.environ.get("APIFY_FACEBOOK_COMMENTS_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"},
             intake_both_mode=os.environ.get("INTAKE_BOTH_MODE", "").strip().lower() in {"1", "true", "yes", "on"},
+            intake_answer_buttons=os.environ.get("INTAKE_ANSWER_BUTTONS", "").strip().lower() in {"1", "true", "yes", "on"},
             architect_provider=_architect_provider(os.environ.get("ARCHITECT_PROVIDER", "openrouter")),
             anthropic_api_key=anthropic_key,
             anthropic_interview_model=os.environ.get("ANTHROPIC_INTERVIEW_MODEL", "").strip() or "claude-sonnet-5-5",

@@ -129,8 +129,10 @@ services:
       INTERVIEW_MAX_ROUNDS: ${INTERVIEW_MAX_ROUNDS:-14}
       # A Facebook post link as the task becomes a comment-leads search (same flag as campaign-runner; off by default).
       APIFY_FACEBOOK_COMMENTS_ENABLED: ${APIFY_FACEBOOK_COMMENTS_ENABLED:-false}
-      # The mode «Недвижимость + инвесторы» in the task menu (v2 C2); off: no such button.
+      # «Недвижимость + инвесторы» detected from the task text (v2 C2, no menu button); off: stays a property task.
       INTAKE_BOTH_MODE: ${INTAKE_BOTH_MODE:-false}
+      # Answer variants under a question (multi-select for lists); «Не важно»/«Хватит, ищи»/«Отмена» at the bottom.
+      INTAKE_ANSWER_BUTTONS: ${INTAKE_ANSWER_BUTTONS:-false}
       # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
       ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}

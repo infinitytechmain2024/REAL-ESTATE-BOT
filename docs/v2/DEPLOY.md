@@ -53,7 +53,7 @@ for k in POSTGRES_PASSWORD REDIS_PASSWORD DATABASE_URL TELEGRAM_TOKEN OPENROUTER
   printf '%-20s %s\n' "$k" "$(grep -c "^$k=." .env)"                # 1 = задан (APIFY_TOKEN нужен для (б)-(г))
 done
 # 4. Все флаги v2 сейчас выключены (в .env пусто или значения «выкл»)
-grep -nE '^(ACQUISITION_MODE|APIFY_[A-Z]+_ENABLED|FEATURE_APIFY_FACEBOOK|CAMPAIGN_JOIN_NOTICES|LEADS_PROVIDER|CAMPAIGN_INVESTOR_REPORT|CAMPAIGN_AUCTION_DEVIATION|AGENT_REDUCTION_ENABLED|INTAKE_BOTH_MODE|CARD_EXTRA_FIELDS|ARCHITECT_PROVIDER|WATCHDOG_[A-Z_]+|OWNER_ALERT_CHAT_ID|COMPOSE_PROFILES)=' .env || echo "ни одной строки: действуют умолчания (всё выключено)"
+grep -nE '^(ACQUISITION_MODE|APIFY_[A-Z]+_ENABLED|FEATURE_APIFY_FACEBOOK|CAMPAIGN_JOIN_NOTICES|LEADS_PROVIDER|CAMPAIGN_INVESTOR_REPORT|CAMPAIGN_AUCTION_DEVIATION|AGENT_REDUCTION_ENABLED|INTAKE_BOTH_MODE|INTAKE_ANSWER_BUTTONS|CARD_EXTRA_FIELDS|ARCHITECT_PROVIDER|WATCHDOG_[A-Z_]+|OWNER_ALERT_CHAT_ID|COMPOSE_PROFILES)=' .env || echo "ни одной строки: действуют умолчания (всё выключено)"
 # `AGENT_REDUCTION_ENABLED=false` — гибрид Claude→Jev (reduction-worker) остаётся выключенным: в тени он дублирует анализ на Opus (17.10: $7 за две кампании)
 # 5. Сервисы сейчас здоровы, база доступна, миграции применены до 046 и выше
 docker compose --env-file .env ps --format 'table {{.Service}}\t{{.Status}}'
@@ -600,6 +600,7 @@ psqlc "select name, state, coalesce(error_code,'-') error_code, jsonb_array_leng
 | Watchdog (мягко) | `WATCHDOG_ENABLED=false` (`OWNER_ALERT_CHAT_ID`, `WATCHDOG_DOCKER_SOCKET`, `WATCHDOG_DOCKER_GID` можно оставить) | watchdog |
 | Watchdog (полностью) | убрать `ops` из `COMPOSE_PROFILES` в `.env`, затем `docker compose --env-file .env --profile ops rm -sf watchdog` | watchdog |
 | Режим «Недвижимость + инвесторы» | `INTAKE_BOTH_MODE=false` | telegram |
+| Варианты ответа под вопросом, мультиселект, «Не важно / Хватит, ищи / Отмена» внизу | `INTAKE_ANSWER_BUTTONS=false` | telegram |
 | Карточка: площадь, телефон, агентство | `CARD_EXTRA_FIELDS=false` | analysis-worker, campaign-runner (+ analysis-pipeline при профиле `analysis`) |
 
 Всё сразу к состоянию до флагов: `cp .env.bak.<метка из раздела 1> .env`, затем
