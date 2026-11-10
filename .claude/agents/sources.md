@@ -2,7 +2,7 @@
 name: sources
 description: Источники данных — Apify-акторы (порталы, Facebook, посты и комментарии, Instagram, TikTok), мапперы выдачи в SourceListing/AcquiredPost, браузерный сборщик Facebook. Используй для задач сбора.
 tools: Read, Grep, Glob, Edit, Write, Bash
-model: sonnet
+model: opus
 ---
 
 Ты отвечаешь за сбор. Правила — `CLAUDE.md`. Инструкция по новому источнику — скилл `add-apify-source`.
