@@ -357,6 +357,17 @@ async def test_429_then_a_lost_answer_is_never_launched_again_and_booked_at_its_
     assert len(api.launches()) == 2  # a run may exist: never a second paid launch
 
 
+async def test_429_then_4xx_fails_without_extra_posts(ledger) -> None:
+    api, clock = Api(launches=[429, 404]), Clock()  # the 404 repeats: only a 429 may be retried for free
+    store = MemorySourceRunStore(clock=clock)
+    result = await build(ApifyInstagramComments, api, IG, store, clock).run(CAMPAIGN, [IG_POST], save=Saved())
+    assert (result.outcome.status, result.outcome.error) == ("failed", "apify_http_404")
+    assert len(api.launches()) == 2 and clock.sleeps == [15.0]
+    (row,) = store.rows.values()
+    assert (row["status"], row["run_id"], row["error_code"], row["attempts"]) == ("failed", None, "apify_http_404", 1)
+    assert [e for e in ledger.entries if e.cost_usd] == []  # refused twice: nothing started, nothing paid
+
+
 async def test_429_then_the_budget_runs_out_during_the_pause_is_skipped(ledger) -> None:
     api, clock = Api(launches=[429, 201]), Clock()
     store = MemorySourceRunStore(clock=clock)
