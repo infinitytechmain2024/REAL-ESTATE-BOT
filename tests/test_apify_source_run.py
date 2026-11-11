@@ -41,8 +41,9 @@ class Api:
     """A scripted Apify API: the launch answer, run states (one per GET, the last repeats) and the dataset."""
 
     def __init__(self, *, launch: Any = None, states: list[Any] | None = None, dataset: list[Any] | None = None,
-                 usage: Any = 0.05) -> None:
+                 usage: Any = 0.05, message: Any = None) -> None:
         self.launch, self.states, self.dataset, self.usage = launch, states or ["SUCCEEDED"], dataset or [], usage
+        self.message = message  # the run's statusMessage, when set
         self.calls: list[httpx.Request] = []
         self.abort_status = 200
 
@@ -64,6 +65,8 @@ class Api:
             data = {"id": "RUN1", "status": state, "defaultDatasetId": "DS1"}
             if self.usage is not None:
                 data["usageTotalUsd"] = self.usage
+            if self.message is not None:
+                data["statusMessage"] = self.message
             return httpx.Response(200, json={"data": data})
         if "/datasets/DS1/items" in path:
             offset, limit = int(request.url.params["offset"]), int(request.url.params["limit"])
@@ -348,3 +351,51 @@ def test_input_hash_is_stable_and_key_order_free() -> None:
     assert a == input_hash("apify/instagram-scraper", {"resultsLimit": 5, "search": "piso"})
     assert a != input_hash("apify/instagram-scraper", {"search": "piso", "resultsLimit": 6})
     assert len(a) == 64
+
+
+# --- P1.3a: a run stopped by its own cap («max charge reached») ------------------------------------------------
+
+
+async def test_cap_reached_with_no_rows_is_cap_too_low_not_an_empty_success(ledger, caplog) -> None:
+    caplog.set_level(logging.INFO)
+    api, store, sink = Api(dataset=[], usage=0.0, message="max charge reached"), MemorySourceRunStore(), Sink()
+    source = runner(api, store)
+    first = await source.run(CAMPAIGN, INPUT, sink)
+    assert (first.status, first.error, first.items_imported, first.cost_usd, first.capped) == (
+        "failed", "apify_cap_too_low", 0, 0.0, True)
+    saved = row(store)
+    assert (saved["status"], saved["error_code"], saved["billed_usd"]) == ("failed", "apify_cap_too_low", 0.0)
+    assert apify_costs(ledger) == [("apify:RUN1", 0.0, "")]  # the real usageTotalUsd, not the cap
+    assert [(e.kind, e.code) for e in ledger.entries if e.kind == "error"] == [("error", "apify_cap_too_low")]
+    again = await source.run(CAMPAIGN, INPUT, sink)  # never relaunched with the same cap
+    assert (again.status, again.error) == ("failed", "apify_cap_too_low") and len(api.launches()) == 1
+    (warning,) = [r for r in caplog.records if r.getMessage() == "apify_source.cap_too_low"]
+    assert warning.levelname == "WARNING"
+    assert (warning.actor_id, warning.max_charge_usd) == ("apify/instagram-comment-scraper", 0.2)
+    assert sink.pages == []
+
+
+async def test_cap_reached_with_rows_is_a_capped_success(ledger, caplog) -> None:
+    caplog.set_level(logging.INFO)
+    api = Api(dataset=[comment(n) for n in range(3)], usage=0.2, message="Max charge reached")
+    store, sink = MemorySourceRunStore(), Sink()
+    outcome = await runner(api, store).run(CAMPAIGN, INPUT, sink)
+    assert (outcome.status, outcome.items_imported, outcome.cost_usd, outcome.capped, outcome.error) == (
+        "succeeded", 3, 0.2, True, None)
+    assert row(store)["status"] == "succeeded" and apify_costs(ledger) == [("apify:RUN1", 0.2, "")]
+    (warning,) = [r for r in caplog.records if r.getMessage() == "apify_source.capped"]
+    assert (warning.levelname, warning.capped, warning.max_charge_usd, warning.rows) == ("WARNING", True, 0.2, 3)
+    (info,) = [r for r in caplog.records if r.getMessage() == "apify_source.imported"]
+    assert info.capped is True
+
+
+async def test_an_empty_run_without_the_cap_message_stays_an_empty_success(ledger) -> None:
+    for message in (None, "Finished", 42):
+        outcome = await runner(Api(message=message), MemorySourceRunStore()).run(CAMPAIGN, INPUT, Sink())
+        assert (outcome.status, outcome.items_imported, outcome.capped) == ("succeeded", 0, False)
+
+
+async def test_cap_reached_on_a_failed_run_keeps_the_run_status(ledger) -> None:
+    outcome = await runner(Api(states=["FAILED"], message="max charge reached"), MemorySourceRunStore()).run(
+        CAMPAIGN, INPUT, Sink())
+    assert (outcome.status, outcome.error) == ("failed", "apify_run_failed")
