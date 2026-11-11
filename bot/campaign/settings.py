@@ -135,7 +135,7 @@ class CampaignRunnerSettings(BaseSettings):
 
     # Tell the chat about closed Facebook groups (Apify group_private) and read them after «Вступил».
     join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
-    # One card for one object listed without a street address (same type, deal, district, price ±1 %, area ±2 %).
+    # One card for one plot for sale listed without a street address (district and city, price ±1 %, area ±2 %).
     dedup_without_address: bool = Field(default=False, validation_alias="DEDUP_WITHOUT_ADDRESS")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.

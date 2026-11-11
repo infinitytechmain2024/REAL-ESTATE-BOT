@@ -36,10 +36,15 @@ phone, the agency or at least two features are shared too, even if the districts
 Two ads of one portal are not merged by text (only Facebook, where one flat is posted in many groups, is).
 
 Without an address (``same_object(..., without_address=True)``, ``DEDUP_WITHOUT_ADDRESS``; at least one side has no
-street address, so the rules above never merge two ads of one portal): the same property type and deal (both known),
-the same rooms (or none on both), the price within 1 % and the area within 2 % (both known; a plot's ``plot_m2``
-when it has no ``area_m2``), and a shared district token (or, when either side names no district, the same city).
-A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a cadastral reference stated in both texts must agree.
+street address, so the rules above never merge two ads of one portal): only plots of land for sale, one plot listed
+by several agencies. Both are ``land`` and ``sale``, the same rooms (or none on both), the price within 1 %, the area
+within 2 % (both known; ``plot_m2`` when there is no ``area_m2``), the same city and, when both name a district, a
+shared district token (generic words such as «urbanización», «costa», «residencial» and regions dropped). The texts'
+small numbers must be the same list (as in the text rules). Never merged: a new development («obra nueva»,
+«promoción», «Residencial X»), the same agency or phone on one portal (one advertiser lists several plots there), two
+plots with a round area (a multiple of 100 up to 2000 m², typical plots of one estate) and neither a zone nor a
+cadastral reference in either text. A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a cadastral reference
+stated in both texts must agree.
 
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
@@ -63,6 +68,8 @@ AREA_TOLERANCE = 0.03
 FACTS_PRICE_TOLERANCE = 0.01  # the cross-portal «same facts» rule is stricter than ``PRICE_TOLERANCE``
 BARE_PRICE_TOLERANCE = 0.01  # the rule without an address (``_same_bare_facts``)
 BARE_AREA_TOLERANCE = 0.02
+BARE_ROUND_AREA = 100  # a plot area that is a multiple of this, up to ``BARE_ROUND_MAX`` m², is a typical estate plot
+BARE_ROUND_MAX = 2000
 FACTS_MIN_FEATURES = 2
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
@@ -84,6 +91,19 @@ _PRICE_TEXT = re.compile(
 _ZONE = re.compile(r"(?<!\w)(?:n\s?\.?\s?z\s?\.?|norma\s+zonal)\s*:?\s*(\d{1,2}(?:\s?\.\s?\d{1,2}){0,3}(?:\s?\.\s?[a-z]|[a-z])?(?!\w))"
                    r"(?:\s*,?\s*grado\s*(\d{1,2})\s*\.?\s*[ºo°]?\s*,?\s*(?:nivel\s*([a-z])(?!\w))?)?", re.IGNORECASE)
 _CADASTRE = re.compile(r"ref(?:erencia|\.)?\s*catastral\s*:?\s*([0-9a-z]{14})(?:[0-9a-z]{6})?(?!\w)", re.IGNORECASE)
+_NEW_BUILD_NAME = re.compile(r"(?<!\w)(?:[Rr]esidencial|RESIDENCIAL)\s+(?:[A-ZÁÉÍÓÚÑ]|(?:[Ee]l|[Ll]a|[Ll]os|[Ll]as)\s+[A-ZÁÉÍÓÚÑ])")
+_NEW_BUILD_WORDS = re.compile(r"(?<!\w)(?:obra\s+nueva|promoci[oó]n|(?:complejo|conjunto)\s+residencial)(?!\w)",
+                              re.IGNORECASE)
+# District words that do not identify a place (estates, new builds, coasts) and Spain's regions.
+_PLACE_STOP = frozenset({
+    "urbanizacion", "urbanizaciones", "urb", "obra", "nueva", "nuevo", "residencial", "promocion", "complejo",
+    "conjunto", "costa", "sol", "playa", "mar", "golf", "alto", "alta", "norte", "sur", "este", "oeste", "san",
+    "santa", "parcela", "parcelas", "solar", "terreno", "terrenos", "urbano", "rustico", "sector", "poligono",
+    "andalucia", "cataluna", "catalunya", "comunidad", "comunitat", "valenciana", "aragon", "asturias", "cantabria",
+    "galicia", "extremadura", "navarra", "rioja", "pais", "vasco", "euskadi", "baleares", "balears", "illes", "islas",
+    "canarias", "castilla", "mancha", "leon", "murcia", "region", "provincia", "blanca", "brava", "dorada", "calida",
+    "tropical", "azahar", "luz", "maresme", "garraf",
+})
 _SOCIAL_HOSTS = frozenset({"facebook.com", "web.facebook.com", "fb.com", "fb.watch", "instagram.com"})
 _STOP = frozenset({
     "calle", "carrer", "avenida", "avda", "plaza", "paseo", "camino", "barrio", "zona", "centro", "street", "road",
@@ -120,6 +140,7 @@ class Listing:
     plot: float | None = None  # the payload's plot_m2
     zones: frozenset[str] = frozenset()  # planning zones of the body («N.Z. 8.1.A» -> "8.1.a")
     cadastre: frozenset[str] = frozenset()  # cadastral references of the body (the 14-character parcel part)
+    new_build: bool = False  # the body, title or location names a new development («obra nueva», «promoción» ...)
 
 
 def _positive(value: object) -> float | None:
@@ -173,7 +194,14 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         plot=_positive(payload.get("plot_m2")),
         zones=zones_of(excerpt),
         cadastre=frozenset(found.upper() for found in _CADASTRE.findall(excerpt)),
+        new_build=is_new_build(" ".join((excerpt, title, place))),
     )
+
+
+def is_new_build(text: str) -> bool:
+    """«obra nueva», «promoción», «complejo / conjunto residencial» or a «Residencial <Name>» complex; a plain «uso
+    residencial» (the zoning of a plot) is not one."""
+    return bool(_NEW_BUILD_WORDS.search(text or "") or _NEW_BUILD_NAME.search(text or ""))
 
 
 def zones_of(text: str) -> frozenset[str]:
@@ -415,23 +443,37 @@ def _bare_area(listing: Listing) -> float | None:
 
 def _same_bare_facts(a: Listing, b: Listing) -> bool:
     """The rule without an address (see the module notes): every negative rule of ``same_object`` has passed and at
-    least one side has no street address. Works on two ads of one portal too (one plot listed by several agencies)."""
-    if not (a.kind and a.kind == b.kind and a.deal and a.deal == b.deal) or a.rooms != b.rooms:
+    least one side has no street address. Plots for sale only; works on two ads of one portal (one plot listed by
+    several agencies), so an advertiser shared on one portal means two of its plots, not one."""
+    if not (a.kind == b.kind == "land" and a.deal == b.deal == "sale") or a.rooms != b.rooms:
+        return False
+    if a.new_build or b.new_build or a.numbers != b.numbers:
+        return False
+    host_a, host_b = _host(a.url), _host(b.url)
+    if host_a and host_a == host_b and (a.phones & b.phones or (a.agency and a.agency == b.agency)):
         return False
     if _close(a.price, b.price, BARE_PRICE_TOLERANCE) is not True:
         return False
-    if _close(_bare_area(a), _bare_area(b), BARE_AREA_TOLERANCE) is not True:
+    area_a, area_b = _bare_area(a), _bare_area(b)
+    if _close(area_a, area_b, BARE_AREA_TOLERANCE) is not True:
         return False
+    if not (a.zones or b.zones or a.cadastre or b.cadastre) and any(
+            area <= BARE_ROUND_MAX and area % BARE_ROUND_AREA == 0 for area in (area_a, area_b) if area is not None):
+        return False  # typical plots of one estate: nothing in the texts tells them apart
     if a.zones and b.zones and not _zones_agree(a.zones, b.zones):
         return False  # another planning zone: another plot
     if a.cadastre and b.cadastre and not a.cadastre & b.cadastre:
         return False  # another parcel
-    place_a = tokens(a.location) - tokens(a.address)  # the district / neighbourhood, without the street
-    place_b = tokens(b.location) - tokens(b.address)
-    if place_a and place_b:
-        return bool(place_a & place_b)
     cities = _cities(a)
-    return bool(cities) and cities == _cities(b)
+    if not cities or cities != _cities(b):
+        return False
+    place_a, place_b = _district_tokens(a), _district_tokens(b)
+    return bool(place_a & place_b) if place_a and place_b else True
+
+
+def _district_tokens(listing: Listing) -> frozenset[str]:
+    """The district / neighbourhood tokens of a listing: no street words, no estate / coast words, no regions."""
+    return frozenset(tokens(listing.location) - tokens(listing.address) - _PLACE_STOP)
 
 
 def _same_text(a: Listing, b: Listing, price: bool | None, area: bool | None) -> bool:
