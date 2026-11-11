@@ -75,6 +75,7 @@ class SiteReport:
     unverified: bool = False   # the site asked for a person's check and nobody passed it («проверку никто не прошёл»)
     read_api: int = 0  # actual structured API reads, a subset of read
     api_empty: bool = False  # its API source run finished and returned no listing at all
+    api_failed: bool = False  # its API source run failed on the provider's side (``apify_http_400`` ...)
 
 
 @dataclass(frozen=True, slots=True)

@@ -41,6 +41,7 @@ class Site:
     unverified: bool = False   # the site asked for a person's check and nobody passed it
     read_api: int = 0
     api_empty: bool = False    # its API source run finished and returned no listing
+    api_failed: bool = False   # its API source run failed on the provider's side
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -76,13 +77,15 @@ def _sites(sources: Sequence[SourceCount], reports: Sequence[object], portals: S
             row[name] = row.get(name, 0) + int(getattr(report, name, 0) or 0)
         row["unverified"] = row.get("unverified", 0) or int(bool(getattr(report, "unverified", False)))
         row["api_empty"] = row.get("api_empty", 0) or int(getattr(report, "api_empty", False) is True)
+        row["api_failed"] = row.get("api_failed", 0) or int(getattr(report, "api_failed", False) is True)
     for source in sources:
         if source.platform != "website":
             continue
         row = merged.setdefault(_portal_of(source.name, portals) or source.name, {})
         for name, value in (("posts", source.posts), ("sent", source.sent), ("held", source.held)):
             row[name] = row.get(name, 0) + value
-    return {host: Site(host, **{**row, "unverified": bool(row.get("unverified")), "api_empty": bool(row.get("api_empty"))})
+    return {host: Site(host, **{**row, "unverified": bool(row.get("unverified")), "api_empty": bool(row.get("api_empty")),
+                                "api_failed": bool(row.get("api_failed"))})
             for host, row in merged.items()}
 
 
@@ -115,6 +118,8 @@ def _nothing_line(site: Site) -> str:
     """A portal with no links: why, from its ``site:`` queries."""
     if site.api_empty:
         why = "0 объявлений по запросу"
+    elif site.api_failed:
+        why = "портал вернул ошибку"
     elif site.queries and not site.results:
         why = f"поиск ничего не вернул ({plural(site.queries, 'запрос', 'запроса', 'запросов')})"
     elif site.queries:

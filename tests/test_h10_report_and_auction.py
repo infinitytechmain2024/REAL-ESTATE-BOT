@@ -219,3 +219,36 @@ def test_raising_the_budget_is_not_advised_when_the_task_already_allows_it() -> 
              "Поищите позже: 2 дня."]
     assert "Поднимите бюджет на 10 %: 5 вариантов дороже." not in clean_recommendations(model, facts)
     assert "Поднимите бюджет на 10 %: 5 вариантов дороже." in clean_recommendations(model, open_facts)
+
+
+async def test_a_portal_whose_api_run_failed_says_so_and_own_limits_do_not() -> None:
+    """v3 Q6: a failed provider run (apify_http_400) is «портал вернул ошибку», not «до него не дошла очередь»."""
+    web = MemoryWebStore()
+    web.sources[("c1", "apify_idealista")] = SourceRun("c1", "apify_idealista", "failed", error_code="apify_http_400")
+    web.sources[("c1", "apify_fotocasa")] = SourceRun("c1", "apify_fotocasa", "failed", error_code="apify_launch_limits")
+    reports = await web.site_report("c1")
+    assert {r.host for r in reports if r.api_failed} == {"idealista.com"}
+    lines, _ = site_lines([], reports, ["idealista.com", "fotocasa.es"])
+    assert "Idealista — портал вернул ошибку" in lines
+    assert "Fotocasa — до него не дошла очередь запросов" in lines
+
+
+@pytest.mark.parametrize("code", ["apify_budget_cap", "apify_time_cap", "apify_task_changed", "apify_launch_uncertain",
+                                  "apify_claim_required", "apify_checkpoint_failed", "apify_geocode_unavailable"])
+async def test_our_own_stops_are_not_a_portal_error(code: str) -> None:
+    web = MemoryWebStore()
+    web.sources[("c1", "apify_idealista")] = SourceRun("c1", "apify_idealista", "failed", error_code=code)
+    reports = await web.site_report("c1")
+    assert not any(r.api_failed for r in reports)
+    lines, _ = site_lines([], reports, ["idealista.com"])
+    assert lines == ["Idealista — до него не дошла очередь запросов"]
+
+
+@pytest.mark.parametrize("code", ["apify_http_400", "apify_run_failed", "apify_transport", "apify_dataset_schema",
+                                  "apify_invalid_json", "apify_wait_timeout", "apify_dataset_timeout",
+                                  "apify_response_too_large", "apify_billing_pending"])
+async def test_provider_failures_are_a_portal_error(code: str) -> None:
+    web = MemoryWebStore()
+    web.sources[("c1", "apify_idealista")] = SourceRun("c1", "apify_idealista", "failed", error_code=code)
+    lines, _ = site_lines([], await web.site_report("c1"), ["idealista.com"])
+    assert lines == ["Idealista — портал вернул ошибку"]

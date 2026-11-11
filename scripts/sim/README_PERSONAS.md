@@ -26,8 +26,11 @@
 (`docs/v3/SIM_RUBRIC.md` §1).
 
 Слоты (`answer_user.SLOT_PATTERNS`, первый совпавший): `clarify` (бот заметил противоречие), `deviation`, `details`
-(общий вопрос: стадия, под какое строительство, этаж/лифт), `investor_role`, `investor_who`, `ticket`, `term`,
-`budget`, `property_type`, `area`, `rooms`, `deal`, `place`, `district`, `must_have`, `sources`; `card` — карточка
+(общий вопрос: стадия, под какое строительство, «что планируете на участке», этаж/лифт), `land_status` (категория
+земли: urbano / urbanizable / rústico), `investor_role`, `investor_who`, `ticket`, `term`, `budget`,
+`property_type`, `area`, `rooms`, `deal`, `district` («только в самом городе или города вокруг», «окрестности»:
+раньше `place`, иначе кампания сужается до города), `place`, `district` (район, пригороды), `must_have`
+(обязательное, коммуникации, подъезд), `sources`; `card` — карточка
 (`card: true` в pending). Свои шаблоны персоны — `slot_patterns: {"<slot>": ["<regex>"]}` (проверяются первыми).
 
 Персоны G6 и G8 — пост по ссылке: ссылку даёт владелец (O7). До неё прогон не запускается; оркестратор кладёт копию с
@@ -41,7 +44,9 @@
 2. `python -m scripts.sim.answer_user --run <batch>-<p> --persona scripts/sim/personas/<p>.json --seed <N>`:
    - читает `sim/pending_answers/<run>.json` (`index`, `card`, `question`, `buttons`);
    - слот вопроса — по тексту после «Понял: …»; карточка — слот `card`;
-   - из `replies[slot]` убираются нажатия кнопок, которых нет на экране (на карточке «Запустить» есть всегда);
+   - из `replies[slot]` убираются нажатия кнопок, которых нет на экране: ни под сообщением (`buttons`), ни на
+     нижней клавиатуре (`keyboard`; клавишу можно назвать без значка: «Изменить»). На карточке «Запустить» есть
+     всегда;
    - если этот слот уже спрашивали (журнал `log` в `sim/answers/<run>.json`), варианты `any`, `contradiction`,
      `low_budget`, `edit` убираются: на повторный вопрос пользователь отвечает прямо;
    - выбор — `random.Random(f"{seed}:{run}:{index}:{slot}").choices(варианты, weights)`: тот же seed — тот же
