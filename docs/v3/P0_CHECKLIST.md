@@ -20,7 +20,7 @@ docker compose --env-file .env config -q && echo "compose config ok"
 for k in POSTGRES_PASSWORD REDIS_PASSWORD DATABASE_URL TELEGRAM_TOKEN OPENROUTER_API_KEY APIFY_TOKEN; do
   printf '%-20s %s\n' "$k" "$(grep -c "^$k=." .env)"; done
 # снимок флагов до update.sh: файл вне репозитория, по нему делаются все откаты
-grep -nE '^(ACQUISITION_MODE|APIFY_[A-Z_]+_ENABLED|FEATURE_APIFY_FACEBOOK|LEADS_PROVIDER|CAMPAIGN_BUDGET_USD|APIFY_FACEBOOK_SCOPE|COMPOSE_PROFILES|CAMPAIGN_JOIN_NOTICES|CAMPAIGN_INVESTOR_REPORT|INTAKE_BOTH_MODE|CARD_EXTRA_FIELDS|ARCHITECT_PROVIDER|WATCHDOG_ENABLED|OPENROUTER_[A-Z_]+_MODEL)=' .env > /root/p0-flags-before.txt
+grep -nE '^(ACQUISITION_MODE|APIFY_[A-Z_]+_ENABLED|FEATURE_APIFY_FACEBOOK|APIFY_FACEBOOK_[A-Z_]+|APIFY_IDEALISTA_PROVIDER|LEADS_PROVIDER|CAMPAIGN_BUDGET_USD|COMPOSE_PROFILES|CAMPAIGN_JOIN_NOTICES|CAMPAIGN_INVESTOR_REPORT|INTAKE_BOTH_MODE|CARD_EXTRA_FIELDS|ARCHITECT_PROVIDER|WATCHDOG_[A-Z_]+|OPENROUTER_[A-Z_]+_MODEL)=' .env > /root/p0-flags-before.txt
 cat /root/p0-flags-before.txt; [ -s /root/p0-flags-before.txt ] || echo "ни одной строки: умолчания (всё выключено)"
 stat -c %g /var/run/docker.sock                                           # GID для блока (ж)
 psqlc() { docker compose --env-file .env exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$1"; }
@@ -29,7 +29,8 @@ llmerr() { psqlc "select stage, code, item, count(*) from campaign_costs where k
 
 Норма: свободно ≥ 5 ГБ; дерево чистое; все шесть ключей `1`; версия Compose v2 (запишите её — `HANDOFF.md` §4 п. 16).
 Снимок `/root/p0-flags-before.txt` (`docs/v2/DEPLOY.md:56`): флаги выключены (`ACQUISITION_MODE=legacy`, `*_ENABLED=false`,
-`FEATURE_APIFY_FACEBOOK=false`, `LEADS_PROVIDER=browser`, `APIFY_FACEBOOK_SCOPE=campaign`, `CAMPAIGN_BUDGET_USD=5`) или строк нет.
+`FEATURE_APIFY_FACEBOOK=false`, `LEADS_PROVIDER=browser`, `APIFY_FACEBOOK_SCOPE=campaign`) или строк нет. `CAMPAIGN_BUDGET_USD` ≤ 5
+и любой `COMPOSE_PROFILES` — не повод для стопа (записать). Секретов в снимке нет: `APIFY_TOKEN` и `*_API_KEY` под регулярку не попадают.
 Что-то включено (на проде было `FEATURE_APIFY_FACEBOOK=true`, `docs/v2/HANDOFF.md:225-231`) — **стоп**, до `update.sh`
 написать разработчику. Откаты ниже написаны для умолчаний: если в снимке у ключа другое значение, возвращайте значение из снимка.
 Записать заранее: билды акторов `apify/facebook-groups-scraper` и `apify/facebook-comments-scraper` (вкладка Builds,
@@ -164,7 +165,7 @@ printf '%s\n' CAMPAIGN_JOIN_NOTICES=false CAMPAIGN_INVESTOR_REPORT=false INTAKE_
 
 ```bash
 grep -q '^COMPOSE_PROFILES=' .env && sed -i '/^COMPOSE_PROFILES=/{/ops/!s/$/,ops/}' .env || echo COMPOSE_PROFILES=ops >> .env
-grep -E '^COMPOSE_PROFILES=' .env                       # одна строка, в ней ops
+grep -E '^COMPOSE_PROFILES=' .env                       # одна строка с ops, без кавычек и `#`; иначе поправить руками
 printf '%s\n' WATCHDOG_ENABLED=true WATCHDOG_DOCKER_SOCKET=/var/run/docker.sock 'WATCHDOG_DOCKER_GID=<GID из stat>' >> .env
 docker compose --env-file .env up -d --build watchdog
 docker compose --env-file .env ps -q watchdog | grep -q . || docker compose --env-file .env --profile ops up -d watchdog
@@ -207,7 +208,7 @@ echo 'CARD_EXTRA_FIELDS=false' >> .env && docker compose --env-file .env up -d a
 
 **Потолок A4: $0.30 на запуск актора групп, ≤ $0.6 на всю кампанию A4.** После (б) и (г) в кампании работают ещё
 порталы, LLM и Apify-комментарии под карточками (до $1 на пост), поэтому на время A4 `LEADS_PROVIDER=browser` и
-`CAMPAIGN_BUDGET_USD=0.5`. Бюджет проверяется до вызова: сверху возможен ещё один вызов. ≤ 50 постов.
+`CAMPAIGN_BUDGET_USD=0.3`. Бюджет проверяется до вызова: сверху возможен ещё один вызов (запуск групп ≤ $0.30), итого ≤ $0.6. ≤ 50 постов.
 `CAMPAIGN_BUDGET_USD` каждый сервис читает сам, поэтому перезапускаются все четыре: `watchdog` — только если (ж) включён.
 Если в `COMPOSE_PROFILES` есть `collector` или `analysis`, добавляйте `facebook-collector` / `analysis-pipeline` во все
 `up -d` этого раздела и раздела 6 (они тоже читают `CAMPAIGN_BUDGET_USD`).
@@ -222,7 +223,7 @@ docker compose --env-file .env run --rm facebook-runner python -m bot.facebook_c
 Норма: обе строки, `…backend` и `…egress`; нет `egress` — стоп (compose не обновился, вернуться к п. 2).
 
 ```bash
-printf '%s\n' FEATURE_APIFY_FACEBOOK=true 'APIFY_FACEBOOK_ACTOR_BUILD=<билд групп>' APIFY_FACEBOOK_SCOPE=campaign APIFY_FACEBOOK_MAX_POSTS_PER_RUN=50 APIFY_FACEBOOK_MAX_USD_PER_RUN=0.3 APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN=0.3 LEADS_PROVIDER=browser CAMPAIGN_BUDGET_USD=0.5 >> .env
+printf '%s\n' FEATURE_APIFY_FACEBOOK=true 'APIFY_FACEBOOK_ACTOR_BUILD=<билд групп>' APIFY_FACEBOOK_SCOPE=campaign APIFY_FACEBOOK_MAX_POSTS_PER_RUN=50 APIFY_FACEBOOK_MAX_USD_PER_RUN=0.3 APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN=0.3 LEADS_PROVIDER=browser CAMPAIGN_BUDGET_USD=0.3 >> .env
 docker compose --env-file .env up -d facebook-runner campaign-runner analysis-worker watchdog   # watchdog — только если (ж) включён
 docker compose --env-file .env logs --tail=20 facebook-runner | grep -iE "build|token|traceback" || echo ok
 ```
@@ -237,8 +238,8 @@ psqlc "select round(sum(cost_usd),4) usd from campaign_costs where campaign_id='
 ```
 
 Норма: `status=SUCCEEDED` (в БД заглавными), `items_imported > 0`, `billed_usd` ≤ 0.30 и совпадает с Apify Billing;
-итог `campaign_costs` по кампании A4 ≤ $0.6. После A4 вернуть значения из снимка п. 0 и (г) (`docs/v2/DEPLOY.md:358-360`),
-`scope=all` не включать (O2):
+итог `campaign_costs` по кампании A4 ≤ $0.6. После A4 вернуть значения из снимка п. 0 и (г) (`docs/v2/DEPLOY.md:358-360`;
+`LEADS_PROVIDER=apify` — если (г) оставлен, иначе `browser`), `scope=all` не включать (O2):
 
 ```bash
 printf '%s\n' APIFY_FACEBOOK_MAX_POSTS_PER_RUN=500 APIFY_FACEBOOK_MAX_USD_PER_RUN=2 APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN=10 LEADS_PROVIDER=apify CAMPAIGN_BUDGET_USD=5 >> .env && docker compose --env-file .env up -d facebook-runner campaign-runner analysis-worker watchdog   # watchdog — если (ж) включён
@@ -266,7 +267,8 @@ psqlc "select run_id, status, items_imported, billed_usd, launched_at from apify
 (только эти ключи, не секреты). Откат всего сразу (`docs/v2/DEPLOY.md:600`, `:604-606`):
 
 ```bash
-cp .env.bak.<метка> .env && docker compose --env-file .env up -d && docker compose --env-file .env --profile ops rm -sf watchdog
+cp .env.bak.<метка> .env && docker compose --env-file .env up -d
+docker compose --env-file .env --profile ops rm -sf watchdog     # только если в снимке не было `ops`
 ```
 
 ## 6. Базовая линия G1–G9 (P0.4) — `docs/v2/GOLDEN_SET.md:27-49`
