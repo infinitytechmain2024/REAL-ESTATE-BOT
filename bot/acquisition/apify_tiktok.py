@@ -57,6 +57,14 @@ COMMENTS_ACTOR = "clockworks/tiktok-comments-scraper"
 # $0.00125) (docs/v3/ACTORS.md, TikTok): MAX_RESULTS x USD_PER_RESULT + START_USD must fit in the run's cap.
 USD_PER_RESULT = 0.0037
 START_USD = 0.001
+# The lowest maxTotalChargeUsd clockworks/tiktok-scraper accepts: a launch below it is refused at the start (4xx,
+# nothing started, nothing paid) with «Maximum cost per run is less than the allowed minimum of $0.50». Not on the
+# actor's pricing card; found by the live sample of P1.7 on 2026-11-11 (a launch with maxTotalChargeUsd=0.03).
+# The cap is only a ceiling: resultsPerPage and maxItems bound a run (30 results ~ $0.112 under a $0.50 cap).
+TIKTOK_MIN_CHARGE_USD = 0.50
+# clockworks/tiktok-comments-scraper: $0.00125 per comment; its own cap (APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD) must
+# hold MAX_RESULTS comments. Its minimum cap has not been measured: a 4xx or apify_cap_too_low means raise it.
+COMMENTS_USD_PER_RESULT = 0.00125
 POSTS_INPUT_KEYS = frozenset({"hashtags", "searchQueries", "searchSection", "postURLs", "resultsPerPage",
                               "maxFollowersPerProfile", "maxFollowingPerProfile", "commentsPerPost"})
 COMMENTS_INPUT_KEYS = frozenset({"postURLs", "commentsPerPost", "maxRepliesPerComment"})
@@ -150,6 +158,11 @@ def tiktok_comment(item: dict[str, Any]) -> Engagement | None:
 class ApifyTikTokPosts(SocialSource[SocialPost]):
     purpose = "posts"
 
+    def __init__(self, store: SourceRunStore, http: ApifyHttp, config: SocialSourceConfig, **run_kw: Any) -> None:
+        if config.max_charge_usd < TIKTOK_MIN_CHARGE_USD - 1e-9:  # the actor would refuse every launch
+            raise ValueError(f"{POSTS_ACTOR} refuses a cap below ${TIKTOK_MIN_CHARGE_USD:.2f} per run")
+        super().__init__(store, http, config, **run_kw)
+
     async def run(self, campaign_id: str, *, save: Save[SocialPost], hashtags: Sequence[str] = (),
                   search_queries: Sequence[str] = (), post_urls: Sequence[str] = (),
                   owner_user_id: int | None = None) -> SocialResult:
@@ -187,5 +200,5 @@ def tiktok_sources(config: SocialSourceConfig, store: SourceRunStore, http: Apif
 
 
 __all__ = ["COMMENTS_ACTOR", "COMMENTS_INPUT_KEYS", "PAID_KEYS", "POSTS_ACTOR", "POSTS_INPUT_KEYS",
-           "ApifyTikTokComments", "ApifyTikTokPosts", "TikTokSources", "comments_input", "post_input",
-           "tiktok_comment", "tiktok_post", "tiktok_profile", "tiktok_sources"]
+           "TIKTOK_MIN_CHARGE_USD", "ApifyTikTokComments", "ApifyTikTokPosts", "TikTokSources", "comments_input",
+           "post_input", "tiktok_comment", "tiktok_post", "tiktok_profile", "tiktok_sources"]

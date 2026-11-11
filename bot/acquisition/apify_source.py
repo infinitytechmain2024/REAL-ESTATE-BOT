@@ -23,7 +23,11 @@ The life of one run, safe to repeat after any crash (the same rules as ``bot.cam
 6. **bill** once: ``costs.record_unique`` under ``apify:<run_id>`` with ``usageTotalUsd``, or the cap with
    ``code='estimated'`` when the run did not say (an estimate never replaces a known cost);
 7. **import** the dataset page by page (``ApifyHttp.dataset_page``) from the stored offset; each page goes to the
-   source's sink, then the offset is saved.
+   source's sink, then the offset is saved;
+8. a run that ``SUCCEEDED`` with ``statusMessage`` «max charge reached» stopped on its ``maxTotalChargeUsd``: with no
+   dataset row at all the cap was too low for the actor to do anything (P1.7 sample 2026-11-11,
+   ``harvestapi/linkedin-profile-search`` at $0.15), so the row closes ``failed apify_cap_too_low`` (billed by
+   ``usageTotalUsd`` as any other run), never as an empty success; with rows it is a success marked ``capped``.
 
 A page can reach the sink twice (a crash between the sink and the checkpoint), so a sink must be idempotent (as
 ``collected_posts`` inserts are: ``on conflict do nothing``). An error that is not an Apify one (the database, the
@@ -75,6 +79,9 @@ Outcome = Literal["succeeded", "failed", "skipped", "retry", "busy"]
 # launch is LaunchUnknown, never retried.
 RETRYABLE = frozenset({"apify_http_402", "apify_http_429"})
 RATE_LIMITED = "apify_http_429"
+# The run object's ``statusMessage`` when an actor stopped on its maxTotalChargeUsd (it still ends SUCCEEDED).
+CAP_REACHED = "max charge reached"
+CAP_TOO_LOW = "apify_cap_too_low"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +148,7 @@ class RunOutcome:
     items_imported: int = 0
     cost_usd: float = 0.0
     error: str | None = None
+    capped: bool = False             # the run stopped on its maxTotalChargeUsd («max charge reached»)
 
 
 class SourceRunStore(Protocol):
@@ -158,6 +166,12 @@ def input_hash(actor_id: str, actor_input: dict[str, Any]) -> str:
     """The stable key of one input of one actor (the build is left out: a new build does not relaunch an input)."""
     return hashlib.sha256(json.dumps({"actor": actor_id, "input": actor_input}, sort_keys=True,
                                      ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def cap_reached(run: dict[str, Any]) -> bool:
+    """The run says it stopped on its maxTotalChargeUsd: ``statusMessage`` contains «max charge reached»."""
+    message = run.get("statusMessage")
+    return isinstance(message, str) and CAP_REACHED in message.lower()
 
 
 def _usage(run: dict[str, Any]) -> float | None:
@@ -232,16 +246,25 @@ class ApifySocialRun:
             return RunOutcome("failed", row.run_id, row.items_imported, cost, error)
         dataset = str(run.get("defaultDatasetId") or row.dataset_id or "") or None
         try:
-            imported = await self._import(row, dataset, sink)
+            imported, rows = await self._import(row, dataset, sink)
         except TemporaryApifyError:
             raise  # the row stays running: the next call resumes the import from its checkpoint
         except ApifyError as exc:
             await self.store.finish(row, "failed", billed_usd=cost, error=exc.code[:200])
             log.warning("apify_source.import_failed %s", exc.code, extra=self._extra(row))
             return RunOutcome("failed", row.run_id, row.items_imported, cost, exc.code)
+        cfg, capped = self.config, cap_reached(run)
+        if capped and rows == 0:  # the cap stopped the actor before its first row: not an empty search
+            await self.store.finish(row, "failed", billed_usd=cost, error=CAP_TOO_LOW)
+            await costs.error("api", CAP_TOO_LOW, item=cfg.actor_id)
+            log.warning("apify_source.cap_too_low", extra={**self._extra(row), "max_charge_usd": cfg.max_charge_usd})
+            return RunOutcome("failed", row.run_id, imported, cost, CAP_TOO_LOW, capped=True)
         await self.store.finish(row, "succeeded", billed_usd=cost)
-        log.info("apify_source.imported", extra={**self._extra(row), "items": imported})
-        return RunOutcome("succeeded", row.run_id, imported, cost)
+        if capped:
+            log.warning("apify_source.capped", extra={**self._extra(row), "max_charge_usd": cfg.max_charge_usd,
+                                                      "rows": rows, "capped": True})
+        log.info("apify_source.imported", extra={**self._extra(row), "items": imported, "capped": capped})
+        return RunOutcome("succeeded", row.run_id, imported, cost, capped=capped)
 
     async def _launch(self, row: SourceRun, actor_input: dict[str, Any]) -> SourceRun | RunOutcome:
         cfg = self.config
@@ -316,7 +339,8 @@ class ApifySocialRun:
                                   campaign_id=row.campaign_id)
         return cost
 
-    async def _import(self, row: SourceRun, dataset: str | None, sink: Sink) -> int:
+    async def _import(self, row: SourceRun, dataset: str | None, sink: Sink) -> tuple[int, int]:
+        """(items the sink kept, dataset rows read) after importing from the stored checkpoint."""
         cfg = self.config
         offset, imported = row.import_checkpoint, row.items_imported
         assert row.run_id is not None
@@ -330,7 +354,7 @@ class ApifySocialRun:
             await self.store.checkpoint(row, offset=offset, items=imported, dataset_id=dataset)
             if len(page) < limit:
                 break
-        return imported
+        return imported, offset
 
     async def _failed(self, row: SourceRun, exc: ApifyError) -> RunOutcome:
         cfg = self.config
@@ -515,5 +539,5 @@ class MemorySourceRunStore:
                 row["billed_usd"] = billed_usd
 
 
-__all__ = ["RATE_LIMITED", "RETRYABLE", "ApifySocialRun", "MemorySourceRunStore", "PostgresSourceRunStore", "RunOutcome", "SocialRunConfig",
+__all__ = ["CAP_REACHED", "CAP_TOO_LOW", "RATE_LIMITED", "RETRYABLE", "ApifySocialRun", "MemorySourceRunStore", "PostgresSourceRunStore", "RunOutcome", "SocialRunConfig",
            "SourceRun", "SourceRunStore", "input_hash"]

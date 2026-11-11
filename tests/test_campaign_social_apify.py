@@ -253,7 +253,8 @@ async def test_targets_fit_what_is_left_and_leave_room_for_linkedin(ledger) -> N
     api = Api(rows)
     campaigns, store, tasks, _runs, worker = await world(api, linkedin_usd=0.30)
     homes = await new_campaign(campaigns, store)
-    await costs.record("api", cost_usd=4.6, campaign_id=homes)  # 0.40 left: one Instagram (0.20) + one TikTok (0.15)
+    # 0.70 left: one Instagram (0.20) + one TikTok posts run at the actor's minimum cap (0.50, P1.3a)
+    await costs.record("api", cost_usd=4.3, campaign_id=homes)
     investors = await new_campaign(campaigns, store, "Ищу инвесторов в недвижимость в Марбелье", vertical="investors")
     await costs.record("api", cost_usd=4.6, campaign_id=investors)  # 0.40 - LinkedIn's 0.30: no Instagram run fits
     await worker.tick()
@@ -261,6 +262,19 @@ async def test_targets_fit_what_is_left_and_leave_room_for_linkedin(ledger) -> N
     planned = {(q.campaign_id, q.platform) for q in store.queries}
     assert sorted(planned) == sorted({(homes, "instagram"), (homes, "tiktok")})
     assert len(api.launches()) == 2
+    await tasks.http.aclose()
+
+
+async def test_the_tiktok_posts_cap_counted_is_the_actor_minimum(ledger) -> None:
+    api = Api(rows)
+    campaigns, store, tasks, _runs, worker = await world(api)
+    assert worker.sources["tiktok"].runner.config.max_charge_usd == 0.50  # P1.3a: below it the actor refuses
+    homes = await new_campaign(campaigns, store)
+    await costs.record("api", cost_usd=4.6, campaign_id=homes)  # 0.40 left: Instagram 0.20, TikTok 0.50 does not fit
+    await worker.tick()
+    await tasks.wait()
+    assert {(q.campaign_id, q.platform) for q in store.queries} == {(homes, "instagram")}
+    assert len(api.launches()) == 1
     await tasks.http.aclose()
 
 

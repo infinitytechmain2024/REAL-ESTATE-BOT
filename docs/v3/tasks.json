@@ -66,7 +66,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "done",
+      "status": "waiting_owner",
       "day": "—",
       "hours": 0
     },
@@ -247,19 +247,6 @@
       "hours": 4
     },
     {
-      "id": "P1.3a",
-      "title": "Потолки соц-акторов: минимум TikTok $0.50, «max charge reached» с 0 строк → failed с кодом",
-      "stream": "sources",
-      "agent": "sources",
-      "deps": [
-        "P1.3",
-        "P1.4"
-      ],
-      "status": "review",
-      "day": "",
-      "hours": 3
-    },
-    {
       "id": "P1.4",
       "title": "LinkedIn через Apify: люди и компании без cookie и e-mail",
       "stream": "sources",
@@ -267,7 +254,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "review",
+      "status": "done",
       "day": "волна 2",
       "hours": 5
     },
@@ -302,13 +289,12 @@
       "stream": "sources",
       "agent": "sources",
       "deps": [
-        "O6",
         "P1.2",
         "P1.3",
-        "P1.3a",
         "P1.4",
         "P1.5",
-        "P1.6"
+        "P1.6",
+        "O6"
       ],
       "status": "blocked",
       "day": "волна 3",
@@ -324,7 +310,7 @@
         "P1.3",
         "P1.4"
       ],
-      "status": "review",
+      "status": "in_progress",
       "day": "волна 3",
       "hours": 5
     },
@@ -832,7 +818,7 @@
       "deps": [
         "P1.8"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": "",
       "hours": 10
     },
@@ -844,7 +830,7 @@
       "deps": [
         "T1"
       ],
-      "status": "blocked",
+      "status": "review",
       "day": "",
       "hours": 4
     },
