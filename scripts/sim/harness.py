@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import db
+from .answer_user import keyboard_label
 from .cassette import _DATETIME, SimNet, SimStop, mark_now, normalize, offline
 
 log = logging.getLogger("scripts.sim")
@@ -62,6 +63,7 @@ BASE_ENV: dict[str, str] = {
     "LEADS_PROVIDER": "apify",
     "INTAKE_BOTH_MODE": "true",
     "CAMPAIGN_INVESTOR_REPORT": "true",
+    "CARD_EXTRA_FIELDS": "true",  # on in prod (docs/v2/CLIENT_DECISIONS.md:76): «Площадь», «Телефон», «Агентство»
     "CAMPAIGN_BUDGET_USD": "0.8",
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
@@ -195,6 +197,7 @@ class Bench:
     clock: Clock = field(default_factory=Clock)
     dialogue: list[dict[str, Any]] = field(default_factory=list)
     check_card: str | None = None
+    keyboard: list[list[str]] = field(default_factory=list)  # the bottom keyboard on the user's screen now
     stage_errors: dict[str, list[str]] = field(default_factory=dict)
     status: str = "running"
     stop_reason: str = ""
@@ -292,7 +295,7 @@ class Bench:
             FallbackInterviewer,
         )
         from bot.control_plane.auto import PostgresSettingsStore
-        from bot.control_plane.intake import PostgresIntakeStore
+        from bot.control_plane.intake import PostgresIntakeStore, key_command
         from bot.control_plane.interviewer import Interviewer, OpenRouterInterviewer
         from bot.control_plane.models import IncomingMessage, Reply, TranscriptResult
         from bot.control_plane.service import ControlPlane
@@ -369,6 +372,13 @@ class Bench:
             self._say("bot", reply)
             return reply
 
+        async def tap(label: str) -> Reply | None:  # a bottom-keyboard tap: Telegram sends the label as a message
+            self._say("user", label, press=label)
+            reply = await control.handle_text(incoming(label))
+            if reply is not None:
+                self._say("bot", reply)
+            return reply
+
         async def download() -> bytes:
             return b"OggS"
 
@@ -397,7 +407,15 @@ class Bench:
             if answer is None:
                 self._ask(reply)
             if "press" in answer:
-                reply = await press(_callback(reply, str(answer["press"])))
+                wanted = str(answer["press"])
+                label = None if _has_button(reply, wanted) else keyboard_label(self.keyboard, wanted)
+                if label is None:
+                    reply = await press(_callback(reply, wanted))
+                    continue
+                reply = await tap(label)
+                if draft.step == "summary" and key_command(label) == "запустить":
+                    launched = True
+                    break
             else:
                 reply = await text(str(answer.get("text", "")))
         if not launched:
@@ -420,6 +438,11 @@ class Bench:
         else:
             item = {"from": "bot", "text": reply.text,
                     "buttons": [{"text": b.text, "data": b.callback_data} for b in reply.buttons if b.callback_data]}
+            keyboard = getattr(reply, "keyboard", None)
+            if keyboard is not None:  # None: the keyboard stays as it is; []: it is removed
+                item["keyboard"] = [list(row) for row in keyboard]
+                if chat_id == USER:
+                    self.keyboard = item["keyboard"]
             if chat_id != USER:
                 item["chat_id"] = chat_id
             item["source"] = source
@@ -464,6 +487,7 @@ class Bench:
             "question": reply.text if reply is not None else "",
             "buttons": [{"text": b.text, "data": b.callback_data} for b in (reply.buttons if reply else ())
                         if b.callback_data],
+            "keyboard": self.keyboard,
             "dialogue": self.dialogue, "persona": self.persona.task,
             "answer_to": f"sim/answers/{self.run_id}.json",
             "answer_format": '{"answers": [{"text": "..."} | {"press": "<button text or data>"}, ...]} '
@@ -811,6 +835,10 @@ def _fast_sleeps(root: Any) -> None:
                 walk(value, depth + 1)
 
     walk(root, 0)
+
+
+def _has_button(reply: Any, wanted: str) -> bool:
+    return any(wanted in (b.text, b.callback_data) for b in getattr(reply, "buttons", ()))
 
 
 def _callback(reply: Any, wanted: str) -> str:

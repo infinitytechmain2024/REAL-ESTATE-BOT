@@ -178,6 +178,69 @@ def test_the_live_portal_fixtures_answer_the_runs_they_match(tmp_path: Path) -> 
         (LIVE / "milanuncios_items_madrid_solares.json").read_bytes()
 
 
+def test_a_portal_fixture_gives_only_the_rows_the_input_filters_let_through(tmp_path: Path) -> None:
+    folder = tmp_path / "pending_apify"
+    folder.mkdir()
+    for name, actor, actor_input in (
+            ("a", "igolaizola/idealista-scraper",  # sizes 67, 179, 232 m2: only 232 is from 200
+             {"location": "Madrid", "operation": "sale", "propertyType": "lands", "minSize": "200"}),
+            ("b", "igolaizola/idealista-scraper",
+             {"location": "Madrid", "operation": "sale", "propertyType": "lands", "minSize": "300"}),
+            ("c", "logiover/pisos-com-property-scraper",  # areas None, 1063, 232, 860; prices up to 2.1 M
+             {"location": "madrid_capital", "transactionType": "sale", "propertyType": "land", "minArea": 800,
+              "maxPrice": 2000000}),
+            ("d", "igolaizola/idealista-scraper",  # no filter: the file as it is
+             {"location": "Madrid", "operation": "sale", "propertyType": "lands"})):
+        (folder / f"{name}.json").write_text(json.dumps({"actor": actor, "key": name, "input": actor_input}))
+    answered, left = answer_apify(tmp_path)
+    assert left == [] and "1 of 3 rows" in answered[0] and "0 of 3 rows" in answered[1]
+    rows = {n: json.loads((tmp_path / "apify" / a / f"{n}.json").read_text(encoding="utf-8"))
+            for n, a in (("a", "igolaizola~idealista-scraper"), ("b", "igolaizola~idealista-scraper"),
+                         ("c", "logiover~pisos-com-property-scraper"))}
+    assert [r["size"] for r in rows["a"]] == [232] and rows["b"] == []
+    # a row without the area is kept (the portal's handling is unknown), 232 m2 and 2.1 M are not
+    assert [(r["areaSqm"], r["price"]) for r in rows["c"]] == [(None, 1550000), (1063, 590000)]
+    assert (tmp_path / "apify" / "igolaizola~idealista-scraper" / "d.json").read_bytes() == \
+        (LIVE / "idealista_items.json").read_bytes()
+
+
+# --- the interview's screen --------------------------------------------------------------------------------------
+
+
+def test_the_bench_runs_with_the_production_card_fields() -> None:
+    from scripts.sim.harness import BASE_ENV
+
+    assert BASE_ENV["CARD_EXTRA_FIELDS"] == "true"
+
+
+def test_the_bottom_keyboard_reaches_the_dialogue_and_the_pending_and_the_helper_presses_it(tmp_path: Path) -> None:
+    from bot.control_plane.intake import TASK_KEYBOARD
+    from bot.control_plane.models import Button, Reply
+    from scripts.sim import answer_user
+    from scripts.sim.harness import AnswerStop, Bench, Persona
+
+    bench = Bench(tmp_path, "kb", Persona(name="p", task="участок"))
+    bench._say("bot", Reply("Какой бюджет?", (Button("Не важно", callback_data="task:skip"),)))
+    card = Reply("Проверьте задачу:\nучасток, Мадрид", keyboard=TASK_KEYBOARD)
+    bench._say("bot", card)
+    bench._say("bot", Reply("Уведомление"))  # no keyboard in the reply: the one on screen stays
+    with pytest.raises(AnswerStop) as stop:
+        bench._ask(card, card=True)
+    pending = json.loads(stop.value.path.read_text(encoding="utf-8"))
+    keys = [["▶️ Запустить", "✏️ Изменить"], ["❌ Отмена"]]
+    assert pending["keyboard"] == keys and pending["buttons"] == []
+    assert [d.get("keyboard") for d in bench.dialogue] == [None, keys, None]
+    persona = {"replies": {"card": [{"press": "Изменить", "weight": 1}]}}
+    assert answer_user.answer_pending(tmp_path, "kb", persona, 0)[0] == answer_user.EXIT_ANSWERED
+    assert json.loads((tmp_path / "answers" / "kb.json").read_text(encoding="utf-8"))["answers"] == \
+        [{"press": "Изменить"}]
+    assert answer_user.keyboard_label(pending["keyboard"], "Изменить") == "✏️ Изменить"
+    assert answer_user.keyboard_label(pending["keyboard"], "❌ Отмена") == "❌ Отмена"
+    assert answer_user.keyboard_label(pending["keyboard"], "Остановить поиск") is None
+    bench._say("bot", Reply("Черновик удалён.", keyboard=()))  # the keyboard removed: nothing to press
+    assert bench.keyboard == [] and bench.dialogue[-1]["keyboard"] == []
+
+
 # --- the rest of the world ---------------------------------------------------------------------------------------
 
 
@@ -317,3 +380,19 @@ async def test_without_answers_the_run_waits_with_pending_files_and_no_secret_in
     assert result["pending"]["llm"] == [pending.stem] and result["stop_reason"].startswith("llm:")
     text = files_text(root)
     assert not any(secret in text for secret in SECRETS.values())
+
+
+@postgres
+@pytest.mark.asyncio
+async def test_the_card_is_launched_from_the_bottom_keyboard(tmp_path: Path) -> None:
+    root = sim_root(tmp_path)
+    (root / "answers" / "land.json").write_text(json.dumps(
+        {"answers": [{"text": "до 3 млн евро"}, {"press": "▶️ Запустить"}]}, ensure_ascii=False), encoding="utf-8")
+    code, result = await run(root, responder=model.answer)
+    assert code == 0 and result["status"] == "done", result["stop_reason"]
+    shown = next(d for d in result["dialogue"] if d["from"] == "bot" and d["text"].startswith("Проверьте задачу:"))
+    assert shown["keyboard"] == [["▶️ Запустить", "✏️ Изменить"], ["❌ Отмена"]]
+    assert {"from": "user", "text": "▶️ Запустить", "press": "▶️ Запустить"} in result["dialogue"]
+    assert result["campaign"]["state"] == "completed"
+    [card] = result["cards"]
+    assert "Площадь: 2 519 м² (участок)" in card["card"]  # CARD_EXTRA_FIELDS=true, as in prod

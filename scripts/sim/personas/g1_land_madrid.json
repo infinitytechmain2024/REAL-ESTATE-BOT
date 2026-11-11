@@ -59,6 +59,10 @@
         "press": "task:skip",
         "weight": 1,
         "tag": "any"
+      },
+      {
+        "text": "можно и область, вся провинция Мадрид",
+        "weight": 3
       }
     ],
     "area": [
@@ -102,6 +106,25 @@
         "press": "task:skip",
         "weight": 1,
         "tag": "any"
+      },
+      {
+        "text": "дом для себя хочу построить",
+        "weight": 2
+      }
+    ],
+    "land_status": [
+      {
+        "text": "лучше urbano, чтобы можно было строить",
+        "weight": 3
+      },
+      {
+        "text": "urbanizable тоже ок",
+        "weight": 1
+      },
+      {
+        "text": "не знаю, не важно",
+        "weight": 1,
+        "tag": "any"
       }
     ],
     "must_have": [
@@ -112,6 +135,15 @@
       {
         "press": "task:skip",
         "weight": 2,
+        "tag": "any"
+      },
+      {
+        "text": "вода и свет желательно, подъезд нормальный",
+        "weight": 2
+      },
+      {
+        "text": "не важно",
+        "weight": 1,
         "tag": "any"
       }
     ],

@@ -26,7 +26,10 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("clarify", r"что верно|какой вариант верн|вы писали|ранее вы|раньше вы|правильно ли я понял|противореч|"
                 r"which is (?:it|correct)|cu[aá]l es correcto"),
     ("deviation", r"точных вариантов|что допустимо|только точные|si no hay exact|if no exact"),
-    ("details", r"стади|под какое строительств|этаж, лифт|состояние важн|etapa|stage"),
+    ("details", r"стади|под какое строительств|этаж, лифт|состояние важн|что планируете|под что|etapa|stage"),
+    # the land's category («suelo urbano или urbanizable/рустико», «категория земли»): before must_have, which a
+    # question naming the category and the utilities together would match too
+    ("land_status", r"urbano|urbanizable|r[uú]stic|рустик|категори"),
     ("investor_role", r"деньги для своего проекта|сами хотите вкладывать|ищете деньги|raising|invertir usted"),
     ("investor_who", r"кого ищете|who are you looking|a qui[eé]n busca"),
     ("ticket", r"тикет|размер вложени|сумма вложени|сколько готовы вложить|ticket|cheque|inversi[oó]n m[ií]nima"),
@@ -36,10 +39,12 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("area", r"площад|м²|м2|\bm2\b|square|superficie|metros"),
     ("rooms", r"комнат|спальн|bedroom|habitaciones|dormitorios"),
     ("deal", r"аренда или покупка|купить или снять|снять или купить|rent or buy|alquiler o compra"),
+    # «только в самом городе или можно города вокруг?» widens the place: before ``place``, which «город» matches
+    ("district", r"в самом городе|города вокруг|вся провинция|окрестност"),
     ("place", r"в каком городе|где искать|в каких странах|in which city|en qu[eé] ciudad"),
     ("district", r"район|пригород|населённые пункты|населенные пункты|district|barrio|zona"),
     ("place", r"город|где искать|регион|стран|провинци|\bcity\b|where|ciudad|d[oó]nde"),
-    ("must_have", r"обязательно должно быть|что обязательно|must have|imprescindible"),
+    ("must_have", r"обязательно должно быть|что обязательно|коммуникац|подвед|подъезд|must have|imprescindible"),
     ("sources", r"какие сайты|какие группы|which sites|qu[eé] webs"),
 )
 CARD = "card"  # «Проверьте задачу»: the pending has ``card: true``
@@ -70,14 +75,27 @@ def slot_of(pending: dict[str, Any], extra: dict[str, list[str]] | None = None) 
     return next((slot for slot, pattern in SLOT_PATTERNS if re.search(pattern, text, re.IGNORECASE)), None)
 
 
+def keyboard_label(keyboard: list[list[str]] | None, wanted: str) -> str | None:
+    """The bottom-keyboard label a press names: the label itself or its words without the icon («Изменить» is
+    «✏️ Изменить»); None when no such key is on screen."""
+    wanted = wanted.strip()
+    for row in keyboard or ():
+        for label in row:
+            if wanted and (wanted == label or wanted.casefold() == label.split(" ", 1)[-1].strip().casefold()):
+                return label
+    return None
+
+
 def _button_ok(option: dict[str, Any], pending: dict[str, Any]) -> bool:
-    """A press is possible only if the button is on screen (the card's «Запустить» always is)."""
+    """A press is possible only if the button is on screen, under the message or on the bottom keyboard (the card's
+    «Запустить» always is)."""
     press = option.get("press")
     if press is None:
         return True
     if pending.get("card") and press in ("task:launch", "Запустить"):
         return True
-    return any(press in (b.get("text"), b.get("data")) for b in pending.get("buttons", []))
+    return (any(press in (b.get("text"), b.get("data")) for b in pending.get("buttons", []))
+            or keyboard_label(pending.get("keyboard"), str(press)) is not None)
 
 
 def choose(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str,
@@ -124,7 +142,8 @@ def answer_pending(root: Path, run: str, persona: dict[str, Any], seed: int) -> 
     pick = choose(persona, pending, seed, run, log)
     if pick.answer is None:
         return EXIT_DEFERRED, (f"run {run}: left pending ({pick.reason}): {pending.get('question', '')!r} "
-                               f"buttons={[b.get('text') for b in pending.get('buttons', [])]}")
+                               f"buttons={[b.get('text') for b in pending.get('buttons', [])]} "
+                               f"keyboard={[k for row in pending.get('keyboard') or () for k in row]}")
     answers.append(pick.answer)
     log.append({"index": index, "slot": pick.slot, "tag": pick.tag, "seed": seed})
     answers_path.parent.mkdir(parents=True, exist_ok=True)

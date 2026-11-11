@@ -107,6 +107,20 @@
         "text": "не знаю пока",
         "weight": 1,
         "tag": "any"
+      },
+      {
+        "text": "жилой комплекс, ищу участок и деньги на стройку",
+        "weight": 1
+      }
+    ],
+    "land_status": [
+      {
+        "text": "urbano или urbanizable, под застройку",
+        "weight": 3
+      },
+      {
+        "text": "только urbano",
+        "weight": 1
       }
     ],
     "must_have": [
@@ -114,6 +128,10 @@
         "press": "task:skip",
         "weight": 1,
         "tag": "any"
+      },
+      {
+        "text": "коммуникации подведены или рядом, подъезд для техники",
+        "weight": 2
       }
     ],
     "deviation": [
