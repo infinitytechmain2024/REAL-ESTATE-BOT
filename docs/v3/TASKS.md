@@ -131,7 +131,7 @@ A3, §0 п. 23). В `docs/v2/tasks.json` задачи A4, D1, D2, D3 перев�
 | LI посты + реакции + комментарии | `harvestapi/linkedin-post-search` | $0.002 / пост, реакцию, комментарий |
 | LI компании | сверить `harvestapi/*company*` | — |
 | FB реакции | `apify/facebook-likes-scraper` | $0.0062 / реакция |
-| FB репосты | сверить наличие (нет — `None`, записать) | — |
+| FB репосты | нет публичного актора (P1.0): только счётчик `shares` | — |
 | Краулер сайтов | `apify/website-content-crawler` (сверить) | — |
 
 **Приёмка.** В `ACTORS.md` у каждой строки есть «поля подтверждены схемой: да/нет». Все акторы без cookie;
@@ -209,6 +209,12 @@ id поста IG/TT/LI); `tests/test_apify_source_run.py` (запуск один
 **Настройки.** `APIFY_CRAWLER_ENABLED` `false`; `APIFY_CRAWLER_ACTOR`, `_ACTOR_BUILD`; `APIFY_CRAWLER_MAX_PAGES`
 int 30 (1–50, предел `ApifyListingSource`, `apify.py:81`); `APIFY_CRAWLER_MAX_CHARGE_USD` 0.20;
 `APIFY_CRAWLER_SITES_FILE` str `config/crawler_sites.yaml`.
+**Деньги (по P1.0, `docs/v3/ACTORS.md`).** `apify/website-content-crawler` оплачивается за compute, а не за события,
+поэтому `maxTotalChargeUsd` (передаётся всё равно, правило 11) его расход **не ограничивает**. Потолок держат
+`maxCrawlPages` = `APIFY_CRAWLER_MAX_PAGES`, `maxCrawlDepth` (`APIFY_CRAWLER_MAX_DEPTH` int 1, 0–3), память
+(`APIFY_CRAWLER_MEMORY_MB` int 1024) и таймаут запуска (`APIFY_CRAWLER_TIMEOUT_SECONDS` int 300). Стоимость в
+`campaign_costs` берётся из `usageTotalUsd`, до запуска бронируется оценка `MAX_CHARGE_USD`. Если владелец захочет
+строгий денежный потолок — актор с оплатой за событие (вопрос в отчёте фазы).
 **Тесты.** `tests/test_apify_crawler.py`: план по двум сайтам, страница объявления против страницы поиска,
 цена без валюты → `None`, площадь участка отдельно от дома, сайт вне списка отбрасывается, кривой YAML → источник
 выключен с ошибкой в логе (кампания не падает).
@@ -222,8 +228,9 @@ int 30 (1–50, предел `ApifyListingSource`, `apify.py:81`); `APIFY_CRAWLE
 Хранение и сила сигнала — P4.1.
 **Файлы.** `bot/acquisition/apify_facebook_reactions.py` (`apify/facebook-likes-scraper`: тип реакции, имя,
 профиль); LinkedIn-реакции и комментарии к посту по ссылке (`harvestapi/linkedin-post-search` с
-`scrapeReactions`, `scrapeComments`). IG и TT — только если P1.0 найдёт поля; иначе в `ACTORS.md` пишется «нет» и
-маппер не делается.
+`scrapeReactions`, `scrapeComments`). По P1.0 (`docs/v3/ACTORS.md`): лайкеров IG и TT публичные акторы не отдают,
+репостнувших списком не отдаёт ни один актор (FB, IG, TT, LI) — только счётчики. Поэтому мапперы только FB и LI,
+`Engagement(kind="repost")` пока никто не наполняет, а число репостов хранится счётчиком у поста.
 **Настройки.** `APIFY_FACEBOOK_REACTIONS_ENABLED` `false`, `_ACTOR`, `_ACTOR_BUILD`, `_MAX_RESULTS` 100 (1–500),
 `_MAX_CHARGE_USD` 0.70; `APIFY_LINKEDIN_POST_REACTIONS_ENABLED` `false` и такие же поля.
 **Тесты.** `tests/test_apify_reactions.py`: маппинг типов (`like`, `love`…), строка без профиля отбрасывается,
@@ -237,13 +244,13 @@ int 30 (1–50, предел `ApifyListingSource`, `apify.py:81`); `APIFY_CRAWLE
 |---|---|---|
 | `apify/instagram-scraper` | 5 | $0.02 |
 | `apify/instagram-comment-scraper` | 5 | $0.02 |
-| TT посты | 5 | $0.02 |
+| `clockworks/tiktok-scraper` | 5 | $0.03 |
 | `clockworks/tiktok-comments-scraper` | 5 | $0.01 |
 | `harvestapi/linkedin-profile-search` | 1 страница | $0.15 |
 | `harvestapi/linkedin-post-search` (реакции, комментарии) | 5 | $0.03 |
 | `apify/facebook-likes-scraper` | 5 | $0.04 |
-| краулер, 1 сайт из O2 | 5 страниц | $0.05 |
-| **Итого** | | **≤ $0.34** |
+| краулер, 1 сайт из O2 (compute: 5 страниц, глубина 1, 1024 МБ, 120 с) | 5 страниц | ≈ $0.05 (оценка, не потолок) |
+| **Итого** | | **≤ $0.35** |
 
 Выдача становится фикстурой с заменённой PII, мапперы правятся по реальным полям, `ACTORS.md` получает пометку
 «проверено живьём <дата>». Расход заносится в отчёт фазы.
