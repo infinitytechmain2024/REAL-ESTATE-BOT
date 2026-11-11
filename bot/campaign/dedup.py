@@ -42,8 +42,8 @@ within 2 % (both known; ``plot_m2`` when there is no ``area_m2``), the same city
 shared district token (generic words such as «urbanización», «costa», «residencial» and regions dropped). The texts'
 small numbers (zone codes aside, the zones are compared on their own) must be the same list. Never merged: a new development («obra nueva»,
 «promoción», «Residencial X»), the same agency or phone on one portal (one advertiser lists several plots there), two
-plots with a round area (a multiple of 100 up to 10000 m², typical plots of one estate) and neither a zone nor a
-cadastral reference in either text. A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a cadastral reference
+plots with a round area (a multiple of 50 m², typical plots of one estate) unless both texts state the same zone or
+the same cadastral reference. A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a cadastral reference
 stated in both texts must agree.
 
 ``object_key`` is an index hint (same key = very likely the same object), built from the
@@ -68,8 +68,7 @@ AREA_TOLERANCE = 0.03
 FACTS_PRICE_TOLERANCE = 0.01  # the cross-portal «same facts» rule is stricter than ``PRICE_TOLERANCE``
 BARE_PRICE_TOLERANCE = 0.01  # the rule without an address (``_same_bare_facts``)
 BARE_AREA_TOLERANCE = 0.02
-BARE_ROUND_AREA = 100  # a plot area that is a multiple of this, up to ``BARE_ROUND_MAX`` m², is a typical estate plot
-BARE_ROUND_MAX = 10000
+BARE_ROUND_AREA = 50  # a plot area that is a multiple of this is a typical estate plot
 FACTS_MIN_FEATURES = 2
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
@@ -96,7 +95,8 @@ _NEW_BUILD_WORDS = re.compile(r"(?<!\w)(?:obra\s+nueva|promoci[oó]n|(?:complejo
                               re.IGNORECASE)
 # «Residencial» as a zoning, not a complex: «Residencial Unifamiliar», «Uso: Residencial», «Zona Residencial X».
 _ZONING_AFTER = re.compile(r"\s*(?:unifamiliar|plurifamiliar|multifamiliar|intensiva|extensiva)(?!\w)", re.IGNORECASE)
-_ZONING_BEFORE = frozenset({"uso", "usos", "suelo", "calificacion", "zona", "urbanizacion"})
+_ZONING_BEFORE = frozenset({"uso", "usos", "suelo", "calificacion", "urbanizacion"})  # «zona» only right before
+_SENTENCE_END = re.compile(r"[.!?;\n](?=\s|$)")
 _PROMOTION_PRICE = re.compile(r"precio\s+de\s*$", re.IGNORECASE)
 # District words that do not identify a place (estates, new builds, coasts) and Spain's regions.
 _PLACE_STOP = frozenset({
@@ -214,8 +214,11 @@ def is_new_build(text: str) -> bool:
             return True
     for found in _NEW_BUILD_NAME.finditer(text):
         word_end = found.start() + len("residencial")
-        before = _WORD.findall(_fold(text[max(0, found.start() - 60):found.start()]))[-3:]
-        if not (_ZONING_AFTER.match(text, word_end) or _ZONING_BEFORE & set(before)):
+        head = text[max(0, found.start() - 60):found.start()]
+        sentence = _SENTENCE_END.split(head)[-1]  # the words before it in its own sentence
+        before = _WORD.findall(_fold(sentence))[-3:]
+        zoning = _ZONING_BEFORE & set(before) or (before and before[-1] == "zona")
+        if not (_ZONING_AFTER.match(text, word_end) or zoning):
             return True
     return False
 
@@ -473,9 +476,9 @@ def _same_bare_facts(a: Listing, b: Listing) -> bool:
     area_a, area_b = _bare_area(a), _bare_area(b)
     if _close(area_a, area_b, BARE_AREA_TOLERANCE) is not True:
         return False
-    if not (a.zones or b.zones or a.cadastre or b.cadastre) and any(
-            area <= BARE_ROUND_MAX and area % BARE_ROUND_AREA == 0 for area in (area_a, area_b) if area is not None):
-        return False  # typical plots of one estate: nothing in the texts tells them apart
+    marked = bool(a.zones and b.zones and _zones_agree(a.zones, b.zones)) or bool(a.cadastre & b.cadastre)
+    if not marked and any(area % BARE_ROUND_AREA == 0 for area in (area_a, area_b) if area is not None):
+        return False  # typical plots of one estate: only a zone or a parcel stated on both sides tells them apart
     if a.zones and b.zones and not _zones_agree(a.zones, b.zones):
         return False  # another planning zone: another plot
     if a.cadastre and b.cadastre and not a.cadastre & b.cadastre:

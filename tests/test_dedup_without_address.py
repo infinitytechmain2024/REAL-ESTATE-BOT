@@ -99,6 +99,8 @@ def test_a_zoning_or_a_promotion_price_is_not_a_new_development() -> None:
                    "Ordenanza Residencial Multifamiliar.", "Grado Residencial Extensiva."):
         assert not is_new_build(zoning), zoning
         assert merged(plot(), plot(), HEAD_BODY + " " + zoning, COPY_BODY + " " + zoning)
+    assert is_new_build("Parcela en la zona de Residencial Los Robles.")  # «zona» counts only right before
+    assert is_new_build("Uso residencial. Residencial Las Lomas, diez viviendas.")  # another sentence
     for development in ("Residencial Los Robles.", "Promoción de viviendas.", "Obra nueva.", "Complejo residencial."):
         assert is_new_build(development), development
 
@@ -130,13 +132,20 @@ def test_review_5_typical_plots_of_one_estate() -> None:
     assert not merged(plot(area=1000, **estate), plot(area=1000, **estate), body, body)
     assert not merged(plot(area=None, plot_m2=1000, **estate), plot(area=None, plot_m2=1000, **estate), body, body)
     assert not merged(plot(area=1000, **estate), plot(area=1010, **estate), body, body)
-    # up to 10000 m²: two other plots of 2500 m² at one price in one district
+    # any multiple of 50 m²: two other plots at one price in one district
     big = {"district": "Urbanización Los Pinos", "city": "Valencia", "price": 400_000}
-    assert not merged(plot(area=2500, **big), plot(area=2500, **big), body, body)
-    assert not merged(plot(area=9000, **big), plot(area=9000, **big), body, body)
-    # a zone in a text: the area may be round
-    zoned = "Parcela urbana, N.Z. 5.2.B."
+    for area in (750, 1250, 2250, 2500, 9000, 12000):
+        assert not merged(plot(area=area, **big), plot(area=area, **big), body, body), area
+    # the same zone stated in both texts: the area may be round; a zone in one text only is not enough
+    zoned = "Parcela urbana, N.Z. 8.1.A."
     assert merged(plot(area=1000, **estate), plot(area=1000, **estate), zoned, zoned)
+    assert not merged(plot(area=1000, **estate), plot(area=1000, **estate), zoned, "Parcela urbana.")
+    assert not merged(plot(area=1000, **estate), plot(area=1000, **estate), zoned, "Parcela urbana, N.Z. 5.2.B.")
+    cadastre = "Parcela urbana. Ref. Catastral: 1111111AA1111A0001AA"
+    assert merged(plot(area=1000, **estate), plot(area=1000, **estate), cadastre, cadastre)
+    assert not merged(plot(area=1000, **estate), plot(area=1000, **estate), cadastre, "Parcela urbana.")
+    # G1: 2519 m² is not round
+    assert merged(plot(address="Calle Gobelas"), plot())
 
 
 def test_review_6_rent_rooms_other_kinds_and_flats() -> None:
