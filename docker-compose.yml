@@ -596,6 +596,13 @@ services:
       # Who reads the comments under sent objects: browser (default) or apify, and the Apify day quota (v2 B2).
       LEADS_PROVIDER: ${LEADS_PROVIDER:-browser}
       APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY: ${APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY:-40}
+      # Instagram through Apify (v3 P1.2, bot/acquisition/apify_instagram.py); off by default.
+      APIFY_INSTAGRAM_ENABLED: ${APIFY_INSTAGRAM_ENABLED:-false}
+      APIFY_INSTAGRAM_POSTS_ACTOR: ${APIFY_INSTAGRAM_POSTS_ACTOR:-apify/instagram-scraper}
+      APIFY_INSTAGRAM_COMMENTS_ACTOR: ${APIFY_INSTAGRAM_COMMENTS_ACTOR:-apify/instagram-comment-scraper}
+      APIFY_INSTAGRAM_ACTOR_BUILD: ${APIFY_INSTAGRAM_ACTOR_BUILD:-}
+      APIFY_INSTAGRAM_MAX_RESULTS: ${APIFY_INSTAGRAM_MAX_RESULTS:-30}
+      APIFY_INSTAGRAM_MAX_CHARGE_USD: ${APIFY_INSTAGRAM_MAX_CHARGE_USD:-0.20}
       # The final report gets the investors section (v2 B4); off by default.
       CAMPAIGN_INVESTOR_REPORT: ${CAMPAIGN_INVESTOR_REPORT:-false}
       WEB_SEARCH_SEARXNG_URL: http://searxng:8080
