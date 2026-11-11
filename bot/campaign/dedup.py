@@ -35,6 +35,12 @@ phone, the agency or at least two features are shared too, even if the districts
 
 Two ads of one portal are not merged by text (only Facebook, where one flat is posted in many groups, is).
 
+Without an address (``same_object(..., without_address=True)``, ``DEDUP_WITHOUT_ADDRESS``; at least one side has no
+street address, so the rules above never merge two ads of one portal): the same property type and deal (both known),
+the same rooms (or none on both), the price within 1 % and the area within 2 % (both known; a plot's ``plot_m2``
+when it has no ``area_m2``), and a shared district token (or, when either side names no district, the same city).
+A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a cadastral reference stated in both texts must agree.
+
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
 are both unknown. ``same_object`` is the arbiter.
@@ -55,6 +61,8 @@ from .architect import find_places
 PRICE_TOLERANCE = 0.02
 AREA_TOLERANCE = 0.03
 FACTS_PRICE_TOLERANCE = 0.01  # the cross-portal «same facts» rule is stricter than ``PRICE_TOLERANCE``
+BARE_PRICE_TOLERANCE = 0.01  # the rule without an address (``_same_bare_facts``)
+BARE_AREA_TOLERANCE = 0.02
 FACTS_MIN_FEATURES = 2
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
@@ -73,6 +81,9 @@ _PHONE = re.compile(r"(?<![\w.,])\+?\d{2,}(?:[ .-]\d{2,}){0,6}(?![\w])")
 _PRICE_TEXT = re.compile(
     r"(?:(?P<a>\d{1,3}(?:[ .,\u00a0]\d{3})+|\d{4,9})\s*(?:€|eur\b|euros?\b|\$|usd\b|грн|₴)"
     r"|(?:€|\$)\s*(?P<b>\d{1,3}(?:[ .,\u00a0]\d{3})+|\d{4,9}))", re.IGNORECASE)
+_ZONE = re.compile(r"(?<!\w)(?:n\s?\.?\s?z\s?\.?|norma\s+zonal)\s*:?\s*(\d{1,2}(?:\s?\.\s?\d{1,2}){0,3}(?:\s?\.\s?[a-z]|[a-z])?(?!\w))"
+                   r"(?:\s*,?\s*grado\s*(\d{1,2})\s*\.?\s*[ºo°]?\s*,?\s*(?:nivel\s*([a-z])(?!\w))?)?", re.IGNORECASE)
+_CADASTRE = re.compile(r"ref(?:erencia|\.)?\s*catastral\s*:?\s*([0-9a-z]{14})(?:[0-9a-z]{6})?(?!\w)", re.IGNORECASE)
 _SOCIAL_HOSTS = frozenset({"facebook.com", "web.facebook.com", "fb.com", "fb.watch", "instagram.com"})
 _STOP = frozenset({
     "calle", "carrer", "avenida", "avda", "plaza", "paseo", "camino", "barrio", "zona", "centro", "street", "road",
@@ -105,6 +116,10 @@ class Listing:
     numbers: tuple[int, ...] = ()  # the small numbers of the body (floor, door, m2, rooms ...), sorted
     agency: str = ""  # normalised advertiser / agency name (``agency_key``), "" when unknown
     features: frozenset[str] = frozenset()  # lower-case features of the payload (terraza, exterior ...)
+    kind: str | None = None  # the payload's property_type (land, apartment ...)
+    plot: float | None = None  # the payload's plot_m2
+    zones: frozenset[str] = frozenset()  # planning zones of the body («N.Z. 8.1.A» -> "8.1.a")
+    cadastre: frozenset[str] = frozenset()  # cadastral references of the body (the 14-character parcel part)
 
 
 def _positive(value: object) -> float | None:
@@ -135,6 +150,7 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
     features = frozenset(_fold(f).strip() for f in raw_features if isinstance(f, str) and f.strip()) \
         if isinstance(raw_features, list | tuple) else frozenset()
     stated_phones = phones_of(" ".join(str(payload[k]) for k in ("phone", "contact_phone") if payload.get(k)))
+    kind = payload.get("property_type")
     return Listing(
         price=price,
         currency=currency.strip().upper() if isinstance(currency, str) and currency.strip() else None,
@@ -153,7 +169,26 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         numbers=numbers_of(excerpt),
         agency=agency_key(raw_agency),
         features=features,
+        kind=kind.strip().lower() if isinstance(kind, str) and kind.strip() else None,
+        plot=_positive(payload.get("plot_m2")),
+        zones=zones_of(excerpt),
+        cadastre=frozenset(found.upper() for found in _CADASTRE.findall(excerpt)),
     )
+
+
+def zones_of(text: str) -> frozenset[str]:
+    """Planning zones a text states as dotted parts: «N. Z. 8.1. A», «norma zonal 8.1.A» and «Norma Zonal 8, grado
+    1.º, nivel A» -> "8.1.a"; «N.Z. 8» -> "8"."""
+    out = set()
+    for code, grade, level in _ZONE.findall(text or ""):
+        parts = re.findall(r"\d+|[a-z]", code.lower()) + [p for p in (grade, level.lower()) if p]
+        out.add(".".join(parts))
+    return frozenset(out)
+
+
+def _zones_agree(a: frozenset[str], b: frozenset[str]) -> bool:
+    """Some zone of one side equals a zone of the other or is a less precise form of it («8» and «8.1.a»)."""
+    return any(x == y or y.startswith(x + ".") or x.startswith(y + ".") for x in a for y in b)
 
 
 _LEGAL_FORM = re.compile(r"\b(?:s\.?\s?l\.?\s?u\.?|s\.?\s?l\.?|s\.?\s?a\.?)(?=\W|$)", re.IGNORECASE)
@@ -302,8 +337,9 @@ def _host(url: str | None) -> str:
     return site_of(url)
 
 
-def same_object(a: Listing, b: Listing) -> bool:
-    """True only when the two listings are almost surely one property (see the module notes)."""
+def same_object(a: Listing, b: Listing, *, without_address: bool = False) -> bool:
+    """True only when the two listings are almost surely one property (see the module notes); ``without_address``
+    (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``)."""
     if a.deal and b.deal and a.deal != b.deal:
         return False
     if a.currency and b.currency and a.currency != b.currency:
@@ -324,6 +360,8 @@ def same_object(a: Listing, b: Listing) -> bool:
     if both_addressed and not (street_a & street_b):
         return False  # a district alone does not identify a flat: the street must be shared (every rule, text included)
     if _same_facts(a, b):
+        return True
+    if without_address and not both_addressed and _same_bare_facts(a, b):
         return True
     if _same_text(a, b, price, area):
         return True
@@ -369,6 +407,31 @@ def _same_facts(a: Listing, b: Listing) -> bool:
         return False
     return bool(a.phones & b.phones) or bool(a.agency and a.agency == b.agency) \
         or len(a.features & b.features) >= FACTS_MIN_FEATURES
+
+
+def _bare_area(listing: Listing) -> float | None:
+    return listing.plot if listing.area is None and listing.kind == "land" else listing.area
+
+
+def _same_bare_facts(a: Listing, b: Listing) -> bool:
+    """The rule without an address (see the module notes): every negative rule of ``same_object`` has passed and at
+    least one side has no street address. Works on two ads of one portal too (one plot listed by several agencies)."""
+    if not (a.kind and a.kind == b.kind and a.deal and a.deal == b.deal) or a.rooms != b.rooms:
+        return False
+    if _close(a.price, b.price, BARE_PRICE_TOLERANCE) is not True:
+        return False
+    if _close(_bare_area(a), _bare_area(b), BARE_AREA_TOLERANCE) is not True:
+        return False
+    if a.zones and b.zones and not _zones_agree(a.zones, b.zones):
+        return False  # another planning zone: another plot
+    if a.cadastre and b.cadastre and not a.cadastre & b.cadastre:
+        return False  # another parcel
+    place_a = tokens(a.location) - tokens(a.address)  # the district / neighbourhood, without the street
+    place_b = tokens(b.location) - tokens(b.address)
+    if place_a and place_b:
+        return bool(place_a & place_b)
+    cities = _cities(a)
+    return bool(cities) and cities == _cities(b)
 
 
 def _same_text(a: Listing, b: Listing, price: bool | None, area: bool | None) -> bool:
