@@ -569,6 +569,8 @@ def test_clean_text_keeps_sums_ranges_and_years(text) -> None:
     ("+34 600 111 222", ""), ("600 111 222", ""), ("600-111-222", ""), ("(+34) 912 34 56 78", ""),
     ("Tel 912345678", "Tel"), ("Llámame +34 600 111 222 ya", "Llámame ya"),
     ("Agente | ana@gmail.com | +34 600 111 222", "Agente"),
+    ("+34600111222", ""), ("+34 600111222", ""), ("0034 600 111 222", ""), ("0034600111222", ""),
+    ("(+34)600111222", ""), ("(0034) 600 111 222", ""), ("Agente +34600111222 Madrid", "Agente Madrid"),
 ])
 def test_clean_text_cuts_phones(text, clean) -> None:
     assert li.clean_text(text) == clean
@@ -579,3 +581,13 @@ async def test_a_ticket_in_the_headline_reaches_the_judge(ledger) -> None:
     row = person(headline="Real estate investor · Ticket 500.000 - 3.000.000€")
     await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([row])), CONFIG).run(CAMPAIGN, SEARCH, store, judge)
     assert judge.seen[0][0].title == "Real estate investor · Ticket 500.000 - 3.000.000€"
+
+
+def test_clean_text_is_linear_on_long_text() -> None:
+    import time
+
+    texts = ["1" * 10_000, "+3" * 5_000, "6 " * 5_000, "600-" * 2_500, "0034 " * 2_000, "9" * 9 + " €" * 4_995]
+    for text in texts:
+        start = time.perf_counter()
+        li.clean_text(text)
+        assert time.perf_counter() - start < 0.05, text[:20]

@@ -204,14 +204,15 @@ class LinkedInContact:
 
 
 # A phone number written into a text. Narrow on purpose (a sum or a year cut out is worse than a phone left in):
-# * international: «+34 …» or «(+34) …», then 2-4 digit groups split by one space or hyphen;
+# * international: «+34», «(+34)», «0034» or «(0034)», then 8-12 digits in one run or 2-4 digit groups split by one
+#   space or hyphen (the prefix is cut together with the number);
 # * Spanish national: 9 digits starting 6-9, grouped «6xx xxx xxx» or «9xx xx xx xx» (one space or hyphen, or none).
 # Never a dot (a thousands separator), never «number - number» with spaces (a range), never next to a currency or a
 # multiplier (€, EUR, USD, $, k, M, mill., млн), never inside a longer number.
 _NOT_AFTER = r"(?![ -]?\d)(?![.,]\d)(?!\s?(?:€|EUR|USD|\$|[kKM]\b|mill|млн))"
 _PHONE = re.compile(
     r"(?<![\w.,€$+])(?:"
-    r"(?:\(\+\d{1,3}\)|\+\d{1,3})[ -]?\d{2,4}(?:[ -]\d{2,4}){1,4}"
+    r"(?:\((?:\+|00)\d{1,3}\)|(?:\+|00)\d{1,3})[ -]?(?:\d{8,12}|\d{2,4}(?:[ -]\d{2,4}){1,4})"
     r"|[6-9]\d{2}(?:[ -]?\d{3}[ -]?\d{3}|[ -]?\d{2}[ -]?\d{2}[ -]?\d{2})"
     r")" + _NOT_AFTER)
 _SEPARATORS = re.compile(r"\s*([|·•,;])(?:\s*[|·•,;])+\s*")
