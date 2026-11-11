@@ -151,7 +151,15 @@ async def test_adapter_imports_a_run_into_collected_posts(ledger) -> None:
     assert launch.url.params["build"] == "1.2.3" and launch.url.params["maxTotalChargeUsd"] == "1.0"
     assert json.loads(launch.content)["startUrls"] == [{"url": G1}, {"url": G2}]
     summary = await ledger.summary("c1")
-    assert summary.by_stage == {"api": pytest.approx(0.4)}
+    assert summary.by_stage == {"api": pytest.approx(0.4)} and summary.estimates == {}  # Apify's own usage
+
+
+async def test_a_run_without_usage_is_booked_as_an_estimate(ledger) -> None:
+    store = Store()
+    assert await provider(Api(dataset=[item(1)], usage=None), store).run("batch-1") == "succeeded"
+    summary = await ledger.summary("c1")
+    assert summary.by_stage == {"api": pytest.approx(1.0)} and summary.estimates == {"api": pytest.approx(1.0)}
+    assert [e.code for e in ledger.entries if e.kind == "cost"] == ["estimated"]
 
 
 async def test_posts_match_their_group_by_the_start_url(ledger) -> None:
@@ -172,6 +180,7 @@ async def test_adapter_does_not_retry_on_launch_unknown(ledger) -> None:
     assert await p.run("batch-1") == "failed" and api.launches() == 1  # the same batch never launches again
     summary = await ledger.summary("c1")
     assert summary.by_stage == {"api": pytest.approx(1.0)} and summary.errors == {"api:apify_launch_unknown": 1}
+    assert summary.estimates == {"api": pytest.approx(1.0)}  # booked at the cap, reported as an estimate
     with pytest.raises(LaunchUnknown):  # a 5xx on the launch is just as uncertain
         await provider(Api(launch=503), Store()).http.launch("apify/facebook-groups-scraper", {}, max_items=1,
                                                               max_charge_usd=1, timeout_seconds=60)

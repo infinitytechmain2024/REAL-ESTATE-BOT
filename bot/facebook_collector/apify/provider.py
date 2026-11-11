@@ -226,7 +226,7 @@ class ApifyFacebookProvider:
             await self.store.save_run(plan.id, campaign_id, actor_id=cfg.actor_id, build=cfg.build,
                                       run_id=f"unknown-{plan.id}", status=LAUNCH_UNKNOWN, input_hash=digest)
             await costs.record_unique("api", key=f"apify-launch-unknown:{plan.id}", provider="apify",
-                                      item=cfg.actor_id, cost_usd=cfg.max_usd_per_run, code="estimate")
+                                      item=cfg.actor_id, cost_usd=cfg.max_usd_per_run, code="estimated")
             await costs.error("api", "apify_launch_unknown", item=cfg.actor_id)
             log.warning("apify.launch_unknown", extra={"batch_id": plan.id, "campaign_id": campaign_id})
             emit("apify_run_failed_total", actor_id=cfg.actor_id, reason="apify_launch_unknown", campaign_id=campaign_id,
@@ -256,7 +256,7 @@ class ApifyFacebookProvider:
         known = isinstance(usage, int | float) and not isinstance(usage, bool) and math.isfinite(usage) and usage >= 0
         cost = float(usage) if known else self.config.max_usd_per_run
         await costs.record_unique("api", key=f"apify:{run_id}", provider="apify", item=self.config.actor_id,
-                                  cost_usd=cost, code="" if known else "estimate", campaign_id=campaign_id)
+                                  cost_usd=cost, code="" if known else "estimated", campaign_id=campaign_id)
         await self.store.update_run(run_id, billed_usd=cost)
         emit("apify_billed_usd_total", cost, actor_id=self.config.actor_id, campaign_id=campaign_id, run_id=run_id,
              estimate=None if known else "true")
