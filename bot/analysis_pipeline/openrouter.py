@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from bot.utils import costs
 
-from . import source_place
+from . import area_check, source_place
 from .models import AnalysisResult, Evidence
 
 log = logging.getLogger(__name__)
@@ -437,10 +437,11 @@ INVALID = "invalid_structured_model_response"
 
 class OpenRouterAnalyzer:
     def __init__(self, api_key: str, model: str, *, timeout_seconds: int = 30, invalid_retry: bool = False,
-                 fallback_model: str = "", location_from_text: bool = False) -> None:
+                 fallback_model: str = "", location_from_text: bool = False, area_text_check: bool = False) -> None:
         self.api_key, self.model, self.timeout_seconds = api_key, model, timeout_seconds
         self.invalid_retry, self.fallback_model = invalid_retry, fallback_model.strip()
         self.location_from_text = location_from_text  # ANALYSIS_LOCATION_FROM_TEXT (Q4)
+        self.area_text_check = area_text_check  # ANALYSIS_AREA_TEXT_CHECK (Q13)
 
     async def analyze(self, evidence: Evidence, vertical: str, task_hint: dict[str, Any] | None = None) -> AnalysisResult:
         if not self.invalid_retry:
@@ -522,4 +523,10 @@ class OpenRouterAnalyzer:
         except Exception as exc:
             log.warning("analysis.unreadable_model_response %s", type(exc).__name__)
             raise ValueError(INVALID) from exc
-        return source_place.apply(result, found) if found else result
+        result = source_place.apply(result, found) if found else result
+        # ANALYSIS_AREA_TEXT_CHECK: a JSON-LD area the text's areas contradict (more than twice apart) is not confirmed.
+        unconfirmed = area_check.conflict(evidence.text, evidence.title) if self.area_text_check else None
+        if unconfirmed is not None:
+            log.info("analysis.area_not_confirmed")
+            result = area_check.apply(result, unconfirmed)
+        return result

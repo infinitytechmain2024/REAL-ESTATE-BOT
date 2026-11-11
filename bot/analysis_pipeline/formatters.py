@@ -36,9 +36,11 @@ def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any
     payload = _base_payload(result, evidence)
     if result.source_place_conflict:  # Q4: only with ANALYSIS_LOCATION_FROM_TEXT; read by campaign/tolerance.py
         payload["source_place_conflict"] = result.source_place_conflict
+    if result.area_unconfirmed:  # Q13: only with ANALYSIS_AREA_TEXT_CHECK; the JSON-LD plot is not shown either
+        payload["area_unconfirmed"] = result.area_unconfirmed
     if card_extra_fields_enabled() and evidence.platform == "website":
         facts = source_line_facts(evidence.text)
-        for key in ("plot_m2", "phone", "advertiser"):
+        for key in ("phone", "advertiser") if result.area_unconfirmed else ("plot_m2", "phone", "advertiser"):
             if key in facts:
                 payload[key] = facts[key]
     return payload

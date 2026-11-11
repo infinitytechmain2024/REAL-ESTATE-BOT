@@ -23,7 +23,18 @@ Only a clear signal counts (no false alarms):
 
 The areas are coarse on purpose (Málaga, Marbella and Sevilla are one area, Valencia and Alicante another): a
 Marbella ad that says «Málaga» is not a conflict. A place the list does not know (Mijas) is never a conflict here;
-the prompt rule (``openrouter.LOCATION_FROM_TEXT_RULE``) covers it. Pure functions, no I/O.
+the prompt rule (``openrouter.LOCATION_FROM_TEXT_RULE``) covers it.
+
+Q13: the municipality is checked too, when the areas agree or the text names no area. A portal filed a «finca … en
+Móstoles» under «Ciudad Universitaria, Madrid»: both are the Madrid area, yet the district is wrong. When the source
+clearly names a municipality (a town of ``municipalities.MUNICIPALITIES``, or the capital with one of its districts:
+«Ciudad Universitaria, Madrid», «Madrid Capital») and a strong signal of the text names another known town (the
+portal's own title «… en Móstoles», «situado/ubicado en», «se encuentra en», or a property noun «finca/parcela/piso …
+en Móstoles»), it is a strong conflict: the source's place is cut, the location becomes that town, and
+``source_place_conflict`` is the town's area (so a campaign of that area keeps the finding). A bare «Madrid» or
+«Valencia» is the province as much as the city: it neither names the source's municipality nor moves a listing.
+A brand before a city («Engel & Völkers Barcelona», «RE/MAX Valencia», «Century 21 Málaga») is an agency and a number
+right after it («se encuentra en Barcelona 12») a street, never the object's place. Pure functions, no I/O.
 """
 
 from __future__ import annotations
@@ -35,6 +46,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import AnalysisResult
+from .municipalities import MUNICIPALITIES
 
 PREFIX = "JSON-LD: "
 PLACE_KEYS = ("address", "location")
@@ -60,15 +72,24 @@ _NOT_PLACE_WORDS = (
     r"cerca|junto|proxim[oa]s?|lejos|alrededores|afueras|desde|hacia|direccion|conexion(?:es)?|comunicad[oa]s?|"
     r"acceso|salida|vistas"
 )
+# Q13: agencies that put a city after their brand («Piso exterior - Engel & Völkers Barcelona», «RE/MAX Valencia»).
+_AGENCY_BRANDS = (
+    r"engel\s*(?:&|and|y|\+)?\s*volkers|re\s*/\s*max|remax|century\s*21|c21|lucas\s+fox|tecnocasa|donpiso|redpiso|"
+    r"keller\s+williams|coldwell\s+banker|sotheby'?s(?:\s+international\s+realty)?|gilmar|look\s*(?:&|and)\s*find|"
+    r"solvia|servihabitat|aliseda|housell|comprarcasa"
+)
 # What a name right after it is not the object's place.
 _NOT_THE_PLACE = re.compile(
     rf"(?:(?<!\w)(?:{_NOT_PLACE_WORDS})\.?\s+{_ARTICLE}"
     rf"|(?<!\w)a\s+(?:unos\s+)?\d+(?:[.,]\d+)?\s*(?:min\w*|km|kms|kilometros?|h|horas?|metros|m|pasos)\.?\s+"
-    rf"(?:en\s+\w+\s+)?{_ARTICLE}(?:(?:centro|capital)\s+(?:de\s+)?)?)$")
+    rf"(?:en\s+\w+\s+)?{_ARTICLE}(?:(?:centro|capital)\s+(?:de\s+)?)?"
+    rf"|(?<!\w)(?:{_AGENCY_BRANDS})\s*(?:[-|·:]\s*)?)$")
 # What a name right before it is not the object's place: an agency or a team named after a place.
 _NOT_THE_PLACE_AFTER = re.compile(
     r"^\s+(?:properties|property|homes|home|realty|real\s+estate|estate|office|oficina|inmobiliaria|group|grupo|"
-    r"invest\w*|living|international|sotheby\w*|team|fc|cf|style)(?!\w)")
+    r"invest\w*|living|international|sotheby\w*|team|fc|cf|style)(?!\w)"
+    # Q13: a house number right after the name is a street («se encuentra en Barcelona 12»), not a postcode
+    r"|^\s+\d{1,4}(?![\d.,]?\d)(?!\s*(?:km|kms|min\w*|m2|m²|mts?|metros|ha|h)(?!\w))")
 _LOOKBEHIND_CHARS = 48
 # «en X», «ubicado en X»...: the X a description gives as the object's place (up to the end of the clause). Group 1:
 # the strong phrases (situado/ubicado en, se encuentra en) that may fill the location; a bare «en» is a weak signal.
@@ -84,6 +105,19 @@ _WEAK_STOP = re.compile(
 _PHRASE_START = re.compile(r"(?:(?:la|las|el|los)\s+)?|[^,]{1,40},\s*(?:(?:la|las|el|los)\s+)?(?:provincia\s+de\s+)?")
 # The titles the portal sources build from the actor's place when the row has none (portals.py: Fotocasa, Habitaclia).
 _SYNTHETIC_TITLE = re.compile(r"^(?:terreno|vivienda|casa|piso|local)\s+en\s+(?:venta|alquiler)(?:\s*,.*)?$")
+# Q13: the known towns (folded) -> (as written, area), the longest name first («Las Rozas de Madrid» before «Las Rozas»).
+_TOWNS: dict[str, tuple[str, str]] = {}
+_TOWN_ARTICLE = r"(?:(?:la|las|el|los)\s+|l')?"
+# What right before a town makes it the object's place: «en» in the portal's own title; «situado/ubicado en», «se
+# encuentra en», or a property noun and then «en» in the same clause («finca rústica de 3 ha en Móstoles»).
+_TITLE_EN = re.compile(rf"(?<!\w)en\s+{_TOWN_ARTICLE}$")
+_STRONG_EN = re.compile(rf"(?<!\w)(?:(?:ubicad|situad)[oa]s?\s+en|se\s+encuentra\s+en)\s+{_TOWN_ARTICLE}$")
+_NOUN_EN = re.compile(
+    r"(?<!\w)(?:fincas?|parcelas?|terrenos?|solar(?:es)?|casas?|chalets?|pisos?|viviendas?|naves?|locales|local|"
+    r"aticos?|duplex|villas?|masias?|adosados?|pareados?|apartamentos?|estudios?|lofts?|edificios?|suelos?|"
+    r"bungalows?|cortijos?)(?!\w)[^.;:!?¿()\n]{0,80}?"
+    rf"(?<!\w)(en)\s+{_TOWN_ARTICLE}$")
+_CLAUSE_END = re.compile(r"[.;:!?¿()\n]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +128,7 @@ class PlaceConflict:
     area: str
     city: str | None  # the first city (not region) of a strong signal, as written; None: a region or a weak signal only
     strong: bool = False  # from the portal's own title or «situado/ubicado en», «se encuentra en» (not a bare «en»)
+    municipality: bool = False  # Q13: the areas agree (or the text names none) but the text names another town
 
 
 def fold(text: str) -> str:
@@ -103,6 +138,13 @@ def fold(text: str) -> str:
         bare = "".join(c for c in unicodedata.normalize("NFKD", char) if not unicodedata.combining(c)).lower()
         out.append(bare if len(bare) == 1 else char.lower() if len(char.lower()) == 1 else char)
     return "".join(out)
+
+
+for _area, _names_of_area in MUNICIPALITIES.items():
+    for _name in _names_of_area:
+        _TOWNS[" ".join(fold(_name).split())] = (_name, _area)
+_TOWNS = dict(sorted(_TOWNS.items(), key=lambda item: -len(item[0])))
+_TOWN = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(name) for name in _TOWNS) + r")(?!\w)")
 
 
 def _jsonld(text: str) -> tuple[dict[str, Any], str] | None:
@@ -194,24 +236,75 @@ def conflict(text: str, title: str = "") -> PlaceConflict | None:
     data, rest = parsed
     source = _source_place(data)
     source_areas = areas_of(source)
-    if not source_areas:
-        return None  # a place the list does not know is never a conflict
+    if not source_areas and not _source_towns(source):
+        return None  # a place the list does not know is never a conflict (a known town «Getafe» is: Q13)
     own_title, description = _parts(rest, title)
     # a title we built from the actor's place repeats the source: it neither confirms nor contradicts it
     own = f"{'' if _SYNTHETIC_TITLE.match(fold(own_title).strip()) else own_title}\n{description}"
-    if areas_of(own) & source_areas:
-        return None  # the text names the source's area somewhere: no clear conflict
     if _hits(fold(own), _source_parts(source)):
         return None  # the text names the source's own district or town («en pleno Triana»): no clear conflict
+    if not source_areas or areas_of(own) & source_areas:
+        return _town_conflict(source, source_areas, own_title, description)  # the area agrees: is the town another?
     hits = [(0, *h[1:], h[0]) for h in _title_hits(own_title)] + [(1, *h[1:], h[0])
                                                                   for h in _description_hits(description)]
     other = sorted((not strong, part, at, area, phrase) for part, at, area, phrase, strong in hits
                    if area not in source_areas)
     if not other:
-        return None
+        return _town_conflict(source, source_areas, own_title, description)
     weak, _, _, area, phrase = other[0]
     city = next((p for w, _, _, a, p in other if not w and fold(p) in AREAS[a][0]), None)
     return PlaceConflict(source, source_areas, phrase, area, city, strong=not weak)
+
+
+def _source_towns(source: str) -> frozenset[str]:
+    """The municipalities (folded) the source clearly names: a known town, or the capital with a district.
+
+    «Getafe, Madrid» -> getafe; «Ciudad Universitaria, Madrid», «Barrio de Salamanca, Madrid Capital» -> madrid; a
+    bare «Madrid» or «Valencia» may be the province: nothing.
+    """
+    parts = [" ".join(fold(p).split()) for p in source.split(",") if p.strip()]
+    towns = frozenset(m.group(0) for p in parts for m in _TOWN.finditer(p))
+    if towns:
+        return towns
+    capitals = {c for area in AREAS for c in AREAS[area][0]}
+    named = [c for p in parts for c in capitals if re.search(rf"(?<!\w){re.escape(c)}(?!\w)", p)]
+    district = any(len(p) >= 4 and not areas_of(p) for p in parts)
+    capital = any(re.search(r"(?<!\w)capital(?!\w)", p) for p in parts)
+    return frozenset(named) if named and (district or capital) else frozenset()
+
+
+def _town_hits(own_title: str, description: str) -> list[tuple[int, int, str, str]]:
+    """(part, position, town as written, its area) of every town a strong signal names: title first."""
+    found = []
+    synthetic = bool(_SYNTHETIC_TITLE.match(fold(own_title).strip()))
+    for part, text in ((0, "" if synthetic else own_title), (1, description)):
+        folded = fold(text)
+        for m in _TOWN.finditer(folded):
+            clause = _CLAUSE_END.split(folded[max(0, m.start() - 120):m.start()])[-1]
+            if not _STRONG_EN.search(clause):
+                title_en = _TITLE_EN.search(clause) if part == 0 else None
+                noun_en = None if title_en else _NOUN_EN.search(clause)
+                en_at = title_en.start() if title_en else noun_en.start(1) if noun_en else None
+                if en_at is None or _WEAK_STOP.search(clause[:en_at]):
+                    continue  # a bare «en» of a description, or one about someone else («como en Móstoles»)
+            if _is_the_place(folded, m.start(), m.end()):
+                area = _TOWNS[" ".join(m.group(0).split())][1]
+                found.append((part, m.start(), text[m.start():m.end()], area))
+    return sorted(found)
+
+
+def _town_conflict(source: str, source_areas: frozenset[str], own_title: str,
+                   description: str) -> PlaceConflict | None:
+    """Q13: another known town than the source's municipality, named by a strong signal of the text."""
+    towns = _source_towns(source)
+    if not towns:
+        return None
+    other = [h for h in _town_hits(own_title, description) if " ".join(fold(h[2]).split()) not in towns]
+    if not other:
+        return None
+    _, _, phrase, area = other[0]
+    areas = source_areas or frozenset(_TOWNS[t][1] for t in towns if t in _TOWNS)
+    return PlaceConflict(source, areas, phrase, area, phrase, strong=True, municipality=True)
 
 
 def without_place(text: str) -> str:
@@ -233,6 +326,18 @@ def _same(value: str | None, source: str) -> bool:
     return value is not None and " ".join(value.casefold().split()) == " ".join(source.casefold().split())
 
 
+def _other_town(location: str | None, found: PlaceConflict) -> bool:
+    """Q13: on a town conflict, a location that does not name the text's town is the source's (it goes)."""
+    if not found.municipality or not location or not found.city:
+        return False
+    return not re.search(rf"(?<!\w){re.escape(fold(found.city))}(?!\w)", fold(location))
+
+
+def _names_source(value: str | None, found: PlaceConflict) -> bool:
+    """Q13: a district or address that repeats a district or town of the source («Ciudad Universitaria»)."""
+    return bool(value) and bool(_hits(fold(value or ""), _source_parts(found.source)))
+
+
 def apply(result: AnalysisResult, found: PlaceConflict) -> AnalysisResult:
     """The answer with the conflict in ``reason``; the model's own location is never overwritten.
 
@@ -240,16 +345,20 @@ def apply(result: AnalysisResult, found: PlaceConflict) -> AnalysisResult:
     (one ``find_places`` knows) of a strong signal, or None when the text names only a region or the signal is weak
     (a bare «en»). An address copied from the source goes. A strong conflict is kept in ``source_place_conflict``
     (the text's area): ``bot.campaign.tolerance`` excludes the finding by place in a campaign of another area.
+    Q13, a town conflict (``municipality``): the text's town also replaces a location that does not name it, and a
+    district or address that repeats the source's district goes.
     """
     update: dict[str, Any] = {}
     reason = note(found)
     if reason not in result.reason:
         update["reason"] = f"{result.reason}; {reason}".strip("; ")[:300]
-    if result.location is None or _same(result.location, found.source):
+    if result.location is None or _same(result.location, found.source) or _other_town(result.location, found):
         update["location"] = found.city
         update["evidence"] = {**result.evidence, "location": found.city}
-    if _same(result.address, found.source):
+    if _same(result.address, found.source) or (found.municipality and _names_source(result.address, found)):
         update["address"] = None
+    if found.municipality and _names_source(result.district, found):
+        update["district"] = None
     if found.strong:
         update["source_place_conflict"] = found.area
     return result.model_copy(update=update) if update else result

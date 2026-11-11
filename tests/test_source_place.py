@@ -103,8 +103,6 @@ def test_ordinary_madrid_plots_keep_their_place():
     "Ático junto a la Glorieta de Bilbao con vistas a la Puerta de Toledo.",
     "Chalet a 30 min de Málaga capital, ideal familias.",          # a distance
     "Bien comunicado con la Costa del Sol por la A-7.",
-    "Parcela en Boadilla del Monte, cerca del Real Madrid.",       # the source's own area is named
-    "Terreno urbano en Mijas, junto al pueblo.",                   # a place the list does not know: the prompt decides
     "Piso reformado, 3 habitaciones, ascensor.",                   # no place at all
 ])
 def test_no_conflict_without_a_clear_signal(text):
@@ -140,7 +138,6 @@ def portal_post(address: str, title: str, description: str) -> str:
     ("Málaga", "Piso", "Calle Madrid, Málaga"),
     ("Málaga", "Piso", "Avenida de Andalucía"),
     ("Ciudad Universitaria, Madrid", "Casa en Girona", "Masía en Girona"),
-    ("Ciudad Universitaria, Madrid", "Piso en Móstoles", "Piso en Móstoles centro"),
     # the same words in a portal's own title
     ("Chamberí, Madrid", "Piso a 10 min de la ciudad de Valencia", "Piso reformado"),
     ("Chamberí, Madrid", "Piso en Carrer de Barcelona", "Piso reformado"),
@@ -190,7 +187,6 @@ def test_a_place_named_by_the_text_is_a_conflict(title, description, phrase, cit
     ("Retiro, Madrid", "Piso", "Perfecto como inversión: rentabilidad como en Barcelona."),
     ("Retiro, Madrid", "Oportunidad: piso tipo loft Barcelona style", "Loft"),
     ("Retiro, Madrid", "Piso", "Nuestra oficina en Barcelona gestiona la venta."),
-    ("Ciudad Universitaria, Madrid", "Piso en venta, Ciudad Universitaria", "Piso en Móstoles"),
     ("Triana, Sevilla", "Piso en Triana", "Piso situado en Barcelona? no; en pleno Triana"),  # names its own district
 ])
 def test_second_review_cases_are_no_conflict(address, title, description):
