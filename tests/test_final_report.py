@@ -768,3 +768,11 @@ async def test_the_real_estate_report_ignores_the_investor_arguments() -> None:
     with_leads = await reporter.build("Квартиры", Request(), outcomes, [], [], [], costs=_spent(), budget=5.0,
                                       leads=LeadsSummary(5, 3, 2, 1, 30))
     assert plain == with_leads and "💼" not in plain and "По веткам" not in plain
+
+
+def test_the_report_does_not_repeat_the_machine_task_text_under_the_goal() -> None:
+    """v3 Q6: «Ваш запрос: покупка Тип: участок. Задача: …» duplicated the 🎯 line in machine wording."""
+    source = "покупка Тип: участок. Задача: участок в Мадриде от 2000 м²"
+    text = report_text("участок · Мадрид · покупка · от 2000 м²", Tally(), [], [], [], [], task_text=source)
+    assert "🎯 участок · Мадрид · покупка · от 2000 м²" in text
+    assert "Ваш запрос" not in text and "Тип: участок" not in text

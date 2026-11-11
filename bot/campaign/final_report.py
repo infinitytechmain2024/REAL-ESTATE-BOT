@@ -756,8 +756,10 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
     ``section``: a heading above the counts (the ``both`` report); ``reserve``: characters left for what follows."""
     limit = MAX_REPORT_CHARS - reserve
     head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
-    if task_text and task_text.casefold() not in goal.casefold():
-        head = f"📋 Отчёт по поиску\n🎯 {goal}\nВаш запрос: {' '.join(task_text.split())[:220]}\n\n"
+    # The 🎯 line already says what is searched; the machine-built ``source_text`` («покупка Тип: участок. Задача: …»)
+    # is shown only when there is no goal to show.
+    if task_text and not goal.strip():
+        head = f"📋 Отчёт по поиску\nВаш запрос: {' '.join(task_text.split())[:220]}\n\n"
     if counts.total == 0:
         summary = ["Объявлений для оценки не получено. Подтверждённых совпадений нет."]
     else:
