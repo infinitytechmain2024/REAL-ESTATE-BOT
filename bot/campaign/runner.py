@@ -574,7 +574,9 @@ class CampaignRunner:
         if await self.store.pending_analysis(campaign.id) and waited < self.config.analysis_grace_seconds:
             return ANALYSIS
         if waited < self.config.social_grace_seconds and (await self.store.social_activity(campaign.id)).pending:
-            return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
+            # TikTok / Instagram / LinkedIn queries are still to run: the browser's (bot.social_search) or, in apify
+            # mode, the Apify runs (bot.campaign.social_apify); CAMPAIGN_SOCIAL_GRACE_SECONDS is the ceiling either way.
+            return ANALYSIS
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
         if waited < self.config.social_grace_seconds and await self._post_read_pending(campaign):
@@ -1493,6 +1495,7 @@ async def main() -> None:
     final_reporter = settings.final_reporter()
     comments, lead_judge = _comment_worker(settings, pool)
     post_reads, post_closers = _post_worker(settings, pool, lead_judge)
+    apify_tasks = _apify_tasks(settings)
     reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None)
     config = settings.runner_config()
     if comments is None:
@@ -1506,11 +1509,20 @@ async def main() -> None:
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool),
                             final_report=final_reporter)
     social, generator = _social_worker(settings, pool, campaigns)
+    apify_social, apify_generator = _apify_social_worker(settings, pool, campaigns, apify_tasks)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
+                                             "apify_social": list(apify_social.platforms) if apify_social else [],
                                              "comment_leads": settings.comment_leads if comments else "off",
                                              "investor_reach": reach is not None})
     stop = asyncio.Event()
+    if apify_tasks is not None:
+        # SIGTERM ends the loops (stop) instead of the process at once, so ``apify_tasks.aclose`` below lets a launch
+        # POST in flight get its answer. Only with Apify social runs on: otherwise SIGTERM behaves as before.
+        import signal
+
+        with suppress(NotImplementedError, RuntimeError):
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
     try:
         # Each stage is its own loop: a slow site or network never delays Facebook work, and the reverse.
         tasks = [runner.serve(settings.poll_seconds, stop)]
@@ -1519,6 +1531,8 @@ async def main() -> None:
             tasks.append(worker.serve(poll, stop))
         if social is not None:
             tasks.append(social.serve(settings.social_poll_seconds, stop))
+        if apify_social is not None:
+            tasks.append(apify_social.serve(settings.social_poll_seconds, stop))
         if comments is not None:
             tasks.append(comments.serve(settings.comment_poll_seconds, stop))
         if post_reads is not None:
@@ -1528,6 +1542,11 @@ async def main() -> None:
         await asyncio.gather(*tasks)
     finally:
         stop.set()
+        if apify_tasks is not None:  # before the clients below close: a launch in flight gets its answer first
+            await apify_tasks.aclose()
+            await apify_tasks.http.aclose()
+        if apify_generator is not None:
+            await apify_generator.aclose()
         if web is not None:
             for close in web[2]:
                 await close()
@@ -1632,6 +1651,45 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
     # The browser's API answers after navigation, the bounded wait for results and the scrolls.
     browser = BrowserSessionClient(settings.browser_url, settings.browser_token, timeout_seconds=45)
     worker = SocialSearchWorker(PostgresSocialStore(pool), campaigns, browser, QueryPlanner(generator), config)
+    return worker, generator
+
+
+def _apify_tasks(settings: Any) -> Any:
+    """The background Apify runs (``social_apify.ApifyTasks``) when ACQUISITION_MODE=apify turns a P1.8 source on:
+    Instagram / TikTok posts; None otherwise (nothing changes)."""
+    if not getattr(settings, "apify_social_on", lambda: False)():
+        return None
+    from bot.acquisition.apify_client import ApifyHttp
+
+    from .social_apify import ApifyTasks
+
+    return ApifyTasks(ApifyHttp(settings.apify_token))
+
+
+def _apify_social_worker(settings: Any, pool: Any, campaigns: CampaignStore, tasks: Any) -> tuple[Any, Any]:
+    """Instagram / TikTok posts through Apify (P1.8) with ACQUISITION_MODE=apify and APIFY_INSTAGRAM_ENABLED /
+    APIFY_TIKTOK_ENABLED; (None, None) otherwise. Returns the worker and its query generator (to close)."""
+    if tasks is None or not settings.apify_social_on():
+        return None, None
+    from bot.acquisition.apify_source import PostgresSourceRunStore
+    from bot.social_search.queries import OpenRouterQueryGenerator, QueryPlanner
+
+    from .social_apify import ApifySocialWorker, PostgresApifySocialStore
+
+    runs = PostgresSourceRunStore(pool)
+    sources: dict[str, Any] = {}
+    instagram = settings.instagram_sources(runs, tasks.http, sleep=tasks.sleep)
+    if instagram is not None:
+        sources["instagram"] = instagram.posts
+    tiktok = settings.tiktok_sources(runs, tasks.http, sleep=tasks.sleep)
+    if tiktok is not None:
+        sources["tiktok"] = tiktok.posts
+    generator = None
+    if settings.openrouter_api_key:
+        generator = OpenRouterQueryGenerator(api_key=settings.openrouter_api_key, model=settings.social_model,
+                                             timeout_seconds=settings.social_model_timeout_seconds)
+    worker = ApifySocialWorker(PostgresApifySocialStore(pool), campaigns, sources, QueryPlanner(generator), tasks,
+                               max_targets=settings.apify_social_max_targets, budget_usd=settings.budget_usd)
     return worker, generator
 
 

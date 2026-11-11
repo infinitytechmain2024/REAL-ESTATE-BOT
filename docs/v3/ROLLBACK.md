@@ -8,6 +8,7 @@
 | # | Часть v3 (задача) | Переменная (`.env.example`) | Откат | Сервисы для `up -d` (`docker-compose.yml`) | Что остаётся в БД | Безопасно оставить? |
 |---|---|---|---|---|---|---|
 | 1 | Общий контракт соцсетей и журнал платных запусков (P1.1) | Нет: код никто не вызывает, флаги заводят источники P1.2–P1.8 | Не нужен | — | 051: таблица `apify_source_runs` (пустая, пока источники не включены) | Да: при выключенных источниках код таблицу не пишет и не читает |
+| 2 | Instagram и TikTok через Apify в кампании (P1.8) | `APIFY_INSTAGRAM_ENABLED`, `APIFY_TIKTOK_ENABLED` (действуют только при `ACQUISITION_MODE=apify`); `APIFY_SOCIAL_MAX_TARGETS` — число целей на кампанию | `APIFY_INSTAGRAM_ENABLED=false` и/или `APIFY_TIKTOK_ENABLED=false` (или `ACQUISITION_MODE=legacy`) | `campaign-runner` | Строки в `apify_source_runs`, `social_search_queries`, `campaign_social_state`, `campaign_social_posts`, посты в `collected_posts` (источник `search` платформы) | Да: новых таблиц нет; посты уже проанализированы и остаются в отчётах |
 
 ## 4. Откат миграций (только если без него нельзя)
 
