@@ -14,6 +14,10 @@ The life of one run, safe to repeat after any crash (the same rules as ``bot.cam
    A lost answer (``LaunchUnknown``) is never launched again: the row closes ``failed launch_unconfirmed`` and the
    cap is booked as an estimate. An explicit refusal (4xx, 429) removes the placeholder: nothing was started. Only
    ``RETRYABLE`` refusals (402, 429) are tried again, at most ``max_attempts`` launches; any other 4xx stays failed.
+   With ``rate_limit_seconds`` set, a 429 (Apify's rate limit: nothing started, nothing paid) does not spend an
+   attempt: the launch is tried again within the same call every ``rate_limit_pause_seconds``, for at most
+   ``rate_limit_seconds``; a 429 that outlasts that window spends one attempt (so the whole wait for one input is
+   bounded by ``max_attempts × rate_limit_seconds``). 0 (the default): every 429 is an attempt.
    A ``launching`` row younger than ``launch_grace_seconds`` is another worker's launch in flight (``busy``);
 5. **checkpoint** the real run id (if that write fails, the run is aborted and booked at its cap); then the cap is booked as an estimate under ``apify:<run_id>`` and the run awaited;
 6. **bill** once: ``costs.record_unique`` under ``apify:<run_id>`` with ``usageTotalUsd``, or the cap with
@@ -70,6 +74,7 @@ Outcome = Literal["succeeded", "failed", "skipped", "retry", "busy"]
 # Every other 4xx (400, 404, 422…) means this input cannot run: the row stays failed. A 5xx or a lost answer on the
 # launch is LaunchUnknown, never retried.
 RETRYABLE = frozenset({"apify_http_402", "apify_http_429"})
+RATE_LIMITED = "apify_http_429"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +92,10 @@ class SocialRunConfig:
     # left alone (``busy``). Older: the launch is taken as lost and booked at its cap. Not below the POST timeout.
     launch_grace_seconds: float = 120
     max_attempts: int = 3             # launches of one input (refusals RETRYABLE included)
+    # A 429 on the launch is retried within one call for at most this long without spending an attempt (0: off,
+    # every 429 is an attempt), pausing rate_limit_pause_seconds between launches.
+    rate_limit_seconds: float = 0
+    rate_limit_pause_seconds: float = 15
 
     def __post_init__(self) -> None:
         actor_path(self.actor_id)
@@ -97,7 +106,9 @@ class SocialRunConfig:
         if not (math.isfinite(self.max_charge_usd) and 0 < self.max_charge_usd <= 5
                 and 1 <= self.max_items <= 5000 and 1 <= self.page_size <= 1000 and 30 <= self.timeout_seconds <= 3600
                 and math.isfinite(self.launch_grace_seconds) and 30 <= self.launch_grace_seconds <= 3600
-                and 1 <= self.max_attempts <= 10):
+                and 1 <= self.max_attempts <= 10
+                and math.isfinite(self.rate_limit_seconds) and 0 <= self.rate_limit_seconds <= 3600
+                and math.isfinite(self.rate_limit_pause_seconds) and 1 <= self.rate_limit_pause_seconds <= 300):
             raise ValueError("unsafe apify source limits")
 
 
@@ -136,7 +147,7 @@ class SourceRunStore(Protocol):
     async def claim(self, campaign_id: str, config: SocialRunConfig, input_hash: str, *,
                     owner_user_id: int | None = None) -> SourceRun: ...
     async def mark_launching(self, run: SourceRun) -> str | None: ...
-    async def unmark_launching(self, run: SourceRun, token: str) -> None: ...
+    async def unmark_launching(self, run: SourceRun, token: str, *, refund: bool = False) -> None: ...
     async def save_run(self, run: SourceRun, run_id: str, dataset_id: str | None) -> None: ...
     async def checkpoint(self, run: SourceRun, *, offset: int, items: int, dataset_id: str | None = None) -> None: ...
     async def finish(self, run: SourceRun, status: str, *, billed_usd: float | None = None,
@@ -157,11 +168,12 @@ def _usage(run: dict[str, Any]) -> float | None:
 
 class ApifySocialRun:
     def __init__(self, store: SourceRunStore, http: ApifyHttp, config: SocialRunConfig, *,
-                 clock: Callable[[], float] = time.monotonic, poll_seconds: int = 20) -> None:
+                 clock: Callable[[], float] = time.monotonic, poll_seconds: int = 20,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         if config.launch_grace_seconds < http.timeout_seconds:
             raise ValueError("launch_grace_seconds must not be below the Apify request timeout")
         self.store, self.http, self.config = store, http, config
-        self._clock, self.poll_seconds = clock, poll_seconds
+        self._clock, self.poll_seconds, self._sleep = clock, poll_seconds, sleep
 
     def __repr__(self) -> str:
         return f"ApifySocialRun(actor={self.config.actor_id}, purpose={self.config.purpose})"
@@ -233,18 +245,29 @@ class ApifySocialRun:
 
     async def _launch(self, row: SourceRun, actor_input: dict[str, Any]) -> SourceRun | RunOutcome:
         cfg = self.config
-        token = await self.store.mark_launching(row)  # before the paid launch: a failure after it never repeats it
-        if token is None:  # another worker holds this launch (or it already has a run id)
-            return RunOutcome("busy")
-        try:
-            run = await self.http.launch(cfg.actor_id, actor_input, build=cfg.build, max_items=cfg.max_items,
-                                         max_charge_usd=cfg.max_charge_usd, timeout_seconds=cfg.timeout_seconds)
-        except LaunchUnknown:
-            # A run may exist remotely: booked at its cap, and never launched a second time for this input.
-            return await self._unconfirmed(replace(row, run_id=token), token, "launch_unconfirmed")
-        except ApifyError:  # refused outright (429, 4xx): no run exists, so no placeholder and no estimate
-            await self.store.unmark_launching(row, token)
-            raise
+        started = self._clock()
+        while True:
+            token = await self.store.mark_launching(row)  # before the paid launch: a failure after it never repeats it
+            if token is None:  # another worker holds this launch (or it already has a run id)
+                return RunOutcome("busy")
+            try:
+                run = await self.http.launch(cfg.actor_id, actor_input, build=cfg.build, max_items=cfg.max_items,
+                                             max_charge_usd=cfg.max_charge_usd, timeout_seconds=cfg.timeout_seconds)
+                break
+            except LaunchUnknown:
+                # A run may exist remotely: booked at its cap, and never launched a second time for this input.
+                return await self._unconfirmed(replace(row, run_id=token), token, "launch_unconfirmed")
+            except ApifyError as exc:  # refused outright (429, 4xx): no run exists, so no placeholder and no estimate
+                pause = min(cfg.rate_limit_pause_seconds, cfg.rate_limit_seconds - (self._clock() - started))
+                free = exc.code == RATE_LIMITED and pause > 0  # a 429 inside the window does not spend the attempt
+                await self.store.unmark_launching(row, token, refund=free)
+                if not free:
+                    raise
+            log.info("apify_source.rate_limited", extra=self._extra(row))
+            await self._sleep(pause)
+            if await costs.over_budget(row.campaign_id):  # others may have spent meanwhile
+                await costs.skip("api", "budget_cap", item=cfg.actor_id)
+                return RunOutcome("skipped", error="budget_cap")
         run_id, dataset = str(run["id"]), str(run.get("defaultDatasetId") or "") or None
         try:
             await self.store.save_run(row, run_id, dataset)
@@ -377,13 +400,16 @@ class PostgresSourceRunStore:
                     where id = $1 and status = 'claimed' and run_id is null""", run.id, token)
         return token if result.split()[-1] == "1" else None
 
-    async def unmark_launching(self, run: SourceRun, token: str) -> None:
-        """Apify refused the launch outright (no run exists): drop our own placeholder."""
+    async def unmark_launching(self, run: SourceRun, token: str, *, refund: bool = False) -> None:
+        """Apify refused the launch outright (no run exists): drop our own placeholder; ``refund``: the refusal does
+        not count as an attempt (a 429 inside ``rate_limit_seconds``)."""
         async with self.pool.acquire() as conn, conn.transaction():
             await _actor(conn)
             await conn.execute(
-                """update apify_source_runs set run_id = null, status = 'claimed', launched_at = null
-                    where id = $1 and status = 'launching' and run_id = $2""", run.id, token)
+                """update apify_source_runs
+                      set run_id = null, status = 'claimed', launched_at = null,
+                          attempts = case when $3 then greatest(attempts - 1, 0) else attempts end
+                    where id = $1 and status = 'launching' and run_id = $2""", run.id, token, refund)
 
     async def save_run(self, run: SourceRun, run_id: str, dataset_id: str | None) -> None:
         async with self.pool.acquire() as conn, conn.transaction():
@@ -458,10 +484,12 @@ class MemorySourceRunStore:
         row["status"], row["launched_at"], row["attempts"] = "launching", self.clock(), row["attempts"] + 1
         return token
 
-    async def unmark_launching(self, run: SourceRun, token: str) -> None:
+    async def unmark_launching(self, run: SourceRun, token: str, *, refund: bool = False) -> None:
         row = self._get(run)
         if row["status"] == "launching" and row["run_id"] == token:
             row["run_id"], row["status"] = None, "claimed"
+            if refund:
+                row["attempts"] = max(0, row["attempts"] - 1)
 
     async def save_run(self, run: SourceRun, run_id: str, dataset_id: str | None) -> None:
         row = self._get(run)
@@ -487,5 +515,5 @@ class MemorySourceRunStore:
                 row["billed_usd"] = billed_usd
 
 
-__all__ = ["RETRYABLE", "ApifySocialRun", "MemorySourceRunStore", "PostgresSourceRunStore", "RunOutcome", "SocialRunConfig",
+__all__ = ["RATE_LIMITED", "RETRYABLE", "ApifySocialRun", "MemorySourceRunStore", "PostgresSourceRunStore", "RunOutcome", "SocialRunConfig",
            "SourceRun", "SourceRunStore", "input_hash"]
