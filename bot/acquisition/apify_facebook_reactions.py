@@ -74,6 +74,11 @@ _PARAM_VALUES = {"story_fbid": re.compile(r"\d{1,25}|pfbid0[A-Za-z0-9]+"), "fbid
                  "multi_permalinks": re.compile(r"\d{1,25}"), "v": re.compile(r"\d{1,25}"),
                  "set": re.compile(r"[A-Za-z]{1,10}\.[\w.\-]{1,80}"), "id": re.compile(r"\d{1,25}")}
 POST_ID_PARAMS = frozenset(_PARAM_VALUES)
+# The only path each id parameter belongs to (matched on the lower-cased path without a trailing ``/``): on any other
+# path the parameter is dropped, so ``/SomePage?v=1`` is a page (``no_post_id``), never a paid run of its feed.
+_PARAM_PATHS = {"v": re.compile(r"/(?:watch|video\.php)"), "set": re.compile(r"/media/set"),
+                "fbid": re.compile(r"/photo(?:\.php)?"), "multi_permalinks": re.compile(r"/groups/[^/]+"),
+                "story_fbid": re.compile(r"/(?:permalink|story)\.php"), "id": re.compile(r"/(?:permalink|story)\.php")}
 # Parameters that name the post by themselves (``id`` alone is its owner, not a post).
 _OWN_ID_PARAMS = POST_ID_PARAMS - {"id"}
 # A post id in the path: /posts/<id>, /permalink/<id>, /videos/<id>, /reel/<id>, /photos/<album>/<id>, a pfbid…
@@ -144,13 +149,20 @@ def normalize_post_url(url: object) -> str:
     """``https://www.facebook.com/<path>`` with only the post-id parameters (sorted), no fragment, no trailing ``/``.
 
     Not an http(s) Facebook link -> ``PostUrlError("not_facebook")``; a link with no post id left in its path or
-    parameters (a feed, a bare ``/watch``, a page) -> ``PostUrlError("no_post_id")``: never paid for."""
+    parameters (a feed, a bare ``/watch``, a page, an id parameter on a path it does not belong to) ->
+    ``PostUrlError("no_post_id")``; one id parameter repeated with different values (``multi_permalinks=5&
+    multi_permalinks=6``: which post?) -> ``PostUrlError("ambiguous_post_id")``, never split or merged. Never paid
+    for."""
     value = url.strip() if isinstance(url, str) else ""
     parts = urlsplit(value)
     path = parts.path.rstrip("/")
     if parts.scheme not in ("http", "https") or (parts.hostname or "").lower() not in POST_HOSTS:
         raise PostUrlError("not_facebook")
-    params = sorted({(k, v) for k, v in parse_qsl(parts.query) if k in _PARAM_VALUES and _PARAM_VALUES[k].fullmatch(v)})
+    where = path.lower()
+    params = sorted({(k, v) for k, v in parse_qsl(parts.query)
+                     if k in _PARAM_VALUES and _PARAM_VALUES[k].fullmatch(v) and _PARAM_PATHS[k].fullmatch(where)})
+    if len({k for k, _ in params}) != len(params):
+        raise PostUrlError("ambiguous_post_id")
     query = urlencode(params)
     canonical = f"https://www.facebook.com{path}" + (f"?{query}" if query else "")
     has_id = (_PATH_ID.search(path) or _POST_ID.search(canonical) or any(k in _OWN_ID_PARAMS for k, _ in params))
@@ -161,7 +173,7 @@ def normalize_post_url(url: object) -> str:
 
 def split_post_urls(urls: Iterable[str]) -> tuple[list[str], Counter[str]]:
     """``(posts, rejected)``: the canonical posts, deduplicated and sorted (a stable input hash), and the links left
-    out of the input by reason (``not_facebook``, ``no_post_id``)."""
+    out of the input by reason (``not_facebook``, ``no_post_id``, ``ambiguous_post_id``)."""
     out: set[str] = set()
     rejected: Counter[str] = Counter()
     for url in urls:

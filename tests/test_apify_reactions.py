@@ -356,7 +356,9 @@ def test_post_id_parameters_are_kept() -> None:
     url = "https://m.facebook.com/permalink.php?id=100000000000001&__tn__=x&story_fbid=1234567890"
     assert normalize_post_url(url) == "https://www.facebook.com/permalink.php?id=100000000000001&story_fbid=1234567890"
     assert normalize_post_url("https://www.facebook.com/photo.php?fbid=1234567&set=a.1&type=3") == (
-        "https://www.facebook.com/photo.php?fbid=1234567&set=a.1")
+        "https://www.facebook.com/photo.php?fbid=1234567")  # set belongs to /media/set only
+    assert normalize_post_url("https://m.facebook.com/photo/?fbid=1234567") == (
+        "https://www.facebook.com/photo?fbid=1234567")
     assert normalize_post_url("https://www.facebook.com/groups/1/?multi_permalinks=123456&ref=x") == (
         "https://www.facebook.com/groups/1?multi_permalinks=123456")
     with pytest.raises(ValueError):
@@ -453,3 +455,33 @@ def test_rejected_links_stay_out_of_the_input() -> None:
 ])
 def test_groups_permalinks_and_paths_work_as_before(url: str, expected: str) -> None:
     assert normalize_post_url(url) == expected
+
+
+# --- id parameters belong to their paths -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.facebook.com/SomePage?v=1", "https://www.facebook.com/SomePage/?set=a.1",
+    "https://www.facebook.com/SomePage?fbid=12", "https://www.facebook.com/SomePage?multi_permalinks=123456",
+    "https://www.facebook.com/SomePage?story_fbid=1234567890&id=100000000000001",
+    "https://www.facebook.com/watch?fbid=12", "https://www.facebook.com/media/set?v=1",
+    "https://www.facebook.com/groups/1/members?multi_permalinks=123456",
+])
+def test_an_id_parameter_on_another_path_is_no_post(url: str) -> None:
+    with pytest.raises(PostUrlError) as exc:
+        normalize_post_url(url)
+    assert exc.value.reason == "no_post_id"
+
+
+def test_a_foreign_id_parameter_is_dropped_from_a_real_post() -> None:
+    assert normalize_post_url("https://www.facebook.com/someagency/posts/pfbid0TEST?v=1&set=a.1") == POST
+
+
+def test_a_repeated_id_parameter_is_refused_not_merged() -> None:
+    with pytest.raises(PostUrlError) as exc:
+        normalize_post_url("https://www.facebook.com/groups/1/?multi_permalinks=5&multi_permalinks=6")
+    assert exc.value.reason == "ambiguous_post_id"
+    assert normalize_post_url("https://www.facebook.com/groups/1/?multi_permalinks=5&multi_permalinks=5") == (
+        "https://www.facebook.com/groups/1?multi_permalinks=5")
+    posts, rejected = split_post_urls(["https://www.facebook.com/groups/1/?multi_permalinks=5&multi_permalinks=6", POST])
+    assert posts == [POST] and rejected == {"ambiguous_post_id": 1}
