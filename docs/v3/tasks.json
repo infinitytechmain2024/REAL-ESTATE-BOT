@@ -66,7 +66,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "—",
       "hours": 0
     },
@@ -247,6 +247,19 @@
       "hours": 4
     },
     {
+      "id": "P1.3a",
+      "title": "Потолки соц-акторов: минимум TikTok $0.50, «max charge reached» с 0 строк → failed с кодом",
+      "stream": "sources",
+      "agent": "sources",
+      "deps": [
+        "P1.3",
+        "P1.4"
+      ],
+      "status": "review",
+      "day": "",
+      "hours": 3
+    },
+    {
       "id": "P1.4",
       "title": "LinkedIn через Apify: люди и компании без cookie и e-mail",
       "stream": "sources",
@@ -254,7 +267,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "done",
+      "status": "review",
       "day": "волна 2",
       "hours": 5
     },
@@ -289,12 +302,13 @@
       "stream": "sources",
       "agent": "sources",
       "deps": [
+        "O6",
         "P1.2",
         "P1.3",
+        "P1.3a",
         "P1.4",
         "P1.5",
-        "P1.6",
-        "O6"
+        "P1.6"
       ],
       "status": "blocked",
       "day": "волна 3",
@@ -310,7 +324,7 @@
         "P1.3",
         "P1.4"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": "волна 3",
       "hours": 5
     },
@@ -809,6 +823,42 @@
       "status": "blocked",
       "day": "волна 10",
       "hours": 4
+    },
+    {
+      "id": "T1",
+      "title": "Стенд симуляции: интервью → карточки, LLM-кассета через Claude, записанные выдачи Apify",
+      "stream": "sim",
+      "agent": "builder",
+      "deps": [
+        "P1.8"
+      ],
+      "status": "in_progress",
+      "day": "",
+      "hours": 10
+    },
+    {
+      "id": "T2",
+      "title": "Персоны (роли) и рубрика судьи",
+      "stream": "sim",
+      "agent": "analyst",
+      "deps": [
+        "T1"
+      ],
+      "status": "blocked",
+      "day": "",
+      "hours": 4
+    },
+    {
+      "id": "T3",
+      "title": "Цикл качества до ≥ 90 % средней по ролям (≤ $10)",
+      "stream": "sim",
+      "agent": "architect",
+      "deps": [
+        "T2"
+      ],
+      "status": "blocked",
+      "day": "",
+      "hours": 0
     }
   ]
 }
