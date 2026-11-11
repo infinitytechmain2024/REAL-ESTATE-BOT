@@ -114,3 +114,85 @@ async def test_rollback_refused_with_rows_then_works(conn):
     await conn.execute(ROLLBACK.read_text(encoding="utf-8"))
     await conn.execute(ROLLBACK.read_text(encoding="utf-8"))  # repeated rollback does not fail
     assert await conn.fetchval("select to_regclass('public.apify_source_runs')") is None
+
+
+# --- the run store (bot/acquisition/apify_source.py) against the table, mocked Apify ------------------------------
+
+
+@pytest.fixture
+async def pool(conn):
+    import asyncpg
+
+    from bot.utils import costs
+
+    p = await asyncpg.create_pool(URL, min_size=1, max_size=4)
+    try:
+        yield p
+    finally:
+        costs.install(None)
+        await p.close()
+
+
+async def test_store_runs_once_bills_once_and_keeps_the_journal(conn, pool):
+    from bot.acquisition.apify_source import ApifySocialRun, PostgresSourceRunStore
+    from bot.utils import costs
+    from tests.test_apify_source_run import CONFIG, INPUT, Api, Sink, comment, runner
+
+    costs.install(costs.PostgresLedger(pool), budget_usd=5)
+    cid = await _campaign(conn)
+    api, store, sink = Api(dataset=[comment(n) for n in range(3)]), PostgresSourceRunStore(pool), Sink()
+    source: ApifySocialRun = runner(api, store)
+    first = await source.run(cid, INPUT, sink, owner_user_id=7)
+    again = await source.run(cid, INPUT, sink, owner_user_id=7)
+    assert (first.status, first.items_imported, again.status) == ("succeeded", 3, "succeeded")
+    assert len(api.launches()) == 1
+    saved = await conn.fetchrow("select * from public.apify_source_runs")
+    assert (saved["platform"], saved["purpose"], saved["actor_id"], saved["actor_build"], saved["owner_user_id"],
+            saved["run_id"], saved["dataset_id"], saved["status"], float(saved["billed_usd"]),
+            float(saved["max_charge_usd"]), saved["items_imported"], saved["import_checkpoint"]) == (
+        "instagram", "comments", CONFIG.actor_id, "0.1.2", 7, "RUN1", "DS1", "succeeded", 0.05, 0.2, 3, 3)
+    assert saved["launched_at"] is not None and saved["finished_at"] is not None
+    booked = await conn.fetch("select idempotency_key, cost_usd::float8 as c, code from public.campaign_costs "
+                              "where idempotency_key like 'apify:%'")
+    assert [(r["idempotency_key"], r["c"], r["code"]) for r in booked] == [("apify:RUN1", 0.05, None)]
+
+
+async def test_store_launch_unknown_keeps_its_placeholder_and_refusal_reopens(conn, pool):
+    import httpx
+
+    from bot.acquisition.apify_source import PostgresSourceRunStore
+    from bot.utils import costs
+    from tests.test_apify_source_run import INPUT, Api, Sink, runner
+
+    costs.install(costs.PostgresLedger(pool), budget_usd=5)
+    cid = await _campaign(conn)
+    store = PostgresSourceRunStore(pool)
+    lost = Api(launch=httpx.ConnectError("lost"))
+    assert (await runner(lost, store).run(cid, INPUT, Sink())).error == "launch_unconfirmed"
+    lost.launch = None
+    assert (await runner(lost, store).run(cid, INPUT, Sink())).status == "failed"
+    assert len(lost.launches()) == 1
+    saved = await conn.fetchrow("select status, run_id, error_code, billed_usd::float8 as b from public.apify_source_runs")
+    assert (saved["status"], saved["error_code"], saved["b"]) == ("failed", "launch_unconfirmed", 0.2)
+    assert saved["run_id"].startswith("pending:")
+
+    other = {**INPUT, "resultsLimit": 5}
+    refused = Api(launch=400)
+    assert (await runner(refused, store).run(cid, other, Sink())).status == "failed"
+    row = await conn.fetchrow("select status, run_id from public.apify_source_runs where run_id is null")
+    assert (row["status"], row["run_id"]) == ("failed", None)
+    refused.launch = None
+    assert (await runner(refused, store).run(cid, other, Sink())).status == "succeeded"
+    assert len(refused.launches()) == 2
+
+
+async def test_store_lets_one_worker_launch(conn, pool):
+    from bot.acquisition.apify_source import PostgresSourceRunStore, input_hash
+    from tests.test_apify_source_run import CONFIG, INPUT
+
+    cid = await _campaign(conn)
+    store = PostgresSourceRunStore(pool)
+    run = await store.claim(cid, CONFIG, input_hash(CONFIG.actor_id, INPUT))
+    assert run.status == "claimed" and run.run_id is None
+    assert await store.mark_launching(run) is not None
+    assert await store.mark_launching(run) is None  # only one worker launches
