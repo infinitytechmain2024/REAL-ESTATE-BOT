@@ -329,7 +329,12 @@ class ApifyIdealistaPortalSource(_PortalSource):
     ``propertyType``, ``municipality``, ``province``, ``price``, ``size``, ``rooms``, ``latitude``/``longitude``,
     ``contactInfo.{phone1,commercialName}``, ``suggestedTexts.title``). Checked against a live run (3 plots in
     Madrid, 2026-10-16): ``size`` is the plot in m2 for ``propertyType=land``, the rows carry no ``description`` and
-    the price is also in ``priceInfo.price.{amount,currencySuffix}``."""
+    the price is also in ``priceInfo.price.{amount,currencySuffix}``.
+
+    ``minSize`` stops at 300 m2 (``_IDEALISTA_SIZES``): a larger ``min_area`` is sent as 300 and the ``maxItems``
+    window of the newest rows fills with smaller plots. With ``sort_biggest`` (``IDEALISTA_SORT_BIGGEST``) such a
+    task without a ``max_area`` is sorted ``biggest`` instead of ``mostRecent``; the rows are still cut by ``min_area`` after the run
+    (the analysis prefilter and ``bot/campaign/tolerance.py``)."""
 
     name = "apify_idealista"
     hosts = frozenset({"idealista.com"})
@@ -337,15 +342,25 @@ class ApifyIdealistaPortalSource(_PortalSource):
                                        "commercial": "premises"}
     _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "commercial": "commercial"}
 
-    def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", **kwargs: Any) -> None:
+    def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
+                 **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
+        self.sort_biggest = sort_biggest
+
+    def _sort(self, min_area: int | None, max_area: int | None) -> str:
+        """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
+        ``max_area``: with one, the biggest rows would all be above it and dropped by ``tolerance`` (a paid empty run)."""
+        if self.sort_biggest and min_area is not None and min_area > _IDEALISTA_SIZES[-1] and max_area is None:
+            return "biggest"
+        return "mostRecent"
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
         constraints = task.constraints
+        min_area = _whole(constraints.get("min_area"))
         actor_input: dict[str, Any] = {"maxItems": amount, "operation": self._deal(task),
                                        "propertyType": self.kinds[task_kind(task)], "country": "es",
-                                       "sortBy": "mostRecent"}
+                                       "sortBy": self._sort(min_area, _whole(constraints.get("max_area")))}
         center = None
         if task.radius_km is not None:
             center = await self._center(task) if not run_id else None
@@ -356,7 +371,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
             actor_input["location"] = task.location.strip()[:120]
         filters = {"minPrice": _floor(_whole(constraints.get("min_price")), _IDEALISTA_PRICES),
                    "maxPrice": _ceil(_whole(constraints.get("max_price")), _IDEALISTA_PRICES),
-                   "minSize": _floor(_whole(constraints.get("min_area")), _IDEALISTA_SIZES)}
+                   "minSize": _floor(min_area, _IDEALISTA_SIZES)}
         actor_input |= {key: value for key, value in filters.items() if value}
         return self.actor_id, actor_input, center
 
