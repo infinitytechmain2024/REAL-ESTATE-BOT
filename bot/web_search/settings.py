@@ -108,6 +108,8 @@ class WebSearchSettings(BaseSettings):
     blocked_hosts_raw: str = Field(default="", validation_alias="WEB_SEARCH_BLOCKED_HOSTS")
     # Search every known portal of the country (Idealista, Fotocasa first), not only those the model picks.
     cover_portals: bool = Field(default=True, validation_alias="WEB_SEARCH_COVER_PORTALS")
+    # Query rounds only in the languages plan_languages allows, neutral Spanish land terms (off: as before).
+    query_hygiene: bool = Field(default=False, validation_alias="SEARCH_QUERY_HYGIENE")
     # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
     # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or
     # an area), off (the old rule: a property word and a deal word). A country without a portal list is soft.
@@ -183,7 +185,7 @@ class WebSearchSettings(BaseSettings):
             max_minutes_per_campaign=self.max_minutes_per_campaign, blocked_hosts=self.blocked_hosts(),
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
-            cover_portals=self.cover_portals, render_on_refusal=self.render_on_refusal,
+            cover_portals=self.cover_portals, query_hygiene=self.query_hygiene, render_on_refusal=self.render_on_refusal,
             render_index_on_refusal=self.render_index_on_refusal,
             human_verification=self.human_verification and self.render_enabled,
             verified_host_interval_seconds=self.verified_host_interval_seconds,

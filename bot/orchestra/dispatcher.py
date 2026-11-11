@@ -47,7 +47,7 @@ def _task_spec(raw: dict[str, Any] | None) -> TaskSpec | None:
 
 
 class OrchestraDispatcher:
-    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, stale_batch_seconds: int = 900, notifier: Notifier | None = None, campaigns: CampaignStore | None = None, roles: OperatorSet | None = None) -> None:
+    def __init__(self, store: PostgresOrchestraStore, *, operator_ids: frozenset[int], lease_seconds: int = 30, poll_seconds: float = 1.0, stale_batch_seconds: int = 900, notifier: Notifier | None = None, campaigns: CampaignStore | None = None, roles: OperatorSet | None = None, query_hygiene: bool = False) -> None:
         if not 10 <= lease_seconds <= 300 or not 0.1 <= poll_seconds <= 30 or not 300 <= stale_batch_seconds <= 86_400:
             raise ValueError("unsafe dispatcher settings")
         self.stale_batch_seconds = stale_batch_seconds
@@ -58,6 +58,8 @@ class OrchestraDispatcher:
         # The shared, live OperatorSet: people with the ``user`` role may
         # create campaigns, read their status and cancel their own, nothing else.
         self.roles = roles
+        # SEARCH_QUERY_HYGIENE: a planned campaign's query seeds keep only its own deal (``plan_campaign``).
+        self.query_hygiene = query_hygiene
         self._stop = asyncio.Event()
 
     async def enqueue(self, command: ConfirmedCommand) -> CommandReceipt:
@@ -192,7 +194,7 @@ class OrchestraDispatcher:
             goal, vertical, city, place = parse_campaign_goal(value)
             spec = _task_spec(parse_campaign_spec(value))
             plan = plan_campaign(goal, vertical=vertical, location=city, place=place,  # type: ignore[arg-type]  # InvalidGoal: nothing is stored
-                                 spec=spec)
+                                 spec=spec, query_hygiene=self.query_hygiene)
             extra: dict[str, Any] = {"spec": spec.model_dump(mode="json")} if spec is not None else {}
             created = await self.campaigns.create(plan, chat_id=item.chat_id, requested_by=item.user_id,
                                                   source_text=goal, actor=actor, **extra)
