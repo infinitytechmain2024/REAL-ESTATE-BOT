@@ -14,13 +14,10 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from bot.acquisition import apify_tiktok as tt
 from bot.acquisition.apify_client import ApifyHttp
-from bot.acquisition.apify_instagram import (
-    COMMENTS_INPUT_KEYS as IG_COMMENTS_KEYS,
-)
-from bot.acquisition.apify_instagram import (
-    POSTS_INPUT_KEYS as IG_POSTS_KEYS,
-)
+from bot.acquisition.apify_instagram import COMMENTS_INPUT_KEYS as IG_COMMENTS_KEYS
+from bot.acquisition.apify_instagram import POSTS_INPUT_KEYS as IG_POSTS_KEYS
 from bot.acquisition.apify_instagram import (
     ApifyInstagramComments,
     ApifyInstagramPosts,
@@ -42,6 +39,10 @@ IG = SocialSourceConfig(platform="instagram", posts_actor="apify/instagram-scrap
                         comments_actor="apify/instagram-comment-scraper", build="0.3.1", max_results=30,
                         max_charge_usd=0.20, build_setting="APIFY_INSTAGRAM_ACTOR_BUILD")
 IG_POST = "https://www.instagram.com/p/C1aBcDeFgHi/"
+TT = SocialSourceConfig(platform="tiktok", posts_actor="clockworks/tiktok-scraper",
+                        comments_actor="clockworks/tiktok-comments-scraper", build="1.4.0", max_results=30,
+                        max_charge_usd=0.15, build_setting="APIFY_TIKTOK_ACTOR_BUILD")
+TT_VIDEO = "https://www.tiktok.com/@pisos_demo_mad/video/7430000000000000001"
 
 # --- synthetic rows (field names from the output schemas; values invented) -----------------------------------
 
@@ -386,4 +387,212 @@ def test_instagram_flag_on_builds_both_sources(monkeypatch: pytest.MonkeyPatch) 
         "apify/instagram-comment-scraper", "ig:comments")
     cfg = sources.posts.runner.config
     assert (cfg.build, cfg.max_items, cfg.max_charge_usd, cfg.rate_limit_seconds) == ("0.3.1", 30, 0.20, 120.0)
+    assert "apify_api_SECRET" not in repr(s) and "apify_api_SECRET" not in repr(sources)
+
+
+# --- TikTok: synthetic rows (field names from the input/output schemas; values invented) -----------------------
+
+
+def tt_post_row(**kw: Any) -> dict[str, Any]:
+    return {"id": "7430000000000000001", "text": "Piso en venta en Lavapiés, 85 m2, 289.000 € 🏠 #pisosmadrid",
+            "textLanguage": "es", "createTimeISO": "2026-10-18T17:05:00.000Z", "createTime": 1792429500,
+            "webVideoUrl": TT_VIDEO, "url": TT_VIDEO, "submittedVideoUrl": None, "input": "pisosmadrid",
+            "hashtags": [{"name": "pisosmadrid"}], "mentions": [], "detailedMentions": [], "diggCount": 120,
+            "shareCount": 3, "playCount": 4100, "commentCount": 9, "collectCount": 11, "repostCount": 0,
+            "isAd": False, "isSponsored": False, "isPinned": False, "isSlideshow": False,
+            "locationCreated": "ES", "locationMeta": {"address": "Calle Demo 1", "city": "Madrid",
+                                                      "countryCode": "ES", "locationName": "Lavapiés"},
+            "authorMeta": {"id": "6900000000000000001", "name": "pisos_demo_mad", "nickName": "Pisos Demo Madrid",
+                           "profileUrl": "https://www.tiktok.com/@pisos_demo_mad", "verified": False,
+                           "privateAccount": False, "fans": 1500, "signature": "demo", "bioLink": None},
+            "videoMeta": {"duration": 31}, "searchHashtag": {"name": "pisosmadrid", "views": 1000}, **kw}
+
+
+def tt_comment_row(n: int = 1, **kw: Any) -> dict[str, Any]:
+    # authorMeta here is the VIDEO's author (pisos_demo_mad), never the commenter (uniqueId)
+    return {"cid": f"743100000000000000{n}", "text": f"¿Cuánto es la comunidad? {n}",
+            "createTimeISO": "2026-10-19T09:00:00.000Z", "diggCount": 2, "uid": f"690000000000000010{n}",
+            "uniqueId": f"demo_comprador_{n}", "videoWebUrl": TT_VIDEO, "submittedVideoUrl": TT_VIDEO,
+            "repliesToId": None, "replyCommentTotal": 0, "likedByAuthor": False, "mentions": [],
+            "detailedMentions": [], "authorMeta": {"name": "pisos_demo_mad", "nickName": "Pisos Demo Madrid",
+                                                   "profileUrl": "https://www.tiktok.com/@pisos_demo_mad",
+                                                   "id": "6900000000000000001", "verified": False, "fans": 1500},
+            **kw}
+
+
+# --- TikTok: the input ----------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("kw", "target"), [
+    ({"hashtags": ["#pisosmadrid", "inversion"]}, {"hashtags": ["pisosmadrid", "inversion"]}),
+    ({"search_queries": ["piso en venta madrid"]}, {"searchQueries": ["piso en venta madrid"],
+                                                    "searchSection": "/video"}),
+    ({"post_urls": [TT_VIDEO]}, {"postURLs": [TT_VIDEO]}),
+])
+async def test_tiktok_posts_launch_body_is_the_white_list_without_paid_add_ons(ledger, kw, target) -> None:
+    api = Api(dataset=[])
+    await build(tt.ApifyTikTokPosts, api, TT).run(CAMPAIGN, save=Saved(), **kw)
+    (launch,) = api.launches()
+    body = api.body()
+    assert launch.url.path == "/v2/acts/clockworks~tiktok-scraper/runs"
+    assert body == {**target, "resultsPerPage": 30, "maxFollowersPerProfile": 0, "maxFollowingPerProfile": 0,
+                    "commentsPerPost": 0}
+    assert set(body) <= tt.POSTS_INPUT_KEYS and not set(body) & tt.PAID_KEYS
+    assert not keys_anywhere(body) & {"profiles", "proxyCountryCode", "scrapeRelatedVideos"}  # not needed, not sent
+    params = launch.url.params
+    assert (params["maxTotalChargeUsd"], params["build"], params["maxItems"]) == ("0.15", "1.4.0", "30")
+    assert_no_login_keys(launch)
+
+
+async def test_tiktok_comments_launch_body_is_the_white_list(ledger) -> None:
+    api = Api(dataset=[])
+    await build(tt.ApifyTikTokComments, api, TT).run(CAMPAIGN, [TT_VIDEO], save=Saved())
+    (launch,) = api.launches()
+    assert launch.url.path == "/v2/acts/clockworks~tiktok-comments-scraper/runs"
+    assert api.body() == {"postURLs": [TT_VIDEO], "commentsPerPost": 30, "maxRepliesPerComment": 0}
+    assert set(api.body()) <= tt.COMMENTS_INPUT_KEYS and not set(api.body()) & tt.PAID_KEYS
+    assert (launch.url.params["maxTotalChargeUsd"], launch.url.params["build"]) == ("0.15", "1.4.0")
+    assert_no_login_keys(launch)
+
+
+def test_tiktok_input_refuses_mixed_or_foreign_targets_and_paid_keys() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        tt.post_input(hashtags=["a"], post_urls=[TT_VIDEO], max_results=5)
+    with pytest.raises(ValueError, match="exactly one"):
+        tt.post_input(max_results=5)
+    with pytest.raises(ValueError, match="public link"):
+        tt.comments_input(["https://www.instagram.com/p/C1aBcDeFgHi/"], max_results=5)
+    with pytest.raises(ValueError, match="search terms"):
+        tt.post_input(hashtags=["#", " "], max_results=5)
+    for key in sorted(tt.PAID_KEYS):
+        with pytest.raises(ValueError, match="not allowed"):
+            check_input({"hashtags": ["a"], key: True}, tt.POSTS_INPUT_KEYS)
+    assert not tt.PAID_KEYS & tt.POSTS_INPUT_KEYS and not tt.PAID_KEYS & tt.COMMENTS_INPUT_KEYS
+
+
+# --- TikTok: mapping ------------------------------------------------------------------------------------------
+
+
+def test_tiktok_post_maps_text_link_author_and_guesses_no_fact() -> None:
+    mapped = tt.tiktok_post(tt_post_row(), campaign_id=CAMPAIGN, actor_id=TT.posts_actor, run_id="RUN1")
+    assert mapped is not None
+    post = mapped.post
+    assert "289.000 €" in post.raw_text and "85 m2" in post.raw_text
+    assert post.provider_facts.model_dump(exclude_defaults=True) == {}  # nor locationMeta: the video's place
+    assert (post.source.platform, post.source.post_url, post.platform_post_id()) == (
+        "tiktok", TT_VIDEO, "7430000000000000001")
+    assert post.source.published_at is not None and post.source.published_at.isoformat() == "2026-10-18T17:05:00+00:00"
+    assert post.source.group_url == "https://www.tiktok.com/@pisos_demo_mad"
+    assert mapped.author is not None and (mapped.author.profile_key, mapped.author.name) == (
+        "tt:pisos_demo_mad", "Pisos Demo Madrid")
+    from_name = tt.tiktok_post(tt_post_row(authorMeta={"name": "pisos_demo_mad"}), campaign_id=CAMPAIGN,
+                               actor_id=TT.posts_actor, run_id="RUN1")
+    assert from_name is not None and from_name.author is not None and from_name.author.name is None
+    assert from_name.author.profile_url == "https://www.tiktok.com/@pisos_demo_mad"
+
+
+def test_tiktok_post_author_on_a_foreign_host_is_refused() -> None:
+    kw = {"campaign_id": CAMPAIGN, "actor_id": TT.posts_actor, "run_id": "RUN1"}
+    for url in ("https://evil.example/@pisos_demo_mad", "https://www.tiktok.com/tag/pisos",
+                "https://www.tiktok.com/@pisos_demo_mad/video/7430000000000000001"):
+        meta = {"name": "pisos_demo_mad", "nickName": "X", "profileUrl": url}
+        mapped = tt.tiktok_post(tt_post_row(authorMeta=meta), **kw)
+        assert mapped is not None and mapped.author is None and mapped.post.source.group_url == TT_VIDEO
+    assert tt.tiktok_post(tt_post_row(webVideoUrl="https://evil.example/v/1", url=None), **kw) is None
+    assert tt.tiktok_post(tt_post_row(text=""), **kw) is None
+
+
+def test_tiktok_commenter_profile_comes_from_unique_id_not_author_meta() -> None:
+    comment = tt.tiktok_comment(tt_comment_row(1))
+    assert isinstance(comment, Engagement)
+    assert (comment.platform, comment.kind, comment.profile_key, comment.profile_url) == (
+        "tiktok", "comment", "tt:demo_comprador_1", "https://www.tiktok.com/@demo_comprador_1")
+    assert comment.author is None  # no commenter name in the output; nickName in authorMeta is the video's author
+    assert (comment.text, comment.post_url, comment.raw_id) == ("¿Cuánto es la comunidad? 1", TT_VIDEO,
+                                                                 "7431000000000000001")
+    # without uniqueId the video's author is NOT taken for the commenter
+    assert tt.tiktok_comment(tt_comment_row(2, uniqueId=None)) is None
+
+
+@pytest.mark.parametrize("change", [
+    {"uniqueId": "evil.example/x"},
+    {"uniqueId": "a"},                                      # too short for a TikTok handle
+    {"text": None},
+    {"videoWebUrl": "https://evil.example/@x/video/7430000000000000001", "submittedVideoUrl": None},
+])
+def test_tiktok_comment_without_a_profile_text_or_tiktok_video_is_skipped(change) -> None:
+    assert tt.tiktok_comment(tt_comment_row(1, **change)) is None
+
+
+# --- TikTok: runs ---------------------------------------------------------------------------------------------
+
+
+async def test_tiktok_error_row_is_post_unavailable(ledger) -> None:
+    error = {"url": TT_VIDEO, "input": TT_VIDEO, "error": "Post not found", "errorCode": "NOT_FOUND",
+             "note": "The video is private or was removed"}
+    api, saved = Api(dataset=[error]), Saved()
+    result = await build(tt.ApifyTikTokPosts, api, TT).run(CAMPAIGN, post_urls=[TT_VIDEO], save=saved)
+    assert (result.outcome.status, result.kept, result.error_rows, result.error) == (
+        "succeeded", 0, 1, "post_unavailable")
+    assert saved.items == []
+
+
+async def test_tiktok_runs_save_posts_and_comments_and_empty_is_nothing(ledger) -> None:
+    saved = Saved()
+    posts = await build(tt.ApifyTikTokPosts, Api(dataset=[tt_post_row()]), TT).run(
+        CAMPAIGN, hashtags=["pisosmadrid"], save=saved)
+    assert (posts.outcome.status, posts.kept, posts.error) == ("succeeded", 1, None)
+    assert saved.items[0].post.source.actor_id == "clockworks/tiktok-scraper"
+    comments = Saved()
+    result = await build(tt.ApifyTikTokComments, Api(dataset=[tt_comment_row(1), tt_comment_row(2)]), TT).run(
+        CAMPAIGN, [TT_VIDEO], save=comments)
+    assert result.kept == 2 and [c.profile_key for c in comments.items] == ["tt:demo_comprador_1",
+                                                                              "tt:demo_comprador_2"]
+    empty = await build(tt.ApifyTikTokComments, Api(dataset=[]), TT).run(CAMPAIGN, [TT_VIDEO], save=Saved())
+    assert (empty.outcome.status, empty.kept, empty.error) == ("succeeded", 0, None)
+
+
+async def test_tiktok_429_does_not_spend_an_attempt_within_the_window(ledger) -> None:
+    api, clock = Api(launches=[429, 201], dataset=[tt_comment_row(1)]), Clock()
+    store = MemorySourceRunStore(clock=clock)
+    result = await build(tt.ApifyTikTokComments, api, TT, store, clock).run(CAMPAIGN, [TT_VIDEO], save=Saved())
+    assert (result.outcome.status, result.kept, len(api.launches()), clock.sleeps) == ("succeeded", 1, 2, [15.0])
+    (row,) = store.rows.values()
+    assert row["attempts"] == 1
+
+
+# --- TikTok: settings -----------------------------------------------------------------------------------------
+
+
+def test_tiktok_flag_off_builds_no_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings(monkeypatch)
+    assert s.apify_tiktok_enabled is False and s.tiktok_config() is None
+    assert s.tiktok_sources(MemorySourceRunStore(), http(Api())) is None
+    assert (s.apify_tiktok_posts_actor, s.apify_tiktok_comments_actor, s.apify_tiktok_max_results,
+            s.apify_tiktok_max_charge_usd) == ("clockworks/tiktok-scraper", "clockworks/tiktok-comments-scraper",
+                                               30, 0.15)
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ({}, "APIFY_TIKTOK_ENABLED=true needs APIFY_TOKEN, APIFY_TIKTOK_ACTOR_BUILD"),
+    ({"APIFY_TOKEN": "x", "APIFY_TIKTOK_ACTOR_BUILD": " "}, "needs APIFY_TIKTOK_ACTOR_BUILD"),
+    ({"APIFY_TOKEN": "x", "APIFY_TIKTOK_ACTOR_BUILD": "latest"}, "APIFY_TIKTOK_ACTOR_BUILD must be a pinned"),
+    ({"APIFY_TOKEN": "x", "APIFY_TIKTOK_ACTOR_BUILD": "1.4.0", "APIFY_TIKTOK_MAX_RESULTS": "0"}, "greater"),
+])
+def test_tiktok_flag_on_without_what_it_needs_does_not_start(monkeypatch: pytest.MonkeyPatch, env, message) -> None:
+    with pytest.raises(ValidationError, match=message):
+        settings(monkeypatch, APIFY_TIKTOK_ENABLED="true", **env)
+
+
+def test_tiktok_flag_on_builds_both_sources_and_instagram_stays_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings(monkeypatch, APIFY_TIKTOK_ENABLED="true", APIFY_TOKEN="apify_api_SECRET",
+                 APIFY_TIKTOK_ACTOR_BUILD="1.4.0")
+    sources = s.tiktok_sources(MemorySourceRunStore(), http(Api()))
+    assert sources is not None and s.instagram_sources(MemorySourceRunStore(), http(Api())) is None
+    assert (sources.posts.runner.config.actor_id, sources.posts.runner.config.purpose,
+            sources.posts.runner.config.platform) == ("clockworks/tiktok-scraper", "tt:posts", "tiktok")
+    assert (sources.comments.runner.config.actor_id, sources.comments.runner.config.purpose) == (
+        "clockworks/tiktok-comments-scraper", "tt:comments")
+    cfg = sources.comments.runner.config
+    assert (cfg.build, cfg.max_items, cfg.max_charge_usd) == ("1.4.0", 30, 0.15)
     assert "apify_api_SECRET" not in repr(s) and "apify_api_SECRET" not in repr(sources)

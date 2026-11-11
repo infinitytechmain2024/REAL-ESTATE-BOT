@@ -173,6 +173,13 @@ class CampaignRunnerSettings(BaseSettings):
     apify_instagram_build: str = Field(default="", max_length=40, validation_alias="APIFY_INSTAGRAM_ACTOR_BUILD")
     apify_instagram_max_results: int = Field(default=30, ge=1, le=50, validation_alias="APIFY_INSTAGRAM_MAX_RESULTS")
     apify_instagram_max_charge_usd: float = Field(default=0.20, gt=0, le=5, validation_alias="APIFY_INSTAGRAM_MAX_CHARGE_USD")
+    # TikTok through Apify (v3 P1.3, bot/acquisition/apify_tiktok.py): the same rules as Instagram above.
+    apify_tiktok_enabled: bool = Field(default=False, validation_alias="APIFY_TIKTOK_ENABLED")
+    apify_tiktok_posts_actor: str = Field(default="clockworks/tiktok-scraper", validation_alias="APIFY_TIKTOK_POSTS_ACTOR")
+    apify_tiktok_comments_actor: str = Field(default="clockworks/tiktok-comments-scraper", validation_alias="APIFY_TIKTOK_COMMENTS_ACTOR")
+    apify_tiktok_build: str = Field(default="", max_length=40, validation_alias="APIFY_TIKTOK_ACTOR_BUILD")
+    apify_tiktok_max_results: int = Field(default=30, ge=1, le=50, validation_alias="APIFY_TIKTOK_MAX_RESULTS")
+    apify_tiktok_max_charge_usd: float = Field(default=0.15, gt=0, le=5, validation_alias="APIFY_TIKTOK_MAX_CHARGE_USD")
 
     @model_validator(mode="after")
     def _comments_ready(self) -> CampaignRunnerSettings:
@@ -188,8 +195,8 @@ class CampaignRunnerSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _social_ready(self) -> CampaignRunnerSettings:
-        """APIFY_INSTAGRAM_ENABLED=true without a token or a pinned build is a start-up error, never a silent
-        fallback."""
+        """APIFY_INSTAGRAM_ENABLED / APIFY_TIKTOK_ENABLED=true without a token or a pinned build is a start-up error,
+        never a silent fallback."""
         for flag, build_name, enabled, build in self._social_flags():
             if not enabled:
                 continue
@@ -198,11 +205,13 @@ class CampaignRunnerSettings(BaseSettings):
             if missing:
                 raise ValueError(f"{flag}=true needs {', '.join(missing)}")
         self.instagram_config()  # an unpinned build («latest») or unsafe limits fail here too
+        self.tiktok_config()
         return self
 
     def _social_flags(self) -> list[tuple[str, str, bool, str]]:
         return [("APIFY_INSTAGRAM_ENABLED", "APIFY_INSTAGRAM_ACTOR_BUILD", self.apify_instagram_enabled,
-                 self.apify_instagram_build)]
+                 self.apify_instagram_build),
+                ("APIFY_TIKTOK_ENABLED", "APIFY_TIKTOK_ACTOR_BUILD", self.apify_tiktok_enabled, self.apify_tiktok_build)]
 
     def instagram_config(self):  # -> bot.acquisition.apify_social.SocialSourceConfig | None
         """The Instagram sources' configuration, or None while APIFY_INSTAGRAM_ENABLED is off."""
@@ -225,6 +234,27 @@ class CampaignRunnerSettings(BaseSettings):
         from bot.acquisition.apify_instagram import instagram_sources
 
         return instagram_sources(config, store, http)
+
+    def tiktok_config(self):  # -> bot.acquisition.apify_social.SocialSourceConfig | None
+        """The TikTok sources' configuration, or None while APIFY_TIKTOK_ENABLED is off."""
+        if not self.apify_tiktok_enabled:
+            return None
+        from bot.acquisition.apify_social import SocialSourceConfig
+
+        return SocialSourceConfig(platform="tiktok", posts_actor=self.apify_tiktok_posts_actor.strip(),
+                                  comments_actor=self.apify_tiktok_comments_actor.strip(),
+                                  build=self.apify_tiktok_build.strip(), max_results=self.apify_tiktok_max_results,
+                                  max_charge_usd=self.apify_tiktok_max_charge_usd,
+                                  build_setting="APIFY_TIKTOK_ACTOR_BUILD")
+
+    def tiktok_sources(self, store, http):  # -> bot.acquisition.apify_tiktok.TikTokSources | None
+        """The TikTok posts and comments sources on ``store`` and ``http``; None while the flag is off."""
+        config = self.tiktok_config()
+        if config is None:
+            return None
+        from bot.acquisition.apify_tiktok import tiktok_sources
+
+        return tiktok_sources(config, store, http)
 
     def post_reads_config(self):  # -> bot.acquisition.apify_facebook_comments.CommentsConfig | None
         """The post comment reader's configuration, or None while APIFY_FACEBOOK_COMMENTS_ENABLED is off."""
