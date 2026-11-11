@@ -94,6 +94,7 @@ lsblk -b -dn -o SIZE /dev/<диск> # размер в байтах совпад
 cd /opt/real-estate-bot
 svc="$(docker compose --env-file .env config --services \
   | grep -vxE 'browser|facebook-runner|campaign-runner|agent-reach-worker|facebook-collector|agent-reach')"
+[ -n "$svc" ] || { echo "svc пуст — стоп"; false; }         # пустой svc поднял бы весь проект вместе с browser
 echo $svc                                                    # сверить список
 docker compose --env-file .env up -d --no-deps $svc
 docker compose --env-file .env ps -a                         # перечисленные Up; browser и зависимые не Up
@@ -147,7 +148,7 @@ cryptsetup open /var/lib/rebot-profiles.luks rebot-profiles     # пароль: 
 
 ```bash
 bash -euo pipefail <<'EOF'
-mkfs.ext4 -L rebot-profiles /dev/mapper/rebot-profiles
+mkfs.ext4 -L rebot-profiles /dev/mapper/rebot-profiles </dev/null
 mkdir -p /srv/rebot-profiles
 chmod 700 /srv/rebot-profiles
 chattr +i /srv/rebot-profiles          # пустая точка монтирования неизменяема: при закрытом томе в неё не записать
@@ -309,8 +310,20 @@ docker compose --env-file .env ps -a browser                  # норма: не
 touch /srv/rebot-profiles/x 2>&1 | tail -1                    # норма: Operation not permitted (chattr +i)
 ```
 
-По желанию там же проверить обход из шага 2 (`up -d --no-deps $svc`): все перечисленные сервисы `Up`, ни один не
-`Created`. Вернуть: шаг 6 (открыть, смонтировать, `up -d`).
+По желанию там же проверить обход из шага 2. `svc` задаётся заново: в новой SSH-сессии переменная пуста, а
+`up -d --no-deps` без аргументов поднял бы весь проект вместе с `browser`.
+
+```bash
+cd /opt/real-estate-bot
+svc="$(docker compose --env-file .env config --services \
+  | grep -vxE 'browser|facebook-runner|campaign-runner|agent-reach-worker|facebook-collector|agent-reach')"
+[ -n "$svc" ] || { echo "svc пуст — стоп"; false; }
+echo $svc
+docker compose --env-file .env up -d --no-deps $svc
+docker compose --env-file .env ps -a                          # норма: перечисленные Up, ни один не Created
+```
+
+Вернуть: шаг 6 (открыть, смонтировать, `up -d`).
 
 Откат шага 4: шаг 8.
 
