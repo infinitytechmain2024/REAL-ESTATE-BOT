@@ -187,6 +187,45 @@ class CampaignRunnerSettings(BaseSettings):
                               max_usd_per_post=self.apify_comments_max_usd,
                               timeout_seconds=float(self.apify_comments_timeout_seconds))
 
+    # People who reacted under public Facebook posts, through Apify (bot/acquisition/apify_facebook_reactions.py,
+    # v3 P1.6). Off by default and not wired yet (P4); on, it needs APIFY_TOKEN and a pinned build or the service
+    # does not start. The cap of one run must cover MAX_RESULTS x $0.0062.
+    apify_reactions_enabled: bool = Field(default=False, validation_alias="APIFY_FACEBOOK_REACTIONS_ENABLED")
+    apify_reactions_actor: str = Field(default="apify/facebook-likes-scraper",
+                                       validation_alias="APIFY_FACEBOOK_REACTIONS_ACTOR")
+    apify_reactions_build: str = Field(default="", max_length=40, validation_alias="APIFY_FACEBOOK_REACTIONS_ACTOR_BUILD")
+    apify_reactions_max_results: int = Field(default=100, ge=1, le=500, validation_alias="APIFY_FACEBOOK_REACTIONS_MAX_RESULTS")
+    apify_reactions_max_charge_usd: float = Field(default=0.70, gt=0, le=5,
+                                                  validation_alias="APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD")
+
+    @model_validator(mode="after")
+    def _reactions_ready(self) -> CampaignRunnerSettings:
+        """With the flag on: no token, no pinned build or a cap below MAX_RESULTS x the result price is a start-up
+        error. With it off nothing is checked, so ENABLED=false alone always rolls it back."""
+        if self.apify_reactions_enabled:
+            from bot.acquisition.apify_facebook_reactions import USD_PER_RESULT, min_charge_usd
+
+            if self.apify_reactions_max_charge_usd < min_charge_usd(self.apify_reactions_max_results):
+                raise ValueError("APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD is below "
+                                 f"APIFY_FACEBOOK_REACTIONS_MAX_RESULTS x {USD_PER_RESULT}")
+            missing = [name for name, value in (("APIFY_TOKEN", self.apify_token),
+                                                ("APIFY_FACEBOOK_REACTIONS_ACTOR_BUILD", self.apify_reactions_build))
+                       if not value.strip()]
+            if missing:
+                raise ValueError(f"APIFY_FACEBOOK_REACTIONS_ENABLED=true needs {', '.join(missing)}")
+            self.reactions_config()  # an unpinned build or a bad actor id fails here too
+        return self
+
+    def reactions_config(self):  # -> bot.acquisition.apify_facebook_reactions.ReactionsConfig | None
+        """The Facebook reactions source's configuration, or None while APIFY_FACEBOOK_REACTIONS_ENABLED is off."""
+        if not self.apify_reactions_enabled:
+            return None
+        from bot.acquisition.apify_facebook_reactions import ReactionsConfig
+
+        return ReactionsConfig(actor_id=self.apify_reactions_actor, build=self.apify_reactions_build.strip(),
+                               max_results=self.apify_reactions_max_results,
+                               max_charge_usd=self.apify_reactions_max_charge_usd)
+
     def social_config(self):  # -> bot.social_search.worker.SocialConfig (imported lazily)
         from bot.social_search.worker import SocialConfig, parse_platforms
 

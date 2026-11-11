@@ -596,6 +596,12 @@ services:
       # Who reads the comments under sent objects: browser (default) or apify, and the Apify day quota (v2 B2).
       LEADS_PROVIDER: ${LEADS_PROVIDER:-browser}
       APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY: ${APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY:-40}
+      # People who reacted under public Facebook posts (v3 P1.6); off by default, not wired yet.
+      APIFY_FACEBOOK_REACTIONS_ENABLED: ${APIFY_FACEBOOK_REACTIONS_ENABLED:-false}
+      APIFY_FACEBOOK_REACTIONS_ACTOR: ${APIFY_FACEBOOK_REACTIONS_ACTOR:-apify/facebook-likes-scraper}
+      APIFY_FACEBOOK_REACTIONS_ACTOR_BUILD: ${APIFY_FACEBOOK_REACTIONS_ACTOR_BUILD:-}
+      APIFY_FACEBOOK_REACTIONS_MAX_RESULTS: ${APIFY_FACEBOOK_REACTIONS_MAX_RESULTS:-100}
+      APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD: ${APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD:-0.70}
       # The final report gets the investors section (v2 B4); off by default.
       CAMPAIGN_INVESTOR_REPORT: ${CAMPAIGN_INVESTOR_REPORT:-false}
       WEB_SEARCH_SEARXNG_URL: http://searxng:8080
