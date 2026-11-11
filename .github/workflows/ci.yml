@@ -116,4 +116,5 @@ jobs:
           tests/test_post_leads.py
           tests/test_task_draft_steps_postgres.py
           tests/test_task_drafts_mode_both_postgres.py
+          tests/test_near_match.py
           tests/test_image_imports.py

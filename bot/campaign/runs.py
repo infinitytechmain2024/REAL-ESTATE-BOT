@@ -790,7 +790,7 @@ class PostgresRunStore:
                   join findings f on f.id = cf.finding_id
                   join collected_posts p on p.id = f.post_id
                  where cf.campaign_id = $1::uuid and cf.bucket = $2 and cf.state = 'held'
-                   and cf.why is distinct from $3
+                   and ($3::text is null or cf.why is distinct from $3)
                  order by cf.distance nulls last, f.created_at, f.id limit {int(limit)}""",
             campaign_id, bucket, exclude_why,
         )
