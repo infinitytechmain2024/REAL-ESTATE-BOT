@@ -392,12 +392,14 @@ def test_idealista_igolaizola_rejects_foreign_rows(change):
     assert adapter._normalize(idealista_row(**change), task(), None) is None
 
 
-async def _idealista_input(min_area, **kwargs):
+async def _idealista_input(min_area, *, deal="sale", kind="terreno", max_area=None, **kwargs):
     requests = []
     adapter = ApifyIdealistaPortalSource("secret-token", client=api([], requests), sleep=AsyncMock(), **kwargs)
-    constraints = {"deal": "sale", "min_area": min_area, "max_price": "3000000"}
+    constraints = {"deal": deal, "min_area": min_area, "max_price": "3000000"}
+    if max_area is not None:
+        constraints["max_area"] = max_area
     with source_run_scope(context("apify_idealista")):
-        await adapter.search(task(constraints=constraints), limit=5)
+        await adapter.search(task(constraints=constraints, goal=kind, task_text=kind), limit=5)
     await adapter.aclose()
     return json.loads(next(r for r in requests if r.method == "POST").content)
 
@@ -413,6 +415,24 @@ async def test_idealista_sort_biggest_off_keeps_the_input():
 async def test_idealista_sort_biggest_on_only_above_the_largest_min_size(min_area, sort, size):
     sent = await _idealista_input(min_area, sort_biggest=True)
     assert sent["sortBy"] == sort and sent["minSize"] == size
+
+
+async def test_idealista_sort_biggest_not_with_a_max_area():
+    sent = await _idealista_input("1000", max_area="2000", sort_biggest=True)
+    assert sent["sortBy"] == "mostRecent" and sent["minSize"] == "300"
+
+
+@pytest.mark.parametrize("min_area", [None, "mucho"])
+async def test_idealista_sort_biggest_without_a_min_area(min_area):
+    sent = await _idealista_input(min_area, sort_biggest=True)
+    assert sent["sortBy"] == "mostRecent" and "minSize" not in sent
+
+
+@pytest.mark.parametrize(("deal", "kind", "property_type"), [("rent", "terreno", "lands"), ("sale", "casa", "homes")])
+async def test_idealista_sort_biggest_for_rent_and_homes(deal, kind, property_type):
+    sent = await _idealista_input("500", deal=deal, kind=kind, sort_biggest=True)
+    assert sent["sortBy"] == "biggest" and sent["minSize"] == "300"
+    assert sent["operation"] == deal and sent["propertyType"] == property_type
 
 
 async def test_idealista_sort_biggest_setting_reaches_the_source(monkeypatch):

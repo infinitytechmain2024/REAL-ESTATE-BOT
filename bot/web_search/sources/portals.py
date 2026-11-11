@@ -333,7 +333,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     ``minSize`` stops at 300 m2 (``_IDEALISTA_SIZES``): a larger ``min_area`` is sent as 300 and the ``maxItems``
     window of the newest rows fills with smaller plots. With ``sort_biggest`` (``IDEALISTA_SORT_BIGGEST``) such a
-    task is sorted ``biggest`` instead of ``mostRecent``; the rows are still cut by ``min_area`` after the run
+    task without a ``max_area`` is sorted ``biggest`` instead of ``mostRecent``; the rows are still cut by ``min_area`` after the run
     (the analysis prefilter and ``bot/campaign/tolerance.py``)."""
 
     name = "apify_idealista"
@@ -347,9 +347,10 @@ class ApifyIdealistaPortalSource(_PortalSource):
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
 
-    def _sort(self, min_area: int | None) -> str:
-        """``biggest`` when the flag is on and ``min_area`` is above the actor's largest ``minSize``."""
-        if self.sort_biggest and min_area is not None and min_area > _IDEALISTA_SIZES[-1]:
+    def _sort(self, min_area: int | None, max_area: int | None) -> str:
+        """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
+        ``max_area``: with one, the biggest rows would all be above it and dropped by ``tolerance`` (a paid empty run)."""
+        if self.sort_biggest and min_area is not None and min_area > _IDEALISTA_SIZES[-1] and max_area is None:
             return "biggest"
         return "mostRecent"
 
@@ -359,7 +360,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
         min_area = _whole(constraints.get("min_area"))
         actor_input: dict[str, Any] = {"maxItems": amount, "operation": self._deal(task),
                                        "propertyType": self.kinds[task_kind(task)], "country": "es",
-                                       "sortBy": self._sort(min_area)}
+                                       "sortBy": self._sort(min_area, _whole(constraints.get("max_area")))}
         center = None
         if task.radius_km is not None:
             center = await self._center(task) if not run_id else None
