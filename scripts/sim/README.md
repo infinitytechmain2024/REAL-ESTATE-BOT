@@ -39,7 +39,12 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 - **Окружение** — `harness.BASE_ENV`: ключи-заглушки `sim-…`, `ACQUISITION_MODE=apify`, порталы Idealista
   (igolaizola), Fotocasa, Habitaclia, Milanuncios, комментарии Facebook через Apify, `INTAKE_BOTH_MODE`, отчёт по
   инвесторам, `CAMPAIGN_BUDGET_USD=0.8`; остальное — умолчания `docker-compose.yml`. `env` персоны перекрывает любое.
-  Процесс работает из `sim/`: `.env` репозитория стенд не читает.
+  После `env` персоны всегда ставится `WEB_SEARCH_IMPERSONATE=off` (`harness.FORCED`), а `CurlTransport` веб-этапа
+  на время прогона заменён httpx-транспортом: curl_cffi шёл бы мимо httpx и мимо запрета сокетов. Все `*_PROXY` /
+  `*_proxy` на время прогона убираются, затем возвращаются; так же сохраняются и возвращаются рабочий каталог,
+  состояние `random`, `uuid.uuid4` и ledger `costs` вызывающего (`harness.sim_process`). Прогон работает из `sim/`
+  (chdir в `sim_process`): `.env` репозитория настройки сервисов не читают — тесты тоже (там ещё и `chdir` во
+  временный каталог).
 - **Facebook**: `SIM_FACEBOOK=none` (по умолчанию) — группы, названные в задаче, идут в Apify как в проде; без них
   Facebook ничего не добавляет, кампания идёт дальше по другим источникам. `SIM_FACEBOOK=browser` — поиск групп через
   Browser Session Manager: страницы из `sim/browser/<хэш url>.json`, иначе пустая выдача (см. «Находки»).
@@ -61,12 +66,14 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 | пользователь | `pending_answers/<run>.json`: `question`, `buttons`, `dialogue` | `answers/<run>.json` | `{"answers": [{"text": "до 3 млн евро"}, {"press": "<текст или data кнопки>"}, ...]}` — дописать следующий |
 
 - **Ключ LLM** = sha256 от (провайдер, модель, сообщения с system, схема `response_format` или `tools`) после
-  нормализации: UUID и время заменены, поэтому повтор в другой день попадает в те же ответы. Ответ отдаётся как
+  нормализации: заменены UUID и только «сейчас» стенда — дата или метка времени, чей день сегодня, день старта
+  прогона или день виртуальных часов (`cassette.mark_now`). Даты из данных (дата объявления) остаются в ключе.
+  Повтор в другой день попадает в те же ответы; исключение — объявление, датированное днём записи. Ответ отдаётся как
   OpenRouter chat completion с `usage.cost = 0`; в `campaign_costs` такие строки идут с провайдером
   `claude_cassette`. Interviewer на Anthropic API (`ARCHITECT_PROVIDER=anthropic` в `env` персоны) — тот же ключ и
   формат, ответ отдаётся `tool_use`-блоком.
 - **Ключ Apify** = sha256 входа актора. Жизненный цикл эмулируется: POST → `RUNNING`, первый GET → `SUCCEEDED`,
-  страницы датасета по `offset/limit`, abort. Стартовый набор — живые фикстуры порталов:
+  страницы датасета по `offset/limit`, abort; в датасете не больше `maxItems` запуска. Стартовый набор — живые фикстуры порталов:
   `.venv/bin/python -m scripts.sim.fixtures` отвечает на pending порталов (Madrid, совпадающие сделка и тип) файлами
   `tests/fixtures/portals_live/`, остальное печатает как `left`. Новые записи — оркестратор через MCP, в бюджете.
 - **Пользователь**: ответ на i-й вопрос — i-й элемент `answers`. Кнопку можно назвать текстом («Не важно») или data
@@ -75,13 +82,22 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 - Прочие хосты (SearXNG, сайты): `http/<host>/<хэш>.json` (`{"status": 200, "json": ...}` или `{"text": ...}`), если
   записано; иначе SearXNG находит ничего, сайт отвечает 503, запрос попадает в `offline` результата.
 
+## Деньги
+
+Стенд не платит. Каждый живой запуск Apify, сделанный оркестратором через MCP для стенда, записывается в
+`sim/spend.jsonl`: `scripts.sim.spend.record_spend(actor, run_id, usd, note)` или
+`python -m scripts.sim.spend add --actor apify/instagram-scraper --run-id <id> --usd 0.12 --note G7`.
+`python -m scripts.sim.spend [--limit 10]` печатает сумму по акторам и выходит с кодом 1, если сумма выше потолка
+($10 на весь цикл T3): тогда новых живых запусков нет.
+
 ## Цикл оркестратора
 
 1. `python -m scripts.sim.run --persona sim/personas/<p>.yaml --run <id>`.
 2. Код `3`: ответить на pending — `pending_answers/<id>.json` агенту-пользователю (дописать `answers/<id>.json`),
    каждый `pending/*.json` агенту в роли модели этапа (`stage`; ответ строго по `schema` и формату из `system`),
    Apify — `python -m scripts.sim.fixtures`, остаток — запись прогона через MCP с `maxTotalChargeUsd` не выше
-   `params.maxTotalChargeUsd`. Сначала не-`speculative`.
+   `params.maxTotalChargeUsd`, затем `record_spend` и `python -m scripts.sim.spend` (код 1 — стоп). Сначала
+   не-`speculative`.
 3. Повторить 1. Всё отвеченное воспроизводится детерминированно, прогон доходит до следующих вопросов.
 4. Код `0`: `runs/<id>/result.json` готов для судьи.
 

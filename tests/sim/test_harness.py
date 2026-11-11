@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from scripts.sim import db
-from scripts.sim.cassette import SimNet, SimStop, digest, llm_request, offline
+from scripts.sim.cassette import SimNet, SimStop, digest, llm_request, mark_now, offline
 from scripts.sim.fixtures import answer as answer_apify
 from tests.sim import model
 
@@ -32,6 +32,12 @@ CHAT = {"model": "anthropic/claude-sonnet-4.5", "temperature": 0, "max_tokens": 
         "messages": [{"role": "system", "content": "Answer in JSON."}, {"role": "user", "content": "Plot 2519 m2?"}],
         "response_format": {"type": "json_schema", "json_schema": {"name": "r", "strict": True,
                                                                    "schema": {"type": "object"}}}}
+
+
+@pytest.fixture(autouse=True)
+def _no_repository_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The services' settings read ``.env`` from the working folder: never the repository's in these tests."""
+    monkeypatch.chdir(tmp_path)
 
 
 def files_text(root: Path) -> str:
@@ -87,13 +93,27 @@ async def test_the_anthropic_interviewer_gets_its_tool_call(tmp_path: Path) -> N
     assert block == {"type": "tool_use", "id": f"toolu_sim_{key}", "name": "submit_turn", "input": {"done": True}}
 
 
-def test_the_key_ignores_ids_and_times_but_not_the_question() -> None:
+def test_the_key_ignores_ids_but_not_the_question() -> None:
     def chat(text: str) -> dict:
         return llm_request("openrouter.ai", {**CHAT, "messages": [{"role": "user", "content": text}]})
 
-    assert digest(chat("run 6f1d2c1e-8f3b-4a59-9d7e-1c2b3a4d5e6f at 2026-11-11T10:00:00Z")) == \
-        digest(chat("run 0a1b2c3d-0000-4000-8000-000000000001 at 2026-11-12T23:59:59+01:00"))
+    assert digest(chat("run 6f1d2c1e-8f3b-4a59-9d7e-1c2b3a4d5e6f")) == \
+        digest(chat("run 0a1b2c3d-0000-4000-8000-000000000001"))
     assert digest(chat("plot 2000 m2")) != digest(chat("plot 3000 m2"))
+
+
+def test_a_listing_date_stays_in_the_key_and_the_benchs_now_does_not() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    def chat(data: dict) -> dict:
+        return llm_request("openrouter.ai", {**CHAT, "messages": [{"role": "user", "content": json.dumps(data)}]})
+
+    assert digest(chat({"listing_date": "2026-10-01"})) != digest(chat({"listing_date": "2026-10-02"}))
+    now = datetime.now(UTC)
+    later = now + timedelta(days=3)  # the virtual clock got there
+    mark_now(later)
+    assert digest(chat({"asked_at": now.isoformat(), "today": now.date().isoformat()})) == \
+        digest(chat({"asked_at": later.isoformat(), "today": later.date().isoformat()}))
 
 
 # --- Apify ------------------------------------------------------------------------------------------------------
@@ -125,6 +145,23 @@ async def test_an_apify_run_lives_its_cycle_from_the_record_and_a_miss_is_pendin
     data = json.loads(pending.read_text(encoding="utf-8"))
     assert data["actor"] == "igolaizola/idealista-scraper" and data["input"]["location"] == "Bilbao"
     assert data["params"]["maxTotalChargeUsd"] == "0.1" and net.pending_apify == [pending.stem]
+
+
+@pytest.mark.asyncio
+async def test_an_apify_record_gives_no_more_than_the_launch_asked_for(tmp_path: Path) -> None:
+    from bot.acquisition.apify_client import ApifyHttp
+
+    folder = tmp_path / "apify" / "rastriq~milanuncios-scraper"
+    folder.mkdir(parents=True)
+    (folder / "_default.json").write_text(json.dumps([{"id": n} for n in range(10)]), encoding="utf-8")
+    with offline(SimNet(tmp_path)):
+        http = ApifyHttp(SECRETS["APIFY_TOKEN"])
+        run = await http.launch("rastriq/milanuncios-scraper", {"province": "madrid"}, max_items=3,
+                                max_charge_usd=.1, timeout_seconds=60)
+        done = await http.run(run["id"])
+        items = await http.dataset_page(done["defaultDatasetId"], offset=0, limit=100)
+        await http.aclose()
+    assert items == [{"id": 0}, {"id": 1}, {"id": 2}]
 
 
 def test_the_live_portal_fixtures_answer_the_runs_they_match(tmp_path: Path) -> None:
@@ -160,6 +197,63 @@ async def test_telegram_is_kept_and_nothing_else_leaves_the_process(tmp_path: Pa
     assert sent["text"] == "Готово" and sent["edits"] == 1 and site.status_code == 503
     assert net.offline[0]["host"] == "www.idealista.com"
     assert SECRETS["TELEGRAM_TOKEN"] not in json.dumps(net.offline + net.telegram.messages)
+
+
+@pytest.mark.asyncio
+async def test_an_impersonating_fetcher_reads_through_simnet_not_curl(tmp_path: Path) -> None:
+    from bot.web_search.fetcher import CurlTransport, PageFetcher
+
+    with offline(SimNet(tmp_path)) as net:
+        fetcher = PageFetcher(user_agent="sim-test", impersonate="chrome", host_interval_seconds=0)
+        assert fetcher.profile and not isinstance(fetcher._transport, CurlTransport)
+        async with fetcher._transport.open("https://www.idealista.com/inmueble/1/", headers={}, proxy=None) as page:
+            assert page.status == 503
+        await fetcher.aclose()
+    assert any(o["host"] == "www.idealista.com" for o in net.offline)
+
+
+def test_the_persona_cannot_turn_curl_on_and_the_process_is_given_back(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    import random
+
+    from bot.utils import costs
+    from scripts.sim.harness import Persona, environment, sim_process
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("all_proxy", "socks5://proxy.example:1080")
+    persona = Persona(name="p", task="x", env={"WEB_SEARCH_IMPERSONATE": "chrome", "APIFY_TOKEN": "t"})
+    env = environment(persona, "postgresql://x/sim_test")
+    assert env["WEB_SEARCH_IMPERSONATE"] == "off" and env["APIFY_TOKEN"] == "t"
+    random.seed(42)
+    expected = random.getstate()
+    ledger = costs.MemoryLedger()
+    costs.install(ledger, 3.0)
+    cwd = os.getcwd()
+    try:
+        with sim_process(tmp_path / "sim", env):
+            assert "HTTPS_PROXY" not in os.environ and "all_proxy" not in os.environ
+            assert os.environ["WEB_SEARCH_IMPERSONATE"] == "off" and os.getcwd() == str(tmp_path / "sim")
+            random.random()
+            costs.install(None)
+        assert os.environ["HTTPS_PROXY"] == "http://proxy.example:3128"
+        assert os.environ["all_proxy"] == "socks5://proxy.example:1080"  # noqa: SIM112 - the lower-case form is read too
+        assert random.getstate() == expected and costs.ledger() is ledger and costs.budget() == 3.0
+        assert os.getcwd() == cwd and "WEB_SEARCH_IMPERSONATE" not in os.environ
+    finally:
+        costs.install(None)
+
+
+def test_the_spend_journal_sums_and_refuses_past_the_ceiling(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    from scripts.sim.spend import main, record_spend, total
+
+    record_spend("apify/instagram-scraper", "run1", 4.5, "G7", sim_root=tmp_path)
+    assert main(["--sim", str(tmp_path), "add", "--actor", "harvestapi/linkedin-profile-search", "--run-id", "run2",
+                 "--usd", "5.5"]) == 0
+    assert total(tmp_path) == 10.0 and "total: $10.0000 of $10.00 (2 runs)" in capsys.readouterr().out
+    record_spend("apify/instagram-scraper", "run3", 0.01, sim_root=tmp_path)
+    assert main(["--sim", str(tmp_path)]) == 1
+    with pytest.raises(ValueError):
+        record_spend("a", "r", -1, sim_root=tmp_path)
 
 
 # --- the whole run (PostgreSQL) ---------------------------------------------------------------------------------

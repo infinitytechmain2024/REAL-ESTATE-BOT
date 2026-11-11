@@ -12,8 +12,9 @@ the transport every client of the bot ends up on, so no production constructor c
 * any other host (SearXNG, sites): ``sim/http/<host>/<hash>.json`` if recorded, else an empty search result or a 503,
   listed in ``offline``.
 
-Headers are never read or written: no key or token reaches a file. Hashes are taken after ``normalize`` (UUIDs and
-timestamps blanked), so a replay on another day hits the same answers.
+Headers are never read or written: no key or token reaches a file. Hashes are taken after ``normalize``: UUIDs and
+the bench's «now» (a date or a timestamp of today, of the virtual clock or of the run's start, ``mark_now``) are
+blanked, so a replay on another day hits the same answers; any other date (a listing's) stays in the key.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ import socket
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,9 +59,26 @@ def canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+_NOW_DATES: set[str] = set()
+
+
+def mark_now(*moments: datetime) -> None:
+    """Dates that are «now» for this process (the virtual clock, the run's start): blanked in a key."""
+    _NOW_DATES.update(m.astimezone(UTC).date().isoformat() for m in moments)
+    _NOW_DATES.update(m.date().isoformat() for m in moments)
+
+
+def now_dates() -> set[str]:
+    return {datetime.now(UTC).date().isoformat(), date.today().isoformat(), *_NOW_DATES}
+
+
 def normalize(text: str) -> str:
-    """UUIDs and timestamps out of a hashed text: they change from run to run, the question does not."""
-    return _DATE.sub("<date>", _DATETIME.sub("<time>", _UUID.sub("<uuid>", text)))
+    """UUIDs and «now» out of a hashed text: they change from run to run, the question does not. A timestamp or a
+    date is «now» when its day is today or a day of the bench's clock; a listing's date is data and stays."""
+    dates = now_dates()
+    text = _UUID.sub("<uuid>", text)
+    text = _DATETIME.sub(lambda m: "<now>" if m.group(0)[:10] in dates else m.group(0), text)
+    return _DATE.sub(lambda m: "<today>" if m.group(0) in dates else m.group(0), text)
 
 
 def digest(value: Any, size: int = 24) -> str:
@@ -149,6 +168,7 @@ class _Run:
     items: list[Any]
     usage: float
     status: str = "RUNNING"
+    max_items: int | None = None  # ``maxItems`` of the launch: the dataset never holds more
 
 
 class SimNet:
@@ -295,8 +315,9 @@ class SimNet:
         items = data if isinstance(data, list) else data.get("items", [])
         usage = 0.0 if isinstance(data, list) else float(data.get("usage_usd", 0.0))
         n = next(self._run_ids)
-        run = _Run(f"simrun{n}", actor, f"simds{n}", list(items), usage,
-                   "RUNNING" if isinstance(data, list) else str(data.get("status", "RUNNING")))
+        limit = _int(request.url.params.get("maxItems"))
+        run = _Run(f"simrun{n}", actor, f"simds{n}", list(items)[:limit] if limit is not None else list(items), usage,
+                   "RUNNING" if isinstance(data, list) else str(data.get("status", "RUNNING")), limit)
         self._runs[run.id], self._datasets[run.dataset] = run, run
         self.hits["apify"] += 1
         self.calls += 1
@@ -358,6 +379,14 @@ def _completion(host: str, body: dict[str, Any], entry: dict[str, Any], key: str
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0}}
 
 
+def _int(value: Any) -> int | None:
+    try:
+        number = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
 def _json(raw: bytes) -> Any:
     try:
         return json.loads(raw) if raw else None
@@ -370,9 +399,25 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+class _NoCurl:
+    """``bot.web_search.fetcher.CurlTransport`` for the run: curl_cffi (libcurl, past httpx and the socket guard) is
+    never used; an impersonating fetcher reads through httpx, which ``net`` answers."""
+
+    def __new__(cls, *, profile: str, timeout_seconds: float = 20) -> Any:
+        from bot.web_search.fetcher import HttpxTransport
+
+        transport = HttpxTransport(timeout_seconds=timeout_seconds)
+        transport.profile = profile  # type: ignore[attr-defined]
+        return transport
+
+
 @contextlib.contextmanager
 def offline(net: SimNet) -> Iterator[SimNet]:
-    """Every ``httpx`` request of the process goes to ``net``; a socket may connect to the loopback only."""
+    """Every ``httpx`` request of the process goes to ``net``; a socket may connect to the loopback only; the web
+    fetcher's curl_cffi transport is replaced by httpx (``_NoCurl``)."""
+    from bot.web_search import fetcher
+
+    curl = fetcher.CurlTransport
     async_send = httpx.AsyncHTTPTransport.handle_async_request
     sync_send = httpx.HTTPTransport.handle_request
     connect, connect_ex = socket.socket.connect, socket.socket.connect_ex
@@ -399,9 +444,11 @@ def offline(net: SimNet) -> Iterator[SimNet]:
     httpx.HTTPTransport.handle_request = refused  # type: ignore[method-assign]
     socket.socket.connect = checked_connect  # type: ignore[method-assign]
     socket.socket.connect_ex = checked_connect_ex  # type: ignore[method-assign]
+    fetcher.CurlTransport = _NoCurl  # type: ignore[assignment,misc]
     try:
         yield net
     finally:
+        fetcher.CurlTransport = curl  # type: ignore[misc]
         httpx.AsyncHTTPTransport.handle_async_request = async_send  # type: ignore[method-assign]
         httpx.HTTPTransport.handle_request = sync_send  # type: ignore[method-assign]
         socket.socket.connect, socket.socket.connect_ex = connect, connect_ex  # type: ignore[method-assign]

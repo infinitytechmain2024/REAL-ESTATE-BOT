@@ -17,14 +17,14 @@ import os
 import random
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from . import db
-from .cassette import _DATETIME, SimNet, SimStop, normalize, offline
+from .cassette import _DATETIME, SimNet, SimStop, mark_now, normalize, offline
 
 log = logging.getLogger("scripts.sim")
 OWNER, USER = 1, 1001
@@ -66,6 +66,48 @@ BASE_ENV: dict[str, str] = {
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")
+# Set after the persona's env, whatever it says: curl_cffi would read pages past httpx (and past SimNet).
+FORCED = {"WEB_SEARCH_IMPERSONATE": "off"}
+
+
+def environment(persona: Persona, database_url: str) -> dict[str, str]:
+    """The run's variables: ``BASE_ENV``, then the persona's ``env``, then ``FORCED`` and the database."""
+    return {**BASE_ENV, **persona.env, **FORCED, "DATABASE_URL": database_url}
+
+
+@contextlib.contextmanager
+def sim_process(root: Path, env: dict[str, str]) -> Iterator[None]:
+    """The process as a run needs it, and as it was afterwards: ``env`` set, ``UNSET`` and every ``*_PROXY`` /
+    ``*_proxy`` removed (the bench has no network to reach through them), the working folder ``root`` (the services'
+    settings read ``.env`` from it: never the repository's), ``random`` seeded, ``uuid.uuid4`` a counter, the
+    ``costs`` ledger and budget of the caller kept."""
+    from bot.utils import costs
+
+    proxies = [k for k in os.environ if k.upper().endswith("_PROXY")]
+    saved = {k: os.environ.get(k) for k in (*env, *UNSET, *proxies)}
+    cwd, state = os.getcwd(), random.getstate()
+    ledger, budget = costs.ledger(), costs.budget()
+    real_uuid4 = uuid.uuid4
+    counter = iter(range(1, 10**9))
+    for key in (*UNSET, *proxies):
+        os.environ.pop(key, None)
+    os.environ.update(env)
+    root.mkdir(parents=True, exist_ok=True)
+    os.chdir(root)
+    random.seed(0)
+    uuid.uuid4 = lambda: uuid.UUID(int=(0x5157 << 112) | next(counter), version=4)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        uuid.uuid4 = real_uuid4  # type: ignore[assignment]
+        costs.install(ledger, budget)
+        random.setstate(state)
+        os.chdir(cwd)
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 @dataclass
@@ -114,6 +156,7 @@ class Clock:
 
     def advance(self, delta: timedelta) -> None:
         self.offset += delta
+        mark_now(self.now())  # a day the clock reaches is «now» in the keys too
 
 
 class LogTrap(logging.Handler):
@@ -166,37 +209,24 @@ class Bench:
 
     async def run(self) -> tuple[int, dict[str, Any]]:
         self.clean_url, self.database_url = self.database_url, db.with_search_path(self.database_url)
-        env = {**BASE_ENV, **self.persona.env, "DATABASE_URL": self.database_url}
-        saved = {k: os.environ.get(k) for k in (*env, *UNSET)}
-        for key in UNSET:
-            os.environ.pop(key, None)
-        os.environ.update(env)
-        random.seed(0)
-        counter = iter(range(1, 10**9))
-        real_uuid4 = uuid.uuid4
-        uuid.uuid4 = lambda: uuid.UUID(int=(0x5157 << 112) | next(counter), version=4)  # type: ignore[assignment]
-        bot_log = logging.getLogger("bot")
-        level, propagate = bot_log.level, bot_log.propagate
-        bot_log.addHandler(self.trap)
-        if not bot_log.isEnabledFor(logging.WARNING):  # quiet run: the warnings go to the result only
-            bot_log.setLevel(logging.WARNING)
-            bot_log.propagate = False
-        try:
-            self._clear_pending()
-            await db.reset(self.clean_url)
-            with offline(self.net):
-                code = await self._run()
-            return code, await self.result()
-        finally:
-            bot_log.removeHandler(self.trap)
-            bot_log.setLevel(level)
-            bot_log.propagate = propagate
-            uuid.uuid4 = real_uuid4  # type: ignore[assignment]
-            for key, value in saved.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+        mark_now(self.clock.now())
+        with sim_process(self.root, environment(self.persona, self.database_url)):
+            bot_log = logging.getLogger("bot")
+            level, propagate = bot_log.level, bot_log.propagate
+            bot_log.addHandler(self.trap)
+            if not bot_log.isEnabledFor(logging.WARNING):  # quiet run: the warnings go to the result only
+                bot_log.setLevel(logging.WARNING)
+                bot_log.propagate = False
+            try:
+                self._clear_pending()
+                await db.reset(self.clean_url)
+                with offline(self.net):
+                    code = await self._run()
+                return code, await self.result()
+            finally:
+                bot_log.removeHandler(self.trap)
+                bot_log.setLevel(level)
+                bot_log.propagate = propagate
 
     def _clear_pending(self) -> None:
         """This run's old pending files go: what is left after the pass is what it waits for now."""
@@ -230,7 +260,6 @@ class Bench:
             self.status, self.stop_reason = "error", normalize(f"{type(exc).__name__}: {exc}")[:500]
             return CODE_STALLED
         finally:
-            costs.install(None)
             for close in getattr(self, "_closers", []):  # the interview's stores, whatever stopped the run
                 with contextlib.suppress(Exception):
                     await close()
