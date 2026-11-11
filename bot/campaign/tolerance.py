@@ -44,6 +44,9 @@ Other constraints
 * Location: the listing's location mentions a known city (the architect's
   gazetteer) and not the requested one -> other. An unknown or unrecognised
   location never downgrades a listing.
+* Moved by its own text (Q4, ``source_place_conflict``) -> excluded by location: the portal filed the listing
+  under one area but its title or «situado en ...» names another (``bot/analysis_pipeline/source_place.py``,
+  written only with ``ANALYSIS_LOCATION_FROM_TEXT=true``), and that area is not the requested city's.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
   (Москва, Минск ...), its link is under another country's TLD (``.ru``,
@@ -347,6 +350,8 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
     elsewhere = foreign(payload, request)
     if elsewhere is not None:
         return elsewhere
+    if _moved_by_text(payload, request):
+        return Match("excluded", math.inf, "location")
     result = Match("exact")
     notes: list[str] = []
     covers: list[str] = []
@@ -430,6 +435,20 @@ def _nearby_hit(location: str, request: Request) -> str | None:
     if any(_fold(d) in folded for d in request.districts):
         return None
     return next((name for name in request.nearby if _whole_word(name, folded)), None)
+
+
+# The area of each gazetteer city in Spain, as bot/analysis_pipeline/source_place.py AREAS names them (the
+# campaign-runner and telegram-control images do not share that module's place; tests keep the two in step).
+CITY_AREA: dict[str, str] = {"Madrid": "Madrid", "Barcelona": "Cataluña", "Valencia": "Comunidad Valenciana",
+                             "Alicante": "Comunidad Valenciana", "Málaga": "Andalucía", "Sevilla": "Andalucía",
+                             "Marbella": "Andalucía"}
+
+
+def _moved_by_text(payload: dict[str, Any], request: Request) -> bool:
+    """The listing's own text puts it in another area (``source_place_conflict``) than the requested city's."""
+    moved = payload.get("source_place_conflict")
+    wanted = CITY_AREA.get(request.location or "")
+    return isinstance(moved, str) and bool(moved) and wanted is not None and moved != wanted
 
 
 def _below_min_price(payload: dict[str, Any], request: Request) -> bool:
