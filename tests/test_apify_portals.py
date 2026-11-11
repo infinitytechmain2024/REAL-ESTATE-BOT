@@ -392,6 +392,44 @@ def test_idealista_igolaizola_rejects_foreign_rows(change):
     assert adapter._normalize(idealista_row(**change), task(), None) is None
 
 
+async def _idealista_input(min_area, **kwargs):
+    requests = []
+    adapter = ApifyIdealistaPortalSource("secret-token", client=api([], requests), sleep=AsyncMock(), **kwargs)
+    constraints = {"deal": "sale", "min_area": min_area, "max_price": "3000000"}
+    with source_run_scope(context("apify_idealista")):
+        await adapter.search(task(constraints=constraints), limit=5)
+    await adapter.aclose()
+    return json.loads(next(r for r in requests if r.method == "POST").content)
+
+
+async def test_idealista_sort_biggest_off_keeps_the_input():
+    assert await _idealista_input("1000") == {
+        "maxItems": 5, "operation": "sale", "propertyType": "lands", "country": "es", "sortBy": "mostRecent",
+        "location": "Madrid", "maxPrice": "3000000", "minSize": "300"}
+
+
+@pytest.mark.parametrize(("min_area", "sort", "size"), [("1000", "biggest", "300"), ("300", "mostRecent", "300"),
+                                                        ("200", "mostRecent", "200")])
+async def test_idealista_sort_biggest_on_only_above_the_largest_min_size(min_area, sort, size):
+    sent = await _idealista_input(min_area, sort_biggest=True)
+    assert sent["sortBy"] == sort and sent["minSize"] == size
+
+
+async def test_idealista_sort_biggest_setting_reaches_the_source(monkeypatch):
+    from bot.web_search.settings import WebSearchSettings
+
+    for name in ("IDEALISTA_SORT_BIGGEST", "APIFY_IDEALISTA_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+    env = {"APIFY_TOKEN": "secret-token", "APIFY_IDEALISTA_ENABLED": True, "APIFY_IDEALISTA_PROVIDER": "igolaizola"}
+    off, = WebSearchSettings(_env_file=None, **env).sources()
+    on, = WebSearchSettings(_env_file=None, IDEALISTA_SORT_BIGGEST=True, **env).sources()
+    try:
+        assert off.sort_biggest is False and on.sort_biggest is True
+    finally:
+        await off.aclose()
+        await on.aclose()
+
+
 async def test_idealista_provider_setting_picks_the_actor_family(monkeypatch):
     from bot.web_search.settings import WebSearchSettings
 
