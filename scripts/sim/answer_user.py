@@ -43,7 +43,7 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("sources", r"какие сайты|какие группы|which sites|qu[eé] webs"),
 )
 CARD = "card"  # «Проверьте задачу»: the pending has ``card: true``
-REPEAT_SKIP_TAGS = frozenset({"any", "contradiction", "edit"})  # asked again: only a straight answer
+REPEAT_SKIP_TAGS = frozenset({"any", "contradiction", "low_budget", "edit"})  # asked again: only a straight answer
 EXIT_ANSWERED, EXIT_NOTHING, EXIT_DEFERRED = 0, 1, 2
 
 
@@ -133,17 +133,51 @@ def answer_pending(root: Path, run: str, persona: dict[str, Any], seed: int) -> 
     return EXIT_ANSWERED, f"run {run}: {pick.slot} -> {pick.answer}" + (f" [{pick.tag}]" if pick.tag else "")
 
 
+def answer_manually(root: Path, run: str, answer: dict[str, Any], persona: dict[str, Any] | None = None,
+                    seed: int | None = None) -> tuple[int, str]:
+    """A deferred question answered by hand (``--manual`` / ``--manual-press``): the answer goes in, and a ``log``
+    line with ``tag: "manual"`` always goes with it (the judge sees which turns no persona weight chose)."""
+    pending_path = root / "pending_answers" / f"{run}.json"
+    if not pending_path.is_file():
+        return EXIT_NOTHING, f"run {run}: no pending answer"
+    pending = json.loads(pending_path.read_text(encoding="utf-8"))
+    answers_path = root / "answers" / f"{run}.json"
+    data: dict[str, Any] = {"answers": []}
+    if answers_path.is_file():
+        loaded = json.loads(answers_path.read_text(encoding="utf-8"))
+        data = loaded if isinstance(loaded, dict) else {"answers": loaded}
+        data.setdefault("answers", [])
+    index = int(pending.get("index", len(data["answers"])))
+    if index != len(data["answers"]):
+        return EXIT_DEFERRED, f"run {run}: question {index}, {len(data['answers'])} answers: fix {answers_path}"
+    data["answers"].append(answer)
+    data.setdefault("log", []).append({"index": index, "slot": slot_of(pending, (persona or {}).get("slot_patterns")),
+                                       "tag": "manual", "seed": seed})
+    answers_path.parent.mkdir(parents=True, exist_ok=True)
+    answers_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    pending_path.unlink()
+    return EXIT_ANSWERED, f"run {run}: manual -> {answer}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m scripts.sim.answer_user", description=__doc__.splitlines()[0])
     parser.add_argument("--run", required=True, help="the run id (sim/pending_answers/<id>.json)")
     parser.add_argument("--persona", required=True, help="the persona JSON (scripts/sim/personas/<p>.json)")
     parser.add_argument("--seed", type=int, default=0, help="the seed of the random choice (default 0)")
     parser.add_argument("--sim", default=str(ROOT / "sim"), help="the bench folder (default: <repo>/sim)")
+    manual = parser.add_mutually_exclusive_group()
+    manual.add_argument("--manual", metavar="TEXT", help="answer a deferred question with this text (log tag manual)")
+    manual.add_argument("--manual-press", metavar="BUTTON", help="answer it with a button (text or data)")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[\w.-]{1,80}", args.run):
         parser.error("--run: letters, digits, '.', '-', '_' only")
     persona = json.loads(Path(args.persona).read_text(encoding="utf-8"))
-    code, message = answer_pending(Path(args.sim).resolve(), args.run, persona, args.seed)
+    root = Path(args.sim).resolve()
+    if args.manual is not None or args.manual_press is not None:
+        answer = {"text": args.manual} if args.manual is not None else {"press": args.manual_press}
+        code, message = answer_manually(root, args.run, answer, persona, args.seed)
+    else:
+        code, message = answer_pending(root, args.run, persona, args.seed)
     print(message)
     return code
 

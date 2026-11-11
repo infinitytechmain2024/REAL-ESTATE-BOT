@@ -163,7 +163,7 @@
             "district": "Centro"
           },
           "from": "task",
-          "note": "район Centro; другой район Мадрида — «похоже»"
+          "note": "район Centro (§1, place.district): другой район Мадрида — no; «me da igual el barrio» — район не проверяется, только город"
         },
         "price_max_eur": {
           "value": 1200,
