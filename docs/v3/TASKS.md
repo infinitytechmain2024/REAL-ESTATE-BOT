@@ -525,6 +525,8 @@ strength smallint, seen_at, unique(owner_user_id, platform, profile_key, post_ur
 Исполнитель: **analyst**. Deps: P4.1, P3.5. 3 ч.
 
 #### P4.3 — Способ 1: кнопка «Кто интересовался» (D6)
+По ревью P1.8: реакции FB (P1.6) подключаются здесь; `ValueError` «все ссылки отклонены» — пустой результат с логом,
+не падение. Резерв бюджета — как в P1.8 (сумма потолков всех Apify-задач кампании ≤ остатка бюджета).
 **Файлы.** `runner.py:187-191`: `send_buttons` принимает ряды; `_send_card` (`:854-866`) при
 `people_delivery=button` отправляет карточку с кнопкой `people:finding:<finding_id>`. `service.py:242-257`:
 колбэк ставит чтение (комментарии + реакции, если включены) через `runs.queue_comment_read` (`runs.py:871-879`),
