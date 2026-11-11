@@ -855,7 +855,7 @@ async def test_the_notice_of_an_ended_campaign_has_no_button() -> None:
     assert any("новом поиске" in t for _, _, t in messenger.sent)
 
 
-# --- Q1: a search without Facebook groups still ends with a report ---------------
+# --- Q1-Q2: a search without Facebook groups still ends with a report ---------------
 
 
 class _SiteStage:
@@ -897,5 +897,14 @@ async def test_q1_apify_mode_without_groups_and_browser_runs_the_other_stages_an
 
     campaign = await _no_groups_run(
         lambda campaigns: FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="apify"))
+    assert campaign.stop_reason == "queue_exhausted"
+
+
+async def test_q2_an_empty_group_search_waits_for_the_sites_before_it_completes() -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+    from tests.test_campaign_discovery import FakeBrowser, FakeReader, Sleeps
+
+    campaign = await _no_groups_run(lambda campaigns: FacebookDiscovery(
+        campaigns, MemoryDiscoveryStore(), FakeBrowser(), FakeReader(), sleep=Sleeps(), max_seeds=1))
     assert campaign.stop_reason == "queue_exhausted"
 

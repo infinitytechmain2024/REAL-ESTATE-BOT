@@ -316,7 +316,7 @@ async def test_bounds_on_seeds_results_candidates_visits_and_pacing() -> None:
     assert len(h.reader.visited) == 2
     navigations = len(h.browser.navigations) + len(h.reader.visited)
     assert len(h.sleeps.calls) == navigations - 1 and all(4.0 <= s <= 9.0 for s in h.sleeps.calls)
-    assert report.state == "completed" and report.stop_reason == "no_active_groups"
+    assert report.state == "running" and report.queued == 0  # Q2: no groups never ends it; the runner drains it
     assert {g.reject_reason for g in groups} == {"activity_unknown"}
 
 
@@ -333,7 +333,7 @@ async def test_time_budget_stops_the_search_and_still_finalizes() -> None:
         clock=lambda: next(ticks), time_budget_seconds=100)
     report = await h.discovery.run(h.cid)
     assert report.budget_exhausted and len(h.browser.navigations) == 3
-    assert report.state == "completed"
+    assert report.state == "running"  # finalized with no group: the runner's drain completes it
 
 
 async def test_a_search_challenge_stops_everything_and_resume_continues() -> None:

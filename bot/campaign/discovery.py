@@ -734,12 +734,11 @@ class FacebookDiscovery:
                 await self.campaigns.set_state(campaign_id, "failed", ACTOR, reason=f"discovery_error:{type(exc).__name__}")
                 raise
             if run.stopped_state is None:
-                queued = await self.store.finalize(campaign_id, max_groups=campaign.plan.limits.max_groups,
-                                                   window_size=campaign.plan.limits.window_size, actor=ACTOR)
-                if queued:
-                    await self.campaigns.set_state(campaign_id, "running", ACTOR)
-                else:
-                    await self.campaigns.set_state(campaign_id, "completed", ACTOR, reason="no_active_groups")
+                await self.store.finalize(campaign_id, max_groups=campaign.plan.limits.max_groups,
+                                          window_size=campaign.plan.limits.window_size, actor=ACTOR)
+                # No group found is no reason to end the search: the runner completes it once the sites, networks
+                # and analysis are done (its drain), as for a campaign whose groups were all read.
+                await self.campaigns.set_state(campaign_id, "running", ACTOR)
             return await self._report(campaign_id, run)
         finally:
             try:
