@@ -437,7 +437,7 @@
       "stream": "ops",
       "agent": "deployer",
       "deps": [],
-      "status": "ready",
+      "status": "review",
       "day": "волна 1",
       "hours": 2
     },
