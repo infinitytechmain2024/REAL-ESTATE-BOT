@@ -116,7 +116,7 @@
       "stream": "rules",
       "agent": "architect",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "волна 1",
       "hours": 1.5
     },
@@ -136,7 +136,7 @@
       "stream": "plan",
       "agent": "builder",
       "deps": [],
-      "status": "in_progress",
+      "status": "review",
       "day": "волна 1",
       "hours": 1
     },
