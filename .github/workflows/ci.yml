@@ -117,4 +117,5 @@ jobs:
           tests/test_task_draft_steps_postgres.py
           tests/test_task_drafts_mode_both_postgres.py
           tests/test_apify_source_runs_postgres.py
+          tests/test_campaign_social_apify_postgres.py
           tests/test_image_imports.py

@@ -523,6 +523,11 @@ services:
       context: .
       dockerfile: docker/campaign-runner.Dockerfile
     restart: unless-stopped
+    # How long Docker waits after SIGTERM before SIGKILL (CAMPAIGN_RUNNER_STOP_GRACE, default 10s as before). With
+    # Apify runs on (v3 P1.8) the runner handles SIGTERM: no new launch, a launch in flight saves its run id (up to
+    # 45 s), then it exits, so set 60s then (docs/v3/ROLLBACK.md). Without them python runs as PID 1 with no SIGTERM
+    # handler: the signal is ignored and the stop always takes this whole period, ending with SIGKILL.
+    stop_grace_period: ${CAMPAIGN_RUNNER_STOP_GRACE:-10s}
     depends_on:
       postgres:
         condition: service_healthy
@@ -616,6 +621,8 @@ services:
       APIFY_TIKTOK_ACTOR_BUILD: ${APIFY_TIKTOK_ACTOR_BUILD:-}
       APIFY_TIKTOK_MAX_RESULTS: ${APIFY_TIKTOK_MAX_RESULTS:-30}
       APIFY_TIKTOK_MAX_CHARGE_USD: ${APIFY_TIKTOK_MAX_CHARGE_USD:-0.15}
+      # Instagram/TikTok targets per campaign with ACQUISITION_MODE=apify (v3 P1.8).
+      APIFY_SOCIAL_MAX_TARGETS: ${APIFY_SOCIAL_MAX_TARGETS:-3}
       # LinkedIn people and companies through Apify without cookies (v3 P1.4); off by default.
       APIFY_LINKEDIN_ENABLED: ${APIFY_LINKEDIN_ENABLED:-false}
       APIFY_LINKEDIN_PEOPLE_ACTOR: ${APIFY_LINKEDIN_PEOPLE_ACTOR:-harvestapi/linkedin-profile-search}

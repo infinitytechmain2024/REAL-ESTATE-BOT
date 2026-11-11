@@ -574,7 +574,9 @@ class CampaignRunner:
         if await self.store.pending_analysis(campaign.id) and waited < self.config.analysis_grace_seconds:
             return ANALYSIS
         if waited < self.config.social_grace_seconds and (await self.store.social_activity(campaign.id)).pending:
-            return ANALYSIS  # TikTok / Instagram / LinkedIn queries are still to run (bot.social_search)
+            # TikTok / Instagram / LinkedIn queries are still to run: the browser's (bot.social_search) or, in apify
+            # mode, the Apify runs (bot.campaign.social_apify); CAMPAIGN_SOCIAL_GRACE_SECONDS is the ceiling either way.
+            return ANALYSIS
         if waited < self.config.social_grace_seconds and await self.store.reach_pending(campaign.id):
             return ANALYSIS  # an investor search's reach across platforms still runs (bot.campaign.reach)
         if waited < self.config.social_grace_seconds and await self._post_read_pending(campaign):
@@ -1493,7 +1495,9 @@ async def main() -> None:
     final_reporter = settings.final_reporter()
     comments, lead_judge = _comment_worker(settings, pool)
     post_reads, post_closers = _post_worker(settings, pool, lead_judge)
-    reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None)
+    apify_tasks = _apify_tasks(settings)
+    reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None,
+                                         tasks=apify_tasks)
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
@@ -1506,11 +1510,21 @@ async def main() -> None:
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool),
                             final_report=final_reporter)
     social, generator = _social_worker(settings, pool, campaigns)
+    apify_social, apify_generator = _apify_social_worker(settings, pool, campaigns, apify_tasks)
     log.info("campaign.runner.ready", extra={"poll_seconds": settings.poll_seconds, "web_search": web is not None,
                                              "social_platforms": list(social.config.platforms) if social else [],
+                                             "apify_social": list(apify_social.platforms) if apify_social else [],
                                              "comment_leads": settings.comment_leads if comments else "off",
                                              "investor_reach": reach is not None})
     stop = asyncio.Event()
+    if apify_tasks is not None:
+        # SIGTERM stops the Apify runs at once (no new target or launch, a 429 pause ends) and ends the loops, so
+        # ``apify_tasks.aclose`` lets every launch in flight save its run id. Only with Apify runs on: otherwise no
+        # handler is installed, as before.
+        import signal
+
+        with suppress(NotImplementedError, RuntimeError):
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, _on_sigterm, stop, apify_tasks)
     try:
         # Each stage is its own loop: a slow site or network never delays Facebook work, and the reverse.
         tasks = [runner.serve(settings.poll_seconds, stop)]
@@ -1519,6 +1533,10 @@ async def main() -> None:
             tasks.append(worker.serve(poll, stop))
         if social is not None:
             tasks.append(social.serve(settings.social_poll_seconds, stop))
+        if apify_social is not None:
+            tasks.append(apify_social.serve(settings.social_poll_seconds, stop))
+        if apify_tasks is not None:  # closes the Apify runs as soon as the stop comes, beside the loops' last ticks
+            tasks.append(_close_on_stop(stop, apify_tasks))
         if comments is not None:
             tasks.append(comments.serve(settings.comment_poll_seconds, stop))
         if post_reads is not None:
@@ -1528,6 +1546,11 @@ async def main() -> None:
         await asyncio.gather(*tasks)
     finally:
         stop.set()
+        if apify_tasks is not None:  # again on an error or a cancel; before the clients below close
+            await apify_tasks.aclose()
+            await apify_tasks.http.aclose()
+        if apify_generator is not None:
+            await apify_generator.aclose()
         if web is not None:
             for close in web[2]:
                 await close()
@@ -1635,11 +1658,85 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
     return worker, generator
 
 
-def _reach_worker(settings: Any, pool: Any, fetcher: Any = None) -> tuple[Any, list[Any]]:
+def _on_sigterm(stop: asyncio.Event, apify_tasks: Any) -> None:
+    """SIGTERM with Apify runs on: no new Apify target or launch from now on, then every loop ends."""
+    apify_tasks.begin_stop()
+    stop.set()
+
+
+async def _close_on_stop(stop: asyncio.Event, apify_tasks: Any) -> None:
+    await stop.wait()
+    await apify_tasks.aclose()
+
+
+def _apify_tasks(settings: Any) -> Any:
+    """The background Apify runs (``social_apify.ApifyTasks``) when ACQUISITION_MODE=apify turns a P1.8 source on:
+    Instagram / TikTok posts or LinkedIn people in the reach; None otherwise (nothing changes)."""
+    social = getattr(settings, "apify_social_on", lambda: False)()
+    linkedin = getattr(settings, "linkedin_apify_on", lambda: False)() and settings.reach_enabled
+    if not (social or linkedin):
+        return None
+    from bot.acquisition.apify_client import ApifyHttp
+
+    from .social_apify import ApifyTasks
+
+    return ApifyTasks(ApifyHttp(settings.apify_token))
+
+
+def _apify_social_worker(settings: Any, pool: Any, campaigns: CampaignStore, tasks: Any) -> tuple[Any, Any]:
+    """Instagram / TikTok posts through Apify (P1.8) with ACQUISITION_MODE=apify and APIFY_INSTAGRAM_ENABLED /
+    APIFY_TIKTOK_ENABLED; (None, None) otherwise. Returns the worker and its query generator (to close)."""
+    if tasks is None or not settings.apify_social_on():
+        return None, None
+    from bot.acquisition.apify_source import PostgresSourceRunStore
+    from bot.social_search.queries import OpenRouterQueryGenerator, QueryPlanner
+
+    from .social_apify import ApifySocialWorker, PostgresApifySocialStore
+
+    runs = tasks.runs(PostgresSourceRunStore(pool))  # every launch a critical section of the shutdown
+    sources: dict[str, Any] = {}
+    instagram = settings.instagram_sources(runs, tasks.http, sleep=tasks.sleep)
+    if instagram is not None:
+        sources["instagram"] = instagram.posts
+    tiktok = settings.tiktok_sources(runs, tasks.http, sleep=tasks.sleep)
+    if tiktok is not None:
+        sources["tiktok"] = tiktok.posts
+    generator = None
+    if settings.openrouter_api_key:
+        generator = OpenRouterQueryGenerator(api_key=settings.openrouter_api_key, model=settings.social_model,
+                                             timeout_seconds=settings.social_model_timeout_seconds)
+    linkedin_usd = 0.0
+    if settings.linkedin_apify_on() and settings.reach_enabled:  # the reach's LinkedIn runs share the budget
+        config = settings.linkedin_config()
+        linkedin_usd = config.cap_usd("person") + config.cap_usd("company")
+    worker = ApifySocialWorker(PostgresApifySocialStore(pool), campaigns, sources, QueryPlanner(generator), tasks,
+                               max_targets=settings.apify_social_max_targets, budget_usd=settings.budget_usd,
+                               linkedin_usd=linkedin_usd)
+    return worker, generator
+
+
+def _linkedin_sources(settings: Any, pool: Any, tasks: Any) -> Any:
+    """LinkedIn people and companies through Apify for the reach (P1.8), or None (the site: searches stay)."""
+    if tasks is None or not getattr(settings, "linkedin_apify_on", lambda: False)():
+        return None
+    from bot.acquisition.apify_linkedin import (
+        ApifyLinkedInCompanies,
+        ApifyLinkedInPeople,
+        LinkedInSources,
+    )
+    from bot.acquisition.apify_source import PostgresSourceRunStore
+
+    runs, config = tasks.runs(PostgresSourceRunStore(pool)), settings.linkedin_config()
+    return LinkedInSources(ApifyLinkedInPeople(runs, tasks.http, config, sleep=tasks.sleep),
+                           ApifyLinkedInCompanies(runs, tasks.http, config, sleep=tasks.sleep))
+
+
+def _reach_worker(settings: Any, pool: Any, fetcher: Any = None, tasks: Any = None) -> tuple[Any, list[Any]]:
     """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false.
 
     ``fetcher``: the web stage's PageFetcher, which opens the public page of a relevant result for its contacts
-    (None when the web stage is off: no enrichment).
+    (None when the web stage is off: no enrichment). ``tasks``: the background Apify runs; with
+    ACQUISITION_MODE=apify and APIFY_LINKEDIN_ENABLED, LinkedIn is read by its Apify source there (P1.8).
     """
     if not settings.reach_enabled:
         return None, []
@@ -1657,7 +1754,8 @@ def _reach_worker(settings: Any, pool: Any, fetcher: Any = None) -> tuple[Any, l
                                      acquisition_mode=settings.acquisition_mode)
     else:
         log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
-    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), fetcher=fetcher)
+    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), fetcher=fetcher,
+                         linkedin=_linkedin_sources(settings, pool, tasks), tasks=tasks)
     return worker, [searcher.aclose] + ([judge.aclose] if judge else [])
 
 

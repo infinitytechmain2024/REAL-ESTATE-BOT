@@ -167,23 +167,30 @@ class ReachQuery:
 
 APIFY_SKIPPED_PLATFORMS = frozenset({"instagram", "x", "reddit"})
 _APIFY_SKIPPED_HOSTS = frozenset({"instagram.com", "x.com", "twitter.com", "reddit.com"})
+# With APIFY_LINKEDIN_ENABLED in apify mode LinkedIn is read by its Apify source (P1.8), not by site: searches.
+_LINKEDIN_PLATFORMS = frozenset({"linkedin"})
+_LINKEDIN_HOSTS = frozenset({"linkedin.com"})
 _SITE_OPERATOR = re.compile(r"site:(?:https?://)?([^\s/]+)", re.I)
 
 
-def _skipped_host(host: str) -> bool:
+def _skipped_host(host: str, hosts: frozenset[str] = _APIFY_SKIPPED_HOSTS) -> bool:
     host = host.lower().removeprefix("www.")
-    return any(host == h or host.endswith("." + h) for h in _APIFY_SKIPPED_HOSTS)
+    return any(host == h or host.endswith("." + h) for h in hosts)
 
 
-def keep_query(query: ReachQuery, acquisition_mode: str) -> bool:
+def keep_query(query: ReachQuery, acquisition_mode: str, *, linkedin_apify: bool = False) -> bool:
     """False for a social-network ``site:`` search in apify mode (LinkedIn, Telegram, YouTube, TikTok, web stay).
 
+    ``linkedin_apify`` (APIFY_LINKEDIN_ENABLED in apify mode): LinkedIn and ``linkedin.com`` are skipped too.
     The host is compared without ``www.`` and with subdomains (``old.reddit.com``); ``twitter.com`` is X.
     """
     if acquisition_mode != "apify":
         return True
-    return query.platform not in APIFY_SKIPPED_PLATFORMS and not any(
-        _skipped_host(host) for host in _SITE_OPERATOR.findall(query.text))
+    platforms, hosts = APIFY_SKIPPED_PLATFORMS, _APIFY_SKIPPED_HOSTS
+    if linkedin_apify:
+        platforms, hosts = platforms | _LINKEDIN_PLATFORMS, hosts | _LINKEDIN_HOSTS
+    return query.platform not in platforms and not any(
+        _skipped_host(host, hosts) for host in _SITE_OPERATOR.findall(query.text))
 
 
 def plan_queries(campaign: ReachCampaign) -> list[ReachQuery]:
@@ -543,6 +550,8 @@ class ReachConfig:
     enrich_per_campaign: int = 30  # relevant results whose public page is opened, per campaign (0: never)
     # apify: no site: searches of Instagram, X and Reddit (Apify covers the social networks); legacy: all of them.
     acquisition_mode: str = "legacy"
+    # apify mode with APIFY_LINKEDIN_ENABLED: no LinkedIn site: searches; the Apify source runs once per campaign.
+    linkedin_apify: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_campaign <= 100 and 1 <= self.queries_per_tick <= 10
@@ -578,11 +587,16 @@ class ReachStore(Protocol):
 
 class ReachWorker:
     def __init__(self, store: ReachStore, searcher: Searcher, judge: ReachJudge | None = None, *,
-                 config: ReachConfig | None = None, fetcher: people.PageFetcherLike | None = None) -> None:
+                 config: ReachConfig | None = None, fetcher: people.PageFetcherLike | None = None,
+                 linkedin: Any = None, tasks: Any = None) -> None:
         self.store, self.searcher, self.judge = store, searcher, judge
         self.fetcher = fetcher  # the web stage's PageFetcher: opens the public page of a relevant result once
         self.config = config or ReachConfig()
         self._planned: dict[str, list[ReachQuery]] = {}  # campaign -> the model's queries (asked once per process)
+        # P1.8: LinkedIn through Apify (``apify_linkedin.LinkedInSources``), run in the background (``ApifyTasks``).
+        self.linkedin = linkedin if self.config.linkedin_apify else None
+        self.tasks = tasks
+        self._linkedin_started: set[str] = set()
 
     async def serve(self, poll_seconds: float, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -597,10 +611,13 @@ class ReachWorker:
         """Up to ``queries_per_tick`` new queries for every open investor search; returns how many ran."""
         ran = 0
         for campaign in await self.store.open_campaigns():
+            self._start_linkedin(campaign)
             used = await self.store.used_queries(campaign.id)
             todo = [q for q in [*await self._model_queries(campaign), *plan_queries(campaign)] if q.text not in used
-                    and keep_query(q, self.config.acquisition_mode)]
+                    and keep_query(q, self.config.acquisition_mode, linkedin_apify=self.config.linkedin_apify)]
             if not todo or len(used) >= self.config.queries_per_campaign:
+                if self._linkedin_running(campaign.id):
+                    continue  # its LinkedIn contacts still come: the reach is not done yet
                 await self.store.finish(campaign.id)
                 continue
             for query in todo[:min(self.config.queries_per_tick, self.config.queries_per_campaign - len(used))]:
@@ -611,6 +628,49 @@ class ReachWorker:
                 ran += 1
             await self.store.set_current(campaign.id, None)
         return ran
+
+    def _linkedin_running(self, campaign_id: str) -> bool:
+        return self.tasks is not None and self.tasks.running(f"linkedin:{campaign_id}")
+
+    def _start_linkedin(self, campaign: ReachCampaign) -> None:
+        """LinkedIn people and companies through Apify, once per campaign, in the background (never in this tick)."""
+        if self.linkedin is None or self.tasks is None or campaign.id in self._linkedin_started:
+            return
+        if self.tasks.spawn(f"linkedin:{campaign.id}", self._linkedin(campaign)):
+            self._linkedin_started.add(campaign.id)
+
+    async def _linkedin(self, campaign: ReachCampaign) -> None:
+        """One paid run per source (its input is the campaign's, so a restart resumes it, never relaunches it)."""
+        from bot.acquisition.apify_linkedin import REAL_ESTATE_FUNCTION_ID, LinkedInSearch
+        from bot.utils import costs
+
+        place = " ".join(campaign.location.split())[:100]
+        if not place:  # a LinkedIn search without a place would be paid for people anywhere: not run
+            log.warning("campaign.reach.linkedin_no_location", extra={"campaign_id": campaign.id})
+            return
+        runs = ((self.linkedin.people, ("real estate investor", (REAL_ESTATE_FUNCTION_ID,))),
+                (self.linkedin.companies, ("real estate investment", ())))
+        again = False
+        for source, (words, functions) in runs:
+            if self.tasks.stopping:
+                return
+            with costs.scope(campaign.id):
+                if await costs.over_budget(campaign.id):
+                    log.info("campaign.reach.linkedin_over_budget", extra={"campaign_id": campaign.id})
+                    return
+                try:
+                    search = LinkedInSearch(words, locations=(place,), function_ids=functions)
+                    outcome = await source.run(campaign, search, self.store, self.judge)
+                except Exception as exc:  # noqa: BLE001 - a refused input, Apify or the database: the reach goes on
+                    log.warning("campaign.reach.linkedin_failed %s", type(exc).__name__,
+                                extra={"campaign_id": campaign.id})
+                    continue
+            again = again or outcome.status in ("retry", "busy")
+            log.info("campaign.reach.linkedin", extra={"campaign_id": campaign.id, "kind": source.kind,
+                                                       "status": outcome.status, "items": outcome.items_imported,
+                                                       "cost_usd": outcome.cost_usd})
+        if again:  # a known run to resume, or Apify busy: the next tick calls again (the same input, no new launch)
+            self._linkedin_started.discard(campaign.id)
 
     async def _model_queries(self, campaign: ReachCampaign) -> list[ReachQuery]:
         """The model's queries for this task (first, before the templates); none without a model or on failure."""
