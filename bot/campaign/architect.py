@@ -16,6 +16,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import (
@@ -195,12 +196,21 @@ _TEMPLATES: dict[str, dict[Language, tuple[tuple[str, str], ...]]] = {
     },
 }
 
+# SEARCH_QUERY_HYGIENE: land has no templates of its own; these neutral ones go first for a land task.
+_LAND_TEMPLATES: dict[Language, tuple[tuple[str, str], ...]] = {
+    "es": (("any", "terreno {loc}"), ("any", "parcela {loc}"), ("any", "solar {loc}")),
+    "en": (("any", "{loc} land plot"), ("any", "{loc} building plot")),
+    "ru": (("any", "участок {loc}"), ("any", "земельный участок {loc}")),
+    "uk": (("any", "ділянка {loc}"), ("any", "земельна ділянка {loc}")),
+}
+
 
 EXPLICIT_VERTICALS = ("real_estate", "investors", "both")
 
 
 def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str | None = None,
-                  place: Mapping[str, Any] | None = None, spec: TaskSpec | None = None) -> CampaignPlan:
+                  place: Mapping[str, Any] | None = None, spec: TaskSpec | None = None,
+                  query_hygiene: bool = False) -> CampaignPlan:
     """Turn a user goal in ES/EN/RU/UK into a bounded plan, or raise ``InvalidGoal``.
 
     ``vertical`` (real_estate|investors|both), ``place`` (names per language,
@@ -212,6 +222,9 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
     ``spec`` (the interviewer's ``TaskSpec``) is what the person confirmed: when given, the constraints (deal,
     price range, rooms, area, property type, districts) are taken from it instead of being read from the text,
     and a place not passed otherwise comes from it. The text still feeds the query seeds' vertical detection.
+
+    ``query_hygiene`` (SEARCH_QUERY_HYGIENE): with a known deal the seeds keep only templates of that deal or any, and
+    a land task gets neutral land seeds first; off: the other deal's templates only go last, as before.
     """
     if not isinstance(text, str) or not text.strip():
         raise InvalidGoal("Пустая задача. Напишите, что искать и где, например: «квартиры в аренду в Мадриде».")
@@ -253,7 +266,8 @@ def plan_campaign(text: str, *, vertical: Vertical | None = None, location: str 
         country=where.country,
         vertical=vertical,
         languages=list(LANGUAGES),
-        query_seeds={lang: _seeds(where, vertical, deal, lang) for lang in LANGUAGES},
+        query_seeds={lang: _seeds(where, vertical, deal, lang, property_type=constraints.get("property_type"),
+                                  hygiene=query_hygiene) for lang in LANGUAGES},
         constraints=constraints,
         limits=limits,
     )
@@ -412,16 +426,21 @@ def _extract_price(text: str) -> int | None:
     return _extract_price_currency(text)[0]
 
 
-def _seeds(place: _Place, vertical: Vertical, deal: str | None, lang: Language) -> list[str]:
+def _seeds(place: _Place, vertical: Vertical, deal: str | None, lang: Language, *, property_type: Any = None,
+           hygiene: bool = False) -> list[str]:
     def ordered(kind: str) -> list[str]:
         templates = _TEMPLATES[kind][lang]
-        if deal is not None:
+        if hygiene and kind == "real_estate" and property_type == "land":
+            templates = (*_LAND_TEMPLATES[lang], *templates)
+        if hygiene and deal is not None:
+            templates = tuple(t for t in templates if t[0] in (deal, "any"))
+        elif deal is not None:
             rank = {deal: 0, "any": 1}
             templates = tuple(sorted(templates, key=lambda t: rank.get(t[0], 2)))
         return [t.format(loc=place.aliases[lang], **{"in": place.locative[lang]}) for _, t in templates]
 
-    if vertical == "both":
-        candidates = [s for pair in zip(ordered("real_estate"), ordered("investors"), strict=True) for s in pair]
+    if vertical == "both":  # equal lengths unless hygiene dropped templates: then the longer list goes on alone
+        candidates = [s for pair in zip_longest(ordered("real_estate"), ordered("investors")) for s in pair if s]
     else:
         candidates = ordered(vertical)
     seeds: list[str] = []

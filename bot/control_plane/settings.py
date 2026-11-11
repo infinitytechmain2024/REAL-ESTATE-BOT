@@ -65,6 +65,8 @@ class ControlPlaneSettings:
     auto_operator_user_ids: frozenset[int] = frozenset()
     # «Вступил ✅» under a closed-group notice of the campaign runner (CAMPAIGN_JOIN_NOTICES).
     campaign_join_notices: bool = False
+    # SEARCH_QUERY_HYGIENE: a new campaign's query seeds keep only its own deal, land gets neutral seeds.
+    search_query_hygiene: bool = False
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
@@ -118,6 +120,7 @@ class ControlPlaneSettings:
             operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_OPERATOR_IDS", "")),
             auto_mode=_on_off("AUTO_MODE"),
             campaign_join_notices=os.environ.get("CAMPAIGN_JOIN_NOTICES", "").strip().lower() in {"1", "true", "yes", "on"},
+            search_query_hygiene=os.environ.get("SEARCH_QUERY_HYGIENE", "").strip().lower() in {"1", "true", "yes", "on"},
             auto_operator_user_ids=parse_user_ids(os.environ.get("TELEGRAM_AUTO_OPERATOR_IDS", ""), "TELEGRAM_AUTO_OPERATOR_IDS"),
         )
 
