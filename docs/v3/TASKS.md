@@ -43,7 +43,7 @@
 | 20 | Пользователи | Таблица `public.users` в живом коде не используется. Одобренные хранятся в `telegram_operators` (`011_operator_access_requests.sql:20`), владелец — в `.env` `TELEGRAM_OPERATOR_IDS` (`bot/operators.py:50-55`) | «Пользователь» в v3 = строка `telegram_operators` с `state='approved'`, `users` не трогаем |
 | 21 | Настройки пользователя (D15) | Таблицы нет. `control_settings` глобальная, ключ `auto_mode` (`017_control_settings.sql:7-14`, `bot/control_plane/auto.py:22`) | P3.5 — `user_settings`, общий слой для P4, P5, P6 |
 | 22 | Мини-апп | Сервера мини-аппа нет. Есть гейт aiohttp в `telegram:8081` (`live_view.py:410-552`) и Caddy `/live/*` (`docker/caddy/Caddyfile:22-24`); всё прочее отдаёт 404 (`:35-37`) | P6.1: маршруты `/app/*` в том же гейте, новая строка в Caddyfile |
-| 23 | Состояние v2 | `tasks.json` v2 отмечает A3 как `done`, а `HANDOFF.md` §1 — как blocked. Решения O1–O10 записаны в `docs/v2/CLIENT_DECISIONS.md:277-294` | P0.5 сводит HANDOFF v2 с фактами |
+| 23 | Состояние v2 | `tasks.json` v2 отмечает A3 как `done`, а `HANDOFF.md` §1 — как blocked. Решения O1–O10 записаны в `docs/v2/CLIENT_DECISIONS.md:71-88` | P0.5 сводит HANDOFF v2 с фактами |
 | 24 | Зависимость P6 → P2 | Раздел «пользователи и входы» требует статусы сетей (P2.6) | P6.3 зависит от P2.6. Таблица фаз KICKOFF это не показывает |
 | 25 | Зависимость P7 → P2 | Ключ пользователя хранится шифрованным (P2.3) | P7.2 зависит от P2.3 |
 | 26 | Сигналы P4 → P1 | Реакции приходят из P1.6, а хранение с владельцем требует P3.1 | P1.6 даёт только контракт и мапперы без таблицы, а хранит P4.1 |
@@ -92,7 +92,7 @@
 
 #### P0.2 — ⛔ A4: Apify для групп FB (стоп 1, 3)
 Владелец выполняет `DEPLOY.md` §3 (в): одна открытая группа, не больше 50 постов, потолок $0.30. Норма:
-`select status, items_imported, billed_usd from apify_runs order by launched_at desc limit 1` → `succeeded`,
+`select status, items_imported, billed_usd from apify_runs order by launched_at desc limit 1` → `SUCCEEDED`,
 `items_imported > 0`, стоимость совпадает с Apify Billing.
 Исполнитель: **owner**. Deps: P0.1. 0.5 ч.
 
