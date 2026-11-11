@@ -361,7 +361,7 @@ MANDATORY_UNKNOWN = "unverified_must"
 # Match.why -> the category the final report counts a held or excluded finding under (``campaign_findings.why``).
 CATEGORY = {"price": "budget", "currency": "budget", "location": "place", "foreign": "place", "deal": "deal",
             "type": "type", "rooms": "rooms", "area": "area", "area_max": "area", "area_unknown": "area_unknown",
-            "kind": "kind", "unverified": "unverified", "ai": "ai", "criteria": "criteria",
+            "location_unknown": "unverified", "kind": "kind", "unverified": "unverified", "ai": "ai", "criteria": "criteria",
             "ai_failed": "ai_failed", "cost_cap": "cost_cap", MANDATORY_UNKNOWN: MANDATORY_UNKNOWN,
             "approved_deviation": "approved", "deal_kind": "deal_kind"}
 # The reviewer's criterion -> the rules' ``Match.why``.

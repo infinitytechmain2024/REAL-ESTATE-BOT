@@ -123,7 +123,7 @@ class _PortalSource(ApifyListingSource):
 
     def _listing(self, task: QueryTask, *, url: str, title: str, price: Any, area: Any, rooms: Any,
                  address: list[str], description: str, phone: Any, advertiser: Any,
-                 property_type: str | None) -> SourceListing:
+                 property_type: str | None, place_unverified: bool = False) -> SourceListing:
         description = description[:_DESCRIPTION_CHARS]
         land = task_kind(task) == "land"
         reported = _number(area, positive=True)
@@ -137,7 +137,31 @@ class _PortalSource(ApifyListingSource):
             address=place[:300] or None, property_type=property_type, deal=self._deal(task),
             description=description, plot_m2=plot_area(reported, description) if land else None,
             phone=_phone(phone), advertiser=_text(advertiser)[:200] or None,
+            place_unverified=True if place_unverified else None,
         )
+
+
+# PORTAL_DEFAULT_POINT_GUARD (Q12). Fotocasa files an ad whose advertiser gave no usable address at a fallback point
+# of the searched city and names the district of that point (``level7/8Name``): in a live run «plots in Madrid»
+# (2026-11, pilot G1) plots in Móstoles, Torroella de Fluvià, Molina de Segura, Llubí and Vinaròs all sat within
+# 0.32 km of one of these points, each with the point's ``level8Name``. The sign is that pair: the row's ``level8Name``
+# is one of these neighbourhoods AND its point is within ``_DEFAULT_POINT_KM`` of the neighbourhood's fallback point
+# (the portal jitters the point by up to ~0.3 km, so equal coordinates are not a sign). On the recorded output (37
+# distinct rows of two Madrid land runs) it marks the 9 misplaced rows and no other; equal coordinates to 3 decimals
+# would mark 2 of them and 6 real plots of one La Florida development, to 4 decimals none. A real object at such a
+# point (a flat in Sol) is marked too: it then goes to «similar», never lost.
+_DEFAULT_POINTS: dict[str, tuple[float, float]] = {
+    "ciudad universitaria": (40.4625, -3.749),
+    "cortes - huertas": (40.417, -3.700),
+    "sol": (40.418, -3.705),
+}
+_DEFAULT_POINT_KM = 0.5
+
+
+def default_point(neighbourhood: str, point: tuple[float, float] | None) -> bool:
+    """The row sits at one of Fotocasa's fallback points of its ``level8Name`` (see ``_DEFAULT_POINTS``)."""
+    fallback = _DEFAULT_POINTS.get(" ".join(_fold(neighbourhood).split()))
+    return fallback is not None and point is not None and _distance_km(fallback, point) <= _DEFAULT_POINT_KM
 
 
 class ApifyFotocasaSource(_PortalSource):
@@ -148,8 +172,10 @@ class ApifyFotocasaSource(_PortalSource):
     _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "commercial": "commercial"}
     _TITLES: ClassVar[dict[str, str]] = {"land": "Terreno", "house": "Vivienda", "apartment": "Vivienda", "commercial": "Local"}
 
-    def __init__(self, token: str, *, actor_id: str = "igolaizola/fotocasa-scraper", **kwargs: Any) -> None:
+    def __init__(self, token: str, *, actor_id: str = "igolaizola/fotocasa-scraper",
+                 default_point_guard: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
+        self.default_point_guard = default_point_guard  # PORTAL_DEFAULT_POINT_GUARD (Q12)
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
@@ -180,19 +206,22 @@ class ApifyFotocasaSource(_PortalSource):
         if url is None or _text(transaction.get("type")).casefold() != self._deal(task):
             return None
         municipality, province = _text(location.get("level5Name")), _text(location.get("level2Name"))
-        if not self._place_ok(task, center, _point(location.get("latitude"), location.get("longitude")),
-                              municipality, province):
+        point = _point(location.get("latitude"), location.get("longitude"))
+        if not self._place_ok(task, center, point, municipality, province):
             return None
         kind = task_kind(task)
         agency = item.get("agency") if isinstance(item.get("agency"), dict) else {}
         neighbourhood = _text(location.get("level8Name")) or _text(location.get("level7Name"))
+        # Q12: at a fallback point the district, town and province are the point's, not the object's: not passed on.
+        unverified = self.default_point_guard and default_point(_text(location.get("level8Name")), point)
+        place = [] if unverified else [neighbourhood, municipality, province]
         title = f"{self._TITLES[kind]} en {'venta' if self._deal(task) == 'sale' else 'alquiler'}"
         return self._listing(
-            task, url=url, title=f"{title}, {neighbourhood or municipality}".rstrip(", "),
+            task, url=url, title=f"{title}, {'' if unverified else neighbourhood or municipality}".rstrip(", "),
             price=transaction.get("price"), area=item.get("surface"), rooms=item.get("rooms"),
-            address=[_text(item.get("street")), neighbourhood, municipality, province],
+            address=[_text(item.get("street")), *place],
             description=_text(item.get("description")), phone=item.get("phone"), advertiser=agency.get("name"),
-            property_type=self._TYPES.get(kind))
+            property_type=self._TYPES.get(kind), place_unverified=unverified)
 
 
 _YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,
