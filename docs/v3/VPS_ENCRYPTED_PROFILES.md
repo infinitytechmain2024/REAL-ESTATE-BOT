@@ -27,6 +27,7 @@ cd /opt/real-estate-bot
 df -h / /var/lib/docker                              # свободно на диске
 free -m; nproc                                       # RAM: argon2id в luksFormat берёт до 1 ГБ
 cryptsetup --version                                 # нужна 2.x (LUKS2)
+rsync --version | head -1                            # есть (иначе: apt-get install rsync)
 docker compose version                               # нужна v2+ (bind.create_host_path)
 docker volume ls --filter name=real-estate-monitor_browser_profiles
 docker volume inspect -f '{{ .Mountpoint }}' real-estate-monitor_browser_profiles
@@ -40,7 +41,7 @@ docker compose --env-file .env exec -T postgres sh -c \
 ```
 
 Норма:
-- `cryptsetup 2.x`, Compose `v2.x` или новее;
+- `cryptsetup 2.x`, `rsync` установлен, Compose `v2.x` или новее;
 - volume один, `Mountpoint` вида `/var/lib/docker/volumes/real-estate-monitor_browser_profiles/_data`;
 - свободно не меньше `размер файла-контейнера + 2 × du профилей` (по умолчанию файл 20 ГБ, см. шаг 3);
 - override ещё нет, `COMPOSE_FILE` не задан (иначе Compose не подхватит `docker-compose.override.yml` сам, и
@@ -54,8 +55,15 @@ docker compose --env-file .env exec -T postgres sh -c \
 **По умолчанию: файл-контейнер LUKS2 на существующем диске** (loop-устройство). Отдельный диск не нужен,
 размер задаётся файлом, при нехватке файл можно увеличить.
 
-**Альтернатива: отдельный блочный том у провайдера VPS.** Те же команды, только вместо файла `/dev/<диск>` (без
-`fallocate` и `losetup`). Плюс: не занимает место на системном диске. Минус: платный, зависит от провайдера.
+**Альтернатива: отдельный блочный том у провайдера VPS.** Те же команды шага 3, только вместо файла `/dev/<диск>`
+и без `fallocate`/`chmod` файла. Плюс: не занимает место на системном диске. Минус: платный, зависит от провайдера.
+`luksFormat` стирает диск, поэтому перед ним убедиться, что это именно новый пустой том:
+
+```bash
+lsblk -f                         # у <диск> нет FSTYPE, MOUNTPOINTS и разделов
+findmnt /dev/<диск>              # пусто: нигде не смонтирован
+lsblk -b -dn -o SIZE /dev/<диск> # размер в байтах совпадает с заказанным у провайдера
+```
 
 **Почему не автоматическая разблокировка ключом на том же диске** (keyfile в `/etc/crypttab`, ключ в `.env`, в
 скрипте): ключ лежит рядом с данными. Тот, у кого копия диска, получает и файл-контейнер, и ключ, и открывает его.
@@ -63,28 +71,56 @@ docker compose --env-file .env exec -T postgres sh -c \
 или требует второй сервер, поэтому сейчас не рассматривается.
 
 **Значит, разблокировка ручная**: после каждой перезагрузки владелец заходит по SSH и вводит пароль
-(`cryptsetup open`, шаг 6). Чем это грозит:
-- пока том закрыт, `browser` не стартует: сбор через браузер (Facebook в браузерном режиме, проверки, окно `/login`)
-  не работает. Остальные сервисы и Apify-источники работают;
-- `scripts/update.sh` при закрытом томе падает на шаге `Restart`: `up -d --force-recreate` не может создать
-  `browser` (источник bind отсутствует, `create_host_path: false`), `set -e` обрывает скрипт до `Cleanup`/`Status`.
-  Поэтому перед каждым деплоем: `mountpoint -q /srv/rebot-profiles && echo открыт`.
+(`cryptsetup open`, шаг 6). **Правило: при закрытом томе сначала шаг 6, потом любой `up` или `update.sh`.**
+
+Чем грозит закрытый том:
+- `browser` не может быть создан и запущен (источник bind отсутствует, `create_host_path: false`). Вместе с ним
+  не стартуют зависящие от него сервисы (`depends_on: browser` в `docker-compose.yml`): `facebook-runner`,
+  `campaign-runner`, `agent-reach-worker`, а при включённых профилях `facebook-collector` и `agent-reach`. Без
+  `campaign-runner` кампании не идут вообще, а не только браузерный сбор;
+- хуже: `docker compose up -d` (и `update.sh`, шаг `Restart`, `up -d --force-recreate`) сначала создаёт все
+  контейнеры, и ошибка создания `browser` может оставить **весь проект** неподнятым или в состоянии `Created`.
+  `Created` не входит в `BAD_STATES` watchdog (`bot/ops/watchdog.py:32`), а сам `watchdog` при этом тоже может
+  не подняться: простой без алерта. `update.sh` с `set -euo pipefail` обрывается до `Cleanup`/`Status`;
+- ежедневный cron `run --rm facebook-runner ... retention` (`docs/v2/OPS.md:111`) тянет зависимость `browser`
+  и падает каждый день, пока том закрыт (смотреть `/var/log/re-backup.log`).
+
+Поэтому перед каждым деплоем: `mountpoint -q /srv/rebot-profiles && echo открыт`, иначе шаг 6.
+
+Обход, если открыть том сейчас нельзя (пароль недоступен), а остальной бот нужен: поднять всё, кроме `browser` и
+зависимых. **Не проверено на демоне Docker**, владелец проверяет на 4.7:
+
+```bash
+cd /opt/real-estate-bot
+svc="$(docker compose --env-file .env config --services \
+  | grep -vxE 'browser|facebook-runner|campaign-runner|agent-reach-worker|facebook-collector|agent-reach')"
+echo $svc                                                    # сверить список
+docker compose --env-file .env up -d --no-deps $svc
+docker compose --env-file .env ps -a                         # перечисленные Up; browser и зависимые не Up
+```
+
+Откат обхода: шаг 6, затем `docker compose --env-file .env up -d`.
 
 **Проверка и алерт.** Каталог `/srv/rebot-profiles/profiles` существует только внутри открытого тома, а bind
-с `create_host_path: false` не даёт Docker создать пустую замену. Поэтому при закрытом томе контейнер не стартует
+с `create_host_path: false` не даёт Docker создать пустую замену. Поэтому при закрытом томе `browser` не стартует
 (а не стартует с пустыми профилями на незашифрованном диске). Что увидит watchdog (`bot/ops/watchdog.py:32`,
-`:150`, нужен `COMPOSE_PROFILES=ops` и `WATCHDOG_DOCKER_SOCKET`, см. `docs/v2/OPS.md` «Watchdog»):
-- внезапная перезагрузка (без `down`): Docker пытается поднять старый контейнер, старт не проходит, `browser` в
-  `exited`, приходит алерт `Сервис browser: exited`. **Не `unhealthy`**: до healthcheck дело не доходит;
-- перезагрузка по `docs/v2/OPS.md` (с `down`) или прерванный `update.sh`: контейнера `browser` нет вовсе, watchdog
-  отсутствующий контейнер не видит, алерта нет. В этих случаях владелец и так за консолью; проверка ниже обязательна.
+`:150`, нужен `COMPOSE_PROFILES=ops` и `WATCHDOG_DOCKER_SOCKET`, см. `docs/v2/OPS.md` «Watchdog»); всё ниже
+ожидание, не проверено на демоне, подтверждается на 4.7:
+- внезапная перезагрузка (без `down`): Docker сам поднимает старые контейнеры, старт `browser` не проходит, он
+  остаётся `exited`, приходит `Сервис browser: exited` (**не `unhealthy`**: до healthcheck дело не доходит).
+  Остальные контейнеры, скорее всего, стартуют: при старте демона `depends_on` не применяется;
+- прерванный `update.sh` или `up -d`: старый контейнер `browser`, скорее всего, остаётся в `exited`; новые
+  контейнеры других сервисов могут застрять в `Created` без алерта;
+- перезагрузка по `docs/v2/OPS.md` (с `down`): контейнеров нет вовсе, watchdog отсутствующее не видит, алерта нет.
+  Владелец в этот момент за консолью, проверка ниже обязательна.
 
 ```bash
 mountpoint -q /srv/rebot-profiles && echo "том открыт" || echo "ТОМ ЗАКРЫТ"
-docker compose --env-file .env ps -a browser            # норма: Up ... (healthy)
+docker compose --env-file .env ps -a                    # норма: все Up, browser (healthy); Created/Exited = проблема
 ```
 
-Предложение (не сделано, вне задачи): научить watchdog алертить, если контейнера ожидаемого сервиса нет вовсе.
+Предложения (не сделано, вне задачи): watchdog алертит на `created` и на отсутствующий контейнер ожидаемого
+сервиса; cron чистки переводится на `run --rm --no-deps facebook-runner`.
 
 ## 3. Создание тома ⛔ «ок» владельца
 
@@ -97,14 +133,20 @@ cd /opt/real-estate-bot && set -o pipefail && ./scripts/backup.sh && ls -lh /roo
 Создание. Размер `20G` подходит для 40 профилей (10 пользователей × 4 сети) с запасом; если `du` из шага 1
 больше 5 ГБ, взять `max(20G, 4 × du)`.
 
+Команды по одной, интерактивные (`luksFormat`, `open`) отдельно, после каждой смотреть, нет ли ошибки:
+
 ```bash
-set -euo pipefail
-fallocate -l 20G /var/lib/rebot-profiles.luks
-chmod 600 /var/lib/rebot-profiles.luks
+fallocate -l 20G /var/lib/rebot-profiles.luks && chmod 600 /var/lib/rebot-profiles.luks && ls -lh /var/lib/rebot-profiles.luks
 cryptsetup luksFormat --type luks2 /var/lib/rebot-profiles.luks
 #   отвечает: YES (заглавными), затем пароль дважды: <пароль из менеджера паролей, см. шаг 9>
 #   мало RAM (меньше 2 ГБ) и падает по памяти: добавить --pbkdf-memory 262144
 cryptsetup open /var/lib/rebot-profiles.luks rebot-profiles     # пароль: <...>
+```
+
+Дальше без ввода, одним блоком, который останавливается на первой ошибке:
+
+```bash
+bash -euo pipefail <<'EOF'
 mkfs.ext4 -L rebot-profiles /dev/mapper/rebot-profiles
 mkdir -p /srv/rebot-profiles
 chmod 700 /srv/rebot-profiles
@@ -113,9 +155,11 @@ mount /dev/mapper/rebot-profiles /srv/rebot-profiles
 mkdir /srv/rebot-profiles/profiles
 chown 10002:10002 /srv/rebot-profiles/profiles
 chmod 700 /srv/rebot-profiles/profiles
+echo DONE
+EOF
 ```
 
-Норма:
+Норма: в конце `DONE`, затем:
 
 ```bash
 cryptsetup luksDump /var/lib/rebot-profiles.luks | grep -E '^Version|Cipher|PBKDF'   # Version: 2, aes-xts-plain64, argon2id
@@ -148,14 +192,33 @@ docker compose --env-file .env ps -a facebook-collector facebook-runner
 
 Норма: `in_use` нет, `facebook-collector` не `Up` (one-shot, профиль `collector`).
 
-4.2. Остановка всех, кто держит профиль или может его запросить:
+4.2. Остановка всех, кто держит профиль или может его запросить.
+
+Сначала cron: строка `15 4 * * * ... run --rm facebook-runner ... retention` (`docs/v2/OPS.md:111`) поднимает
+зависимость `browser` на старом volume и может сделать это посреди `rsync`. В `crontab -e` закомментировать её
+(`#` в начале), вернуть после успешного 4.6:
+
+```bash
+crontab -e                                                           # закомментировать строку retention
+crontab -l | grep retention                                          # норма: строка начинается с #
+```
+
+Ожидаемые алерты watchdog на время переноса: `Сервис browser: exited`, `Сервис facebook-runner: exited` (каждые
+30 минут, пока стоят). `campaign-runner` и `agent-reach-worker` остаются `Up`, но их обращения к браузеру
+до 4.5 будут падать (ошибки в логах; кампании лучше не запускать).
 
 ```bash
 docker compose --env-file .env stop facebook-runner browser
 docker compose --env-file .env ps -a browser facebook-runner        # оба Exited
+docker compose --env-file .env exec -T postgres sh -c \
+  'psql -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select profile_name, state from browser_profiles where deleted_at is null and state = '"'"'in_use'"'"'"'
 ```
 
-(`facebook-collector` уже не запущен по 4.1; если `Up`, дождаться окончания, не убивать.)
+Норма: оба `Exited`; последний запрос ничего не печатает (за время между 4.1 и `stop` никто не взял профиль).
+Если `in_use` есть: `docker compose --env-file .env up -d browser facebook-runner`, дождаться окончания сбора и
+начать 4.1 заново. (`facebook-collector` уже не запущен по 4.1; если `Up`, дождаться окончания, не убивать.)
+
+Откат 4.2: `docker compose --env-file .env up -d browser facebook-runner`, вернуть строку в `crontab -e`.
 
 4.3. Копия со старого volume:
 
@@ -217,25 +280,37 @@ docker compose --env-file .env ps facebook-runner           # Up ... (healthy)
 
 Норма: в `mountinfo` строка с `/dev/mapper/rebot-profiles` (или `dm-N`) и `/profiles`; `write ok`; логи `ok`.
 
-4.6. Профиль `ready` и вход жив. По каждому профилю (имя и сеть из шага 1) открыть окно входа: в Telegram `/login`
-или
+4.6. Профиль `ready` и вход жив. По каждому профилю из вывода шага 1 (`profile_name`, `platform`) открыть окно
+входа: в Telegram `/login` или скриптом. URL третьим аргументом обязателен для всех сетей, кроме Facebook: по
+умолчанию скрипт открывает `https://www.facebook.com/` (`scripts/browser_login.sh:18`).
 
 ```bash
-bash scripts/browser_login.sh facebook facebook-main        # для остальных: <платформа> <имя профиля>
+bash scripts/browser_login.sh facebook  <имя профиля> https://www.facebook.com/
+bash scripts/browser_login.sh instagram <имя профиля> https://www.instagram.com/
+bash scripts/browser_login.sh tiktok    <имя профиля> https://www.tiktok.com/
+bash scripts/browser_login.sh linkedin  <имя профиля> https://www.linkedin.com/feed/
 ```
 
 Норма: страница сети открыта под пользователем, вход заново не просит; на вопрос скрипта ответить `y` (профиль
 остаётся `ready`). Если просит войти: не входить, ответить `N` и сделать откат (шаг 8): копия не та.
 
-4.7. Проверка алерта (по желанию, 2-3 минуты простоя браузера; нужен включённый watchdog):
+После всех профилей вернуть строку retention в `crontab -e` (убрать `#`), `crontab -l | grep retention`.
+
+4.7. Проверка поведения при закрытом томе (по желанию, несколько минут простоя браузера). Алерт
+`Сервис browser: exited` придёт уже от самого `stop`, это не проверка. Проверяется другое: при закрытом томе
+`browser` не может стартовать, а не стартует с пустым каталогом.
 
 ```bash
-docker compose --env-file .env stop browser
+docker compose --env-file .env stop facebook-runner browser
 umount /srv/rebot-profiles && cryptsetup close rebot-profiles
-docker compose --env-file .env start browser                # ожидаемо ошибка: bind source path does not exist
-docker compose --env-file .env ps -a browser                # Exited; через 1-2 мин алерт "Сервис browser: exited"
-# вернуть: шаг 6
+mountpoint -q /srv/rebot-profiles || echo "том закрыт"
+docker compose --env-file .env start browser; echo "exit=$?"  # норма: ошибка (bind source path does not exist), exit не 0
+docker compose --env-file .env ps -a browser                  # норма: не Up
+touch /srv/rebot-profiles/x 2>&1 | tail -1                    # норма: Operation not permitted (chattr +i)
 ```
+
+По желанию там же проверить обход из шага 2 (`up -d --no-deps $svc`): все перечисленные сервисы `Up`, ни один не
+`Created`. Вернуть: шаг 6 (открыть, смонтировать, `up -d`).
 
 Откат шага 4: шаг 8.
 
@@ -278,16 +353,24 @@ docker volume ls --filter name=real-estate-monitor_browser_profiles  # пуст�
 cryptsetup open /var/lib/rebot-profiles.luks rebot-profiles          # пароль: <...>
 mount /dev/mapper/rebot-profiles /srv/rebot-profiles
 ls -ld /srv/rebot-profiles/profiles                                  # drwx------ 10002 10002
-cd /opt/real-estate-bot && docker compose --env-file .env up -d      # при внезапной перезагрузке хватит: up -d browser
+cd /opt/real-estate-bot
+docker compose --env-file .env config | awk '/^  browser:/,/^  facebook-collector:/' | grep -B1 'target: /profiles'
+#   норма: source: /srv/rebot-profiles/profiles; если source: browser_profiles, override пропал: не поднимать, 4.4
+docker compose --env-file .env up -d                                 # поднимает и зависимых, застрявших в Exited/Created
 sleep 130
 docker compose --env-file .env ps                                    # browser Up (healthy), остальные тоже
 docker compose --env-file .env logs --since=5m browser | grep -iE "error|traceback" || echo ok
 ```
 
-Норма: `browser` `Up (healthy)`, логи `ok`, `/login` открывает профиль без нового входа. `cryptsetup open` с
-ошибкой `No key available with this passphrase`: неверный пароль, повторить (данные не меняются).
+Норма: `browser` `Up (healthy)`, ни одного `Created`/`Exited`, логи `ok`, `/login` открывает профиль без нового
+входа. `cryptsetup open` с ошибкой `No key available with this passphrase`: неверный пароль, повторить (данные не
+меняются).
 
-Перед каждым `BRANCH=main ./scripts/update.sh`: `mountpoint -q /srv/rebot-profiles && echo открыт`.
+Пока том закрыт, cron чистки `retention` (`docs/v2/OPS.md:111`) падает каждый день: в `/var/log/re-backup.log`
+ошибка про `browser`. После открытия тома проходит сам.
+
+Перед каждым `BRANCH=main ./scripts/update.sh`: `mountpoint -q /srv/rebot-profiles && echo открыт` и проверка
+`config` выше (source `/srv/rebot-profiles/profiles`).
 
 Закрыть том вручную (например, перед долгим простоем):
 
@@ -306,17 +389,25 @@ umount /srv/rebot-profiles && cryptsetup close rebot-profiles
 копия самого файла `/var/lib/rebot-profiles.luks` при закрытом томе, или `tar | gpg --symmetric` с отдельным
 паролем) и не в `/root/backups` рядом с дампами. Незашифрованная копия профилей обнуляет смысл шифрования.
 
-По желанию (защита от порчи заголовка LUKS, без него данные не открыть):
+По желанию (защита от порчи заголовка LUKS, без него данные не открыть). Файл пишется в `/dev/shm` (память, не
+диск) и сразу удаляется:
 
 ```bash
-cryptsetup luksHeaderBackup /var/lib/rebot-profiles.luks --header-backup-file /root/rebot-profiles.header
-# скачать файл к себе в менеджер паролей (вложение), затем на VPS:
-rm -f /root/rebot-profiles.header
+cryptsetup luksHeaderBackup /var/lib/rebot-profiles.luks --header-backup-file /dev/shm/rebot-profiles.header
+chmod 600 /dev/shm/rebot-profiles.header
+# скачать к себе (scp root@<vps>:/dev/shm/rebot-profiles.header .) и вложить в менеджер паролей, затем на VPS:
+rm -f /dev/shm/rebot-profiles.header
 ```
+
+Бэкап заголовка содержит старые слоты ключей: после смены пароля (шаг 9) старый бэкап открывается старым паролем.
+Поэтому после `luksChangeKey` старый бэкап удалить из менеджера паролей и сделать новый той же командой.
 
 ## 8. Откат на старый volume
 
-Возможен, пока не выполнен шаг 5.
+Возможен, пока не выполнен шаг 5. ⛔ Отдельное «ок» владельца, если после переноса на LUKS были новые входы
+(`/login`, новые пользователи или сети): в старом volume их нет, после отката эти профили придётся входить заново.
+Посмотреть: `select profile_name, last_verified_at from browser_profiles where deleted_at is null` и сравнить с
+датой 4.6.
 
 ```bash
 cd /opt/real-estate-bot
@@ -340,4 +431,5 @@ sleep 130 && docker compose --env-file .env ps browser facebook-runner          
 - Не на VPS (ни в файле, ни в `.env`, ни в cron, ни в истории shell: пароль вводится только в запрос `cryptsetup`).
 - Не в чате, не в Telegram боту, не в тикетах и не в репозитории.
 - Пароль длинный (не меньше 20 случайных символов или 6 слов). Потеря пароля = потеря профилей (см. шаг 7: входят
-  заново). Сменить пароль: `cryptsetup luksChangeKey /var/lib/rebot-profiles.luks` (старый и новый вводятся в запрос).
+  заново). Сменить пароль: `cryptsetup luksChangeKey /var/lib/rebot-profiles.luks` (старый и новый вводятся в запрос);
+  после смены удалить старый бэкап заголовка и сделать новый (шаг 7).
