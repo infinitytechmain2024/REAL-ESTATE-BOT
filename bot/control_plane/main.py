@@ -129,6 +129,7 @@ async def run() -> None:
         campaigns=PostgresCampaignStore(orchestra_store.pool) if orchestra_store.pool else None,
         # People with the ``user`` role may queue campaign create/status/own cancel only.
         roles=operators,
+        query_hygiene=settings.search_query_hygiene,
     )
 
     async def enqueue(envelope: CommandEnvelope) -> object:

@@ -3,7 +3,10 @@
 ``tests/fixtures/portals_live`` holds rows of real portal runs (Madrid, 2026-10-16, phones replaced). A pending run
 whose actor and input match one of those runs (same portal, Madrid, same deal and property kind) gets that file as
 its record in ``sim/apify/<actor>/<hash>.json``; every other pending run is left for a recorded run (MCP, within the
-budget). Prints what it answered and what is left. ``--dry-run``: print only.
+budget). The rows the actor's own input filters would not return (``FILTERS``: ``minPrice``, ``maxPrice``,
+``minSize``/``minArea``, as ``bot/web_search/sources/portals.py`` sends them) are dropped first: the bench gets no
+listing the production run would not get. A row without the value (a plot whose area is only in the text) is kept:
+what the portal does with it is unknown. Prints what it answered and what is left. ``--dry-run``: print only.
 """
 
 from __future__ import annotations
@@ -51,6 +54,41 @@ RULES: dict[str, Callable[[dict[str, Any]], str | None]] = {
 }
 
 
+# actor -> the input filter -> (the row's field, "min" | "max"); Milanuncios has no filters in its input.
+FILTERS: dict[str, dict[str, tuple[str, str]]] = {
+    "igolaizola~idealista-scraper": {"minPrice": ("price", "min"), "maxPrice": ("price", "max"),
+                                     "minSize": ("size", "min")},
+    "trev0n~habitaclia-com-spain-scraper": {"minPrice": ("price", "min"), "maxPrice": ("price", "max"),
+                                            "minArea": ("areaSqm", "min")},
+    "logiover~pisos-com-property-scraper": {"minPrice": ("price", "min"), "maxPrice": ("price", "max"),
+                                            "minArea": ("areaSqm", "min")},
+    "igolaizola~yaencontre-scraper": {"minPrice": ("price", "min"), "maxPrice": ("price", "max"),
+                                      "minArea": ("area", "min")},
+}
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def passes(actor: str, actor_input: dict[str, Any], row: Any) -> bool:
+    """False when the row fails one of the input's filters the actor applies; a row without the value passes."""
+    if not isinstance(row, dict):
+        return True
+    for key, (name, side) in FILTERS.get(actor, {}).items():
+        limit, value = _number(actor_input.get(key)), _number(row.get(name))
+        if limit is None or value is None:
+            continue
+        if (side == "min" and value < limit) or (side == "max" and value > limit):
+            return False
+    return True
+
+
 def answer(sim_root: Path, *, dry_run: bool = False) -> tuple[list[str], list[str]]:
     """(answered, left) pending Apify files."""
     answered, left = [], []
@@ -63,11 +101,19 @@ def answer(sim_root: Path, *, dry_run: bool = False) -> tuple[list[str], list[st
             left.append(path.name)
             continue
         target = sim_root / "apify" / actor / f"{data['key']}.json"
+        text = (LIVE / name).read_text(encoding="utf-8")
+        rows = json.loads(text)
+        rows = rows if isinstance(rows, list) else [rows]
+        kept = [row for row in rows if passes(actor, data.get("input") or {}, row)]
+        if len(kept) < len(rows):  # the rows the actor would have returned for this input
+            text = json.dumps(kept, ensure_ascii=False, indent=2) + "\n"
         if not dry_run:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text((LIVE / name).read_text(encoding="utf-8"), encoding="utf-8")
+            target.write_text(text, encoding="utf-8")
             path.unlink()
-        answered.append(f"{path.name} <- tests/fixtures/portals_live/{name}")
+        answered.append(f"{path.name} <- tests/fixtures/portals_live/{name}"
+                        + (f" ({len(kept)} of {len(rows)} rows pass the input's filters)" if len(kept) < len(rows)
+                           else ""))
     return answered, left
 
 

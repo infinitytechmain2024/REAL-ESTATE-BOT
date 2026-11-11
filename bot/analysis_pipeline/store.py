@@ -6,7 +6,7 @@ from typing import Any
 
 from .formatters import finding_payload
 from .models import Evidence
-from .openrouter import PROMPT_VERSION
+from .pipeline import metadata
 from .prefilter import TaskContext, context_of
 
 ACTOR = "analysis_pipeline"
@@ -114,9 +114,8 @@ class PostgresAnalysisStore:
                 key,
                 json.dumps(payload),
                 outcome.result.confidence,
-                json.dumps(
-                    {"prompt_version": PROMPT_VERSION, "model": model, "language": outcome.language}
-                ),
+                json.dumps(metadata(outcome.language, model,
+                                    location_from_text=getattr(outcome, "location_from_text", False) is True)),
             )
             return str(row["id"])
 
