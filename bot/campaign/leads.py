@@ -29,8 +29,8 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
-from urllib.parse import parse_qs, urlsplit
 
+from bot.acquisition.people import profile_link as social_profile_link
 from bot.facebook_collector.challenges import detect_challenge
 
 from .fblinks import (  # noqa: F401 - re-exported (runner, post_leads, tests)
@@ -56,17 +56,6 @@ MAX_COMMENTS = 40
 MAX_COMMENT_CHARS = 1500
 MAX_CARD_COMMENT_CHARS = 300
 
-_FB_HOSTS = FB_HOSTS
-# First path segments that are never a person or a page.
-_NOT_PROFILES = frozenset({
-    "groups", "hashtag", "photo", "photo.php", "photos", "watch", "events", "share", "sharer", "sharer.php",
-    "reel", "reels", "story.php", "permalink.php", "login", "login.php", "help", "policies", "privacy",
-    "marketplace", "gaming", "search", "notifications", "messages", "friends", "bookmarks", "pages", "l.php",
-    "home.php", "settings", "ads", "business", "stories", "saved", "memories", "privacy_policy", "legal",
-})
-_VANITY = re.compile(r"^[A-Za-z0-9.\-]{3,80}$")
-_DIGITS = re.compile(r"^\d{5,25}$")
-
 
 def profile_link(href: object) -> tuple[str, str] | None:
     """``(key, url)`` of the person or page a Facebook link points to, or None.
@@ -75,32 +64,9 @@ def profile_link(href: object) -> tuple[str, str] | None:
     and ``/people/<name>/<id>`` become ``https://www.facebook.com/profile.php?id=<id>``;
     a vanity name becomes ``https://www.facebook.com/<name>``. Tracking
     parameters are dropped. The key identifies the person within a campaign.
+    The rules live in ``bot.acquisition.people.profile_link`` (every network).
     """
-    if not isinstance(href, str):
-        return None
-    parts = urlsplit(href.strip())
-    if parts.scheme not in ("https", "http") or (parts.hostname or "").lower() not in _FB_HOSTS:
-        return None
-    segments = [s for s in parts.path.split("/") if s]
-    user_id: str | None = None
-    if len(segments) >= 4 and segments[0] == "groups" and segments[2] == "user":
-        user_id = segments[3]
-    elif segments[:1] == ["profile.php"]:
-        user_id = (parse_qs(parts.query).get("id") or [""])[0]
-    elif len(segments) >= 3 and segments[0] == "people":
-        user_id = segments[2]
-    if user_id is not None:
-        if not _DIGITS.match(user_id):
-            return None
-        return f"fb:{user_id}", f"https://www.facebook.com/profile.php?id={user_id}"
-    if len(segments) != 1:
-        return None
-    name = segments[0]
-    if name.lower() in _NOT_PROFILES or not _VANITY.match(name) or name.lower().endswith(".php"):
-        return None
-    if _DIGITS.match(name):
-        return f"fb:{name}", f"https://www.facebook.com/profile.php?id={name}"
-    return f"fb:{name.lower()}", f"https://www.facebook.com/{name}"
+    return social_profile_link("facebook", href)
 
 
 @dataclass(frozen=True, slots=True)
