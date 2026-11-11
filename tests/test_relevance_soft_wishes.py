@@ -48,18 +48,20 @@ def chat(content: str) -> httpx.Response:
 
 def model_answer(criteria: list[str], *, verdicts: dict[str, str] | None = None, overall: str = "near",
                  deviation: str | None = "без вида на горы", wishes: bool = True,
-                 wish_rows: object = ...) -> str:
+                 wish_rows: object = ..., near_reason: object = "wish") -> str:
     """What the model said in the pilot: every hard criterion passes, but «near» because a wish is not met."""
     verdicts = verdicts or {}
     rows = [{"name": n, "verdict": verdicts.get(n, "pass"),
              "quote": "Parcela en Madrid" if verdicts.get(n, "pass") != "unknown" else None, "note_ru": "ок"}
             for n in criteria]
     data = {"criteria": rows, "overall": overall, "deviation_ru": deviation, "confidence": 0.8}
+    if near_reason is not ...:
+        data["near_reason"] = near_reason
     if wish_rows is not ...:  # an explicit value, None included
         data["wishes"] = wish_rows
     elif wishes:
-        data["wishes"] = [{"text": "вид на горы", "verdict": "fail", "quote": None},
-                          {"text": "рядом со школой", "verdict": "unknown", "quote": None}]
+        data["wishes"] = [{"id": 1, "text": "вид на горы", "verdict": "fail", "quote": None},
+                          {"id": 2, "text": "рядом со школой", "verdict": "unknown", "quote": None}]
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -95,12 +97,15 @@ def test_the_flag_is_off_by_default_and_reaches_the_reviewer(monkeypatch: pytest
 def test_the_soft_prompt_differs_and_keeps_strict_json() -> None:
     assert hashlib.sha256(SYSTEM.encode()).hexdigest() == SYSTEM_V3_SHA256  # flag off: the old prompt, byte for byte
     assert PROMPT_VERSION == "reviewer-v3" and PROMPT_VERSION_SOFT != PROMPT_VERSION
-    assert SYSTEM_SOFT != SYSTEM and "SOFT WISHES" in SYSTEM_SOFT and "a wish is not met" not in SYSTEM_SOFT
+    assert SYSTEM_SOFT != SYSTEM and "SOFT WISHES" in SYSTEM_SOFT and "everything passes and a wish is not met" not in SYSTEM_SOFT
     assert "everything passes and a wish is not met" in SYSTEM
     assert "wishes" not in SCHEMA["properties"] and "wishes" not in SCHEMA["required"]
     assert SCHEMA_SOFT["additionalProperties"] is False and "wishes" in SCHEMA_SOFT["required"]
     assert SCHEMA_SOFT["properties"]["wishes"]["items"]["additionalProperties"] is False
-    assert set(SCHEMA_SOFT["required"]) == {*SCHEMA["required"], "wishes"}
+    assert set(SCHEMA_SOFT["required"]) == {*SCHEMA["required"], "wishes", "near_reason"}
+    assert SCHEMA_SOFT["properties"]["near_reason"]["enum"] == ["wish", "other", None]
+    assert "id" in SCHEMA_SOFT["properties"]["wishes"]["items"]["required"]
+    assert '"wish"' in SYSTEM_SOFT and '"other"' in SYSTEM_SOFT and "near_reason" in SYSTEM_SOFT
 
 
 def test_task_data_carries_the_wishes_only_with_the_flag() -> None:
@@ -108,7 +113,8 @@ def test_task_data_carries_the_wishes_only_with_the_flag() -> None:
     off = task_data(campaign, review=True)
     assert "wishes" not in off and off == task_data(campaign, review=True, soft_wishes=False)
     on = task_data(campaign, review=True, soft_wishes=True)
-    assert on["wishes"] == [{"text": "вид на горы", "weight": 2}, {"text": "рядом со школой", "weight": 1}]
+    assert on["wishes"] == [{"id": 1, "text": "вид на горы", "weight": 2},
+                            {"id": 2, "text": "рядом со школой", "weight": 1}]
     assert on["criteria"] == off["criteria"]  # the hard criteria are the same; no wish becomes one
     assert not any("вид" in c or "школ" in c for c in on["criteria"])
     assert "wishes" not in review_task(valencia({**SPEC, "wishes": []}), soft_wishes=True)
@@ -140,7 +146,7 @@ async def test_flag_on_an_unmet_soft_wish_stays_exact() -> None:
     assert body["response_format"]["json_schema"]["schema"] == SCHEMA_SOFT
     assert body["response_format"]["json_schema"]["strict"] is True
     sent = json.loads(body["messages"][1]["content"].split("\n", 1)[1])["task"]
-    assert sent["wishes"][0] == {"text": "вид на горы", "weight": 2}
+    assert sent["wishes"][0] == {"id": 1, "text": "вид на горы", "weight": 2}
     assert review.overall == "match" and review.deviation_ru is None
     stored = review.to_dict()
     assert stored["prompt"] == "reviewer-v3-soft"
@@ -269,3 +275,58 @@ async def test_runner_flag_off_holds_the_plot_flag_on_sends_it() -> None:
     assert store.buckets["plot"][0] == "exact" and len(messenger.findings()) == 1
     sent = json.loads(seen[0]["messages"][1]["content"].split("\n", 1)[1])["task"]
     assert [w["text"] for w in sent["wishes"]] == ["вид на горы", "рядом со школой"]
+
+
+# --- near_reason, ids, duplicates -----------------------------------------------------------------------------------
+
+METRO = {"deal": "sale", "property_type": "apartment", "place": {"name": "Madrid", "level": "city", "country": "ES"},
+         "wishes": [{"text": "рядом с метро", "weight": 1}]}
+
+
+async def test_flag_on_near_for_a_suburb_with_an_unknown_wish_stays_near() -> None:
+    # «квартира в Мадриде, желательно рядом с метро»: near because of a suburb, the metro wish unknown.
+    task = task_data(valencia(METRO), review=True, soft_wishes=True)
+    rows = [{"id": 1, "text": "рядом с метро", "verdict": "unknown", "quote": None}]
+    review = await reviewer(True, [], wish_rows=rows, near_reason="other",
+                            deviation="в пригороде, а не в самом Мадриде").review(task, FINDING)
+    assert review.overall == "near" and review.deviation_ru == "в пригороде, а не в самом Мадриде"
+    assert review.to_dict()["near_reason"] == "other"
+    assert review_match(Match("exact"), review.to_dict()).bucket == "similar"
+
+
+@pytest.mark.parametrize("reason", [None, ..., "", "WISHES", 1, ["wish"]])
+async def test_flag_on_near_without_a_wish_reason_stays_near(reason) -> None:
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)
+    review = await reviewer(True, [], near_reason=reason).review(task, FINDING)
+    assert review.overall == "near" and review.deviation_ru == "без вида на горы" and review.near_reason is None
+
+
+async def test_flag_on_wish_rows_match_by_id_even_when_paraphrased() -> None:
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)
+    rows = [{"id": 1, "text": "с видом на горы (вид не указан)", "verdict": "fail", "quote": None},
+            {"id": "2", "text": "школа рядом", "verdict": "pass", "quote": "colegio"}]
+    review = await reviewer(True, [], wish_rows=rows).review(task, FINDING)
+    assert review.overall == "match"
+    assert review.to_dict()["wishes"] == [{"text": "вид на горы", "verdict": "fail", "quote": None},
+                                          {"text": "рядом со школой", "verdict": "pass", "quote": "colegio"}]
+    # an unknown id falls back to the text; a paraphrase with an unknown id is dropped
+    rows = [{"id": 9, "text": "Вид на горы", "verdict": "fail", "quote": None},
+            {"id": 7, "text": "школа рядом", "verdict": "fail", "quote": None}]
+    review = await reviewer(True, [], wish_rows=rows).review(task, FINDING)
+    assert [(w.name, w.verdict) for w in review.wishes] == [("вид на горы", "fail")]
+
+
+async def test_duplicate_wishes_merge_with_the_highest_weight() -> None:
+    spec = {**SPEC, "wishes": [{"text": "вид на горы", "weight": 1}, {"text": "Вид на горы.", "weight": 3},
+                               {"text": "рядом со школой", "weight": 2}]}
+    task = task_data(valencia(spec), review=True, soft_wishes=True)
+    assert task["wishes"] == [{"id": 1, "text": "вид на горы", "weight": 3},
+                              {"id": 2, "text": "рядом со школой", "weight": 2}]
+    # the merged weight-3 wish unmet: near stays, even with near_reason "wish"
+    review = await reviewer(True, []).review(task, FINDING)
+    assert review.overall == "near"
+    # the parser merges duplicates in task.wishes the same way (max weight)
+    dup = {**task, "wishes": [{"id": 1, "text": "вид на горы", "weight": 1},
+                              {"id": 2, "text": "вид на горы", "weight": 3}]}
+    rows = [{"id": 1, "text": "вид на горы", "verdict": "fail", "quote": None}]
+    assert (await reviewer(True, [], wish_rows=rows).review(dup, FINDING)).overall == "near"

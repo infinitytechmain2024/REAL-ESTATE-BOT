@@ -84,13 +84,16 @@ SCHEMA: dict[str, Any] = {
 # RELEVANCE_SOFT_WISHES: the same answer plus one row per soft wish (never a criterion, never part of "overall").
 SCHEMA_SOFT: dict[str, Any] = {
     **SCHEMA,
-    "required": [*SCHEMA["required"], "wishes"],
+    "required": [*SCHEMA["required"], "wishes", "near_reason"],
     "properties": {
         **SCHEMA["properties"],
+        "near_reason": {"type": ["string", "null"], "enum": ["wish", "other", None],
+                        "description": "near only: wish = only the wishes differ; other = anything else; else null"},
         "wishes": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["text", "verdict", "quote"],
+            "required": ["id", "text", "verdict", "quote"],
             "properties": {
+                "id": {"type": "integer", "description": "the id of the wish in task.wishes"},
                 "text": {"type": "string"},
                 "verdict": {"type": "string", "enum": list(VERDICTS)},
                 "quote": {"type": ["string", "null"]},
@@ -153,17 +156,20 @@ _NEAR_SOFT = """- "near": no "fail" but at least one "unknown", or a wish of wei
 """
 _WISHES_SOFT = """
 SOFT WISHES. "task.wishes" (when present) are the person's soft wishes, "nice to have" («желательно», «лучше»,
-«Дополнительно: …» in the task text, the same wishes in "task.context"): [{"text", "weight" 1-3}]. They are NOT
+«Дополнительно: …» in the task text, the same wishes in "task.context"): [{"id", "text", "weight" 1-3}]. They are NOT
 criteria: never put them into "criteria"; a wish of weight 1 or 2 never changes "overall" or "deviation_ru". A wish
 of weight 3 («очень важно») that is not met ("fail" or "unknown") makes "overall" "near", with deviation_ru naming
-it. Report each of them
-once in "wishes": {"text": the same text, "verdict": "pass" | "fail" | "unknown", "quote": verbatim quote or null};
-"wishes" is [] when there are none. Only "task.criteria" (place, deal, type, budget, rooms, area, "must_have:",
-"exclude:") are hard.
+it. Report each of them once in "wishes": {"id": the same id, "text": the same text, "verdict": "pass" | "fail" |
+"unknown", "quote": verbatim quote or null}; "wishes" is [] when there are none. Only "task.criteria" (place, deal,
+type, budget, rooms, area, "must_have:", "exclude:") are hard.
+near_reason: for "near" only, why it is not "match": "wish" when ONLY the wishes differ (every criterion passes and
+nothing else is a compromise); "other" when anything else differs or is unclear (an "unknown" criterion, a suburb
+or another town than the one asked, a close but different kind such as a townhouse for a house, several units, a
+number off), even when a wish is not met as well; null when "overall" is not "near".
 """
 _JSON_V3 = 'Answer with exactly one JSON object {"criteria": [...], "overall": ..., "deviation_ru": ..., "confidence": ...}.'
 _JSON_SOFT = ('Answer with exactly one JSON object {"criteria": [...], "overall": ..., "deviation_ru": ..., '
-              '"confidence": ..., "wishes": [...]}.')
+              '"confidence": ..., "wishes": [...], "near_reason": ...}.')
 assert SYSTEM.count(_NEAR_V3) == 1 and SYSTEM.count(_JSON_V3) == 1
 SYSTEM_SOFT = (SYSTEM.replace(_NEAR_V3, _NEAR_SOFT).replace(_JSON_V3, _JSON_SOFT)
                .replace("\noverall:\n", _WISHES_SOFT + "\noverall:\n", 1))
@@ -188,6 +194,7 @@ class Review:
     prompt: str = PROMPT_VERSION
     # RELEVANCE_SOFT_WISHES only: one row per soft wish, never part of the bucket.
     wishes: tuple[Criterion, ...] = ()
+    near_reason: str | None = None  # RELEVANCE_SOFT_WISHES: "wish" | "other" | None, the model's own
 
     @property
     def fails(self) -> tuple[Criterion, ...]:
@@ -205,6 +212,7 @@ class Review:
                 "tolerance_pct": self.tolerance_pct, "prompt": self.prompt}
         if self.prompt == PROMPT_VERSION_SOFT:
             data["wishes"] = [{"text": w.name, "verdict": w.verdict, "quote": w.quote} for w in self.wishes]
+            data["near_reason"] = self.near_reason
         return data
 
 
@@ -284,16 +292,24 @@ def expected_criteria(hard: dict[str, Any]) -> list[str]:
     return names
 
 
+def _weight(value: object) -> int:
+    return value if value in (1, 2, 3) and not isinstance(value, bool) else 1  # type: ignore[return-value]
+
+
 def soft_wishes_of(campaign: Campaign) -> list[dict[str, Any]]:
-    """The task's soft wishes (``spec.wishes``) as ``{"text", "weight"}``, at most ``MAX_WISHES``."""
-    wishes: list[dict[str, Any]] = []
+    """The task's soft wishes (``spec.wishes``) as ``{"id", "text", "weight"}`` (ids 1, 2, ...), at most
+    ``MAX_WISHES``; duplicates (the same text once folded) are merged with the highest weight."""
+    merged: dict[str, dict[str, Any]] = {}
     for wish in (campaign.spec or {}).get("wishes") or []:
         text = wish.get("text") if isinstance(wish, dict) else wish
-        if isinstance(text, str) and text.strip():
-            weight = wish.get("weight") if isinstance(wish, dict) else None
-            wishes.append({"text": _SPACES.sub(" ", text).strip()[:120],
-                           "weight": weight if weight in (1, 2, 3) else 1})
-    return wishes[:MAX_WISHES]
+        if isinstance(text, str) and _fold(text):
+            weight = _weight(wish.get("weight") if isinstance(wish, dict) else None)
+            key = _fold(text)
+            if key in merged:
+                merged[key]["weight"] = max(merged[key]["weight"], weight)
+            else:
+                merged[key] = {"text": _SPACES.sub(" ", text).strip()[:120], "weight": weight}
+    return [{"id": n, **w} for n, w in enumerate(list(merged.values())[:MAX_WISHES], start=1)]
 
 
 def review_task(campaign: Campaign, *, soft_wishes: bool = False) -> dict[str, Any]:
@@ -385,7 +401,8 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     an unasked one is dropped); ``haystack``: the folded finding text a ``fail`` quote must occur in
     (empty: the quote is not checked, only required). ``soft_wishes`` (``RELEVANCE_SOFT_WISHES``): the answer of
     ``SYSTEM_SOFT``; the ``wishes`` rows of the task's wishes (``task_wishes``, ``task.wishes``) are kept apart, and
-    the model's ``near`` becomes ``match`` only when every hard criterion passes, the model reported at least one
+    the model's ``near`` becomes ``match`` only when the model said ``near_reason: "wish"`` (only the wishes differ),
+    every hard criterion passes, the model reported at least one
     task wish as not ``pass`` and no wish of weight 3 lacks a ``pass`` (``_only_soft_wishes_unmet``). Any other
     ``near`` (a suburb, a townhouse for a house, a promotion of several flats) stays ``near`` with its deviation.
     """
@@ -418,7 +435,9 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     elif overall == "match" and any(c.verdict == "unknown" for c in criteria):
         overall = "near"
     wishes = _wish_rows(data.get("wishes"), task_wishes) if soft_wishes else ()
-    if (soft_wishes and overall == "near" and all(c.verdict == "pass" for c in criteria)
+    reason = str(data.get("near_reason") or "").strip().casefold()
+    near_reason = reason if soft_wishes and overall == "near" and reason in ("wish", "other") else None
+    if (soft_wishes and overall == "near" and near_reason == "wish" and all(c.verdict == "pass" for c in criteria)
             and _only_soft_wishes_unmet(wishes, task_wishes)):
         overall = "match"  # Q9: every hard criterion passes; an unmet soft wish does not lower «exact»
     confidence = data.get("confidence")
@@ -428,27 +447,48 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     if not soft_wishes:
         return Review(criteria, overall, deviation, confidence, model, tolerance)  # type: ignore[arg-type]
     return Review(criteria, overall, deviation, confidence, model, tolerance,  # type: ignore[arg-type]
-                  PROMPT_VERSION_SOFT, wishes)
+                  PROMPT_VERSION_SOFT, wishes, near_reason)
 
 
 def _task_wishes(task_wishes: Sequence[Any]) -> dict[str, tuple[str, int]]:
-    """The task's wishes by folded text -> (text, weight); malformed entries are skipped."""
+    """The task's wishes by folded text -> (text, weight); malformed entries are skipped, a duplicate keeps the
+    highest weight."""
     out: dict[str, tuple[str, int]] = {}
     for wish in task_wishes if isinstance(task_wishes, list | tuple) else ():
         if isinstance(wish, dict) and isinstance(wish.get("text"), str) and _fold(wish["text"]):
-            weight = wish.get("weight") if wish.get("weight") in (1, 2, 3) else 1
-            out.setdefault(_fold(wish["text"]), (wish["text"], weight))
+            key, weight = _fold(wish["text"]), _weight(wish.get("weight"))
+            out[key] = (out[key][0], max(out[key][1], weight)) if key in out else (wish["text"], weight)
     return out
 
 
+def _task_wish_ids(task_wishes: Sequence[Any]) -> dict[int, str]:
+    """The task's wish ids -> the folded text (the key of ``_task_wishes``)."""
+    ids: dict[int, str] = {}
+    for wish in task_wishes if isinstance(task_wishes, list | tuple) else ():
+        if (isinstance(wish, dict) and isinstance(wish.get("id"), int) and not isinstance(wish.get("id"), bool)
+                and isinstance(wish.get("text"), str) and _fold(wish["text"])):
+            ids.setdefault(wish["id"], _fold(wish["text"]))
+    return ids
+
+
+def _row_id(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return int(value.strip()) if isinstance(value, str) and value.strip().isdigit() else None
+
+
 def _wish_rows(raw: object, task_wishes: Sequence[Any]) -> tuple[Criterion, ...]:
-    """The model's rows for the task's wishes, once each, with the task's text; anything else (not an object, no
-    text, a wish the task does not have) is dropped."""
-    known = _task_wishes(task_wishes)
+    """The model's rows for the task's wishes, once each, with the task's text: matched by ``id``, else (no or an
+    unknown id) by the text; anything else (not an object, a wish the task does not have) is dropped."""
+    known, ids = _task_wishes(task_wishes), _task_wish_ids(task_wishes)
     rows: dict[str, Criterion] = {}
     for row in raw if isinstance(raw, list) else []:
-        text = row.get("text") if isinstance(row, dict) else None
-        key = _fold(text) if isinstance(text, str) else ""
+        if not isinstance(row, dict):
+            continue
+        key = ids.get(_row_id(row.get("id")))  # type: ignore[arg-type]
+        if key is None:
+            text = row.get("text")
+            key = _fold(text) if isinstance(text, str) else ""
         if key in known and key not in rows:
             verdict = _VERDICT_WORDS.get(str(row.get("verdict") or "").strip().casefold(), "unknown")
             rows[key] = Criterion(known[key][0], verdict, _clip(row.get("quote"), MAX_QUOTE_CHARS) or None)  # type: ignore[arg-type]
