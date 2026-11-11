@@ -70,6 +70,7 @@ from .queries import (
     place_level_of,
     plan_portal_urls,
     plan_sites,
+    portal_place_level,
     portal_quota,
 )
 from .render import ChallengeDetected, Renderer, RenderError
@@ -159,6 +160,10 @@ class WebSearchConfig:
     # SEARCH_QUERY_HYGIENE: the query round writes only in the languages ``plan_languages`` allows and uses neutral
     # Spanish land terms (or the category the task names). Off: all plan languages and the old terms.
     query_hygiene: bool = False
+    # SEARCH_PLACE_LEVEL_FROM_SPEC: the task's place level comes from the campaign's TaskSpec (``place.level``) before
+    # the words of its text, and a Spanish province is ``province`` for the portals (``portal_place_level``). Off: the
+    # level is read from the text only, as before.
+    place_level_from_spec: bool = False
     # apify: the portal sources run first and the search engine is only the fallback when they gave fewer than
     # ``apify_min_listings`` listings; legacy: the search engine runs next to the sources, as before.
     acquisition_mode: str = "legacy"
@@ -209,7 +214,7 @@ def hygienic_languages(campaign: Campaign) -> tuple[str, ...]:
     return kept or tuple(campaign.plan.languages)
 
 
-def query_task(campaign: Campaign, *, hygiene: bool = False) -> QueryTask:
+def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = False) -> QueryTask:
     plan = campaign.plan
     place = (campaign.spec or {}).get("place") if isinstance(campaign.spec, dict) else None
     districts = place.get("districts") if isinstance(place, dict) else None
@@ -218,13 +223,19 @@ def query_task(campaign: Campaign, *, hygiene: bool = False) -> QueryTask:
     # Preserve an out-of-range radius so the provider rejects this task instead
     # of silently searching only the city.
     radius = float(radius) if isinstance(radius, int | float) and not isinstance(radius, bool) else None
+    level = place_level_of(campaign.source_text, plan.location)
+    if spec_level:  # SEARCH_PLACE_LEVEL_FROM_SPEC: «вся провинция Мадрид» is in the spec, not in the text
+        named = place.get("level") if isinstance(place, dict) else None
+        level = named if named in ("city", "province", "region") else level
+        level = portal_place_level(level, plan.location, plan.country or geo.country_of(plan.location),
+                                   campaign.source_text)
     suburbs_only = bool(re.search(r"пригород|передміст|окрестност|околиц|afueras|alrededores|suburb|outskirts",
                                    campaign.source_text, re.IGNORECASE))
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
                      constraints=dict(plan.constraints),
                      languages=hygienic_languages(campaign) if hygiene else tuple(plan.languages),
-                     country_code=plan.country, place_level=place_level_of(campaign.source_text, plan.location),
+                     country_code=plan.country, place_level=level,
                      search_plan=plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country),
                      nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only, query_hygiene=hygiene)
 
@@ -397,7 +408,7 @@ class WebSearchWorker:
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
-        task = query_task(campaign, hygiene=cfg.query_hygiene)
+        task = query_task(campaign, hygiene=cfg.query_hygiene, spec_level=cfg.place_level_from_spec)
         # The known portals (Idealista, Fotocasa first) are always searched: the ones not yet
         # searched take up to half of this round, written by the model or, if it skips one, from the task.
         if cfg.cover_portals:
@@ -453,7 +464,7 @@ class WebSearchWorker:
 
     async def _from_sources(self, campaign: Campaign) -> None:
         """Claim new provider work only in the first round; persisted claims prevent repeated POSTs."""
-        task = query_task(campaign)
+        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
         for source in self.sources:
             blocked = task.blocked_hosts | self.config.blocked_hosts
             if not source.supports(task) or any(not fetchable(f"https://{host}/", blocked) for host in source.hosts):
@@ -472,7 +483,7 @@ class WebSearchWorker:
     async def _resume_sources(self, campaign: Campaign) -> bool:
         """Resume cached imports or the known run, even after query generation has been committed."""
         sources = {s.name: s for s in self.sources}
-        task = query_task(campaign)
+        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
         blocked = task.blocked_hosts | self.config.blocked_hosts
         for run in await self.store.source_runs(campaign.id):
             source = sources.get(run.name)
@@ -535,7 +546,7 @@ class WebSearchWorker:
         try:
             with source_run_scope(context):
                 timeout = min(getattr(source, "timeout_seconds", 120) + 75, self.config.lease_seconds - 30)
-                listings = await asyncio.wait_for(source.search(query_task(campaign), limit=limit), timeout=timeout)
+                listings = await asyncio.wait_for(source.search(query_task(campaign, spec_level=self.config.place_level_from_spec), limit=limit), timeout=timeout)
             if len(listings) > min(limit, 50):
                 await costs.record("api", kind="skip", code="apify_result_limit", item=source.name,
                                    units=len(listings) - min(limit, 50), campaign_id=cid)
@@ -590,7 +601,7 @@ class WebSearchWorker:
 
     def _listing_ok(self, campaign: Campaign, source: ListingSource, listing: SourceListing, text: str | None) -> bool:
         """What ``_import_source`` accepts: a listing of the source's host, the campaign's deal and country."""
-        task = query_task(campaign)
+        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
         blocked = task.blocked_hosts | self.config.blocked_hosts
         host = host_of(listing.url)
         return not (not fetchable(listing.url, blocked) or host not in source.hosts
@@ -660,7 +671,7 @@ class WebSearchWorker:
 
     async def _enqueue_portal_urls(self, campaign: Campaign) -> None:
         """The plan's direct portal search pages go into the queue as depth-0 index pages (already queued: no-op)."""
-        task = query_task(campaign)
+        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
         blocked = self.config.blocked_hosts | task.blocked_hosts
         # The kind is what the URL looks like (an index page is expected; a concrete listing URL is never queued here).
         deal = campaign_deal(campaign)
@@ -670,7 +681,7 @@ class WebSearchWorker:
             await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
 
     async def _search(self, campaign: Campaign, query_count: int, pages: int) -> None:
-        task = query_task(campaign)
+        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
         blocked = self.config.blocked_hosts | task.blocked_hosts
         deal, known, real_estate = campaign_deal(campaign), known_hosts_of(campaign), campaign.plan.vertical == "real_estate"
         allowed = self._allowed_hosts(campaign, known)
@@ -829,7 +840,7 @@ class WebSearchWorker:
                 log.warning("web_search.host_breaker", extra={"campaign_id": campaign.id, "host": url.host,
                                                               "refusals": self.config.host_breaker_refusals})
             deal = campaign_deal(campaign)
-            children = [c for c in children if fetchable(c.url, cfg.blocked_hosts | query_task(campaign).blocked_hosts)
+            children = [c for c in children if fetchable(c.url, cfg.blocked_hosts | query_task(campaign, spec_level=self.config.place_level_from_spec).blocked_hosts)
                         and not deal_conflict(c.url, deal)]
             if children:
                 await self.store.enqueue(campaign.id, children, index_ttl_days=cfg.index_ttl_days)
@@ -892,7 +903,7 @@ class WebSearchWorker:
         failed = PageResult(False, url.kind, url.url, error="http_blocked", layer="none")  # HTTP skipped: blocked
         if layers.get("http", True):
             try:
-                fetch = self.fetcher.fetch(url.url, country=query_task(campaign).country)
+                fetch = self.fetcher.fetch(url.url, country=query_task(campaign, spec_level=self.config.place_level_from_spec).country)
                 page = await asyncio.wait_for(fetch, timeout=cfg.page_runtime_seconds)
             except FetchError as exc:
                 failed = PageResult(False, url.kind, url.url, error=exc.code)
@@ -904,7 +915,7 @@ class WebSearchWorker:
                     failed = PageResult(False, url.kind, page.url, parsed.title, error="captcha")
                 else:
                     result, children = self._page(url, page.url, parsed, structured(page.html, page.url),
-                                                  blocked=cfg.blocked_hosts | query_task(campaign).blocked_hosts,
+                                                  blocked=cfg.blocked_hosts | query_task(campaign, spec_level=self.config.place_level_from_spec).blocked_hosts,
                                                   deal=campaign_deal(campaign))
                     if not await self._wants_render(campaign.id, result, children):
                         return result, children

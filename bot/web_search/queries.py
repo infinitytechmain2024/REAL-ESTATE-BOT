@@ -168,6 +168,38 @@ def place_level_of(task_text: str, location: str) -> PlaceLevel:
     return "city"
 
 
+# SEARCH_PLACE_LEVEL_FROM_SPEC: the 50 provinces of Spain (folded, with their official and common names) and the
+# communities that are one province each (Comunidad de Madrid is the province of Madrid).
+_ES_PROVINCES = frozenset({
+    "a coruna", "la coruna", "coruna", "alava", "araba", "albacete", "alicante", "alacant", "almeria", "asturias",
+    "avila", "badajoz", "barcelona", "bizkaia", "vizcaya", "burgos", "caceres", "cadiz", "cantabria", "castellon",
+    "castello", "ciudad real", "cordoba", "cuenca", "gipuzkoa", "guipuzcoa", "girona", "gerona", "granada",
+    "guadalajara", "huelva", "huesca", "illes balears", "islas baleares", "baleares", "balearic islands", "jaen",
+    "la rioja", "las palmas", "leon", "lleida", "lerida", "lugo", "madrid", "malaga", "murcia", "navarra", "navarre",
+    "ourense", "orense", "palencia", "pontevedra", "salamanca", "santa cruz de tenerife", "segovia", "sevilla",
+    "seville", "soria", "tarragona", "teruel", "toledo", "valencia", "valladolid", "zamora", "zaragoza"})
+_ES_ONE_PROVINCE_REGIONS = frozenset({"madrid", "asturias", "cantabria", "la rioja", "murcia", "navarra", "navarre",
+                                      "illes balears", "islas baleares", "baleares", "balearic islands"})
+_PROVINCE_WORD = re.compile(r"(?<!\w)(?:provincias?|provincie|province)(?!\w)|(?<!\w)провинц")
+
+
+def portal_place_level(level: PlaceLevel, location: str, country: str | None, task_text: str = "") -> PlaceLevel:
+    """SEARCH_PLACE_LEVEL_FROM_SPEC: a non-city level of a Spanish province as the portals take it.
+
+    A province of Spain is ``province``, a place that is no province is ``region``; a ``region`` is ``province`` only when it is that province itself: a
+    community of one province (Madrid, Asturias, Murcia ...) or a task that says «provincia»/«провинция». Any other
+    region (Andalucía around Málaga, Comunidad Valenciana) stays ``region``: the portals are not asked to guess it.
+    """
+    place = _fold(location.strip())
+    if level == "city" or country != "ES":
+        return level
+    if place not in _ES_PROVINCES:  # «Costa del Sol» is no province: never sent to a portal as one
+        return "region"
+    if level == "province" or place in _ES_ONE_PROVINCE_REGIONS:
+        return "province"
+    return "province" if _PROVINCE_WORD.search(_fold(task_text)) else level
+
+
 @dataclass(frozen=True, slots=True)
 class QueryTask:
     goal: str
