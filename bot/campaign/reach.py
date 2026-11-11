@@ -570,7 +570,9 @@ class ReachStore(Protocol):
     async def known(self, url_keys: Sequence[str]) -> set[str]: ...
     async def save(self, results: Sequence[Stored]) -> int: ...
     async def enriched_count(self, campaign_id: str) -> int: ...
-    async def save_enrichment(self, url_key: str, enrichment: people.Enrichment | None, score: int) -> None: ...
+    async def save_enrichment(self, url_key: str, enrichment: people.Enrichment | None, score: int, *,
+                              mark_enriched: bool = True) -> None: ...
+    async def unscored(self, url_keys: Sequence[str]) -> dict[str, Judged]: ...
     async def finish(self, campaign_id: str) -> None: ...
 
 
@@ -787,15 +789,32 @@ class PostgresReachStore:
             "select count(*) from reach_contacts where campaign_id = $1::uuid and enriched_at is not null",
             campaign_id))
 
-    async def save_enrichment(self, url_key: str, enrichment: people.Enrichment | None, score: int) -> None:
-        """The score of a kept result and, when its page was read, the contacts and text found there."""
+    async def save_enrichment(self, url_key: str, enrichment: people.Enrichment | None, score: int, *,
+                              mark_enriched: bool = True) -> None:
+        """The score of a kept result and, when its page was read, the contacts and text found there.
+
+        ``mark_enriched`` False: the contacts came with the result itself (no page was opened), so ``enriched_at``
+        stays as it is and the per-campaign page cap is not used."""
         if enrichment is None:
             await self.pool.execute("update reach_contacts set score = $2 where url_key = $1", url_key, score)
             return
         await self.pool.execute(
-            """update reach_contacts set enriched_at = now(), contacts = $2::jsonb, profile_text = $3, score = $4
+            """update reach_contacts
+                  set enriched_at = case when $5 then now() else enriched_at end, contacts = $2::jsonb,
+                      profile_text = $3, score = $4
                 where url_key = $1""",
-            url_key, json.dumps(enrichment.contacts(), ensure_ascii=False), enrichment.description or None, score)
+            url_key, json.dumps(enrichment.contacts(), ensure_ascii=False), enrichment.description or None, score,
+            mark_enriched)
+
+    async def unscored(self, url_keys: Sequence[str]) -> dict[str, Judged]:
+        """Stored relevant results among ``url_keys`` whose score was never saved, with their verdict."""
+        if not url_keys:
+            return {}
+        rows = await self.pool.fetch(
+            """select url_key, kind, confidence::float8 as confidence, name, summary_ru from reach_contacts
+                where url_key = any($1::text[]) and relevant and score is null""", list(url_keys))
+        return {r["url_key"]: Judged(r["kind"], True, float(r["confidence"] or 0.0), r["name"], r["summary_ru"])
+                for r in rows}
 
     async def finish(self, campaign_id: str) -> None:
         await self.pool.execute(
@@ -827,6 +846,7 @@ class MemoryReachStore:
         self.done: set[str] = set()
         self.enrichments: dict[str, people.Enrichment] = {}
         self.scores: dict[str, int] = {}
+        self.unmarked: set[str] = set()  # enrichments saved with mark_enriched=False (no page was opened)
         self.today = today
 
     async def open_campaigns(self) -> list[ReachCampaign]:
@@ -860,12 +880,20 @@ class MemoryReachStore:
         return saved
 
     async def enriched_count(self, campaign_id: str) -> int:
-        return sum(1 for key in self.enrichments if self.contacts[key].campaign_id == campaign_id)
+        return sum(1 for key in self.enrichments
+                   if key not in self.unmarked and self.contacts[key].campaign_id == campaign_id)
 
-    async def save_enrichment(self, url_key: str, enrichment: people.Enrichment | None, score: int) -> None:
+    async def save_enrichment(self, url_key: str, enrichment: people.Enrichment | None, score: int, *,
+                              mark_enriched: bool = True) -> None:
         self.scores[url_key] = score
         if enrichment is not None:
             self.enrichments[url_key] = enrichment
+            if not mark_enriched:
+                self.unmarked.add(url_key)
+
+    async def unscored(self, url_keys: Sequence[str]) -> dict[str, Judged]:
+        return {k: self.contacts[k].judged for k in url_keys
+                if k in self.contacts and self.contacts[k].judged.keep and k not in self.scores}
 
     async def finish(self, campaign_id: str) -> None:
         self.done.add(campaign_id)

@@ -1,0 +1,636 @@
+"""P1.4: LinkedIn people and companies through Apify without cookies, against a mocked Apify API.
+
+No live calls: every answer comes from ``httpx.MockTransport``. The dataset rows are synthetic, shaped by the
+actors' schemas as recorded in ``docs/v3/ACTORS.md`` (``harvestapi/linkedin-profile-search``,
+``harvestapi/linkedin-company-search``); no real person, phone or address. A live sample is P1.7.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+import httpx
+import pytest
+from pydantic import ValidationError
+
+from bot.acquisition import apify_linkedin as li
+from bot.acquisition.apify_client import ApifyHttp
+from bot.acquisition.apify_source import MemorySourceRunStore
+from bot.campaign.reach import Judged, MemoryReachStore, ReachCampaign
+from bot.campaign.settings import CampaignRunnerSettings
+from bot.utils import costs
+from tests.test_near_match import needs_db
+from tests.test_near_match import pool as pool
+
+TOKEN = "apify_api_SECRETtoken123"
+CAMPAIGN = ReachCampaign("00000000-0000-0000-0000-000000000001", "Madrid", {}, ("es", "en"))
+CONFIG = li.LinkedInConfig(people_build="1.2.3", companies_build="0.4.1")
+SEARCH = li.LinkedInSearch("real estate investor", ("Madrid",), function_ids=(li.REAL_ESTATE_FUNCTION_ID,))
+
+
+def person(n: int = 1, **kw: Any) -> dict[str, Any]:
+    return {"id": f"ACoAA{n}", "publicIdentifier": f"persona-ejemplo-{n}",
+            "linkedinUrl": f"https://www.linkedin.com/in/persona-ejemplo-{n}",
+            "firstName": "Persona", "lastName": f"Ejemplo {n}", "headline": "Real estate investor",
+            "location": {"linkedinText": "Madrid, Comunidad de Madrid, España",
+                         "parsed": {"city": "Madrid", "country": "Spain", "countryCode": "ES"}},
+            "currentPosition": [{"companyName": "Ejemplo Capital", "position": "Socio",
+                                 "companyLinkedinUrl": "https://www.linkedin.com/company/ejemplo-capital"}],
+            "about": "Texto largo del perfil", "emails": [], "followerCount": 10,
+            "_meta": {"pagination": {"totalElements": 1, "totalPages": 1}}, **kw}
+
+
+def company(n: int = 1, **kw: Any) -> dict[str, Any]:
+    return {"id": f"10{n}", "name": f"Ejemplo Inmuebles {n}", "universalName": f"ejemplo-inmuebles-{n}",
+            "linkedinUrl": f"https://www.linkedin.com/company/ejemplo-inmuebles-{n}/",
+            "website": "https://www.ejemplo-inmuebles.example", "description": "Descripción larga",
+            "tagline": "Lema", "industry": "Real Estate", "industries": [{"name": "Real Estate"}],
+            "employeeCount": 12, "phone": {"number": "+34 900 000 000"},
+            "location": {"linkedinText": "Madrid, España"},
+            "locations": [{"headquarter": False, "city": "Sevilla"},
+                          {"headquarter": True, "city": "Madrid", "country": "ES", "line1": "Calle Ejemplo 1",
+                           "postalCode": "28000", "parsed": {"city": "Madrid", "country": "Spain"}}],
+            "_meta": {"pagination": {"totalElements": 1, "totalPages": 1}}, **kw}
+
+
+class Api:
+    def __init__(self, dataset: list[Any] | None = None, *, launch_status: int = 201,
+                 launches: list[int] | None = None) -> None:
+        self.dataset, self.launch_status = dataset or [], launch_status
+        self.statuses = list(launches or [])  # one status per launch, the last repeats
+        self.calls: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls.append(request)
+        path = request.url.path
+        if request.method == "POST" and path.endswith("/runs"):
+            if self.statuses:
+                self.launch_status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+            if self.launch_status != 201:
+                return httpx.Response(self.launch_status, json={"error": {"type": "rate-limit-exceeded"}})
+            return httpx.Response(201, json={"data": {"id": "RUN1", "defaultDatasetId": "DS1", "status": "READY"}})
+        if "/actor-runs/RUN1" in path:
+            return httpx.Response(200, json={"data": {"id": "RUN1", "status": "SUCCEEDED", "defaultDatasetId": "DS1",
+                                                      "usageTotalUsd": 0.1}})
+        if "/datasets/DS1/items" in path:
+            offset, limit = int(request.url.params["offset"]), int(request.url.params["limit"])
+            return httpx.Response(200, json=self.dataset[offset:offset + limit])
+        return httpx.Response(404)
+
+    def launches(self) -> list[httpx.Request]:
+        return [r for r in self.calls if r.method == "POST" and r.url.path.endswith("/runs")]
+
+
+def http(api: Api) -> ApifyHttp:
+    async def no_sleep(_: float) -> None:
+        return None
+
+    return ApifyHttp(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(api)), sleep=no_sleep,
+                     jitter=lambda: 0, retries=1)
+
+
+class FakeJudge:
+    model = "test/judge"
+
+    def __init__(self, kind: str = "investor") -> None:
+        self.kind, self.seen = kind, []
+
+    async def judge(self, campaign, candidates):
+        self.seen.append(list(candidates))
+        return [Judged(self.kind, True, 0.9, "nombre del juez", "Кратко") for _ in candidates]  # type: ignore[arg-type]
+
+    async def queries(self, campaign, count):
+        return []
+
+
+@pytest.fixture
+def ledger():
+    sink = costs.MemoryLedger()
+    costs.install(sink, budget_usd=5)
+    try:
+        yield sink
+    finally:
+        costs.install(None)
+
+
+BUILDS = {"APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD": "1.2.3", "APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD": "0.4.1"}
+
+
+def settings(**env: str) -> CampaignRunnerSettings:
+    return CampaignRunnerSettings(_env_file=None, DATABASE_URL="postgresql://x", TELEGRAM_TOKEN="t", **env)
+
+
+_COOKIE_LIKE = re.compile(r"cookie|session|token|password|secret|auth|credential|login|li_at|header|proxy|mongo"
+                          r"|dedup|segmentation|email", re.I)
+
+
+def keys_of(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [k for k, v in value.items() for k in (k, *keys_of(v))]
+    if isinstance(value, list):
+        return [k for v in value for k in keys_of(v)]
+    return []
+
+
+# --- the launch body --------------------------------------------------------------------------------------------
+
+
+async def test_people_launch_short_white_list_cap_and_build(ledger) -> None:
+    api, store = Api([person()]), MemoryReachStore()
+    source = li.ApifyLinkedInPeople(MemorySourceRunStore(), http(api), CONFIG)
+    outcome = await source.run(CAMPAIGN, SEARCH, store, FakeJudge())
+    assert outcome.status == "succeeded"
+    (launch,) = api.launches()
+    assert launch.url.path.endswith("/acts/harvestapi~linkedin-profile-search/runs")
+    body = json.loads(launch.content)
+    assert body == {"profileScraperMode": "Short", "searchQuery": "real estate investor", "locations": ["Madrid"],
+                    "functionIds": ["23"], "takePages": 1, "maxItems": 25}
+    assert set(body) <= li.PEOPLE_INPUT_KEYS
+    params = dict(launch.url.params)
+    assert params["maxTotalChargeUsd"] == "0.15" and params["build"] == "1.2.3" and params["maxItems"] == "25"
+    # The whole request: no forbidden, cookie-, session- or e-mail-like key anywhere, the token only in the header.
+    scanned = [*keys_of(body), *params]
+    assert not [k for k in scanned if _COOKIE_LIKE.search(k) or k in li.FORBIDDEN_INPUT_KEYS]
+    assert TOKEN not in str(launch.url) and TOKEN not in launch.content.decode()
+
+
+async def test_companies_launch_short_white_list(ledger) -> None:
+    api = Api([company()])
+    source = li.ApifyLinkedInCompanies(MemorySourceRunStore(), http(api), CONFIG)
+    await source.run(CAMPAIGN, li.LinkedInSearch("inmobiliaria", ("Madrid",), industry_ids=("44",),
+                                                 function_ids=("23",)), MemoryReachStore(), FakeJudge("agency"))
+    (launch,) = api.launches()
+    assert launch.url.path.endswith("/acts/harvestapi~linkedin-company-search/runs")
+    body = json.loads(launch.content)
+    # functionIds is a people filter: never sent to the company search.
+    assert body == {"scraperMode": "short", "searchQuery": "inmobiliaria", "locations": ["Madrid"],
+                    "industryIds": ["44"], "takePages": 1, "maxItems": 50}
+    assert set(body) <= li.COMPANY_INPUT_KEYS
+    # Its own price per page (50 x $0.002 + $0.001) and its own pinned build.
+    assert launch.url.params["maxTotalChargeUsd"] == "0.151" and launch.url.params["build"] == "0.4.1"
+    assert not [k for k in keys_of(body) if _COOKIE_LIKE.search(k)]
+
+
+def test_full_with_email_search_is_refused() -> None:
+    assert li.FORBIDDEN_PROFILE_MODE == "Full + email search"
+    good = {"profileScraperMode": "Short", "searchQuery": "x"}
+    li.check_input(good, li.PEOPLE_INPUT_KEYS)
+    for mode in (li.FORBIDDEN_PROFILE_MODE, "Full", None):
+        with pytest.raises(ValueError, match="Short"):
+            li.check_input({**good, "profileScraperMode": mode}, li.PEOPLE_INPUT_KEYS)
+    with pytest.raises(ValueError, match="short"):
+        li.check_input({"scraperMode": "full", "searchQuery": "x"}, li.COMPANY_INPUT_KEYS)
+    with pytest.raises(ValueError, match="short"):  # the mode is always sent
+        li.check_input({"searchQuery": "x"}, li.COMPANY_INPUT_KEYS)
+
+
+@pytest.mark.parametrize("key", ["mongoDbConnectionString", "mongoDbDatabaseName", "profileDeduplicationMode",
+                                 "postFilteringMongoDbQuery", "postFilteringMongoDbAggregation",
+                                 "autoQuerySegmentation", "autoQuerySegmentationLevel", "cookie", "li_at",
+                                 "sessionCookie", "customHttpHeaders", "startPage"])
+def test_forbidden_and_unknown_keys_are_refused(key) -> None:
+    for allowed in (li.PEOPLE_INPUT_KEYS, li.COMPANY_INPUT_KEYS):
+        mode = {"profileScraperMode": "Short"} if allowed is li.PEOPLE_INPUT_KEYS else {"scraperMode": "short"}
+        with pytest.raises(ValueError, match="not allowed"):
+            li.check_input({**mode, "searchQuery": "x", key: "v"}, allowed)
+
+
+def test_white_lists_hold_no_forbidden_key() -> None:
+    for allowed in (li.PEOPLE_INPUT_KEYS, li.COMPANY_INPUT_KEYS):
+        assert not allowed & li.FORBIDDEN_INPUT_KEYS
+        assert not [k for k in allowed if _COOKIE_LIKE.search(k)]
+
+
+# --- mapping ------------------------------------------------------------------------------------------------------
+
+
+async def test_person_is_mapped_to_a_reach_contact(ledger) -> None:
+    api, store, judge = Api([person()]), MemoryReachStore(), FakeJudge("investor")
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(api), CONFIG).run(
+        CAMPAIGN, SEARCH, store, judge)
+    assert outcome.items_imported == 1
+    (stored,) = store.contacts.values()
+    assert stored.candidate.url == "https://www.linkedin.com/in/persona-ejemplo-1"
+    assert (stored.candidate.platform, stored.candidate.page) == ("linkedin", "profile")
+    assert stored.candidate.title == "Real estate investor"
+    assert stored.candidate.snippet == "Socio, Ejemplo Capital · Madrid"
+    assert stored.judged.kind == "investor" and stored.judged.keep
+    assert stored.judged.name == "Persona Ejemplo 1"  # as LinkedIn wrote it, not the judge's reading
+    assert stored.judged_by == "test/judge" and stored.location == "Madrid" and stored.campaign_id == CAMPAIGN.id
+    assert store.enrichments[stored.candidate.url_key].contacts() == {"company": "Ejemplo Capital"}
+    assert stored.candidate.url_key in store.scores
+    # The long «about» is not kept.
+    assert "Texto largo" not in repr(store.contacts) + repr(store.enrichments)
+
+
+async def test_company_is_mapped_with_site_industry_and_phone(ledger) -> None:
+    api, store = Api([company()]), MemoryReachStore()
+    await li.ApifyLinkedInCompanies(MemorySourceRunStore(), http(api), CONFIG).run(
+        CAMPAIGN, li.LinkedInSearch("inmobiliaria", ("Madrid",)), store, FakeJudge("investor"))
+    (stored,) = store.contacts.values()
+    assert stored.candidate.url == "https://www.linkedin.com/company/ejemplo-inmuebles-1"
+    assert stored.candidate.page == "company"
+    assert stored.candidate.title == "Ejemplo Inmuebles 1"
+    assert stored.candidate.snippet == "Real Estate · Madrid · https://www.ejemplo-inmuebles.example"
+    assert stored.judged.kind == "company"  # a company page is never an individual investor
+    assert store.enrichments[stored.candidate.url_key].contacts() == {
+        "phones": ["+34 900 000 000"], "website": "https://www.ejemplo-inmuebles.example"}
+    kept = repr(store.contacts) + repr(store.enrichments)
+    assert "Calle Ejemplo" not in kept and "Descripción" not in kept and "Lema" not in kept
+
+
+def test_company_without_headquarter_uses_location_and_nothing_is_guessed() -> None:
+    row = company(locations=[], industry=None, industries=[], website="not a site", phone=None)
+    contact = li.map_company(row)
+    assert contact is not None
+    assert (contact.city, contact.industry, contact.website, contact.phone) == ("Madrid, España", None, None, None)
+    bare = li.map_person({"linkedinUrl": "https://www.linkedin.com/in/solo-enlace"})
+    assert bare is not None
+    assert (bare.name, bare.headline, bare.position, bare.company, bare.city) == (None,) * 5
+
+
+async def test_rules_judge_without_a_model(ledger) -> None:
+    store = MemoryReachStore()
+    await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([person()])), CONFIG).run(
+        CAMPAIGN, SEARCH, store, None)
+    (stored,) = store.contacts.values()
+    assert stored.judged_by == "rules" and stored.judged.kind == "investor" and stored.judged.relevant
+
+
+# --- the profile link -----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("href", "url"), [
+    ("https://es.linkedin.com/in/Persona-Ejemplo-1/?trk=public_profile", "https://www.linkedin.com/in/persona-ejemplo-1"),
+    ("http://linkedin.com/in/persona-ejemplo-1", "https://www.linkedin.com/in/persona-ejemplo-1"),
+    ("https://www.linkedin.com/in/persona-ejemplo-1/", "https://www.linkedin.com/in/persona-ejemplo-1"),
+])
+def test_profile_link_is_normalised(href, url) -> None:
+    contact = li.map_person(person(linkedinUrl=href))
+    assert contact is not None and contact.url == url and contact.key == "li:in:persona-ejemplo-1"
+
+
+def test_profile_from_public_identifier_and_bad_links_dropped() -> None:
+    contact = li.map_person(person(linkedinUrl=None, publicIdentifier="persona-ejemplo-7"))
+    assert contact is not None and contact.url == "https://www.linkedin.com/in/persona-ejemplo-7"
+    for href in ("https://www.linkedin.com/company/ejemplo", "https://www.linkedin.com/posts/x-123",
+                 "https://evil.example/in/persona", "javascript:alert(1)"):
+        assert li.map_person(person(linkedinUrl=href, publicIdentifier=None)) is None
+    assert li.map_company(company(linkedinUrl="https://www.linkedin.com/in/persona")) is None
+
+
+# --- e-mail ---------------------------------------------------------------------------------------------------------
+
+
+async def test_email_is_never_kept(ledger) -> None:
+    rows = [person(1, emails=["persona@ejemplo.example"]),
+            person(2, emails=[{"email": "otra@ejemplo.example", "status": "valid"}], email="x@ejemplo.example")]
+    store, judge = MemoryReachStore(), FakeJudge()
+    await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api(rows)), CONFIG).run(CAMPAIGN, SEARCH, store, judge)
+    assert len(store.contacts) == 2
+    kept = repr(store.contacts) + repr(store.enrichments) + repr(judge.seen)
+    assert "@" not in kept and "ejemplo.example" not in kept
+    assert all(not e.emails for e in store.enrichments.values())
+    for row in rows:
+        contact = li.map_person(row)
+        assert contact is not None and "@" not in repr(contact)
+
+
+# --- empty, duplicates, flag ----------------------------------------------------------------------------------------
+
+
+async def test_empty_dataset(ledger) -> None:
+    store, judge = MemoryReachStore(), FakeJudge()
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([])), CONFIG).run(
+        CAMPAIGN, SEARCH, store, judge)
+    assert (outcome.status, outcome.items_imported) == ("succeeded", 0)
+    assert store.contacts == {} and judge.seen == []
+
+
+async def test_rows_without_links_and_known_contacts_add_nothing(ledger) -> None:
+    store, judge = MemoryReachStore(), FakeJudge()
+    sink = li.ReachSink("person", CAMPAIGN, store, judge)
+    assert await sink([person(1), person(1), {"firstName": "Sin enlace"}], "RUN1") == 1
+    assert await sink([person(1)], "RUN1") == 0  # a page seen twice
+    assert len(judge.seen) == 1 and len(judge.seen[0]) == 1
+
+
+def test_flag_off_builds_no_source() -> None:
+    off = settings()
+    assert off.apify_linkedin_enabled is False and off.linkedin_config() is None
+    assert li.build_sources(off.linkedin_config(), MemorySourceRunStore(), http(Api())) is None
+
+
+def test_flag_on_needs_token_and_pinned_build() -> None:
+    for env in ({"APIFY_TOKEN": "x"}, {"APIFY_TOKEN": "x", **BUILDS, "APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD": "latest"},
+                {"APIFY_TOKEN": "x", **BUILDS, "APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD": ""},
+                {"APIFY_TOKEN": "x", "APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD": "1.2.3"}, BUILDS):
+        with pytest.raises(ValidationError):
+            settings(APIFY_LINKEDIN_ENABLED="true", **env)
+    on = settings(APIFY_LINKEDIN_ENABLED="true", APIFY_TOKEN="x", **BUILDS)
+    config = on.linkedin_config()
+    assert config is not None and config.people_actor == li.PEOPLE_ACTOR and config.companies_actor == li.COMPANIES_ACTOR
+    sources = li.build_sources(config, MemorySourceRunStore(), http(Api()))
+    assert sources is not None
+    assert sources.people.runner.config.build == "1.2.3"
+    assert sources.people.runner.config.build_setting == "APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD"
+    assert sources.companies.runner.config.build == "0.4.1"
+    assert sources.companies.runner.config.build_setting == "APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD"
+
+
+# --- money ----------------------------------------------------------------------------------------------------------
+
+
+def test_charge_cap_formula() -> None:
+    assert li.charge_cap(1, 0.10, 0.45) == 0.15
+    assert li.charge_cap(2, 0.10, 0.45) == 0.25
+    assert li.charge_cap(4, 0.10, 0.45) == 0.45  # 0.45 = the ceiling, not 0.45 by chance
+    assert li.charge_cap(4, 0.10, 0.30) == 0.30
+    config = settings(APIFY_LINKEDIN_ENABLED="true", APIFY_TOKEN="x", **BUILDS,
+                      APIFY_LINKEDIN_MAX_PAGES="2").linkedin_config()
+    assert config is not None and config.cap_usd("person") == 0.25
+    assert config.cap_usd("company") == 0.252  # 2 x 0.101 + 0.05
+    people, companies = config.run_config("person"), config.run_config("company")
+    assert (people.max_charge_usd, companies.max_charge_usd) == (0.25, 0.252)
+    assert (people.max_items, companies.max_items) == (50, 100)
+    for pages in ("0", "5"):
+        with pytest.raises(ValidationError):
+            settings(APIFY_LINKEDIN_MAX_PAGES=pages)
+
+
+async def test_two_pages_reach_the_launch(ledger) -> None:
+    api = Api([person()])
+    config = li.LinkedInConfig(people_build="1.2.3", companies_build="0.4.1", max_pages=2)
+    await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(api), config).run(
+        CAMPAIGN, SEARCH, MemoryReachStore(), FakeJudge())
+    (launch,) = api.launches()
+    assert json.loads(launch.content)["takePages"] == 2 and json.loads(launch.content)["maxItems"] == 50
+    assert launch.url.params["maxTotalChargeUsd"] == "0.25"
+
+
+# --- 429 ------------------------------------------------------------------------------------------------------------
+
+
+class Clock:
+    """A fake monotonic clock that ``sleep`` advances (no real wait)."""
+
+    def __init__(self) -> None:
+        self.now, self.sleeps = 1000.0, []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+async def test_429_within_the_window_does_not_spend_an_attempt(ledger) -> None:
+    api, clock = Api([person()], launches=[429, 429, 201]), Clock()
+    runs = MemorySourceRunStore(clock=clock)
+    source = li.ApifyLinkedInPeople(runs, http(api), CONFIG, clock=clock, sleep=clock.sleep)
+    config = source.runner.config
+    assert (config.rate_limit_seconds, config.rate_limit_pause_seconds) == (120.0, 15.0)  # as P1.2
+    outcome = await source.run(CAMPAIGN, SEARCH, MemoryReachStore(), FakeJudge())
+    assert outcome.status == "succeeded" and len(api.launches()) == 3 and clock.sleeps == [15.0, 15.0]
+    (row,) = runs.rows.values()
+    assert row["attempts"] == 1
+
+
+async def test_429_past_the_window_spends_one_attempt_and_stops_after_max(ledger) -> None:
+    api, clock = Api(launch_status=429), Clock()
+    runs = MemorySourceRunStore(clock=clock)
+    source = li.ApifyLinkedInPeople(runs, http(api), CONFIG, clock=clock, sleep=clock.sleep)
+    assert source.runner.config.max_attempts == li.LINKEDIN_MAX_ATTEMPTS == 3
+    outcomes = [await source.run(CAMPAIGN, SEARCH, MemoryReachStore(), FakeJudge()) for _ in range(5)]
+    assert [(o.status, o.error) for o in outcomes[:3]] == [("retry", "apify_http_429")] * 3
+    assert (outcomes[3].status, outcomes[3].error) == ("failed", "max_attempts")
+    assert outcomes[4].status == "failed"
+    assert sum(clock.sleeps) == 3 * 120.0  # the whole wait for one input is bounded
+    assert not [e for e in ledger.entries if e.cost_usd]  # a refusal starts nothing: nothing booked
+
+
+# --- review fixes: personal data in the text, a failed enrichment, the reach's page cap -----------------------------
+
+
+async def test_email_and_phone_in_the_text_never_reach_title_snippet_or_judge(ledger) -> None:
+    row = person(headline="Agente | ana@gmail.com | +34 600 111 222", firstName="Ana",
+                 lastName="Ejemplo 600111222",
+                 currentPosition=[{"companyName": "Ejemplo (tel. 912 345 678)", "position": "Socia, ana@ejemplo.es"}])
+    store, judge = MemoryReachStore(), FakeJudge()
+    await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([row])), CONFIG).run(CAMPAIGN, SEARCH, store, judge)
+    (stored,) = store.contacts.values()
+    assert stored.candidate.title == "Agente"
+    assert stored.candidate.snippet == "Socia, Ejemplo ( ) · Madrid"  # «tel. 912 345 678» cut with its keyword
+    kept = repr(store.contacts) + repr(store.enrichments) + repr(judge.seen)
+    for leaked in ("@", "gmail", "600 111 222", "600111222", "912 345 678"):
+        assert leaked not in kept, leaked
+    assert stored.judged.name == "Ana Ejemplo"
+
+
+def test_clean_text_keeps_ordinary_text() -> None:
+    assert li.clean_text("CEO · Inversiones 2010-2020 | Madrid") == "CEO · Inversiones 2010-2020 | Madrid"
+    assert li.clean_text("ana@gmail.com") == ""
+    assert li.clean_text("Llámame +34 600 111 222 ya") == "Llámame ya"
+
+
+async def test_company_phone_only_in_contacts(ledger) -> None:
+    row = company(name="Ejemplo Inmuebles +34 900 000 000", industry="Real Estate · info@ejemplo.es")
+    store = MemoryReachStore()
+    await li.ApifyLinkedInCompanies(MemorySourceRunStore(), http(Api([row])), CONFIG).run(
+        CAMPAIGN, li.LinkedInSearch("inmobiliaria"), store, FakeJudge("agency"))
+    (stored,) = store.contacts.values()
+    assert stored.candidate.title == "Ejemplo Inmuebles" and "900" not in stored.candidate.snippet
+    assert "@" not in repr(store.contacts)
+    assert store.enrichments[stored.candidate.url_key].phones == ("+34 900 000 000",)
+
+
+class FlakyReachStore(MemoryReachStore):
+    """``save_enrichment`` fails on its n-th call (an Exception, or a crash: ``CancelledError``)."""
+
+    def __init__(self, fail_on: int, error: BaseException) -> None:
+        super().__init__()
+        self.fail_on, self.error, self.calls = fail_on, error, 0
+
+    async def save_enrichment(self, url_key, enrichment, score, *, mark_enriched=True):
+        self.calls += 1
+        if self.calls == self.fail_on:
+            raise self.error
+        await super().save_enrichment(url_key, enrichment, score, mark_enriched=mark_enriched)
+
+
+def keys_in_order(rows: list[dict[str, Any]]) -> list[str]:
+    from bot.campaign.reach import Candidate
+
+    out = []
+    for row in rows:
+        contact = li.map_person(row)
+        assert contact is not None
+        out.append(Candidate(contact.url, "linkedin", "profile", contact.title, contact.snippet).url_key)
+    return out
+
+
+async def test_failed_enrichment_is_logged_and_repaired_when_the_row_comes_again(ledger) -> None:
+    rows = [person(n) for n in range(1, 6)]
+    keys = keys_in_order(rows)
+    store = FlakyReachStore(3, RuntimeError("db down"))
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api(rows)), CONFIG).run(
+        CAMPAIGN, SEARCH, store, FakeJudge())
+    assert outcome.status == "succeeded" and outcome.items_imported == 5  # the contacts are stored
+    assert [k in store.scores for k in keys] == [True, True, False, True, True]
+    judge = FakeJudge()
+    assert await li.ReachSink("person", CAMPAIGN, store, judge)(rows, "RUN2") == 0
+    assert all(k in store.scores for k in keys) and judge.seen == []  # repaired, not judged again
+
+
+async def test_crash_between_save_and_enrichment_resumes_without_a_second_launch(ledger) -> None:
+    import asyncio
+
+    rows = [person(n) for n in range(1, 6)]
+    keys = keys_in_order(rows)
+    api, runs = Api(rows), MemorySourceRunStore()
+    store = FlakyReachStore(3, asyncio.CancelledError())
+    source = li.ApifyLinkedInPeople(runs, http(api), CONFIG)
+    with pytest.raises(asyncio.CancelledError):
+        await source.run(CAMPAIGN, SEARCH, store, FakeJudge())
+    assert len(store.contacts) == 5 and [k in store.scores for k in keys] == [True, True, False, False, False]
+    outcome = await source.run(CAMPAIGN, SEARCH, store, FakeJudge())
+    assert outcome.status == "succeeded"
+    assert all(k in store.scores for k in keys) and len(store.contacts) == 5
+    assert len(api.launches()) == 1
+
+
+async def test_linkedin_contacts_do_not_use_the_reach_page_cap(ledger) -> None:
+    from bot.campaign.reach import ReachConfig
+
+    store = MemoryReachStore()
+    sink = li.ReachSink("person", CAMPAIGN, store, FakeJudge())
+    for start in (1, 26, 51):
+        assert await sink([person(n) for n in range(start, start + 25)], "RUN1") == 25
+    assert len(store.contacts) == 75 and len(store.enrichments) == 75  # each has its company
+    cap = ReachConfig().enrich_per_campaign
+    assert cap - await store.enriched_count(CAMPAIGN.id) == cap  # the reach's room is untouched
+
+
+# --- review fixes: failures ---------------------------------------------------------------------------------------
+
+
+async def test_failed_run_stores_nothing(ledger) -> None:
+    class Failed(Api):
+        def __call__(self, request):
+            if "/actor-runs/RUN1" in request.url.path:
+                self.calls.append(request)
+                return httpx.Response(200, json={"data": {"id": "RUN1", "status": "FAILED", "usageTotalUsd": 0.02}})
+            return super().__call__(request)
+
+    api, store = Failed([person()]), MemoryReachStore()
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(api), CONFIG).run(
+        CAMPAIGN, SEARCH, store, FakeJudge())
+    assert (outcome.status, outcome.error, outcome.cost_usd) == ("failed", "apify_run_failed", 0.02)
+    assert store.contacts == {} and not [r for r in api.calls if "/datasets/" in r.url.path]
+
+
+@pytest.mark.parametrize("status", [400, 402, 404])
+async def test_refused_launch_stores_nothing(ledger, status) -> None:
+    api, store = Api(launch_status=status), MemoryReachStore()
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(api), CONFIG).run(
+        CAMPAIGN, SEARCH, store, FakeJudge())
+    assert outcome.status == "failed" and outcome.error == f"apify_http_{status}"
+    assert store.contacts == {} and len(api.launches()) == 1
+    assert not [e for e in ledger.entries if e.cost_usd]  # a refusal starts nothing: nothing booked
+
+
+async def test_judge_failure_falls_back_to_the_rules(ledger, caplog) -> None:
+    class Broken(FakeJudge):
+        async def judge(self, campaign, candidates):
+            raise TimeoutError
+
+    store = MemoryReachStore()
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([person()])), CONFIG).run(
+        CAMPAIGN, SEARCH, store, Broken())
+    assert outcome.status == "succeeded"
+    (stored,) = store.contacts.values()
+    assert stored.judged_by == "rules" and stored.judged.kind == "investor"
+    assert "apify_linkedin.judge_failed" in caplog.text
+
+
+# --- PostgreSQL (027, 028, 037): mark_enriched and unscored ----------------------------------------------------------
+
+@needs_db
+async def test_postgres_linkedin_enrichment_does_not_mark_enriched(pool) -> None:
+    from bot.campaign import plan_campaign
+    from bot.campaign.reach import PostgresReachStore
+    from bot.campaign.store import PostgresCampaignStore
+
+    goal = "Найди инвесторов в Мадриде"
+    cid = await PostgresCampaignStore(pool).create(plan_campaign(goal), chat_id=1, requested_by=8, source_text=goal,
+                                                   actor="t")
+    campaign = ReachCampaign(cid, "Madrid", {}, ("es", "en"))
+    store = PostgresReachStore(pool)
+    sink = li.ReachSink("person", campaign, store, FakeJudge())
+    assert await sink([person(1), person(2)], "RUN1") == 2
+    assert await store.enriched_count(cid) == 0
+    rows = await pool.fetch("select enriched_at, contacts::text as c, score, kind from reach_contacts order by url")
+    assert all(r["enriched_at"] is None and r["score"] is not None and r["kind"] == "investor" for r in rows)
+    assert json.loads(rows[0]["c"]) == {"company": "Ejemplo Capital"}
+    await pool.execute("update reach_contacts set score = null where url like '%-1'")
+    keys = keys_in_order([person(1), person(2)])
+    unscored = await store.unscored(keys)
+    assert list(unscored) == [keys[0]] and unscored[keys[0]].kind == "investor" and unscored[keys[0]].keep
+    assert await sink([person(1), person(2)], "RUN1") == 0
+    assert await store.unscored(keys) == {}
+
+
+# --- clean_text keeps sums, ranges and years ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "Ticket 500.000 - 3.000.000€", "Tickets 1.000.000-5.000.000 €", "Inversión 250 000 - 1 000 000 EUR",
+    "Proyectos de 100.000.000 €", "2015-2018 2019-2023", "Ticket 700 000 000 €", "Ticket 600 000 000€",
+    "Fondos de 650 000 000 USD", "Ticket 900k", "Ticket 650 000 M", "Ticket 700.000-900.000",
+    "Rango 600 - 900", "CEO · Inversiones 2010-2020 | Madrid", "Desde 1999 - 2024, 120 proyectos",
+    "+100 000 000 euros", "Gestiono +200 000 000 en activos", "+1 000 000 m2", "Top +40 2023 2024",
+    "Fondos 600 000 000 EUR", "Call center 2023", "Kowa 600 111 22", "Cold call 2015-2020", "Tel 2015 - 2020",
+])
+def test_clean_text_keeps_sums_ranges_and_years(text) -> None:
+    assert li.clean_text(text) == text
+
+
+@pytest.mark.parametrize(("text", "clean"), [
+    ("+34 600 111 222", ""), ("600 111 222", ""), ("600-111-222", ""), ("(+34) 912 34 56 78", ""),
+    ("912345678", ""), ("Tel: +44 20 7946 0958", ""), ("WhatsApp +1 415 555 0101", ""),
+    ("📞 0033 6 12 34 56 78", ""), ("tlf. 912-34-56-78", ""), ("Móvil 600111222 Madrid", "Madrid"),
+    ("Tel 912345678", ""), ("Llámame +34 600 111 222 ya", "Llámame ya"),
+    ("Agente | ana@gmail.com | +34 600 111 222", "Agente"),
+    ("+34600111222", ""), ("+34 600111222", ""), ("0034 600 111 222", ""), ("0034600111222", ""),
+    ("(+34)600111222", ""), ("(0034) 600 111 222", ""), ("Agente +34600111222 Madrid", "Agente Madrid"),
+])
+def test_clean_text_cuts_phones(text, clean) -> None:
+    """The narrow rule: Spanish numbers, and any number after a keyword."""
+    assert li.clean_text(text) == clean
+
+
+async def test_a_ticket_in_the_headline_reaches_the_judge(ledger) -> None:
+    store, judge = MemoryReachStore(), FakeJudge()
+    row = person(headline="Real estate investor · Ticket 500.000 - 3.000.000€")
+    await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([row])), CONFIG).run(CAMPAIGN, SEARCH, store, judge)
+    assert judge.seen[0][0].title == "Real estate investor · Ticket 500.000 - 3.000.000€"
+
+
+def test_clean_text_is_linear_on_long_text() -> None:
+    import time
+
+    units = ["1", "+3", "6 ", "600-", "0034 ", " €", "tel ", "tel: 1-", "📞 (", "+34 6", "wa 1 2 3 ", "Tel: +44 20 "]
+    texts = [(unit * (10_000 // len(unit) + 1))[:10_000] for unit in units]
+    for text in texts:
+        start = time.perf_counter()
+        li.clean_text(text)
+        assert time.perf_counter() - start < 0.05, text[:20]
+
+
+@pytest.mark.parametrize("text", ["+44 20 7946 0958", "+1 415 555 0101", "0033 6 12 34 56 78"])
+def test_a_foreign_number_without_a_keyword_may_stay(text) -> None:
+    """Owner decision 2026-11-11: better a foreign phone left in than a sum cut out."""
+    assert li.clean_text(text) == text

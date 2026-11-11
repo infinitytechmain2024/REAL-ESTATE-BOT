@@ -321,6 +321,48 @@ class CampaignRunnerSettings(BaseSettings):
                                max_results=self.apify_reactions_max_results,
                                max_charge_usd=self.apify_reactions_max_charge_usd)
 
+    # LinkedIn people and companies through Apify without cookies (v3 P1.4, bot/acquisition/apify_linkedin.py). Off by
+    # default; on, it needs APIFY_TOKEN and a pinned build of each actor (APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD,
+    # APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD; never «latest») or the service does not start. One run's cap:
+    # MAX_PAGES x the actor's price per page + 0.05, never above MAX_CHARGE_USD.
+    apify_linkedin_enabled: bool = Field(default=False, validation_alias="APIFY_LINKEDIN_ENABLED")
+    apify_linkedin_people_actor: str = Field(default="harvestapi/linkedin-profile-search",
+                                             validation_alias="APIFY_LINKEDIN_PEOPLE_ACTOR")
+    apify_linkedin_companies_actor: str = Field(default="harvestapi/linkedin-company-search",
+                                                validation_alias="APIFY_LINKEDIN_COMPANIES_ACTOR")
+    apify_linkedin_people_build: str = Field(default="", max_length=40,
+                                             validation_alias="APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD")
+    apify_linkedin_companies_build: str = Field(default="", max_length=40,
+                                                validation_alias="APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD")
+    apify_linkedin_max_pages: int = Field(default=1, ge=1, le=4, validation_alias="APIFY_LINKEDIN_MAX_PAGES")
+    apify_linkedin_usd_per_page: float = Field(default=0.10, gt=0, le=1, validation_alias="APIFY_LINKEDIN_USD_PER_PAGE")
+    apify_linkedin_companies_usd_per_page: float = Field(default=0.101, gt=0, le=1,
+                                                         validation_alias="APIFY_LINKEDIN_COMPANIES_USD_PER_PAGE")
+    apify_linkedin_max_charge_usd: float = Field(default=0.45, gt=0, le=5, validation_alias="APIFY_LINKEDIN_MAX_CHARGE_USD")
+
+    @model_validator(mode="after")
+    def _linkedin_ready(self) -> CampaignRunnerSettings:
+        """APIFY_LINKEDIN_ENABLED=true without a token or a pinned build is a start-up error."""
+        if self.apify_linkedin_enabled:
+            if not self.apify_token.strip():
+                raise ValueError("APIFY_LINKEDIN_ENABLED=true needs APIFY_TOKEN")
+            self.linkedin_config()  # an empty or «latest» build, a bad actor id or unsafe limits fail here
+        return self
+
+    def linkedin_config(self):  # -> bot.acquisition.apify_linkedin.LinkedInConfig | None
+        """Both LinkedIn sources' configuration, or None while APIFY_LINKEDIN_ENABLED is off."""
+        if not self.apify_linkedin_enabled:
+            return None
+        from bot.acquisition.apify_linkedin import LinkedInConfig
+
+        return LinkedInConfig(people_build=self.apify_linkedin_people_build.strip(),
+                              companies_build=self.apify_linkedin_companies_build.strip(),
+                              people_actor=self.apify_linkedin_people_actor,
+                              companies_actor=self.apify_linkedin_companies_actor,
+                              max_pages=self.apify_linkedin_max_pages, usd_per_page=self.apify_linkedin_usd_per_page,
+                              companies_usd_per_page=self.apify_linkedin_companies_usd_per_page,
+                              max_charge_usd=self.apify_linkedin_max_charge_usd)
+
     def social_config(self):  # -> bot.social_search.worker.SocialConfig (imported lazily)
         from bot.social_search.worker import SocialConfig, parse_platforms
 
