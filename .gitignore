@@ -41,3 +41,6 @@ fb-bot-profile/
 **/Cookies
 screenshots/
 *.png
+
+# The user simulation bench (scripts/sim): cassettes, recorded Apify runs, answers and results hold live data.
+/sim/
