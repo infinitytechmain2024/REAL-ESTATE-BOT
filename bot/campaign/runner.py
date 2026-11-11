@@ -1518,12 +1518,13 @@ async def main() -> None:
                                              "investor_reach": reach is not None})
     stop = asyncio.Event()
     if apify_tasks is not None:
-        # SIGTERM ends the loops (stop) instead of the process at once, so ``apify_tasks.aclose`` below lets a launch
-        # POST in flight get its answer. Only with Apify social runs on: otherwise SIGTERM behaves as before.
+        # SIGTERM stops the Apify runs at once (no new target or launch, a 429 pause ends) and ends the loops, so
+        # ``apify_tasks.aclose`` lets every launch in flight save its run id. Only with Apify runs on: otherwise no
+        # handler is installed, as before.
         import signal
 
         with suppress(NotImplementedError, RuntimeError):
-            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, _on_sigterm, stop, apify_tasks)
     try:
         # Each stage is its own loop: a slow site or network never delays Facebook work, and the reverse.
         tasks = [runner.serve(settings.poll_seconds, stop)]
@@ -1534,6 +1535,8 @@ async def main() -> None:
             tasks.append(social.serve(settings.social_poll_seconds, stop))
         if apify_social is not None:
             tasks.append(apify_social.serve(settings.social_poll_seconds, stop))
+        if apify_tasks is not None:  # closes the Apify runs as soon as the stop comes, beside the loops' last ticks
+            tasks.append(_close_on_stop(stop, apify_tasks))
         if comments is not None:
             tasks.append(comments.serve(settings.comment_poll_seconds, stop))
         if post_reads is not None:
@@ -1543,7 +1546,7 @@ async def main() -> None:
         await asyncio.gather(*tasks)
     finally:
         stop.set()
-        if apify_tasks is not None:  # before the clients below close: a launch in flight gets its answer first
+        if apify_tasks is not None:  # again on an error or a cancel; before the clients below close
             await apify_tasks.aclose()
             await apify_tasks.http.aclose()
         if apify_generator is not None:
@@ -1655,6 +1658,17 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
     return worker, generator
 
 
+def _on_sigterm(stop: asyncio.Event, apify_tasks: Any) -> None:
+    """SIGTERM with Apify runs on: no new Apify target or launch from now on, then every loop ends."""
+    apify_tasks.begin_stop()
+    stop.set()
+
+
+async def _close_on_stop(stop: asyncio.Event, apify_tasks: Any) -> None:
+    await stop.wait()
+    await apify_tasks.aclose()
+
+
 def _apify_tasks(settings: Any) -> Any:
     """The background Apify runs (``social_apify.ApifyTasks``) when ACQUISITION_MODE=apify turns a P1.8 source on:
     Instagram / TikTok posts or LinkedIn people in the reach; None otherwise (nothing changes)."""
@@ -1679,7 +1693,7 @@ def _apify_social_worker(settings: Any, pool: Any, campaigns: CampaignStore, tas
 
     from .social_apify import ApifySocialWorker, PostgresApifySocialStore
 
-    runs = PostgresSourceRunStore(pool)
+    runs = tasks.runs(PostgresSourceRunStore(pool))  # every launch a critical section of the shutdown
     sources: dict[str, Any] = {}
     instagram = settings.instagram_sources(runs, tasks.http, sleep=tasks.sleep)
     if instagram is not None:
@@ -1691,8 +1705,13 @@ def _apify_social_worker(settings: Any, pool: Any, campaigns: CampaignStore, tas
     if settings.openrouter_api_key:
         generator = OpenRouterQueryGenerator(api_key=settings.openrouter_api_key, model=settings.social_model,
                                              timeout_seconds=settings.social_model_timeout_seconds)
+    linkedin_usd = 0.0
+    if settings.linkedin_apify_on() and settings.reach_enabled:  # the reach's LinkedIn runs share the budget
+        config = settings.linkedin_config()
+        linkedin_usd = config.cap_usd("person") + config.cap_usd("company")
     worker = ApifySocialWorker(PostgresApifySocialStore(pool), campaigns, sources, QueryPlanner(generator), tasks,
-                               max_targets=settings.apify_social_max_targets, budget_usd=settings.budget_usd)
+                               max_targets=settings.apify_social_max_targets, budget_usd=settings.budget_usd,
+                               linkedin_usd=linkedin_usd)
     return worker, generator
 
 
@@ -1707,7 +1726,7 @@ def _linkedin_sources(settings: Any, pool: Any, tasks: Any) -> Any:
     )
     from bot.acquisition.apify_source import PostgresSourceRunStore
 
-    runs, config = PostgresSourceRunStore(pool), settings.linkedin_config()
+    runs, config = tasks.runs(PostgresSourceRunStore(pool)), settings.linkedin_config()
     return LinkedInSources(ApifyLinkedInPeople(runs, tasks.http, config, sleep=tasks.sleep),
                            ApifyLinkedInCompanies(runs, tasks.http, config, sleep=tasks.sleep))
 

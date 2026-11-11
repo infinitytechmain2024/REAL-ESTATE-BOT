@@ -27,6 +27,7 @@ from bot.campaign import runner as runner_module
 from bot.campaign.final_report import FinalReporter
 from bot.campaign.reach import (
     MemoryReachStore,
+    ReachCampaign,
     ReachConfig,
     ReachQuery,
     ReachWorker,
@@ -130,20 +131,24 @@ def ledger():
 
 
 async def world(api: Api, *, platforms: tuple[str, ...] = ("instagram", "tiktok"), max_targets: int = 3,
-                budget_usd: float = 5.0):
+                budget_usd: float = 5.0, linkedin_usd: float = 0.0, runs: MemorySourceRunStore | None = None,
+                store: MemoryApifySocialStore | None = None):
     campaigns = MemoryCampaignStore()
-    store = MemoryApifySocialStore()
+    store = store or MemoryApifySocialStore()
     tasks = ApifyTasks(apify_http(api))
-    runs = MemorySourceRunStore()
-    built = {"instagram": lambda: ApifyInstagramPosts(runs, tasks.http, IG, sleep=tasks.sleep, poll_seconds=0),
-             "tiktok": lambda: ApifyTikTokPosts(runs, tasks.http, TT, sleep=tasks.sleep, poll_seconds=0)}
+    runs = runs or MemorySourceRunStore()
+    guarded = tasks.runs(runs)
+    built = {"instagram": lambda: ApifyInstagramPosts(guarded, tasks.http, IG, sleep=tasks.sleep, poll_seconds=0),
+             "tiktok": lambda: ApifyTikTokPosts(guarded, tasks.http, TT, sleep=tasks.sleep, poll_seconds=0)}
     worker = ApifySocialWorker(store, campaigns, {p: built[p]() for p in platforms}, QueryPlanner(None), tasks,
-                               max_targets=max_targets, budget_usd=budget_usd)
+                               max_targets=max_targets, budget_usd=budget_usd, linkedin_usd=linkedin_usd)
     return campaigns, store, tasks, runs, worker
 
 
-async def new_campaign(campaigns: MemoryCampaignStore, store: MemoryApifySocialStore, text: str = LAND) -> str:
-    cid = await campaigns.create(plan_campaign(text), chat_id=-1, requested_by=7, source_text=text, actor="t")
+async def new_campaign(campaigns: MemoryCampaignStore, store: MemoryApifySocialStore, text: str = LAND,
+                       vertical: str = "real_estate") -> str:
+    plan = plan_campaign(text, vertical=vertical)  # type: ignore[arg-type]
+    cid = await campaigns.create(plan, chat_id=-1, requested_by=7, source_text=text, actor="t")
     store.campaigns[cid] = "planned"
     return cid
 
@@ -187,10 +192,11 @@ def test_max_targets_is_bounded() -> None:
 
 def test_targets_are_dealt_in_turn_and_never_above_the_budget() -> None:
     caps = {"instagram": 0.20, "tiktok": 0.15}
-    assert deal_targets(("instagram", "tiktok"), caps, 3, 0) == {"instagram": 2, "tiktok": 1}
+    assert deal_targets(("instagram", "tiktok"), caps, 3, None) == {"instagram": 2, "tiktok": 1}
     assert deal_targets(("tiktok",), caps, 3, 5) == {"tiktok": 3}
     assert deal_targets(("instagram", "tiktok"), caps, 3, 0.36) == {"instagram": 1, "tiktok": 1}
     assert deal_targets(("instagram",), caps, 3, 0.1) == {"instagram": 0}
+    assert deal_targets(("instagram",), caps, 3, -1.0) == {"instagram": 0}  # the budget is spent already
 
 
 # --- the Apify social worker ------------------------------------------------------------------------------------
@@ -228,12 +234,33 @@ async def test_over_budget_launches_nothing(ledger) -> None:
     api = Api(rows)
     campaigns, store, tasks, runs, worker = await world(api)
     cid = await new_campaign(campaigns, store)
-    await costs.record("api", cost_usd=5.0, campaign_id=cid)  # the campaign's budget is spent
+    await costs.record("api", cost_usd=5.0, campaign_id=cid)  # the campaign's budget is spent before planning
     await worker.tick()
+    await tasks.wait()
+    assert api.launches() == [] and runs.rows == {} and store.queries == []
+    assert {row["state"] for row in store.social.values()} == {"done"}
+
+    cid2 = await new_campaign(campaigns, store)
+    assert await worker.tick() == 1  # planned within the budget ...
+    await costs.record("api", cost_usd=5.0, campaign_id=cid2)  # ... spent by another stage before the runs
     await tasks.wait()
     assert api.launches() == [] and runs.rows == {}
     assert {q.state for q in store.queries} == {"skipped"}
-    assert {row["state"] for row in store.social.values()} == {"done"}
+    await tasks.http.aclose()
+
+
+async def test_targets_fit_what_is_left_and_leave_room_for_linkedin(ledger) -> None:
+    api = Api(rows)
+    campaigns, store, tasks, _runs, worker = await world(api, linkedin_usd=0.30)
+    homes = await new_campaign(campaigns, store)
+    await costs.record("api", cost_usd=4.6, campaign_id=homes)  # 0.40 left: one Instagram (0.20) + one TikTok (0.15)
+    investors = await new_campaign(campaigns, store, "Ищу инвесторов в недвижимость в Марбелье", vertical="investors")
+    await costs.record("api", cost_usd=4.6, campaign_id=investors)  # 0.40 - LinkedIn's 0.30: no Instagram run fits
+    await worker.tick()
+    await tasks.wait()
+    planned = {(q.campaign_id, q.platform) for q in store.queries}
+    assert sorted(planned) == sorted({(homes, "instagram"), (homes, "tiktok")})
+    assert len(api.launches()) == 2
     await tasks.http.aclose()
 
 
@@ -260,8 +287,8 @@ class Broken:
         raise self.exc
 
 
-@pytest.mark.parametrize("exc", [ValueError("all links rejected"), RuntimeError("db down")])
-async def test_a_source_error_is_an_empty_result_and_the_campaign_goes_on(ledger, exc: Exception) -> None:
+async def test_a_refused_input_is_an_empty_result_and_the_campaign_goes_on(ledger) -> None:
+    exc = ValueError("all links rejected")
     campaigns = MemoryCampaignStore()
     store = MemoryApifySocialStore()
     tasks = ApifyTasks(apify_http(Api()))
@@ -297,10 +324,10 @@ async def test_shutdown_waits_for_the_launch_in_flight_then_stops(ledger) -> Non
     await new_campaign(campaigns, store)
     await worker.tick()  # returns at once: the run is a background task
     for _ in range(50):
-        if tasks.http.launching:
+        if tasks.launching:
             break
         await asyncio.sleep(0)
-    assert tasks.http.launching == 1
+    assert tasks.launching == 1
     closing = asyncio.create_task(tasks.aclose(timeout=5))
     await asyncio.sleep(0.01)
     assert not closing.done()  # waits for the POST's answer
@@ -415,12 +442,13 @@ def li_rows(n: int) -> list[dict[str, Any]]:
     return [person(1), person(2)] if n == 1 else [company(1)]
 
 
-async def reach_world(api: Api, *, linkedin_apify: bool = True):
+async def reach_world(api: Api, *, linkedin_apify: bool = True, campaign: ReachCampaign = LI_CAMPAIGN):
     tasks = ApifyTasks(apify_http(api))
     runs = MemorySourceRunStore()
-    sources = LinkedInSources(ApifyLinkedInPeople(runs, tasks.http, LI_CONFIG, sleep=tasks.sleep, poll_seconds=0),
-                              ApifyLinkedInCompanies(runs, tasks.http, LI_CONFIG, sleep=tasks.sleep, poll_seconds=0))
-    store = MemoryReachStore([LI_CAMPAIGN])
+    guarded = tasks.runs(runs)
+    sources = LinkedInSources(ApifyLinkedInPeople(guarded, tasks.http, LI_CONFIG, sleep=tasks.sleep, poll_seconds=0),
+                              ApifyLinkedInCompanies(guarded, tasks.http, LI_CONFIG, sleep=tasks.sleep, poll_seconds=0))
+    store = MemoryReachStore([campaign])
     searcher = FakeSearcher()
     worker = ReachWorker(store, searcher, FakeJudge(),
                          config=ReachConfig(acquisition_mode="apify", linkedin_apify=linkedin_apify,
@@ -504,3 +532,119 @@ async def test_instagram_and_tiktok_sources_in_the_summary_and_the_final_report(
     assert "Instagram — 3 поста" in text and "TikTok — 2 поста" in text
     report = await FinalReporter().build("Участок в Марбелье", Request(), [], [], sources, [])
     assert report
+
+
+# --- review fixes: the whole launch is guarded, SIGTERM stops new launches at once --------------------------
+
+
+class SlowSaveRuns(MemorySourceRunStore):
+    """``save_run`` yields to the loop, as asyncpg does (pool, transaction, execute)."""
+
+    async def save_run(self, run: Any, run_id: str, dataset_id: str | None) -> None:
+        await asyncio.sleep(0.01)
+        await super().save_run(run, run_id, dataset_id)
+
+
+async def until(check: Any, steps: int = 200) -> None:
+    for _ in range(steps):
+        if check():
+            return
+        await asyncio.sleep(0.001)
+    raise AssertionError("never happened")
+
+
+async def test_a_stop_between_the_201_and_save_run_still_saves_the_run_id(ledger) -> None:
+    gate = asyncio.Event()
+    api = Api(rows, gate=gate, run_status="RUNNING")
+    runs = SlowSaveRuns()
+    campaigns, store, tasks, _runs, worker = await world(api, platforms=("instagram",), max_targets=2, runs=runs)
+    await new_campaign(campaigns, store)
+    await worker.tick()
+    await until(lambda: tasks.launching == 1 and api.calls)  # the POST is in flight
+    closing = asyncio.create_task(tasks.aclose(timeout=5))
+    await asyncio.sleep(0.005)
+    gate.set()  # the 201 comes while the service stops; save_run then takes its time
+    await closing
+    [row] = runs.rows.values()
+    assert row["status"] == "running" and row["run_id"] == "RUN1"  # resumable, never launch_unconfirmed
+    assert len(api.launches()) == 1
+    await tasks.http.aclose()
+
+
+async def test_sigterm_stops_new_launches_at_once(ledger) -> None:
+    gate = asyncio.Event()
+    api = Api(rows, gate=gate)
+    campaigns, store, tasks, runs, worker = await world(api, platforms=("instagram", "tiktok"), max_targets=3)
+    await new_campaign(campaigns, store)
+    await worker.tick()
+    await until(lambda: tasks.launching == 1 and api.calls)
+    stop = asyncio.Event()
+    closer = asyncio.create_task(runner_module._close_on_stop(stop, tasks))
+    runner_module._on_sigterm(stop, tasks)  # what the SIGTERM handler does
+    assert stop.is_set() and tasks.stopping
+    assert await worker.tick() == 0 and not tasks.spawn("x", asyncio.sleep(0))  # no new task
+    gate.set()
+    await closer
+    assert len(api.launches()) == 1  # the one in flight; the other two targets never launched
+    assert [r["status"] for r in runs.rows.values()] == ["succeeded"] or len(runs.rows) == 1
+    # a source called after the stop gets «busy» from the guarded journal: no POST, no row changed
+    source = worker.sources["tiktok"]
+    outcome = await source.run("c-after", save=lambda posts, run_id: asyncio.sleep(0, 0), hashtags=["casa"])
+    assert outcome.outcome.status == "busy" and len(api.launches()) == 1
+    await tasks.http.aclose()
+
+
+class FailingRecover(MemoryApifySocialStore):
+    async def recover_apify(self) -> int:
+        raise RuntimeError("db down")
+
+
+async def test_a_failed_recovery_is_logged_and_no_platform_is_marked_done(ledger, caplog) -> None:
+    store = FailingRecover()
+    campaigns, store, tasks, _runs, worker = await world(Api(rows), platforms=("instagram",), store=store)
+    await new_campaign(campaigns, store)
+    stop = asyncio.Event()
+    serving = asyncio.create_task(worker.serve(0.01, stop))
+    await asyncio.sleep(0.05)
+    stop.set()
+    await serving
+    assert "social_apify.recover_failed" in caplog.text
+    assert store.social == {} and store.queries == []  # nothing planned, nothing marked done
+    await tasks.http.aclose()
+
+
+class FlakySave(MemoryApifySocialStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failures = 1
+
+    async def save_posts(self, campaign_id: str, vertical: str, posts: Any) -> int:
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("db down")
+        return await super().save_posts(campaign_id, vertical, posts)
+
+
+async def test_a_database_error_while_importing_gives_the_paid_target_back(ledger) -> None:
+    api = Api(rows)
+    store = FlakySave()
+    campaigns, store, tasks, _runs, worker = await world(api, platforms=("instagram",), max_targets=1, store=store)
+    cid = await new_campaign(campaigns, store)
+    await worker.tick()
+    await tasks.wait()
+    assert [q.state for q in store.queries] == ["planned"]  # not failed: the run is paid
+    assert store.social[(cid, "instagram")]["state"] == "pending"
+    await worker.tick()  # the next tick resumes the same run: its import, no second launch
+    await tasks.wait()
+    assert [q.state for q in store.queries] == ["done"] and len(api.launches()) == 1 and store.posts
+    await tasks.http.aclose()
+
+
+async def test_linkedin_without_a_place_is_not_run(ledger, caplog) -> None:
+    api = Api(li_rows)
+    nowhere = ReachCampaign("00000000-0000-0000-0000-000000000009", "  ", {}, ("en",))
+    tasks, _runs, _store, _searcher, worker = await reach_world(api, campaign=nowhere)
+    await worker.tick()
+    await tasks.wait()
+    assert api.launches() == [] and "campaign.reach.linkedin_no_location" in caplog.text
+    await tasks.http.aclose()

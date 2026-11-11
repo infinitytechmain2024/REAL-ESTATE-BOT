@@ -19,14 +19,19 @@ line and the summary read it as they read the browser search:
   ``CAMPAIGN_SOCIAL_GRACE_SECONDS`` (``runner._drain``).
 
 **Out of the tick.** The paid runs are background tasks (:class:`ApifyTasks`), never awaited by a worker's tick and
-never under ``wait_for``: a tick only plans and hands a campaign's targets to its task. On shutdown
-(:meth:`ApifyTasks.aclose`) no new target starts, a pause after a 429 ends at once (the launch was refused: nothing
-started), and a launch POST in flight is awaited to its answer before anything is cancelled, so its run id is saved
-and no row is left ``launching`` (which would close ``launch_unconfirmed`` with the cap booked). A task cancelled
-after that is awaiting a known run or importing it: the next start resumes the same run (``ApifySocialRun``).
+never under ``wait_for``: a tick only plans and hands a campaign's targets to its task. The launch of a run is a
+critical section of the run journal (:meth:`ApifyTasks.runs`): from ``mark_launching`` (the ``pending:``
+placeholder) through the POST to ``save_run`` (the real run id), ``unmark_launching`` (refused, nothing started) or
+``finish`` (a lost answer, booked at its cap). On SIGTERM (:meth:`ApifyTasks.begin_stop`) no new target and no new
+launch starts and a pause after a 429 ends at once; :meth:`ApifyTasks.aclose` waits for every open section to close
+before it cancels anything, so a row is never left ``launching`` by a stop (which would end ``launch_unconfirmed``
+with the cap booked while the run goes on in Apify). A task cancelled after that is awaiting a known run or
+importing it: the next start plans the target again (``recover_apify``) and ``ApifySocialRun`` resumes the same run
+by its input, never launches a second one.
 
-An error of a source -- a refused input (``ValueError``), an Apify failure, a database error -- fails that target
-only, with a log line; the campaign goes on.
+A refused input (``ValueError``, «all links rejected» included) or an Apify failure fails that target only, with a
+log line. Any other error (the database while the dataset is imported) gives the target back (``planned``): the run
+is paid, so the next tick resumes it. The campaign goes on either way.
 """
 
 from __future__ import annotations
@@ -55,50 +60,85 @@ log = logging.getLogger(__name__)
 
 PLATFORMS = ("instagram", "tiktok")
 MAX_TARGETS = 10
-# How long shutdown waits for a launch POST in flight (above ApifyHttp's 30 s request timeout).
+# How long shutdown waits for a launch in flight (its POST has ApifyHttp's 30 s timeout, plus the journal writes).
 SHUTDOWN_SECONDS = 45.0
 
 
 # --- background runs -------------------------------------------------------------------------------------------
 
 
-class _GuardedHttp:
-    """``ApifyHttp`` that counts the launches (POST) in flight, so shutdown can wait for their answers."""
+class _GuardedRuns:
+    """A ``SourceRunStore`` whose launches are critical sections of :class:`ApifyTasks` (see the module notes)."""
 
-    def __init__(self, http: Any) -> None:
-        self._http = http
-        self.launching = 0
-        self._idle = asyncio.Event()
-        self._idle.set()
+    def __init__(self, store: Any, tasks: ApifyTasks) -> None:
+        self._store, self._tasks = store, tasks
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._http, name)
+        return getattr(self._store, name)
 
     def __repr__(self) -> str:
-        return repr(self._http)
+        return repr(self._store)
 
-    async def launch(self, *args: Any, **kwargs: Any) -> Any:
-        self.launching += 1
-        self._idle.clear()
+    async def mark_launching(self, run: Any) -> str | None:
+        if self._tasks.stopping:
+            return None  # the service stops: no new launch (the run reads it as «busy», nothing changes)
+        self._tasks._enter(run.id)
         try:
-            return await self._http.launch(*args, **kwargs)
-        finally:
-            self.launching -= 1
-            if not self.launching:
-                self._idle.set()
+            token = await self._store.mark_launching(run)
+        except BaseException:
+            self._tasks._leave(run.id)
+            raise
+        if token is None:
+            self._tasks._leave(run.id)
+        return token
 
-    async def idle(self) -> None:
-        await self._idle.wait()
+    async def save_run(self, run: Any, run_id: str, dataset_id: str | None) -> None:
+        try:
+            await self._store.save_run(run, run_id, dataset_id)
+        finally:
+            self._tasks._leave(run.id)
+
+    async def unmark_launching(self, run: Any, token: str, *, refund: bool = False) -> None:
+        try:
+            await self._store.unmark_launching(run, token, refund=refund)
+        finally:
+            self._tasks._leave(run.id)
+
+    async def finish(self, run: Any, status: str, *, billed_usd: float | None = None, error: str | None = None) -> None:
+        try:
+            await self._store.finish(run, status, billed_usd=billed_usd, error=error)
+        finally:
+            self._tasks._leave(run.id)
 
 
 class ApifyTasks:
     """The background tasks of the paid Apify runs of this process (social posts, LinkedIn): one per key."""
 
     def __init__(self, http: Any) -> None:
-        self.http = _GuardedHttp(http)
+        self.http = http
         self.stopping = False
         self._stop = asyncio.Event()
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._launching: set[Any] = set()  # run journal rows between mark_launching and save_run / unmark / finish
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    def runs(self, store: Any) -> Any:
+        """``store`` (a ``SourceRunStore``) with its launches guarded: every source of this process is built on it."""
+        return _GuardedRuns(store, self)
+
+    @property
+    def launching(self) -> int:
+        return len(self._launching)
+
+    def _enter(self, row_id: Any) -> None:
+        self._launching.add(row_id)
+        self._idle.clear()
+
+    def _leave(self, row_id: Any) -> None:
+        self._launching.discard(row_id)
+        if not self._launching:
+            self._idle.set()
 
     def running(self, key: str) -> bool:
         task = self._tasks.get(key)
@@ -135,15 +175,19 @@ class ApifyTasks:
             await asyncio.gather(*list(self._tasks.values()), return_exceptions=True)
             await asyncio.sleep(0)  # the done callbacks drop them
 
-    async def aclose(self, timeout: float = SHUTDOWN_SECONDS) -> None:
-        """No new run; a launch POST in flight gets its answer (at most ``timeout``); then the rest is cancelled."""
+    def begin_stop(self) -> None:
+        """SIGTERM: no new target, no new launch, and a 429 pause ends now (synchronous: a signal handler calls it)."""
         self.stopping = True
         self._stop.set()
+
+    async def aclose(self, timeout: float = SHUTDOWN_SECONDS) -> None:
+        """Stop; every launch section in flight closes (at most ``timeout``); then the rest is cancelled."""
+        self.begin_stop()
         with suppress(TimeoutError):
             async with asyncio.timeout(timeout):
-                await self.http.idle()
-        if self.http.launching:
-            log.warning("apify_tasks.launch_cut", extra={"launches": self.http.launching})
+                await self._idle.wait()
+        if self._launching:
+            log.warning("apify_tasks.launch_cut", extra={"launches": len(self._launching)})
         tasks = list(self._tasks.values())
         for task in tasks:
             task.cancel()
@@ -265,14 +309,28 @@ class Campaigns(Protocol):
     async def get(self, campaign_id: str) -> Any: ...
 
 
+async def remaining_usd(campaign_id: str, budget_usd: float) -> float | None:
+    """What is left of the campaign's ``CAMPAIGN_BUDGET_USD`` (its ledger's spend taken off); None: no limit."""
+    sink = costs.ledger()
+    if budget_usd <= 0 or sink is None:
+        return None
+    try:
+        spent = await sink.spent(campaign_id)
+    except Exception:  # noqa: BLE001 - as costs.over_budget: an unreadable ledger never stops a campaign
+        log.warning("social_apify.spent_failed", extra={"campaign_id": campaign_id})
+        spent = 0.0
+    return budget_usd - spent
+
+
 def deal_targets(platforms: Sequence[str], caps: Mapping[str, float], max_targets: int,
-                 budget_usd: float) -> dict[str, int]:
-    """Targets per platform: ``max_targets`` dealt in turn; with a budget, only while the run caps fit in it."""
+                 budget_usd: float | None) -> dict[str, int]:
+    """Targets per platform: ``max_targets`` dealt in turn; with a budget (None: none), only while the run caps fit
+    in it."""
     counts = dict.fromkeys(platforms, 0)
     booked = 0.0
     for n in range(max_targets if platforms else 0):
         platform = platforms[n % len(platforms)]
-        if budget_usd > 0 and booked + caps[platform] > budget_usd + 1e-9:
+        if budget_usd is not None and booked + caps[platform] > budget_usd + 1e-9:
             break
         booked += caps[platform]
         counts[platform] += 1
@@ -283,7 +341,10 @@ class ApifySocialWorker:
     """Plans each open campaign's Instagram/TikTok targets once and runs them in a background task."""
 
     def __init__(self, store: ApifySocialStore, campaigns: Campaigns, sources: Mapping[str, Any],
-                 planner: QueryPlanner, tasks: ApifyTasks, *, max_targets: int = 3, budget_usd: float = 0.0) -> None:
+                 planner: QueryPlanner, tasks: ApifyTasks, *, max_targets: int = 3, budget_usd: float = 0.0,
+                 linkedin_usd: float = 0.0) -> None:
+        """``linkedin_usd``: the caps of the LinkedIn runs the reach makes for an investor search (P1.8), kept out of
+        the budget the Instagram / TikTok targets are dealt from; 0 without them."""
         unknown = set(sources) - set(PLATFORMS)
         if unknown or not sources:
             raise ValueError("apify social sources are instagram and/or tiktok")
@@ -291,20 +352,31 @@ class ApifySocialWorker:
             raise ValueError(f"APIFY_SOCIAL_MAX_TARGETS must be 1-{MAX_TARGETS}")
         self.store, self.campaigns, self.planner, self.tasks = store, campaigns, planner, tasks
         self.sources = {p: sources[p] for p in PLATFORMS if p in sources}  # Instagram first
-        self.max_targets, self.budget_usd = max_targets, budget_usd
+        self.max_targets, self.budget_usd, self.linkedin_usd = max_targets, budget_usd, linkedin_usd
+        self._recovered = False
 
     @property
     def platforms(self) -> tuple[str, ...]:
         return tuple(self.sources)
 
-    async def serve(self, poll_seconds: float, stop: asyncio.Event) -> None:
-        with suppress(Exception):
+    async def recover(self) -> bool:
+        """Startup: targets a stop left running are planned again. Until that works no tick runs: a platform with a
+        stale ``running`` target must not be taken for done."""
+        try:
             recovered = await self.store.recover_apify()
-            if recovered:
-                log.warning("social_apify.recovered", extra={"queries": recovered})
+        except Exception:
+            log.exception("social_apify.recover_failed")
+            return False
+        if recovered:
+            log.warning("social_apify.recovered", extra={"queries": recovered})
+        self._recovered = True
+        return True
+
+    async def serve(self, poll_seconds: float, stop: asyncio.Event) -> None:
         while not stop.is_set():
             try:
-                await self.tick()
+                if self._recovered or await self.recover():
+                    await self.tick()
             except Exception:  # a database outage delays the runs, it never ends the loop
                 log.exception("social_apify.tick_failed")
             with suppress(TimeoutError):
@@ -330,20 +402,28 @@ class ApifySocialWorker:
 
     async def _plan(self, campaign: Any) -> list[str]:
         """The platforms with targets still to run; the first sight plans them (one round, never again)."""
-        shares = deal_targets(self.platforms, {p: s.config.max_charge_usd for p, s in self.sources.items()},
-                              self.max_targets, self.budget_usd)
+        shares: dict[str, int] | None = None
         todo: list[str] = []
         for platform in self.platforms:
             social = await self.store.campaign_social(campaign.id, platform)
             if social.state == "done":
                 continue
             if social.rounds == 0:
+                shares = shares or await self._shares(campaign)
                 await self._first_round(campaign, platform, shares[platform])
             if await self.store.next_query(campaign.id, platform) is None:
                 await self.store.set_campaign_social(campaign.id, platform, "done")
                 continue
             todo.append(platform)
         return todo
+
+    async def _shares(self, campaign: Any) -> dict[str, int]:
+        """Targets per platform within what is left of the budget, the LinkedIn runs of an investor search kept out."""
+        left = await remaining_usd(campaign.id, self.budget_usd)
+        if left is not None and campaign.plan.vertical in ("investors", "both"):
+            left -= self.linkedin_usd
+        return deal_targets(self.platforms, {p: s.config.max_charge_usd for p, s in self.sources.items()},
+                            self.max_targets, left)
 
     async def _first_round(self, campaign: Any, platform: str, count: int) -> None:
         queries = []
@@ -384,11 +464,16 @@ class ApifySocialWorker:
                 return True
             try:
                 result = await self._run(campaign, platform, query)
-            except Exception as exc:  # noqa: BLE001 - a refused input (ValueError), the database: this target only
-                log.warning("social_apify.target_failed %s", type(exc).__name__,
+            except ValueError as exc:  # a refused input («all links rejected» too): this target cannot run
+                log.warning("social_apify.target_refused %s", type(exc).__name__,
                             extra={"campaign_id": campaign.id, "platform": platform})
                 await self.store.finish_query(query.id, "failed", error=type(exc).__name__)
                 return True
+            except Exception as exc:  # noqa: BLE001 - the database while importing: the run is paid, resume it later
+                log.warning("social_apify.target_interrupted %s", type(exc).__name__,
+                            extra={"campaign_id": campaign.id, "platform": platform})
+                await self.store.finish_query(query.id, "planned")
+                return False
         outcome = result.outcome
         if outcome.status in ("retry", "busy"):
             await self.store.finish_query(query.id, "planned")
@@ -418,4 +503,4 @@ class ApifySocialWorker:
 
 
 __all__ = ["PLATFORMS", "ApifySocialWorker", "ApifyTasks", "MemoryApifySocialStore", "PostgresApifySocialStore",
-           "deal_targets", "post_title"]
+           "deal_targets", "post_title", "remaining_usd"]

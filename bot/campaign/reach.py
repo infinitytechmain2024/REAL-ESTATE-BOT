@@ -644,7 +644,10 @@ class ReachWorker:
         from bot.acquisition.apify_linkedin import REAL_ESTATE_FUNCTION_ID, LinkedInSearch
         from bot.utils import costs
 
-        place = campaign.location[:100]
+        place = " ".join(campaign.location.split())[:100]
+        if not place:  # a LinkedIn search without a place would be paid for people anywhere: not run
+            log.warning("campaign.reach.linkedin_no_location", extra={"campaign_id": campaign.id})
+            return
         runs = ((self.linkedin.people, ("real estate investor", (REAL_ESTATE_FUNCTION_ID,))),
                 (self.linkedin.companies, ("real estate investment", ())))
         again = False
@@ -656,7 +659,7 @@ class ReachWorker:
                     log.info("campaign.reach.linkedin_over_budget", extra={"campaign_id": campaign.id})
                     return
                 try:
-                    search = LinkedInSearch(words, locations=(place,) if place.strip() else (), function_ids=functions)
+                    search = LinkedInSearch(words, locations=(place,), function_ids=functions)
                     outcome = await source.run(campaign, search, self.store, self.judge)
                 except Exception as exc:  # noqa: BLE001 - a refused input, Apify or the database: the reach goes on
                     log.warning("campaign.reach.linkedin_failed %s", type(exc).__name__,
