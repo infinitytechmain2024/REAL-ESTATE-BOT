@@ -1,0 +1,190 @@
+{
+  "name": "g1_land_madrid",
+  "id": "G1",
+  "role": "buyer_land",
+  "language": "ru",
+  "mode": "real_estate",
+  "task": "нужен участок в мадриде под покупку, от 2000 м2",
+  "task_source": "text",
+  "voice": false,
+  "confirm_card": true,
+  "env": {},
+  "fixtures": "tests/fixtures/portals_live (Madrid, solares) — есть объекты",
+  "replies": {
+    "budget": [
+      {
+        "text": "до 3 млн евро",
+        "weight": 4
+      },
+      {
+        "text": "примерно до 1,5 млн €",
+        "weight": 2
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      },
+      {
+        "text": "до 50 тысяч евро",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "place": [
+      {
+        "text": "Мадрид",
+        "weight": 4
+      },
+      {
+        "text": "провинция Мадрид, можно пригороды",
+        "weight": 2
+      },
+      {
+        "text": "не знаю, где-нибудь рядом с Мадридом",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "district": [
+      {
+        "text": "вся провинция Мадрид",
+        "weight": 3
+      },
+      {
+        "text": "север: Алькобендас, Сан-Себастьян-де-лос-Рейес",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "area": [
+      {
+        "text": "от 2000 м² участка",
+        "weight": 4
+      },
+      {
+        "text": "от 500 м²",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "property_type": [
+      {
+        "text": "участок, земля",
+        "weight": 1
+      }
+    ],
+    "deal": [
+      {
+        "press": "Покупка",
+        "weight": 4
+      },
+      {
+        "text": "аренда",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "details": [
+      {
+        "text": "под дом для себя",
+        "weight": 2
+      },
+      {
+        "text": "пока только в инвестиции",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "must_have": [
+      {
+        "text": "чтобы был доступ к воде и свету",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 2,
+        "tag": "any"
+      }
+    ],
+    "deviation": [
+      {
+        "press": "Только точные",
+        "weight": 3
+      },
+      {
+        "press": "±10 %",
+        "weight": 2
+      },
+      {
+        "text": "не знаю, на ваше усмотрение",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "clarify": [
+      {
+        "text": "покупка участка от 2000 м², как писал вначале",
+        "weight": 1
+      }
+    ],
+    "card": [
+      {
+        "press": "task:launch",
+        "weight": 8
+      },
+      {
+        "text": "и с ценой обязательно",
+        "weight": 1,
+        "tag": "edit"
+      }
+    ]
+  },
+  "truth": {
+    "objects": {
+      "hard": {
+        "property_type": {
+          "value": "land",
+          "from": "task"
+        },
+        "deal": {
+          "value": "sale",
+          "from": "task"
+        },
+        "place": {
+          "value": {
+            "province": "Madrid"
+          },
+          "from": "task",
+          "note": "провинция Мадрид; город Мадрид — частный случай"
+        },
+        "area_min_m2": {
+          "value": 2000,
+          "from": "task",
+          "kind": "plot"
+        },
+        "price_max_eur": {
+          "value": null,
+          "from": "budget",
+          "note": "если пользователь назвал бюджет — он; «Не важно» — не проверяется"
+        }
+      },
+      "soft": [
+        "цена указана",
+        "телефон или контакт продавца"
+      ],
+      "not": [
+        "площадь дома вместо площади участка",
+        "аренда"
+      ]
+    }
+  }
+}

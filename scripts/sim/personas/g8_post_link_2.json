@@ -1,0 +1,65 @@
+{
+  "name": "g8_post_link_2",
+  "id": "G8",
+  "role": "post_link",
+  "language": "unknown",
+  "mode": "post_link",
+  "task": "",
+  "task_source": "owner_O7",
+  "voice": false,
+  "confirm_card": false,
+  "env": {},
+  "fixtures": "ссылку даёт владелец (O7); второй пост FB, другая тема или язык. До записи прогон не запускается",
+  "replies": {
+    "card": [
+      {
+        "press": "task:launch",
+        "weight": 8
+      }
+    ],
+    "ticket": [
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "place": [
+      {
+        "text": "Испания",
+        "weight": 1
+      }
+    ],
+    "investor_role": [
+      {
+        "press": "Ищу деньги",
+        "weight": 1
+      }
+    ],
+    "clarify": [
+      {
+        "text": "нужны люди из комментариев, которые хотят вложиться",
+        "weight": 1
+      }
+    ]
+  },
+  "truth": {
+    "leads": {
+      "roles": [
+        "комментатор с намерением инвестировать или купить по теме поста"
+      ],
+      "geo": [
+        "как в посте"
+      ],
+      "not": [
+        "продаёт сам («продаю», «vendo»)",
+        "агент/реклама услуг",
+        "спам, эмодзи без текста",
+        "автор поста"
+      ],
+      "soft": [
+        "есть контакт или профиль для связи"
+      ]
+    }
+  }
+}

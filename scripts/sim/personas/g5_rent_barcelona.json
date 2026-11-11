@@ -1,0 +1,192 @@
+{
+  "name": "g5_rent_barcelona",
+  "id": "G5",
+  "role": "renter",
+  "language": "mixed",
+  "mode": "real_estate",
+  "task": "снять piso в Барселоне до 1500 в месяц",
+  "task_source": "text",
+  "voice": false,
+  "confirm_card": false,
+  "env": {},
+  "fixtures": "нужны записи порталов по Barcelona alquiler",
+  "replies": {
+    "budget": [
+      {
+        "text": "до 1500 евро в месяц",
+        "weight": 3
+      },
+      {
+        "text": "1500 €/mes max",
+        "weight": 1
+      },
+      {
+        "text": "до 2000",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "place": [
+      {
+        "text": "Барселона",
+        "weight": 3
+      },
+      {
+        "text": "Barcelona ciudad",
+        "weight": 1
+      }
+    ],
+    "district": [
+      {
+        "text": "вся Барселона",
+        "weight": 2
+      },
+      {
+        "text": "Gràcia, Eixample",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "rooms": [
+      {
+        "text": "от 1 спальни",
+        "weight": 2
+      },
+      {
+        "text": "2",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "area": [
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "property_type": [
+      {
+        "text": "квартира",
+        "weight": 1
+      }
+    ],
+    "deal": [
+      {
+        "press": "Аренда",
+        "weight": 3
+      },
+      {
+        "text": "купить",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "term": [
+      {
+        "text": "на год",
+        "weight": 3
+      },
+      {
+        "text": "от 6 месяцев",
+        "weight": 1
+      },
+      {
+        "text": "не знаю пока",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "details": [
+      {
+        "text": "на год",
+        "weight": 2
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "must_have": [
+      {
+        "text": "можно с животными",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 2,
+        "tag": "any"
+      }
+    ],
+    "deviation": [
+      {
+        "press": "Только точные",
+        "weight": 3
+      },
+      {
+        "press": "±10 %",
+        "weight": 2
+      },
+      {
+        "text": "не знаю, на ваше усмотрение",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "clarify": [
+      {
+        "text": "аренда, до 1500 € в месяц",
+        "weight": 1
+      }
+    ],
+    "card": [
+      {
+        "press": "task:launch",
+        "weight": 8
+      }
+    ]
+  },
+  "truth": {
+    "objects": {
+      "hard": {
+        "property_type": {
+          "value": "apartment",
+          "from": "task"
+        },
+        "deal": {
+          "value": "rent",
+          "from": "task"
+        },
+        "place": {
+          "value": {
+            "city": "Barcelona"
+          },
+          "from": "task"
+        },
+        "price_max_eur": {
+          "value": 1500,
+          "from": "task",
+          "period": "month",
+          "note": "месячная цена; цена без валюты — не цена"
+        }
+      },
+      "soft": [
+        "долгосрочная аренда"
+      ],
+      "not": [
+        "посуточно / сезонно",
+        "комната вместо квартиры",
+        "продажа"
+      ]
+    }
+  }
+}

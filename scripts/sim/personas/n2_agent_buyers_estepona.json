@@ -1,0 +1,123 @@
+{
+  "name": "n2_agent_buyers_estepona",
+  "id": "N2",
+  "role": "agent_buyers",
+  "language": "en",
+  "mode": "investors",
+  "task": "Im an agent, have a 4 bed villa in Estepona asking 1.2M EUR, need serious buyers or investors for it",
+  "task_source": "text",
+  "voice": false,
+  "confirm_card": false,
+  "env": {},
+  "fixtures": "нужны записи групп/комментариев Apify по Costa del Sol",
+  "replies": {
+    "ticket": [
+      {
+        "text": "about 1.2 million euros",
+        "weight": 3
+      },
+      {
+        "text": "от 1 млн €",
+        "weight": 1
+      },
+      {
+        "text": "100k",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "place": [
+      {
+        "text": "Estepona, Costa del Sol",
+        "weight": 3
+      },
+      {
+        "text": "Spain, buyers can be from anywhere",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "investor_who": [
+      {
+        "text": "private buyers and real estate investors",
+        "weight": 3
+      },
+      {
+        "text": "anyone",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "investor_role": [
+      {
+        "press": "Ищу деньги",
+        "weight": 2
+      },
+      {
+        "text": "I sell, I need a buyer",
+        "weight": 2
+      }
+    ],
+    "details": [
+      {
+        "text": "ready villa, 4 bedrooms, pool, sea view",
+        "weight": 2
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "term": [
+      {
+        "text": "within 6 months",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "clarify": [
+      {
+        "text": "I sell one villa for 1.2M EUR and need buyers",
+        "weight": 1
+      }
+    ],
+    "card": [
+      {
+        "press": "task:launch",
+        "weight": 8
+      }
+    ]
+  },
+  "truth": {
+    "leads": {
+      "roles": [
+        "покупатель жилья с бюджетом ≥ ~1 млн €",
+        "инвестор в виллы/недвижимость Коста-дель-Соль"
+      ],
+      "geo": [
+        "Estepona",
+        "Marbella",
+        "Costa del Sol",
+        "Málaga"
+      ],
+      "not": [
+        "другой агент или продавец",
+        "ищет аренду",
+        "ищет дешёвое жильё (< 500 тыс €)"
+      ],
+      "soft": [
+        "есть контакт или профиль"
+      ],
+      "ticket_eur": {
+        "min": 1000000,
+        "max": null,
+        "from": "task"
+      }
+    }
+  }
+}

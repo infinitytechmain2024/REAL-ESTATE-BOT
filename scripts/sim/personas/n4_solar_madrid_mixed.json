@@ -1,0 +1,154 @@
+{
+  "name": "n4_solar_madrid_mixed",
+  "id": "N4",
+  "role": "buyer_land",
+  "language": "mixed",
+  "mode": "real_estate",
+  "task": "solar urbano в Мадриде, compra, hasta 600k, мин 500 м2",
+  "task_source": "text",
+  "voice": false,
+  "confirm_card": false,
+  "env": {},
+  "fixtures": "tests/fixtures/portals_live (Madrid, solares) — объекты есть",
+  "replies": {
+    "budget": [
+      {
+        "text": "hasta 600.000 €",
+        "weight": 3
+      },
+      {
+        "text": "до 600 тыс €",
+        "weight": 1
+      }
+    ],
+    "place": [
+      {
+        "text": "Madrid",
+        "weight": 2
+      },
+      {
+        "text": "Comunidad de Madrid",
+        "weight": 1
+      }
+    ],
+    "district": [
+      {
+        "text": "toda la Comunidad de Madrid",
+        "weight": 2
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "area": [
+      {
+        "text": "mínimo 500 m2 de parcela",
+        "weight": 3
+      },
+      {
+        "text": "от 5000",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "property_type": [
+      {
+        "text": "solar / участок",
+        "weight": 1
+      }
+    ],
+    "deal": [
+      {
+        "press": "Покупка",
+        "weight": 3
+      }
+    ],
+    "details": [
+      {
+        "text": "para construir una casa",
+        "weight": 2
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "must_have": [
+      {
+        "text": "urbano, con licencia posible",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "deviation": [
+      {
+        "press": "Только точные",
+        "weight": 3
+      },
+      {
+        "press": "±10 %",
+        "weight": 2
+      },
+      {
+        "text": "не знаю, на ваше усмотрение",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "clarify": [
+      {
+        "text": "500 m2 mínimo, hasta 600k",
+        "weight": 1
+      }
+    ],
+    "card": [
+      {
+        "press": "task:launch",
+        "weight": 8
+      }
+    ]
+  },
+  "truth": {
+    "objects": {
+      "hard": {
+        "property_type": {
+          "value": "land",
+          "from": "task"
+        },
+        "deal": {
+          "value": "sale",
+          "from": "task"
+        },
+        "place": {
+          "value": {
+            "province": "Madrid"
+          },
+          "from": "task"
+        },
+        "price_max_eur": {
+          "value": 600000,
+          "from": "task"
+        },
+        "area_min_m2": {
+          "value": 500,
+          "from": "task",
+          "kind": "plot"
+        }
+      },
+      "soft": [
+        "urbano (не rústico)"
+      ],
+      "not": [
+        "площадь дома",
+        "аренда"
+      ]
+    }
+  }
+}
