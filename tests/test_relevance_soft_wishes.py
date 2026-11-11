@@ -47,14 +47,17 @@ def chat(content: str) -> httpx.Response:
 
 
 def model_answer(criteria: list[str], *, verdicts: dict[str, str] | None = None, overall: str = "near",
-                 deviation: str | None = "без вида на горы", wishes: bool = True) -> str:
+                 deviation: str | None = "без вида на горы", wishes: bool = True,
+                 wish_rows: object = ...) -> str:
     """What the model said in the pilot: every hard criterion passes, but «near» because a wish is not met."""
     verdicts = verdicts or {}
     rows = [{"name": n, "verdict": verdicts.get(n, "pass"),
              "quote": "Parcela en Madrid" if verdicts.get(n, "pass") != "unknown" else None, "note_ru": "ок"}
             for n in criteria]
     data = {"criteria": rows, "overall": overall, "deviation_ru": deviation, "confidence": 0.8}
-    if wishes:
+    if wish_rows is not ...:  # an explicit value, None included
+        data["wishes"] = wish_rows
+    elif wishes:
         data["wishes"] = [{"text": "вид на горы", "verdict": "fail", "quote": None},
                           {"text": "рядом со школой", "verdict": "unknown", "quote": None}]
     return json.dumps(data, ensure_ascii=False)
@@ -157,10 +160,83 @@ async def test_flag_on_hard_criteria_work_as_before(verdicts, overall, bucket, w
     assert (result.bucket, result.why) == (bucket, why)
 
 
-async def test_flag_on_a_soft_answer_without_wishes_is_still_read() -> None:
+async def test_flag_on_near_without_wishes_in_the_answer_stays_near() -> None:
+    # e.g. «в пригороде, а не в самом Мадриде»: the model's near is not about a wish, so it is kept.
     task = task_data(valencia(SPEC), review=True, soft_wishes=True)
-    review = await reviewer(True, [], wishes=False).review(task, FINDING)
-    assert review.overall == "match" and review.wishes == ()
+    review = await reviewer(True, [], wishes=False, deviation="в пригороде").review(task, FINDING)
+    assert review.overall == "near" and review.deviation_ru == "в пригороде" and review.wishes == ()
+    assert review_match(Match("exact"), review.to_dict()).bucket == "similar"
+
+
+async def test_flag_on_near_when_every_wish_is_met_stays_near() -> None:
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)
+    rows = [{"text": "вид на горы", "verdict": "pass", "quote": "vistas"},
+            {"text": "рядом со школой", "verdict": "pass", "quote": None}]
+    review = await reviewer(True, [], wish_rows=rows, deviation="таунхаус вместо дома").review(task, FINDING)
+    assert review.overall == "near" and review.deviation_ru == "таунхаус вместо дома"
+
+
+async def test_flag_on_near_in_a_task_without_wishes_stays_near() -> None:
+    task = task_data(valencia({**SPEC, "wishes": []}), review=True, soft_wishes=True)
+    assert "wishes" not in task
+    review = await reviewer(True, [], deviation="промоция из нескольких квартир").review(task, FINDING)
+    assert review.overall == "near" and review.wishes == ()  # the model's rows of wishes the task has not are dropped
+
+
+async def test_flag_on_an_unmet_weight_3_wish_keeps_near() -> None:
+    assert "weight 3" in SYSTEM_SOFT and "очень важно" in SYSTEM_SOFT
+    spec = {**SPEC, "wishes": [{"text": "вид на горы", "weight": 3}, {"text": "рядом со школой", "weight": 1}]}
+    task = task_data(valencia(spec), review=True, soft_wishes=True)
+    for verdict in ("fail", "unknown"):
+        rows = [{"text": "вид на горы", "verdict": verdict, "quote": None},
+                {"text": "рядом со школой", "verdict": "fail", "quote": None}]
+        review = await reviewer(True, [], wish_rows=rows).review(task, FINDING)
+        assert review.overall == "near" and review.deviation_ru == "без вида на горы"
+    # the weight-3 wish met, only the weight-1 one not: exact
+    rows = [{"text": "вид на горы", "verdict": "pass", "quote": "vistas"},
+            {"text": "рядом со школой", "verdict": "fail", "quote": None}]
+    assert (await reviewer(True, [], wish_rows=rows).review(task, FINDING)).overall == "match"
+    # the weight-3 wish not reported at all: not proven, near stays
+    rows = [{"text": "рядом со школой", "verdict": "fail", "quote": None}]
+    assert (await reviewer(True, [], wish_rows=rows).review(task, FINDING)).overall == "near"
+
+
+@pytest.mark.parametrize("rows", [
+    "вид на горы", None, 42, {"text": "вид на горы"},  # not a list
+    ["вид на горы", 3, None, ["x"]],  # rows that are not objects
+    [{"verdict": "fail"}, {"text": None, "verdict": "fail"}, {"text": "  ", "verdict": "fail"}],  # no text
+    [{"text": "бассейн", "verdict": "fail"}],  # a wish the task does not have
+])
+async def test_flag_on_garbage_wishes_are_dropped_and_near_stays(rows) -> None:
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)
+    review = await reviewer(True, [], wish_rows=rows).review(task, FINDING)
+    assert review.overall == "near" and review.wishes == ()
+    assert review.to_dict()["wishes"] == []
+
+
+async def test_flag_on_garbage_rows_next_to_a_real_one_keep_only_the_real_one() -> None:
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)
+    rows = ["x", {"verdict": "fail"}, {"text": "Вид на горы.", "verdict": "FAIL", "quote": None},
+            {"text": "вид на горы", "verdict": "pass"}]  # the duplicate is ignored
+    review = await reviewer(True, [], wish_rows=rows).review(task, FINDING)
+    assert review.overall == "match"
+    assert review.to_dict()["wishes"] == [{"text": "вид на горы", "verdict": "fail", "quote": None}]
+
+
+@pytest.mark.parametrize(("response", "code"), [
+    (httpx.Response(503), "http_503"),
+    (chat("not json"), "invalid_response"),
+    (chat(json.dumps({"criteria": [], "overall": "maybe", "deviation_ru": None, "confidence": 1, "wishes": []})),
+     "invalid_response"),
+])
+async def test_flag_on_an_llm_error_is_a_coded_error(response, code) -> None:
+    from bot.campaign.relevance import RelevanceError
+
+    broken = OpenRouterReviewer(api_key="k", soft_wishes=True,
+                                client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: response)))
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)
+    with pytest.raises(RelevanceError, match=code):
+        await broken.review(task, FINDING)
 
 
 # --- the runner end to end -----------------------------------------------------------------------------------------

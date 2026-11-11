@@ -147,12 +147,16 @@ No markdown."""
 
 _NEAR_V3 = """- "near": no "fail" but at least one "unknown", or everything passes and a wish is not met.
 """
-_NEAR_SOFT = """- "near": no "fail" but at least one "unknown". A wish that is not met never makes it "near".
+_NEAR_SOFT = """- "near": no "fail" but at least one "unknown", or a wish of weight 3 is not met, or something else outside the
+  criteria makes it a compromise (another town than the one asked, a close but different kind, several units).
+  A wish of weight 1 or 2 that is not met never makes it "near".
 """
 _WISHES_SOFT = """
 SOFT WISHES. "task.wishes" (when present) are the person's soft wishes, "nice to have" («желательно», «лучше»,
 «Дополнительно: …» in the task text, the same wishes in "task.context"): [{"text", "weight" 1-3}]. They are NOT
-criteria: never put them into "criteria", never let them change "overall" or "deviation_ru". Report each of them
+criteria: never put them into "criteria"; a wish of weight 1 or 2 never changes "overall" or "deviation_ru". A wish
+of weight 3 («очень важно») that is not met ("fail" or "unknown") makes "overall" "near", with deviation_ru naming
+it. Report each of them
 once in "wishes": {"text": the same text, "verdict": "pass" | "fail" | "unknown", "quote": verbatim quote or null};
 "wishes" is [] when there are none. Only "task.criteria" (place, deal, type, budget, rooms, area, "must_have:",
 "exclude:") are hard.
@@ -373,14 +377,17 @@ def _clip(text: object, limit: int) -> str:
 
 
 def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", model: str | None = None,
-                 tolerance: float | None = None, soft_wishes: bool = False) -> Review:
+                 tolerance: float | None = None, soft_wishes: bool = False,
+                 task_wishes: Sequence[Any] = ()) -> Review:
     """The model's answer after harmless drift is fixed and the rules above are enforced.
 
     ``ValueError``: not a JSON object. ``expected``: the criteria asked for (an unanswered one is ``unknown``,
     an unasked one is dropped); ``haystack``: the folded finding text a ``fail`` quote must occur in
     (empty: the quote is not checked, only required). ``soft_wishes`` (``RELEVANCE_SOFT_WISHES``): the answer of
-    ``SYSTEM_SOFT``; an all-pass matrix is ``match`` even when the model said ``near`` (only a wish differs), and
-    the ``wishes`` rows are kept apart.
+    ``SYSTEM_SOFT``; the ``wishes`` rows of the task's wishes (``task_wishes``, ``task.wishes``) are kept apart, and
+    the model's ``near`` becomes ``match`` only when every hard criterion passes, the model reported at least one
+    task wish as not ``pass`` and no wish of weight 3 lacks a ``pass`` (``_only_soft_wishes_unmet``). Any other
+    ``near`` (a suburb, a townhouse for a house, a promotion of several flats) stays ``near`` with its deviation.
     """
     data = json.loads(_FENCE.sub("", content))
     if not isinstance(data, dict):
@@ -410,7 +417,9 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
         overall = "reject"  # the matrix decides: a hard fail is a rejection
     elif overall == "match" and any(c.verdict == "unknown" for c in criteria):
         overall = "near"
-    elif soft_wishes and overall == "near" and all(c.verdict == "pass" for c in criteria):
+    wishes = _wish_rows(data.get("wishes"), task_wishes) if soft_wishes else ()
+    if (soft_wishes and overall == "near" and all(c.verdict == "pass" for c in criteria)
+            and _only_soft_wishes_unmet(wishes, task_wishes)):
         overall = "match"  # Q9: every hard criterion passes; an unmet soft wish does not lower «exact»
     confidence = data.get("confidence")
     confidence = (max(0.0, min(1.0, float(confidence)))
@@ -419,18 +428,41 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     if not soft_wishes:
         return Review(criteria, overall, deviation, confidence, model, tolerance)  # type: ignore[arg-type]
     return Review(criteria, overall, deviation, confidence, model, tolerance,  # type: ignore[arg-type]
-                  PROMPT_VERSION_SOFT, _wish_rows(data.get("wishes")))
+                  PROMPT_VERSION_SOFT, wishes)
 
 
-def _wish_rows(raw: object) -> tuple[Criterion, ...]:
-    """The soft wishes the model reported (at most ``MAX_WISHES``); a row without a text is dropped."""
-    rows: list[Criterion] = []
+def _task_wishes(task_wishes: Sequence[Any]) -> dict[str, tuple[str, int]]:
+    """The task's wishes by folded text -> (text, weight); malformed entries are skipped."""
+    out: dict[str, tuple[str, int]] = {}
+    for wish in task_wishes if isinstance(task_wishes, list | tuple) else ():
+        if isinstance(wish, dict) and isinstance(wish.get("text"), str) and _fold(wish["text"]):
+            weight = wish.get("weight") if wish.get("weight") in (1, 2, 3) else 1
+            out.setdefault(_fold(wish["text"]), (wish["text"], weight))
+    return out
+
+
+def _wish_rows(raw: object, task_wishes: Sequence[Any]) -> tuple[Criterion, ...]:
+    """The model's rows for the task's wishes, once each, with the task's text; anything else (not an object, no
+    text, a wish the task does not have) is dropped."""
+    known = _task_wishes(task_wishes)
+    rows: dict[str, Criterion] = {}
     for row in raw if isinstance(raw, list) else []:
-        text = _clip(row.get("text"), 120) if isinstance(row, dict) else ""
-        if text:
+        text = row.get("text") if isinstance(row, dict) else None
+        key = _fold(text) if isinstance(text, str) else ""
+        if key in known and key not in rows:
             verdict = _VERDICT_WORDS.get(str(row.get("verdict") or "").strip().casefold(), "unknown")
-            rows.append(Criterion(text, verdict, _clip(row.get("quote"), MAX_QUOTE_CHARS) or None))  # type: ignore[arg-type]
-    return tuple(rows[:MAX_WISHES])
+            rows[key] = Criterion(known[key][0], verdict, _clip(row.get("quote"), MAX_QUOTE_CHARS) or None)  # type: ignore[arg-type]
+    return tuple(rows.values())[:MAX_WISHES]
+
+
+def _only_soft_wishes_unmet(wishes: Sequence[Criterion], task_wishes: Sequence[Any]) -> bool:
+    """True when the model's «near» can only be about soft wishes: the task has wishes, at least one of them is
+    reported as not ``pass``, and every wish of weight 3 («очень важно») is reported as ``pass``."""
+    known = _task_wishes(task_wishes)
+    verdicts = {_fold(w.name): w.verdict for w in wishes}
+    if not known or not any(v != "pass" for v in verdicts.values()):
+        return False
+    return all(verdicts.get(key) == "pass" for key, (_, weight) in known.items() if weight == 3)
 
 
 # --- the model ----------------------------------------------------------------------------------------------------
@@ -461,7 +493,8 @@ class OpenRouterReviewer:
             raise RelevanceError(exc.code) from exc
         try:
             return parse_review(content, expected=expected, haystack=haystack_of(finding), model=self.model,
-                                tolerance=_number(task.get("tolerance_pct")), soft_wishes=self.soft_wishes)
+                                tolerance=_number(task.get("tolerance_pct")), soft_wishes=self.soft_wishes,
+                                task_wishes=task.get("wishes") or ())
         except Exception as exc:
             log.warning("campaign.review_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response") from exc
