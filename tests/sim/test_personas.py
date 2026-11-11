@@ -197,7 +197,9 @@ def persona_set(tmp_path: Path) -> Path:
     folder = tmp_path / "personas"
     folder.mkdir()
     for number, (name, role) in enumerate(SET.items(), 1):
-        (folder / f"{name}.json").write_text(json.dumps({"id": f"X{number}", "role": role}), encoding="utf-8")
+        source = "owner_O7" if role == "post_link" else "text"
+        (folder / f"{name}.json").write_text(json.dumps({"id": f"X{number}", "role": role, "task_source": source}),
+                                             encoding="utf-8")
     return folder
 
 
@@ -208,13 +210,14 @@ def line(batch: str, persona: str, **kw: object) -> dict:
 
 def objects(batch: str, persona: str, exact: int, sent: int = 10, available: int = 10, **kw: object) -> dict:
     fields = {"cards_sent": sent, "exact": exact, "similar": sent - exact, "miss": 0, "junk": 0,
-              "exact_available": available, "junk_hosts": [], **kw}
+              "exact_available": available, "available_refs": [f"f{i}" for i in range(available)],
+              "junk_hosts": [], **kw}
     return line(batch, persona, **fields)
 
 
 def leads(batch: str, persona: str, good: int, sent: int = 10, available: int = 10) -> dict:
     return line(batch, persona, leads_sent=sent, leads_reasonable=good, leads_doubtful=sent - good, leads_miss=0,
-                reasonable_available=available)
+                reasonable_available=available, reasonable_refs=[f"l{i}" for i in range(available)])
 
 
 def write(tmp_path: Path, lines: list[dict]) -> Path:
@@ -231,17 +234,17 @@ def good_batch(name: str) -> list[dict]:
 def test_the_streak_of_three(tmp_path: Path, persona_set: Path, capsys: pytest.CaptureFixture[str]) -> None:
     personas = score.PersonaSet.load(persona_set)
     lines = [*good_batch("b1"), *good_batch("b2"), *good_batch("b3")]
-    # b1 judged again: the last line of a run wins (home_a 1/10 -> buyer_home (10 + 100) / 2 = 55 %,
-    # the mean by roles (55 + 100 + 90 + 100) / 4 = 86 %: b1 fails)
+    # b1 judged again: with --latest the last line of a persona wins (home_a 1/10 -> buyer_home (10 + 100) / 2 =
+    # 55 %, the mean by roles (55 + 100 + 90 + 100) / 4 = 86 %: b1 fails)
     lines.append(objects("b1", "home_a", 1))
     path = write(tmp_path, lines)
-    batches = score.load(path, personas)
+    batches = score.load(path, personas, latest=True)
     assert [b.name for b in batches] == ["b1", "b2", "b3"]
     assert batches[0].role_scores()["buyer_home"] == pytest.approx(0.55)
     assert not batches[0].passed(personas.expected) and batches[1].passed(personas.expected)
     assert score.streak(batches, personas.expected) == 2
     path = write(tmp_path, [*lines, *good_batch("b4")])
-    args = ["--scores", str(path), "--personas", str(persona_set), "--check"]
+    args = ["--scores", str(path), "--personas", str(persona_set), "--latest", "--check"]
     assert score.main(args) == 0
     out = capsys.readouterr().out
     assert "goal (3 in a row): met" in out and "| b4 | 4 |" in out
@@ -284,7 +287,7 @@ def test_the_seeds_of_a_streak_differ(tmp_path: Path, persona_set: Path) -> None
     assert score.streak(batches, personas.expected) == 1  # N1: the same seed three times is one batch of evidence
     missing = [{k: v for k, v in x.items() if k != "seed"} for x in good_batch("b1")]
     assert score.streak(score.load(write(tmp_path, missing), personas), personas.expected) == 0
-    mixed = [*good_batch("b1"), {**objects("b1", "home_b", 10), "seed": 99}]
+    mixed = [*good_batch("b1")[:-1], {**good_batch("b1")[-1], "seed": 99}]
     with pytest.raises(ValueError, match="different seeds"):
         score.load(write(tmp_path, mixed), personas)
 
@@ -316,10 +319,11 @@ def test_junk_no_data_and_failures(tmp_path: Path, persona_set: Path) -> None:
     stalled = line("b1", "home_a", status="stalled")
     assert score.run_score(stalled).score == 0.0 and not score.run_score(stalled).done
     both = line("b1", "g9", cards_sent=4, exact=4, similar=0, miss=0, junk=0, exact_available=4, junk_hosts=[],
-                leads_sent=4, leads_reasonable=2, leads_doubtful=1, leads_miss=1, reasonable_available=4)
+                leads_sent=4, leads_reasonable=2, leads_doubtful=1, leads_miss=1, reasonable_available=4,
+                available_refs=["a", "b", "c", "d"], reasonable_refs=["a", "b", "c", "d"])
     assert score.run_score(both).score == pytest.approx(0.75)
     no_leads = {**both, "leads_sent": 0, "leads_reasonable": 0, "leads_doubtful": 0, "leads_miss": 0,
-                "reasonable_available": 0}
+                "reasonable_available": 0, "reasonable_refs": []}
     assert score.run_score(no_leads).score is None
     assert score.run_score({**both, "junk_hosts": ["x.example"]}).score == 0.0
     # a role with no data does not let the batch pass, even at 100 % elsewhere
@@ -332,11 +336,16 @@ def test_junk_no_data_and_failures(tmp_path: Path, persona_set: Path) -> None:
     ({"exact": 11, "similar": -1}, "must be an integer"),
     ({"exact": 11, "similar": 0, "cards_sent": 10}, r"exact 11 > cards_sent 10"),
     ({"similar": 0}, r"exact\+similar\+miss\+junk = 9 != cards_sent 10"),
-    ({"exact_available": 3}, r"exact 9 > exact_available 3"),
+    ({"exact_available": 3, "available_refs": ["a", "b", "c"]}, r"exact 9 > exact_available 3"),
+    ({"exact_available": 3}, r"10 available_refs \(10 distinct\) != exact_available 3"),
+    ({"available_refs": ["a"] * 10}, r"10 available_refs \(1 distinct\)"),
+    ({"available_refs": None}, "must be a list of links"),
     ({"cards": [{"verdict": "exact"}]}, r"1 cards listed != cards_sent 10"),
     ({"cards": [{"verdict": "exact"}] * 10}, "the verdicts of cards"),
     ({"exact": "9"}, "must be an integer"),
     ({"exact_available": None}, "must be an integer"),
+    ({"seed": "x"}, "seed must be an integer"),
+    ({"seed": True}, "seed must be an integer"),
 ])
 def test_the_numbers_must_add_up(tmp_path: Path, change: dict, error: str) -> None:
     # B3: a line whose numbers do not add up is refused, not scored
@@ -349,7 +358,8 @@ def test_the_numbers_must_add_up(tmp_path: Path, change: dict, error: str) -> No
 @pytest.mark.parametrize(("change", "error"), [
     ({"leads_doubtful": 0}, r"leads_reasonable\+leads_doubtful\+leads_miss = 9 != leads_sent 10"),
     ({"leads_reasonable": 11, "leads_doubtful": 0}, r"leads_reasonable 11 > leads_sent 10"),
-    ({"reasonable_available": 2}, r"leads_reasonable 9 > reasonable_available 2"),
+    ({"reasonable_available": 2, "reasonable_refs": ["a", "b"]}, r"leads_reasonable 9 > reasonable_available 2"),
+    ({"reasonable_refs": []}, r"0 reasonable_refs \(0 distinct\) != reasonable_available 10"),
     ({"leads": []}, r"0 leads listed != leads_sent 10"),
 ])
 def test_the_lead_numbers_must_add_up(tmp_path: Path, change: dict, error: str) -> None:
@@ -372,3 +382,51 @@ def test_a_line_needs_its_keys_and_its_persona(tmp_path: Path, persona_set: Path
     (tmp_path / "bad.jsonl").write_text("{not json\n", encoding="utf-8")
     with pytest.raises(ValueError, match="not JSON"):
         score.load(tmp_path / "bad.jsonl")
+
+
+def test_one_line_per_persona_in_a_batch(tmp_path: Path, persona_set: Path,
+                                         capsys: pytest.CaptureFixture[str]) -> None:
+    # B4: home_b fails (2/10); two «retries» of the easy home_a under new run ids must not lift buyer_home
+    personas = score.PersonaSet.load(persona_set)
+    lines = [objects("b1", "home_a", 10), objects("b1", "home_b", 2), objects("b1", "land_a", 10),
+             leads("b1", "inv_a", 10), leads("b1", "post_a", 10)]
+    retries = [{**objects("b1", "home_a", 10), "run": f"b1-home_a-retry{i}"} for i in (1, 2)]
+    path = write(tmp_path, [*lines, *retries])
+    with pytest.raises(ValueError, match="a second line of persona 'home_a'"):
+        score.load(path, personas)
+    batch = score.load(path, personas, latest=True)[0]
+    assert batch.role_scores()["buyer_home"] == pytest.approx(0.6)  # (100 + 20) / 2, not (100*3 + 20) / 4
+    assert [r.run for r in batch.roles["buyer_home"]] == ["b1-home_b", "b1-home_a-retry2"]
+    # the last line in the file wins with --latest, even if it is worse
+    worse = write(tmp_path, [*lines, {**objects("b1", "home_a", 1), "run": "b1-home_a-retry3"}])
+    assert score.load(worse, personas, latest=True)[0].role_scores()["buyer_home"] == pytest.approx(0.15)
+    args = ["--scores", str(path), "--personas", str(persona_set)]
+    with pytest.raises(ValueError, match="one per batch, or --latest"):
+        score.main(args)
+    assert score.main([*args, "--latest"]) == 0
+    capsys.readouterr()
+
+
+def test_check_by_hand_and_seeds(tmp_path: Path, persona_set: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # few cards and every good object «found»: the judge may have counted the available ones low
+    low = score.run_score(objects("b1", "home_a", 2, sent=2, available=2))
+    assert low.score == 1.0 and "exact_available = exact = 2" in low.review[0]
+    assert not score.run_score(objects("b1", "home_a", 2, sent=2, available=6)).review
+    assert not score.run_score(objects("b1", "home_a", 9, sent=10, available=9)).review
+    assert score.run_score(leads("b1", "inv_a", 1, sent=1, available=1)).review
+    path = write(tmp_path, [objects("b1", "home_a", 2, sent=2, available=2)])
+    score.main(["--scores", str(path), "--personas", str(persona_set)])
+    assert "b1/b1-home_a: check by hand" in capsys.readouterr().out
+    # seeds are integers: "3" and 3 are the same seed
+    batches = score.load(write(tmp_path, [{**x, "seed": str(x["seed"])} for x in good_batch("b3")]))
+    assert batches[0].seed == 3
+    mixed = [*good_batch("b3")[:-1], {**good_batch("b3")[-1], "seed": "3"}]
+    assert score.load(write(tmp_path, mixed))[0].seed == 3
+
+
+def test_only_owner_personas_can_be_excluded(persona_set: Path) -> None:
+    assert score.PersonaSet.load(persona_set, "X5").excluded == {"post_a"}
+    with pytest.raises(ValueError, match="only a persona waiting for the owner's link"):
+        score.PersonaSet.load(persona_set, "home_b")
+    with pytest.raises(ValueError, match="only a persona waiting"):
+        score.PersonaSet.load(PERSONAS, "G2")

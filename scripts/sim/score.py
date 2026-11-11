@@ -1,4 +1,4 @@
-"""``python -m scripts.sim.score [--scores sim/scores.jsonl] [--exclude G6,G8] [--check]``: scores by role, the goal.
+"""``python -m scripts.sim.score [--scores sim/scores.jsonl] [--exclude G6,G8] [--latest] [--check]``: the goal.
 
 Reads the judge's lines (``docs/v3/SIM_RUBRIC.md`` §6), one per run, checks their numbers, groups them by ``batch``
 (one pass of the persona set), prints the score of every role and their mean per batch, and checks the owner's goal:
@@ -37,6 +37,7 @@ class RunScore:
     score: float | None
     done: bool = True
     failed: list[str] = field(default_factory=list)  # why the run scored 0 or less than it looks
+    review: list[str] = field(default_factory=list)  # «check by hand»: the judge's count of the good ones may be low
 
 
 def _int(line: dict[str, Any], key: str, where: str) -> int:
@@ -47,10 +48,15 @@ def _int(line: dict[str, Any], key: str, where: str) -> int:
 
 
 def _check_part(line: dict[str, Any], where: str, sent_key: str, keys: dict[str, str], good: str,
-                available_key: str, listed_key: str) -> None:
+                available_key: str, listed_key: str, refs_key: str) -> None:
     sent = _int(line, sent_key, where)
     counts = {verdict: _int(line, key, where) for verdict, key in keys.items()}
     available = _int(line, available_key, where)
+    refs = line.get(refs_key)
+    if not isinstance(refs, list) or not all(isinstance(r, str) and r for r in refs):
+        raise ValueError(f"{where}: {refs_key!r} must be a list of links or finding ids, got {refs!r}")
+    if len(refs) != available or len(set(refs)) != len(refs):
+        raise ValueError(f"{where}: {len(refs)} {refs_key} ({len(set(refs))} distinct) != {available_key} {available}")
     if counts[good] > sent:
         raise ValueError(f"{where}: {keys[good]} {counts[good]} > {sent_key} {sent}")
     if sum(counts.values()) != sent:
@@ -73,10 +79,11 @@ def check_numbers(line: dict[str, Any], where: str) -> None:
         return
     kind = KINDS[line["role"]]
     if kind in ("objects", "both"):
-        _check_part(line, where, "cards_sent", {v: v for v in OBJECT_VERDICTS}, "exact", "exact_available", "cards")
+        _check_part(line, where, "cards_sent", {v: v for v in OBJECT_VERDICTS}, "exact", "exact_available", "cards",
+                    "available_refs")
     if kind in ("leads", "both"):
         _check_part(line, where, "leads_sent", {v: f"leads_{v}" for v in LEAD_VERDICTS}, "reasonable",
-                    "reasonable_available", "leads")
+                    "reasonable_available", "leads", "reasonable_refs")
 
 
 def _share(good: int, sent: int, available: int, why: list[str], what: str) -> float | None:
@@ -124,13 +131,20 @@ def run_score(line: dict[str, Any]) -> RunScore:
             score = None
         else:
             score = (objects + leads) / 2
-    return RunScore(run, persona, role, score, failed=why)
+    review = []
+    if kind in ("objects", "both") and line["cards_sent"] < MIN_CARDS and line["exact_available"] == line["exact"]:
+        review.append(f"{line['cards_sent']} cards sent and exact_available = exact = {line['exact']}")
+    if kind in ("leads", "both") and line["leads_sent"] < MIN_CARDS and (
+            line["reasonable_available"] == line["leads_reasonable"]):
+        review.append(f"{line['leads_sent']} leads sent and reasonable_available = reasonable = "
+                      f"{line['leads_reasonable']}")
+    return RunScore(run, persona, role, score, failed=why, review=review)
 
 
 @dataclass
 class Batch:
     name: str
-    seed: Any = None
+    seed: int | None = None
     roles: dict[str, list[RunScore]] = field(default_factory=dict)
 
     def personas(self) -> set[str]:
@@ -168,10 +182,13 @@ class PersonaSet:
 
     @classmethod
     def load(cls, folder: Path, exclude: str = "") -> PersonaSet:
-        roles, ids = {}, {}
+        """The set; ``exclude`` may name only personas waiting for the owner's link (``task_source: owner_O7``)."""
+        roles, ids, owner = {}, {}, set()
         for path in sorted(folder.glob("*.json")):
             data = json.loads(path.read_text(encoding="utf-8"))
             roles[path.stem], ids[path.stem] = str(data.get("role")), str(data.get("id", path.stem))
+            if data.get("task_source") == "owner_O7":
+                owner.add(path.stem)
         if not roles:
             raise ValueError(f"no personas in {folder}")
         excluded: set[str] = set()
@@ -179,6 +196,9 @@ class PersonaSet:
             names = {n for n in roles if item in (n, ids[n])}
             if not names:
                 raise ValueError(f"--exclude {item!r}: no such persona in {folder}")
+            if names - owner:
+                raise ValueError(f"--exclude {item!r}: only a persona waiting for the owner's link "
+                                 f"(task_source owner_O7) may be excluded")
             excluded |= names
         return cls(roles, ids, excluded)
 
@@ -187,9 +207,22 @@ class PersonaSet:
         return set(self.roles) - self.excluded
 
 
-def load(path: Path, personas: PersonaSet | None = None) -> list[Batch]:
-    """The batches in the order they first appear; a run judged twice keeps its last line. Every line is checked
-    (``ValueError``); the lines of excluded personas are skipped."""
+def _seed(line: dict[str, Any], where: str) -> int | None:
+    value = line.get("seed")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{where}: seed must be an integer, got {value!r}")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{where}: seed must be an integer, got {value!r}") from None
+
+
+def load(path: Path, personas: PersonaSet | None = None, latest: bool = False) -> list[Batch]:
+    """The batches in the order they first appear, one line per persona in a batch: a second line of the same
+    persona (a retry under a new run id, a judge again) is a ``ValueError`` unless ``latest`` (the last line in
+    the file wins). Every line is checked (``ValueError``); the lines of excluded personas are skipped."""
     batches: dict[str, dict[str, dict[str, Any]]] = {}
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not raw.strip():
@@ -213,13 +246,20 @@ def load(path: Path, personas: PersonaSet | None = None) -> list[Batch]:
             if name in personas.excluded:
                 continue
         check_numbers(line, where)
-        batches.setdefault(str(line["batch"]), {})[str(line["run"])] = line
+        line["seed"] = _seed(line, where)
+        runs = batches.setdefault(str(line["batch"]), {})
+        persona = str(line["persona"])
+        if persona in runs and not latest:
+            raise ValueError(f"{where}: batch {line['batch']}: a second line of persona {persona!r} "
+                             f"(runs {runs[persona]['run']!r}, {line['run']!r}); one per batch, or --latest")
+        runs.pop(persona, None)
+        runs[persona] = line
     out: list[Batch] = []
     for name, runs in batches.items():
-        seeds = {json.dumps(line.get("seed")) for line in runs.values()}
+        seeds = {line["seed"] for line in runs.values()}
         if len(seeds) > 1:
-            raise ValueError(f"batch {name}: different seeds {sorted(seeds)}")
-        batch = Batch(name, seed=next(iter(runs.values())).get("seed"))
+            raise ValueError(f"batch {name}: different seeds {sorted(seeds, key=str)}")
+        batch = Batch(name, seed=next(iter(runs.values()))["seed"])
         for line in runs.values():
             score = run_score(line)
             batch.roles.setdefault(score.role, []).append(score)
@@ -232,9 +272,9 @@ def streak(batches: list[Batch], expected: set[str] | None = None) -> int:
     seed ends the streak: the same dialogue again proves nothing new)."""
     count, seeds = 0, set()
     for batch in reversed(batches):
-        if not batch.passed(expected) or batch.seed is None or json.dumps(batch.seed) in seeds:
+        if not batch.passed(expected) or batch.seed is None or batch.seed in seeds:
             break
-        seeds.add(json.dumps(batch.seed))
+        seeds.add(batch.seed)
         count += 1
     return count
 
@@ -257,6 +297,7 @@ def report(batches: list[Batch], personas: PersonaSet | None = None) -> str:
                      f"{'yes' if batch.passed(expected) else 'no'} |")
         for runs in batch.roles.values():
             notes += [f"{batch.name}/{r.run}: {'; '.join(r.failed)}" for r in runs if r.failed and r.done]
+            notes += [f"{batch.name}/{r.run}: check by hand: {'; '.join(r.review)}" for r in runs if r.review]
         notes += [f"{batch.name}: {p}" for p in problems]
     run = streak(batches, expected)
     goal = "not met"
@@ -277,6 +318,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--personas", default=str(ROOT / "scripts" / "sim" / "personas"),
                         help="the persona set: every persona in it is expected in every batch")
     parser.add_argument("--exclude", default="", help="persona ids or names not expected yet, e.g. G6,G8 (until O7)")
+    parser.add_argument("--latest", action="store_true",
+                        help="a persona judged twice in a batch: take its last line (default: an error)")
     parser.add_argument("--check", action="store_true",
                         help="exit code 0 met, 2 met only conditionally (--exclude), 1 not met")
     args = parser.parse_args(argv)
@@ -284,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     if not Path(args.scores).is_file():
         print(f"no scores yet: {args.scores}")
         return 1 if args.check else 0
-    batches = load(Path(args.scores), personas)
+    batches = load(Path(args.scores), personas, latest=args.latest)
     print(report(batches, personas))
     if not args.check:
         return 0
