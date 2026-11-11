@@ -65,6 +65,12 @@ BASE_ENV: dict[str, str] = {
     "CAMPAIGN_INVESTOR_REPORT": "true",
     "CARD_EXTRA_FIELDS": "true",  # on in prod (docs/v2/CLIENT_DECISIONS.md:76): «Площадь», «Телефон», «Агентство»
     "CAMPAIGN_BUDGET_USD": "0.8",
+    # Flags of Q4, Q5, Q8, Q9, Q10 (their own branches): ignored by the bot until those branches are merged.
+    "DEDUP_WITHOUT_ADDRESS": "true",
+    "IDEALISTA_SORT_BIGGEST": "true",
+    "RELEVANCE_SOFT_WISHES": "true",
+    "SEARCH_QUERY_HYGIENE": "true",
+    "ANALYSIS_LOCATION_FROM_TEXT": "true",
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")
@@ -439,7 +445,9 @@ class Bench:
             item = {"from": "bot", "text": reply.text,
                     "buttons": [{"text": b.text, "data": b.callback_data} for b in reply.buttons if b.callback_data]}
             keyboard = getattr(reply, "keyboard", None)
-            if keyboard is not None:  # None: the keyboard stays as it is; []: it is removed
+            # None: the keyboard stays as it is; []: it is removed. Inline buttons win: prod sends only them
+            # (bot/control_plane/main.py:_markup), the bottom keyboard of such a reply is never shown.
+            if keyboard is not None and not reply.buttons:
                 item["keyboard"] = [list(row) for row in keyboard]
                 if chat_id == USER:
                     self.keyboard = item["keyboard"]

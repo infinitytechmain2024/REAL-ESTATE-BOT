@@ -161,7 +161,8 @@
         }
       },
       "soft": [
-        "urbano (не rústico)"
+        "urbano (не rústico)",
+        "agua y luz, acceso asfaltado"
       ],
       "not": [
         "площадь дома",

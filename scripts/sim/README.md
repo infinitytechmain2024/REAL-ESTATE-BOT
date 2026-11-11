@@ -103,6 +103,8 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 и `INTAKE_BOTH_MODE` (д), `CARD_EXTRA_FIELDS=true` (з), `ARCHITECT_PROVIDER=openrouter` (е пропущен),
 `CAMPAIGN_BUDGET_USD=0.8` (на время прогона G1–G9, п. 6). Расходятся (стенд не менялся, кроме `CARD_EXTRA_FIELDS`):
 
+Флаги Q4, Q5, Q8, Q9, Q10 (`DEDUP_WITHOUT_ADDRESS`, `IDEALISTA_SORT_BIGGEST`, `RELEVANCE_SOFT_WISHES`, `SEARCH_QUERY_HYGIENE`, `ANALYSIS_LOCATION_FROM_TEXT`) в `BASE_ENV` включены заранее: пока их ветки не смержены в `main`, бот их игнорирует.
+
 | Ключ | Стенд | Прод по P0 | Следствие |
 |---|---|---|---|
 | `OPENROUTER_*_MODEL` | умолчания compose (`claude-sonnet-4.5`, `gpt-4o-mini`) | (а): `claude-sonnet-5.5`, `claude-haiku-5.5`, `claude-opus-5.5` (final) | модель — часть ключа кассеты; ответы кассеты пишет агент, не эта модель. Сменить — новые ключи у всех pending |

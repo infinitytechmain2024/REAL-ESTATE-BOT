@@ -241,6 +241,20 @@ def test_the_bottom_keyboard_reaches_the_dialogue_and_the_pending_and_the_helper
     assert bench.keyboard == [] and bench.dialogue[-1]["keyboard"] == []
 
 
+def test_a_reply_with_inline_buttons_does_not_change_the_bottom_keyboard(tmp_path: Path) -> None:
+    from bot.control_plane.intake import TASK_KEYBOARD
+    from bot.control_plane.models import Button, Reply
+    from scripts.sim.harness import Bench, Persona
+
+    bench = Bench(tmp_path, "kb2", Persona(name="p", task="участок"))
+    bench._say("bot", Reply("Проверьте задачу:\nучасток, Мадрид", keyboard=TASK_KEYBOARD))
+    shown = bench.keyboard
+    # prod sends only the inline buttons (bot/control_plane/main.py:_markup): the user never sees this keyboard
+    bench._say("bot", Reply("Какой бюджет?", (Button("Не важно", callback_data="task:skip"),), keyboard=()))
+    assert bench.keyboard == shown
+    assert "keyboard" not in bench.dialogue[-1]
+
+
 # --- the rest of the world ---------------------------------------------------------------------------------------
 
 

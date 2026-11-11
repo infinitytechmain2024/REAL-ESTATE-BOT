@@ -59,10 +59,6 @@
         "press": "task:skip",
         "weight": 1,
         "tag": "any"
-      },
-      {
-        "text": "можно и область, вся провинция Мадрид",
-        "weight": 3
       }
     ],
     "area": [

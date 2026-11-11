@@ -28,8 +28,9 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("deviation", r"точных вариантов|что допустимо|только точные|si no hay exact|if no exact"),
     ("details", r"стади|под какое строительств|этаж, лифт|состояние важн|что планируете|под что|etapa|stage"),
     # the land's category («suelo urbano или urbanizable/рустико», «категория земли»): before must_have, which a
-    # question naming the category and the utilities together would match too
-    ("land_status", r"urbano|urbanizable|r[uú]stic|рустик|категори"),
+    # question naming the category and the utilities together would match too. «категори» alone is not enough
+    # («какая категория жилья?» is the type): only with «участ/земл/suelo» in the same question.
+    ("land_status", r"urbano|urbanizable|r[uú]stic|рустик|^(?s:(?=.*категори)(?=.*(?:участ|земл|suelo)))"),
     ("investor_role", r"деньги для своего проекта|сами хотите вкладывать|ищете деньги|raising|invertir usted"),
     ("investor_who", r"кого ищете|who are you looking|a qui[eé]n busca"),
     ("ticket", r"тикет|размер вложени|сумма вложени|сколько готовы вложить|ticket|cheque|inversi[oó]n m[ií]nima"),
