@@ -86,6 +86,24 @@ covers it; it is personal data too, of the account holder.
 
 ---
 
+### 2.5 What v3 adds (planned, `docs/v3/MASTER_PLAN.md`; all of it behind flags, off by default)
+
+| What | From | Stored in | Kept | Who sees it |
+|---|---|---|---|---|
+| Reactions under a listing: name, profile link, reaction type | Apify (`apify/facebook-likes-scraper`, LinkedIn post reactions) | `person_signals` (`kind='reaction'`) | 90 days | only the user whose task found it |
+| Reposts: name, profile link | Apify, where an actor returns them | `person_signals` (`kind='repost'`) | 90 days | same |
+| Instagram and TikTok authors and commenters: name, link, text | Apify | `person_signals`, `investor_leads` | 90 days | same |
+| LinkedIn people and companies: name, title, company, city, link. **No e-mail** — the e-mail search mode is never used | Apify, no cookies | `reach_contacts` | 90 days | same |
+| Draft first message to a lead | LLM, from the comment and the task | not sent by the bot; shown to the user only | — | the user |
+| Social-network sessions of **bot users** (cookies of 4 networks) | the user logs in by hand in the noVNC window | browser profile on an encrypted volume on the VPS | until "Disconnect account" or `/forget` | nobody but the bot's browser |
+| Users' API keys and subscription tokens | entered by the user | `user_credentials`, Fernet-encrypted | until the user removes them or `/forget` | nobody; never logged |
+| A user's residential proxy (host, login, password) | the owner | `user_proxies`, password encrypted | until removed | the owner |
+
+Changes to the sections above once v3 ships: leads become per user (`owner_user_id`), so leads of one post are no
+longer visible to every campaign with that link (`docs/v2/HANDOFF.md` §4 item 11); Apify also processes Instagram,
+TikTok, LinkedIn and the client's own sites; the agent provider (Anthropic or OpenAI) receives collected text when a
+user switches on agent mode; the residential-proxy provider carries the browser traffic of that user.
+
 ## 3. Where it goes
 
 - **Supabase** (Postgres, hosted). Region is whatever the project was created in — **worth
@@ -122,6 +140,20 @@ These are not engineering choices and should not be made by default or by omissi
    settled. The regulatory exposure is a separate question with a different owner, and it
    has never been raised with the client.
 
+### 4a. Open decisions for v3 (O5) — the client's, in writing
+
+1. **Keep everyone who reacted** (reactions and reposts without text), not only commenters classified as
+   investors. The 2026-10-16 decision covered Facebook commenters; extend it to reactions, reposts and to
+   Instagram, TikTok and LinkedIn — yes / no.
+2. **LinkedIn**: store a person's title and company; never search for e-mail (engineering default) — confirm.
+3. **Bot users' sessions on the VPS**: the bot holds cookies of four networks for every user; a compromised VPS
+   leaks them. Accept the risk with an encrypted volume, "Disconnect account" and `/forget` — yes / no.
+4. **Ban risk for users' personal accounts** (not only the bot's account, as in v2): users are warned at
+   `/connect`; agree the warning text.
+5. **Proxy provider** sees the user's browser traffic; choose the provider (O3) with that in mind.
+6. **Agent mode**: comment text goes to the agent provider under the user's subscription; allowed only after O4.
+7. **90 days** for findings and leads — confirm or name another period.
+
 ### Decisions recorded 2026-10-16 (owner, in session)
 
 1. Lawful basis: legitimate interests. The owner decided **not** to write a legitimate interests
@@ -144,6 +176,11 @@ Not everything here is open. Several decisions are already made and enforced in 
 
 - **No CAPTCHA-solving, no 2FA bypass, no anti-detection tooling.** A checkpoint is
   resolved by a human, every time. This is a hard non-goal, not a backlog item.
+  *Recorded exception (owner, 2026-11-11, O10):* the browser already starts Chromium with
+  `--disable-blink-features=AutomationControlled` and without `--enable-automation`
+  (`bot/browser_session/manager.py:79-80`). The owner decided to keep these two flags as they are. Nothing beyond
+  them is added: no user-agent, WebGL, canvas or other fingerprint changes; a per-user proxy only pins the address
+  (v3, D11).
 - **Nothing is auto-posted.** The draft-approve-post workflow (Stage 4.7) is unbuilt, and
   the plan specifies per-comment human approval with **no bulk-approve path** when it is.
 - **No credentials on disk by default** — `DEPLOYMENT.md` §6.
