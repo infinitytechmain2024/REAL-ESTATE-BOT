@@ -116,7 +116,7 @@
       "stream": "rules",
       "agent": "architect",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "волна 1",
       "hours": 1.5
     },
@@ -126,7 +126,7 @@
       "stream": "plan",
       "agent": "architect",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "волна 1",
       "hours": 0.5
     },
@@ -136,7 +136,7 @@
       "stream": "plan",
       "agent": "builder",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "волна 1",
       "hours": 1
     },
@@ -146,7 +146,7 @@
       "stream": "ops",
       "agent": "deployer",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "волна 1",
       "hours": 1.5
     },
@@ -206,7 +206,7 @@
       "stream": "sources",
       "agent": "sources",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "волна 1",
       "hours": 3
     },
@@ -218,7 +218,7 @@
       "deps": [
         "P1.0"
       ],
-      "status": "blocked",
+      "status": "in_progress",
       "day": "волна 1",
       "hours": 9
     },
@@ -437,7 +437,7 @@
       "stream": "ops",
       "agent": "deployer",
       "deps": [],
-      "status": "review",
+      "status": "done",
       "day": "волна 1",
       "hours": 2
     },
