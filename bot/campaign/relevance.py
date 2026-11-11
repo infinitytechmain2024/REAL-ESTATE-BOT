@@ -168,7 +168,7 @@ def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", ori
 
 
 def _finding_facts(payload: dict[str, Any], summary: object, excerpt: str, original: str) -> dict[str, Any]:
-    return {
+    facts = {
         "summary": str(summary or "")[:MAX_SUMMARY_CHARS],
         "excerpt": excerpt,
         "from_search": SEARCH_RESULT_NOTE in str(original or "") or INDEX_NOTE_PREFIX in str(original or ""),  # the note ends the post: check it whole
@@ -183,6 +183,9 @@ def _finding_facts(payload: dict[str, Any], summary: object, excerpt: str, origi
         "listing_kind": payload.get("listing_kind") or "offer",
         "link_host": geo.host_of_link(payload.get("original_post_link") or payload.get("url")),
     }
+    if payload.get("source_place_conflict"):  # Q4: the listing's text names another area than its portal's place
+        facts["source_place_conflict"] = payload["source_place_conflict"]
+    return facts
 
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)

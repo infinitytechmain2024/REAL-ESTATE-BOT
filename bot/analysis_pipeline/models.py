@@ -39,6 +39,9 @@ class AnalysisResult(BaseModel):
     features: list[str] = Field(default_factory=list, max_length=20)
     condition: Literal["new", "good", "needs_renovation"] | None = None
     listing_date: str | None = Field(default=None, max_length=40)
+    # Q4 (ANALYSIS_LOCATION_FROM_TEXT): never the model's -- set by source_place.apply on a strong conflict between
+    # the JSON-LD place and the text: the area the text names (e.g. «Andalucía»). Not in the model's schema.
+    source_place_conflict: str | None = Field(default=None, max_length=40)
 
 
 class Evidence(BaseModel):

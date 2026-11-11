@@ -34,6 +34,8 @@ def source_line_facts(text: str) -> dict[str, Any]:
 def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any]:
     """What ``findings.structured_payload`` stores (besides ``formatted``); the card is rebuilt from it."""
     payload = _base_payload(result, evidence)
+    if result.source_place_conflict:  # Q4: only with ANALYSIS_LOCATION_FROM_TEXT; read by campaign/tolerance.py
+        payload["source_place_conflict"] = result.source_place_conflict
     if card_extra_fields_enabled() and evidence.platform == "website":
         facts = source_line_facts(evidence.text)
         for key in ("plot_m2", "phone", "advertiser"):

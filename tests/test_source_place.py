@@ -165,17 +165,107 @@ def test_review_cases_are_no_conflict(address, title, description):
     assert source_place.conflict(portal_post(address, title, description), title) is None
 
 
-@pytest.mark.parametrize(("title", "description", "phrase", "city"), [
-    ("Parcela en Mijas, Costa del Sol", "Terreno con vistas", "Costa del Sol", None),
-    ("Piso", "Se encuentra en Marbella, junto al mar", "Marbella", "Marbella"),
-    ("Piso", "Situado en la Costa del Sol", "Costa del Sol", None),
-    ("Piso", "Terreno ubicado en Mijas, Málaga", "Málaga", "Málaga"),
-    ("Casa en Girona", "Masía en Girona, Catalunya", "Catalunya", None),
-    ("Parcela… ½ hectárea en Marbella №5", "", "Marbella", "Marbella"),  # «…», «½», «№» keep the positions
+@pytest.mark.parametrize(("title", "description", "phrase", "city", "strong"), [
+    ("Parcela en Mijas, Costa del Sol", "Terreno con vistas", "Costa del Sol", None, True),   # the portal's title
+    ("Piso", "Se encuentra en Marbella, junto al mar", "Marbella", "Marbella", True),
+    ("Piso", "Situado en la Costa del Sol", "Costa del Sol", None, True),
+    ("Piso", "Terreno ubicado en Mijas, Málaga", "Málaga", "Málaga", True),
+    ("Piso", "Chalet en Marbella con piscina", "Marbella", None, False),     # a bare «en»: weak, no city
+    ("Casa en Girona", "Masía en Girona, Catalunya", "Catalunya", None, False),
+    ("Parcela… ½ hectárea en Marbella №5", "", "Marbella", "Marbella", True),  # «…», «½», «№» keep the positions
 ])
-def test_a_place_named_by_the_text_is_a_conflict(title, description, phrase, city):
+def test_a_place_named_by_the_text_is_a_conflict(title, description, phrase, city, strong):
     found = source_place.conflict(portal_post("Barrio de Salamanca, Madrid Capital", title, description), title)
-    assert found is not None and (found.phrase, found.city) == (phrase, city) and found.source_areas == {"Madrid"}
+    assert found is not None and (found.phrase, found.city, found.strong) == (phrase, city, strong)
+    assert found.source_areas == {"Madrid"}
+
+
+# The second review of Q4 (scratchpad s2.py): a bare «en» about a person, a kitchen or other flats is not the place.
+@pytest.mark.parametrize(("address", "title", "description"), [
+    ("Chamberí, Madrid", "Piso exterior reformado", "Propietario residente en Barcelona vende este piso."),
+    ("Chamberí, Madrid", "Piso exterior", "Vendo porque ahora vivo en Valencia."),
+    ("Chamberí, Madrid", "Piso exterior", "Disponemos de más pisos en Valencia y Málaga."),
+    ("Chamberí, Madrid", "Piso exterior", "Cocina diseñada en Barcelona por estudio local."),
+    ("Chamberí, Madrid", "Piso exterior", "Ideal para quien trabaja en Barcelona y viaja."),
+    ("Retiro, Madrid", "Piso", "Perfecto como inversión: rentabilidad como en Barcelona."),
+    ("Retiro, Madrid", "Oportunidad: piso tipo loft Barcelona style", "Loft"),
+    ("Retiro, Madrid", "Piso", "Nuestra oficina en Barcelona gestiona la venta."),
+    ("Ciudad Universitaria, Madrid", "Piso en venta, Ciudad Universitaria", "Piso en Móstoles"),
+    ("Triana, Sevilla", "Piso en Triana", "Piso situado en Barcelona? no; en pleno Triana"),  # names its own district
+])
+def test_second_review_cases_are_no_conflict(address, title, description):
+    assert source_place.conflict(portal_post(address, title, description), title) is None
+
+
+@pytest.mark.parametrize(("title", "description", "phrase", "city", "strong"), [
+    ("Parcela en Mijas, Costa del Sol…", "Terreno… vistas", "Costa del Sol", None, True),
+    # our own title repeats the source's district: it neither confirms nor contradicts the place
+    ("Terreno en venta, Barrio de Salamanca", "Terreno urbano situado en Mijas, Málaga. Vistas…", "Málaga", "Málaga",
+     True),
+    ("Chalet", "Chalet en la Costa del Sol con piscina", "Costa del Sol", None, False),
+])
+def test_second_review_conflicts(title, description, phrase, city, strong):
+    found = source_place.conflict(portal_post("Barrio de Salamanca, Madrid Capital", title, description), title)
+    assert found is not None and (found.phrase, found.city, found.strong) == (phrase, city, strong)
+
+
+def test_a_weak_conflict_only_notes_it_and_never_fills_a_city():
+    from bot.analysis_pipeline.openrouter import parse_result
+
+    title = "Chalet"
+    text = portal_post("Salamanca, Madrid", title, "Chalet en Marbella con piscina")
+    found = source_place.conflict(text, title)
+    assert found is not None and not found.strong and found.city is None
+    assert '"address"' not in source_place.without_place(text).split("\n", 1)[0]
+    result = source_place.apply(parse_result(json.dumps({**ANSWER, "location": "Salamanca, Madrid"})), found)
+    assert result.location is None and result.source_place_conflict is None
+    assert "contradicts the text: 'Marbella'" in result.reason
+
+
+def payload_of(result, url: str = MIJAS) -> dict:
+    from bot.analysis_pipeline.formatters import finding_payload
+
+    title, text = habitaclia_texts()[url]
+    return finding_payload(result, Evidence(post_id="p", source_id="s", canonical_url=url, title=title, text=text,
+                                            platform="website"))
+
+
+def campaign(location: str):
+    from bot.campaign.tolerance import request_for
+
+    return request_for({"deal": "sale", "min_area": 2000, "max_price": 3000000}, location=location,
+                       vertical="real_estate", country="ES")
+
+
+@pytest.mark.asyncio
+async def test_mijas_with_a_null_location_is_excluded_by_place_in_a_madrid_campaign(monkeypatch):
+    from bot.campaign.relevance import _finding_facts
+    from bot.campaign.tolerance import classify
+
+    result, _, _ = await analyze(monkeypatch, MIJAS, flag=True,
+                                 answer={**ANSWER, "location": None, "district": None, "address": None})
+    assert result.location is None and result.source_place_conflict == "Andalucía"
+    payload = payload_of(result)
+    assert payload["source_place_conflict"] == "Andalucía"
+    verdict = classify(payload, campaign("Madrid"))
+    assert (verdict.bucket, verdict.why) == ("excluded", "location")
+    assert classify(payload, campaign("Málaga")).why != "location"  # a Málaga campaign keeps the plot
+    assert _finding_facts(payload, "s", "e", "o")["source_place_conflict"] == "Andalucía"
+    # without the flag the fact is never written: the payload, the relevance facts and the bucket are as before
+    old, _, _ = await analyze(monkeypatch, MIJAS, flag=False, answer={**ANSWER, "location": None})
+    assert "source_place_conflict" not in payload_of(old)
+    assert "source_place_conflict" not in _finding_facts(payload_of(old), "s", "e", "o")
+    assert classify(payload_of(old), campaign("Madrid")).why != "location"
+
+
+def test_tolerance_city_areas_match_source_place():
+    from bot.campaign.architect import GAZETTEER
+    from bot.campaign.tolerance import CITY_AREA
+
+    spanish = {p.canonical for p in GAZETTEER if p.country == "ES"}
+    assert set(CITY_AREA) == spanish
+    for city, area in CITY_AREA.items():
+        assert source_place.areas_of(city) == {area}, city
 
 
 def test_fold_keeps_one_character_for_one():
