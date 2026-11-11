@@ -86,7 +86,7 @@
       "stream": "owner",
       "agent": "owner",
       "deps": [],
-      "status": "waiting_owner",
+      "status": "done",
       "day": "—",
       "hours": 0
     },
@@ -230,7 +230,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "review",
+      "status": "done",
       "day": "волна 2",
       "hours": 5
     },
@@ -242,7 +242,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "review",
+      "status": "done",
       "day": "волна 2",
       "hours": 4
     },
@@ -254,7 +254,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": "волна 2",
       "hours": 5
     },

@@ -164,6 +164,23 @@ class CampaignRunnerSettings(BaseSettings):
     leads_provider: str = Field(default="browser", pattern="^(browser|apify)$", validation_alias="LEADS_PROVIDER")
     apify_comments_max_per_day: int = Field(default=40, ge=0, le=100_000, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY")
 
+    # Instagram through Apify (v3 P1.2, bot/acquisition/apify_instagram.py): posts and the people under them, no
+    # account. Off by default; on, it needs APIFY_TOKEN and a pinned build or the service does not start. Not wired
+    # into the runner yet (P1.8): only instagram_sources() builds it.
+    apify_instagram_enabled: bool = Field(default=False, validation_alias="APIFY_INSTAGRAM_ENABLED")
+    apify_instagram_posts_actor: str = Field(default="apify/instagram-scraper", validation_alias="APIFY_INSTAGRAM_POSTS_ACTOR")
+    apify_instagram_comments_actor: str = Field(default="apify/instagram-comment-scraper", validation_alias="APIFY_INSTAGRAM_COMMENTS_ACTOR")
+    apify_instagram_build: str = Field(default="", max_length=40, validation_alias="APIFY_INSTAGRAM_ACTOR_BUILD")
+    apify_instagram_max_results: int = Field(default=30, ge=1, le=50, validation_alias="APIFY_INSTAGRAM_MAX_RESULTS")
+    apify_instagram_max_charge_usd: float = Field(default=0.20, gt=0, le=5, validation_alias="APIFY_INSTAGRAM_MAX_CHARGE_USD")
+    # TikTok through Apify (v3 P1.3, bot/acquisition/apify_tiktok.py): the same rules as Instagram above.
+    apify_tiktok_enabled: bool = Field(default=False, validation_alias="APIFY_TIKTOK_ENABLED")
+    apify_tiktok_posts_actor: str = Field(default="clockworks/tiktok-scraper", validation_alias="APIFY_TIKTOK_POSTS_ACTOR")
+    apify_tiktok_comments_actor: str = Field(default="clockworks/tiktok-comments-scraper", validation_alias="APIFY_TIKTOK_COMMENTS_ACTOR")
+    apify_tiktok_build: str = Field(default="", max_length=40, validation_alias="APIFY_TIKTOK_ACTOR_BUILD")
+    apify_tiktok_max_results: int = Field(default=30, ge=1, le=50, validation_alias="APIFY_TIKTOK_MAX_RESULTS")
+    apify_tiktok_max_charge_usd: float = Field(default=0.15, gt=0, le=5, validation_alias="APIFY_TIKTOK_MAX_CHARGE_USD")
+
     @model_validator(mode="after")
     def _comments_ready(self) -> CampaignRunnerSettings:
         """APIFY_FACEBOOK_COMMENTS_ENABLED=true without what it needs is a start-up error, never a silent fallback."""
@@ -176,6 +193,84 @@ class CampaignRunnerSettings(BaseSettings):
             self.post_reads_config()  # an unpinned build or unsafe limits fail here too
         return self
 
+    @model_validator(mode="after")
+    def _social_ready(self) -> CampaignRunnerSettings:
+        """APIFY_INSTAGRAM_ENABLED / APIFY_TIKTOK_ENABLED=true without a token or a pinned build is a start-up error,
+        never a silent fallback."""
+        for flag, build_name, enabled, build in self._social_flags():
+            if not enabled:
+                continue
+            missing = [name for name, value in (("APIFY_TOKEN", self.apify_token), (build_name, build))
+                       if not value.strip()]
+            if missing:
+                raise ValueError(f"{flag}=true needs {', '.join(missing)}")
+        self._social_caps_fit()
+        self.instagram_config()  # an unpinned build («latest») or unsafe limits fail here too
+        self.tiktok_config()
+        return self
+
+    def _social_caps_fit(self) -> None:
+        """A run of MAX_RESULTS must fit in its cap at the actor's price (else the cap, not the limit, ends it)."""
+        from bot.acquisition import apify_instagram, apify_tiktok
+
+        for prefix, enabled, results, cap, prices in (
+                ("APIFY_INSTAGRAM", self.apify_instagram_enabled, self.apify_instagram_max_results,
+                 self.apify_instagram_max_charge_usd, apify_instagram),
+                ("APIFY_TIKTOK", self.apify_tiktok_enabled, self.apify_tiktok_max_results,
+                 self.apify_tiktok_max_charge_usd, apify_tiktok)):
+            need = results * prices.USD_PER_RESULT + prices.START_USD
+            if enabled and need > cap + 1e-9:
+                raise ValueError(f"{prefix}_MAX_RESULTS={results} costs up to ${need:.4f} per run, above "
+                                 f"{prefix}_MAX_CHARGE_USD={cap}: lower the results or raise the cap")
+
+    def _social_flags(self) -> list[tuple[str, str, bool, str]]:
+        return [("APIFY_INSTAGRAM_ENABLED", "APIFY_INSTAGRAM_ACTOR_BUILD", self.apify_instagram_enabled,
+                 self.apify_instagram_build),
+                ("APIFY_TIKTOK_ENABLED", "APIFY_TIKTOK_ACTOR_BUILD", self.apify_tiktok_enabled, self.apify_tiktok_build)]
+
+    def instagram_config(self):  # -> bot.acquisition.apify_social.SocialSourceConfig | None
+        """The Instagram sources' configuration, or None while APIFY_INSTAGRAM_ENABLED is off."""
+        if not self.apify_instagram_enabled:
+            return None
+        from bot.acquisition.apify_social import SocialSourceConfig
+
+        return SocialSourceConfig(platform="instagram", posts_actor=self.apify_instagram_posts_actor.strip(),
+                                  comments_actor=self.apify_instagram_comments_actor.strip(),
+                                  build=self.apify_instagram_build.strip(),
+                                  max_results=self.apify_instagram_max_results,
+                                  max_charge_usd=self.apify_instagram_max_charge_usd,
+                                  build_setting="APIFY_INSTAGRAM_ACTOR_BUILD")
+
+    def instagram_sources(self, store, http):  # -> bot.acquisition.apify_instagram.InstagramSources | None
+        """The Instagram posts and comments sources on ``store`` and ``http``; None while the flag is off."""
+        config = self.instagram_config()
+        if config is None:
+            return None
+        from bot.acquisition.apify_instagram import instagram_sources
+
+        return instagram_sources(config, store, http)
+
+    def tiktok_config(self):  # -> bot.acquisition.apify_social.SocialSourceConfig | None
+        """The TikTok sources' configuration, or None while APIFY_TIKTOK_ENABLED is off."""
+        if not self.apify_tiktok_enabled:
+            return None
+        from bot.acquisition.apify_social import SocialSourceConfig
+
+        return SocialSourceConfig(platform="tiktok", posts_actor=self.apify_tiktok_posts_actor.strip(),
+                                  comments_actor=self.apify_tiktok_comments_actor.strip(),
+                                  build=self.apify_tiktok_build.strip(), max_results=self.apify_tiktok_max_results,
+                                  max_charge_usd=self.apify_tiktok_max_charge_usd,
+                                  build_setting="APIFY_TIKTOK_ACTOR_BUILD")
+
+    def tiktok_sources(self, store, http):  # -> bot.acquisition.apify_tiktok.TikTokSources | None
+        """The TikTok posts and comments sources on ``store`` and ``http``; None while the flag is off."""
+        config = self.tiktok_config()
+        if config is None:
+            return None
+        from bot.acquisition.apify_tiktok import tiktok_sources
+
+        return tiktok_sources(config, store, http)
+
     def post_reads_config(self):  # -> bot.acquisition.apify_facebook_comments.CommentsConfig | None
         """The post comment reader's configuration, or None while APIFY_FACEBOOK_COMMENTS_ENABLED is off."""
         if not self.apify_comments_enabled:
@@ -186,6 +281,45 @@ class CampaignRunnerSettings(BaseSettings):
                               posts_actor_id=self.apify_posts_actor, max_comments=self.apify_comments_max,
                               max_usd_per_post=self.apify_comments_max_usd,
                               timeout_seconds=float(self.apify_comments_timeout_seconds))
+
+    # People who reacted under public Facebook posts, through Apify (bot/acquisition/apify_facebook_reactions.py,
+    # v3 P1.6). Off by default and not wired yet (P4); on, it needs APIFY_TOKEN and a pinned build or the service
+    # does not start. The cap of one run must cover MAX_RESULTS x $0.0062.
+    apify_reactions_enabled: bool = Field(default=False, validation_alias="APIFY_FACEBOOK_REACTIONS_ENABLED")
+    apify_reactions_actor: str = Field(default="apify/facebook-likes-scraper",
+                                       validation_alias="APIFY_FACEBOOK_REACTIONS_ACTOR")
+    apify_reactions_build: str = Field(default="", max_length=40, validation_alias="APIFY_FACEBOOK_REACTIONS_ACTOR_BUILD")
+    apify_reactions_max_results: int = Field(default=100, ge=1, le=500, validation_alias="APIFY_FACEBOOK_REACTIONS_MAX_RESULTS")
+    apify_reactions_max_charge_usd: float = Field(default=0.70, gt=0, le=5,
+                                                  validation_alias="APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD")
+
+    @model_validator(mode="after")
+    def _reactions_ready(self) -> CampaignRunnerSettings:
+        """With the flag on: no token, no pinned build or a cap below MAX_RESULTS x the result price is a start-up
+        error. With it off nothing is checked, so ENABLED=false alone always rolls it back."""
+        if self.apify_reactions_enabled:
+            from bot.acquisition.apify_facebook_reactions import USD_PER_RESULT, min_charge_usd
+
+            if self.apify_reactions_max_charge_usd < min_charge_usd(self.apify_reactions_max_results):
+                raise ValueError("APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD is below "
+                                 f"APIFY_FACEBOOK_REACTIONS_MAX_RESULTS x {USD_PER_RESULT}")
+            missing = [name for name, value in (("APIFY_TOKEN", self.apify_token),
+                                                ("APIFY_FACEBOOK_REACTIONS_ACTOR_BUILD", self.apify_reactions_build))
+                       if not value.strip()]
+            if missing:
+                raise ValueError(f"APIFY_FACEBOOK_REACTIONS_ENABLED=true needs {', '.join(missing)}")
+            self.reactions_config()  # an unpinned build or a bad actor id fails here too
+        return self
+
+    def reactions_config(self):  # -> bot.acquisition.apify_facebook_reactions.ReactionsConfig | None
+        """The Facebook reactions source's configuration, or None while APIFY_FACEBOOK_REACTIONS_ENABLED is off."""
+        if not self.apify_reactions_enabled:
+            return None
+        from bot.acquisition.apify_facebook_reactions import ReactionsConfig
+
+        return ReactionsConfig(actor_id=self.apify_reactions_actor, build=self.apify_reactions_build.strip(),
+                               max_results=self.apify_reactions_max_results,
+                               max_charge_usd=self.apify_reactions_max_charge_usd)
 
     def social_config(self):  # -> bot.social_search.worker.SocialConfig (imported lazily)
         from bot.social_search.worker import SocialConfig, parse_platforms
