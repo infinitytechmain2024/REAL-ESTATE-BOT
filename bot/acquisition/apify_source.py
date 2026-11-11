@@ -12,8 +12,10 @@ The life of one run, safe to repeat after any crash (the same rules as ``bot.cam
 3. the row gets ``run_id = pending:<uuid>`` **before** the paid launch (``docs/v2/HANDOFF.md`` §4 item 2);
 4. **launch**: one POST with ``maxTotalChargeUsd`` and the pinned build (``ApifyHttp.launch``, never retried).
    A lost answer (``LaunchUnknown``) is never launched again: the row closes ``failed launch_unconfirmed`` and the
-   cap is booked as an estimate. An explicit refusal (4xx, 429) removes the placeholder: nothing was started;
-5. **checkpoint** the real run id; then the cap is booked as an estimate under ``apify:<run_id>`` and the run awaited;
+   cap is booked as an estimate. An explicit refusal (4xx, 429) removes the placeholder: nothing was started. Only
+   ``RETRYABLE`` refusals (402, 429) are tried again, at most ``max_attempts`` launches; any other 4xx stays failed.
+   A ``launching`` row younger than ``launch_grace_seconds`` is another worker's launch in flight (``busy``);
+5. **checkpoint** the real run id (if that write fails, the run is aborted and booked at its cap); then the cap is booked as an estimate under ``apify:<run_id>`` and the run awaited;
 6. **bill** once: ``costs.record_unique`` under ``apify:<run_id>`` with ``usageTotalUsd``, or the cap with
    ``code='estimated'`` when the run did not say (an estimate never replaces a known cost);
 7. **import** the dataset page by page (``ApifyHttp.dataset_page``) from the stored offset; each page goes to the
@@ -49,9 +51,8 @@ from bot.acquisition.apify_client import (
     actor_path,
     check_pinned_build,
 )
+from bot.acquisition.apify_util import PENDING, scrub
 from bot.acquisition.contracts import Platform
-from bot.campaign.leads import PENDING
-from bot.facebook_collector.apify.provider import scrub
 from bot.utils import costs
 
 if TYPE_CHECKING:
@@ -65,6 +66,10 @@ _PURPOSE_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_:-")
 # A sink gets one page of scrubbed items and the run id, and answers how many it kept.
 Sink = Callable[[list[dict[str, Any]], str], Awaitable[int]]
 Outcome = Literal["succeeded", "failed", "skipped", "retry", "busy"]
+# Refusals of a launch that may pass later (quota, account balance): the row is opened again, up to max_attempts.
+# Every other 4xx (400, 404, 422…) means this input cannot run: the row stays failed. A 5xx or a lost answer on the
+# launch is LaunchUnknown, never retried.
+RETRYABLE = frozenset({"apify_http_402", "apify_http_429"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +83,10 @@ class SocialRunConfig:
     build_setting: str = "APIFY_ACTOR_BUILD"   # the setting named in the error when the build is not pinned
     timeout_seconds: float = 300
     page_size: int = 100
+    # A ``launching`` row younger than this is another worker's launch still in flight (its POST has not answered):
+    # left alone (``busy``). Older: the launch is taken as lost and booked at its cap. Not below the POST timeout.
+    launch_grace_seconds: float = 120
+    max_attempts: int = 3             # launches of one input (refusals RETRYABLE included)
 
     def __post_init__(self) -> None:
         actor_path(self.actor_id)
@@ -86,7 +95,9 @@ class SocialRunConfig:
                 and self.purpose[0].isalpha()):
             raise ValueError("purpose must look like posts or comments:ig")
         if not (math.isfinite(self.max_charge_usd) and 0 < self.max_charge_usd <= 5
-                and 1 <= self.max_items <= 5000 and 1 <= self.page_size <= 1000 and 30 <= self.timeout_seconds <= 3600):
+                and 1 <= self.max_items <= 5000 and 1 <= self.page_size <= 1000 and 30 <= self.timeout_seconds <= 3600
+                and math.isfinite(self.launch_grace_seconds) and 30 <= self.launch_grace_seconds <= 3600
+                and 1 <= self.max_attempts <= 10):
             raise ValueError("unsafe apify source limits")
 
 
@@ -105,6 +116,8 @@ class SourceRun:
     items_imported: int = 0
     billed_usd: float | None = None
     error_code: str | None = None
+    attempts: int = 0                          # launches begun (mark_launching)
+    launching_age_seconds: float | None = None  # since launched_at, by the store's clock (None: not launching)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +158,8 @@ def _usage(run: dict[str, Any]) -> float | None:
 class ApifySocialRun:
     def __init__(self, store: SourceRunStore, http: ApifyHttp, config: SocialRunConfig, *,
                  clock: Callable[[], float] = time.monotonic, poll_seconds: int = 20) -> None:
+        if config.launch_grace_seconds < http.timeout_seconds:
+            raise ValueError("launch_grace_seconds must not be below the Apify request timeout")
         self.store, self.http, self.config = store, http, config
         self._clock, self.poll_seconds = clock, poll_seconds
 
@@ -160,7 +175,7 @@ class ApifySocialRun:
             row = await self.store.claim(campaign_id, cfg, digest, owner_user_id=owner_user_id)
             if row.status == "succeeded":
                 return RunOutcome("succeeded", row.run_id, row.items_imported, row.billed_usd or 0.0)
-            if row.status == "failed" and row.run_id is not None:  # paid, or possibly paid: never again
+            if row.status == "failed":  # paid, possibly paid, or refused for good (claim reopened what may pass)
                 return RunOutcome("failed", row.run_id, row.items_imported, row.billed_usd or 0.0, row.error_code)
             try:
                 return await self._run(row, actor_input, sink)
@@ -170,9 +185,15 @@ class ApifySocialRun:
     async def _run(self, row: SourceRun, actor_input: dict[str, Any], sink: Sink) -> RunOutcome:
         cfg = self.config
         if row.run_id is not None and row.run_id.startswith(PENDING):
+            age = row.launching_age_seconds
+            if age is not None and age < cfg.launch_grace_seconds:
+                return RunOutcome("busy")  # another worker's POST may still be in flight: its run is not lost
             # A launch began and its run id was never stored: a run may exist, so it is booked at its cap, not repeated.
             return await self._unconfirmed(row, row.run_id, "launch_unconfirmed")
         if row.run_id is None:
+            if row.attempts >= cfg.max_attempts:
+                await self.store.finish(row, "failed", error="max_attempts")
+                return RunOutcome("failed", error="max_attempts")
             if await costs.over_budget(row.campaign_id):
                 await costs.skip("api", "budget_cap", item=cfg.actor_id)
                 return RunOutcome("skipped", error="budget_cap")
@@ -229,6 +250,11 @@ class ApifySocialRun:
             await self.store.save_run(row, run_id, dataset)
         except Exception:  # noqa: BLE001 - the run exists but its id is lost: never launch a second paid one
             log.warning("apify_source.run_id_not_saved", extra=self._extra(row))
+            try:  # stop what it would spend; nobody can resume it without its id
+                await self.http.abort(run_id)
+            except Exception as exc:  # noqa: BLE001 - booked at its cap below either way
+                log.warning("apify_source.abort_failed %s", getattr(exc, "code", type(exc).__name__),
+                            extra=self._extra(row))
             return await self._unconfirmed(replace(row, run_id=token), token, "launch_unconfirmed")
         log.info("apify_source.launched", extra={**self._extra(row), "run_id": run_id})
         return replace(row, status="running", run_id=run_id, dataset_id=dataset)
@@ -301,13 +327,15 @@ class ApifySocialRun:
 # --- PostgreSQL (migration 051) ---------------------------------------------------------------------------------
 
 _COLUMNS = """id, campaign_id::text as campaign_id, purpose, input_hash, status, run_id, dataset_id, import_checkpoint,
-              items_imported, billed_usd::float8 as billed_usd, error_code"""
+              items_imported, billed_usd::float8 as billed_usd, error_code, attempts,
+              case when status = 'launching' then extract(epoch from now() - launched_at)::float8 end
+                  as launching_age"""
 
 
 def _row(record: Any) -> SourceRun:
     return SourceRun(record["id"], record["campaign_id"], record["purpose"], record["input_hash"], record["status"],
                      record["run_id"], record["dataset_id"], record["import_checkpoint"], record["items_imported"],
-                     record["billed_usd"], record["error_code"])
+                     record["billed_usd"], record["error_code"], record["attempts"], record["launching_age"])
 
 
 class PostgresSourceRunStore:
@@ -316,7 +344,8 @@ class PostgresSourceRunStore:
 
     async def claim(self, campaign_id: str, config: SocialRunConfig, input_hash: str, *,
                     owner_user_id: int | None = None) -> SourceRun:
-        """The row of this input (created once). A failure that paid nothing (no run id) is opened again."""
+        """The row of this input (created once). A refusal that may pass later (``RETRYABLE``, nothing paid, fewer
+        than ``max_attempts`` launches) is opened again; any other failure stays."""
         async with self.pool.acquire() as conn, conn.transaction():
             await _actor(conn)
             await conn.execute(
@@ -326,13 +355,15 @@ class PostgresSourceRunStore:
                    on conflict (campaign_id, purpose, input_hash) do nothing""",
                 campaign_id, owner_user_id, config.platform, config.purpose, config.actor_id, config.build, input_hash,
                 config.max_charge_usd)
+            await conn.execute(
+                """update apify_source_runs set status = 'claimed', error_code = null, finished_at = null
+                    where campaign_id = $1::uuid and purpose = $2 and input_hash = $3
+                      and status = 'failed' and run_id is null and error_code = any($4::text[]) and attempts < $5""",
+                campaign_id, config.purpose, input_hash, sorted(RETRYABLE), config.max_attempts)
             record = await conn.fetchrow(
-                f"""update apify_source_runs
-                       set status = case when status = 'failed' and run_id is null then 'claimed' else status end,
-                           error_code = case when status = 'failed' and run_id is null then null else error_code end,
-                           finished_at = case when status = 'failed' and run_id is null then null else finished_at end
-                     where campaign_id = $1::uuid and purpose = $2 and input_hash = $3
-                 returning {_COLUMNS}""", campaign_id, config.purpose, input_hash)
+                f"""select {_COLUMNS} from apify_source_runs
+                     where campaign_id = $1::uuid and purpose = $2 and input_hash = $3""",
+                campaign_id, config.purpose, input_hash)
         return _row(record)
 
     async def mark_launching(self, run: SourceRun) -> str | None:
@@ -341,7 +372,8 @@ class PostgresSourceRunStore:
         async with self.pool.acquire() as conn, conn.transaction():
             await _actor(conn)
             result = await conn.execute(
-                """update apify_source_runs set run_id = $2, status = 'launching', launched_at = now()
+                """update apify_source_runs
+                      set run_id = $2, status = 'launching', launched_at = now(), attempts = attempts + 1
                     where id = $1 and status = 'claimed' and run_id is null""", run.id, token)
         return token if result.split()[-1] == "1" else None
 
@@ -397,6 +429,7 @@ class MemorySourceRunStore:
 
     rows: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
     fail_save_run: bool = False
+    clock: Callable[[], float] = time.monotonic
 
     def _get(self, run: SourceRun) -> dict[str, Any]:
         return self.rows[(run.campaign_id, run.purpose, run.input_hash)]
@@ -408,19 +441,21 @@ class MemorySourceRunStore:
             "id": len(self.rows) + 1, "owner_user_id": owner_user_id, "platform": config.platform,
             "actor_id": config.actor_id, "actor_build": config.build, "max_charge_usd": config.max_charge_usd,
             "status": "claimed", "run_id": None, "dataset_id": None, "import_checkpoint": 0, "items_imported": 0,
-            "billed_usd": None, "error_code": None})
-        if row["status"] == "failed" and row["run_id"] is None:
+            "billed_usd": None, "error_code": None, "attempts": 0, "launched_at": None})
+        if (row["status"] == "failed" and row["run_id"] is None and row["error_code"] in RETRYABLE
+                and row["attempts"] < config.max_attempts):
             row["status"], row["error_code"] = "claimed", None
+        age = self.clock() - row["launched_at"] if row["status"] == "launching" else None
         return SourceRun(row["id"], campaign_id, config.purpose, input_hash, row["status"], row["run_id"],
                          row["dataset_id"], row["import_checkpoint"], row["items_imported"], row["billed_usd"],
-                         row["error_code"])
+                         row["error_code"], row["attempts"], age)
 
     async def mark_launching(self, run: SourceRun) -> str | None:
         row = self._get(run)
         if row["status"] != "claimed" or row["run_id"] is not None:
             return None
         row["run_id"] = token = f"{PENDING}{uuid.uuid4().hex}"
-        row["status"] = "launching"
+        row["status"], row["launched_at"], row["attempts"] = "launching", self.clock(), row["attempts"] + 1
         return token
 
     async def unmark_launching(self, run: SourceRun, token: str) -> None:
@@ -452,5 +487,5 @@ class MemorySourceRunStore:
                 row["billed_usd"] = billed_usd
 
 
-__all__ = ["ApifySocialRun", "MemorySourceRunStore", "PostgresSourceRunStore", "RunOutcome", "SocialRunConfig",
+__all__ = ["RETRYABLE", "ApifySocialRun", "MemorySourceRunStore", "PostgresSourceRunStore", "RunOutcome", "SocialRunConfig",
            "SourceRun", "SourceRunStore", "input_hash"]

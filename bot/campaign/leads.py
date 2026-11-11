@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
+from bot.acquisition.apify_util import PENDING  # also re-exported (post_leads, comment_reader)
 from bot.acquisition.people import profile_link as social_profile_link
 from bot.facebook_collector.challenges import detect_challenge
 
@@ -408,7 +409,6 @@ class Profile:
     name: str
 
 
-PENDING = "pending:"  # run_id placeholder written before a paid launch (v2 H1): no real id came back, never launch again
 
 
 class LeadStore(Protocol):

@@ -177,13 +177,23 @@ async def test_store_launch_unknown_keeps_its_placeholder_and_refusal_reopens(co
     assert saved["run_id"].startswith("pending:")
 
     other = {**INPUT, "resultsLimit": 5}
-    refused = Api(launch=400)
+    refused = Api(launch=402)  # may pass later (account balance): opened again
     assert (await runner(refused, store).run(cid, other, Sink())).status == "failed"
-    row = await conn.fetchrow("select status, run_id from public.apify_source_runs where run_id is null")
-    assert (row["status"], row["run_id"]) == ("failed", None)
+    row = await conn.fetchrow("select status, run_id, attempts from public.apify_source_runs where run_id is null")
+    assert (row["status"], row["run_id"], row["attempts"]) == ("failed", None, 1)
     refused.launch = None
     assert (await runner(refused, store).run(cid, other, Sink())).status == "succeeded"
     assert len(refused.launches()) == 2
+
+    bad = {**INPUT, "resultsLimit": 6}
+    invalid = Api(launch=400)  # this input cannot run: failed for good
+    assert (await runner(invalid, store).run(cid, bad, Sink())).error == "apify_http_400"
+    invalid.launch = None
+    assert (await runner(invalid, store).run(cid, bad, Sink())).status == "failed"
+    assert len(invalid.launches()) == 1
+    row = await conn.fetchrow("select status, error_code, attempts from public.apify_source_runs "
+                              "where error_code = 'apify_http_400'")
+    assert (row["status"], row["attempts"]) == ("failed", 1)
 
 
 async def test_store_lets_one_worker_launch(conn, pool):
@@ -196,3 +206,22 @@ async def test_store_lets_one_worker_launch(conn, pool):
     assert run.status == "claimed" and run.run_id is None
     assert await store.mark_launching(run) is not None
     assert await store.mark_launching(run) is None  # only one worker launches
+    seen = await store.claim(cid, CONFIG, input_hash(CONFIG.actor_id, INPUT))
+    assert seen.status == "launching" and seen.attempts == 1
+    assert seen.launching_age_seconds is not None and 0 <= seen.launching_age_seconds < 60
+
+
+async def test_store_fresh_launch_is_busy_and_an_old_one_is_closed(conn, pool):
+    from bot.acquisition.apify_source import PostgresSourceRunStore, input_hash
+    from bot.utils import costs
+    from tests.test_apify_source_run import CONFIG, INPUT, Api, Sink, runner
+
+    costs.install(costs.PostgresLedger(pool), budget_usd=5)
+    cid = await _campaign(conn)
+    store, api = PostgresSourceRunStore(pool), Api()
+    await store.mark_launching(await store.claim(cid, CONFIG, input_hash(CONFIG.actor_id, INPUT)))
+    assert (await runner(api, store).run(cid, INPUT, Sink())).status == "busy"
+    assert await conn.fetchval("select count(*) from public.campaign_costs where kind = 'cost'") == 0
+    await conn.execute("update public.apify_source_runs set launched_at = now() - interval '10 minutes'")
+    assert (await runner(api, store).run(cid, INPUT, Sink())).error == "launch_unconfirmed"
+    assert api.launches() == []

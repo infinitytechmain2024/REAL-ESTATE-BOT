@@ -8,7 +8,8 @@
 -- launch replaces it with the real run id, an explicit refusal (4xx/429) removes it. A row whose run_id is set is
 -- never launched again: a placeholder left behind closes as failed launch_unconfirmed, booked at max_charge_usd.
 -- billed_usd is the run's cost (also in campaign_costs, key apify:<run_id>); import_checkpoint the dataset offset
--- already read, items_imported what the source kept.
+-- already read, items_imported what the source kept; attempts the launches begun (a refusal that may pass later,
+-- 402/429, is tried again up to the source's max_attempts; any other 4xx stays failed).
 
 create table if not exists public.apify_source_runs (
     id                bigint generated always as identity primary key,
@@ -28,6 +29,7 @@ create table if not exists public.apify_source_runs (
     billed_usd        numeric(10, 4) check (billed_usd is null or billed_usd >= 0),
     import_checkpoint integer not null default 0 check (import_checkpoint >= 0),
     items_imported    integer not null default 0 check (items_imported >= 0),
+    attempts          integer not null default 0 check (attempts >= 0),
     error_code        text check (error_code is null or char_length(error_code) <= 200),
     created_at        timestamptz not null default now(),
     launched_at       timestamptz,

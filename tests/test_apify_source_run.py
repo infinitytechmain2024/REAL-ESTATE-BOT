@@ -44,6 +44,7 @@ class Api:
                  usage: Any = 0.05) -> None:
         self.launch, self.states, self.dataset, self.usage = launch, states or ["SUCCEEDED"], dataset or [], usage
         self.calls: list[httpx.Request] = []
+        self.abort_status = 200
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
@@ -54,6 +55,8 @@ class Api:
             if isinstance(self.launch, int):
                 return httpx.Response(self.launch, json={"error": {"type": "x"}})
             return httpx.Response(201, json={"data": {"id": "RUN1", "defaultDatasetId": "DS1", "status": "READY"}})
+        if path.endswith("/actor-runs/RUN1/abort") and request.method == "POST":
+            return httpx.Response(self.abort_status, json={"data": {"id": "RUN1", "status": "ABORTING"}})
         if "/actor-runs/RUN1" in path and request.method == "GET":
             state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
             if isinstance(state, int):
@@ -156,24 +159,54 @@ async def test_launch_unknown_never_launches_again_and_books_the_cap(ledger) -> 
     assert key == f"apify:{saved['run_id']}" and cost == 0.2 and code == "estimated"
 
 
-async def test_a_left_placeholder_is_closed_at_its_cap_without_a_launch(ledger) -> None:
-    api, store = Api(), MemorySourceRunStore()
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_a_fresh_placeholder_is_busy_and_an_old_one_is_closed_at_its_cap(ledger) -> None:
+    clock = Clock()
+    api, store = Api(), MemorySourceRunStore(clock=clock)
     source = runner(api, store)
     claimed = await store.claim(CAMPAIGN, CONFIG, input_hash(CONFIG.actor_id, INPUT))
-    token = await store.mark_launching(claimed)  # a crash right after the placeholder was written
+    token = await store.mark_launching(claimed)  # another worker's POST in flight, or a crash right after it
+    clock.now += CONFIG.launch_grace_seconds - 1
+    fresh = await source.run(CAMPAIGN, INPUT, Sink())
+    assert fresh.status == "busy"
+    assert apify_costs(ledger) == [] and row(store)["status"] == "launching"  # nothing booked, nothing closed
+    clock.now += 2  # past the grace: the launch is taken as lost
     outcome = await source.run(CAMPAIGN, INPUT, Sink())
     assert outcome.status == "failed" and outcome.error == "launch_unconfirmed"
     assert api.launches() == []
     assert apify_costs(ledger) == [(f"apify:{token}", 0.2, "estimated")]
 
 
-async def test_a_lost_run_id_is_never_launched_twice(ledger) -> None:
+def test_grace_below_the_request_timeout_is_refused() -> None:
+    from dataclasses import replace
+
+    http = ApifyHttp(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(Api())), timeout_seconds=60)
+    with pytest.raises(ValueError, match="launch_grace_seconds"):
+        ApifySocialRun(MemorySourceRunStore(), http, replace(CONFIG, launch_grace_seconds=30))
+
+
+def aborts(api: Api) -> list[httpx.Request]:
+    return [r for r in api.calls if r.method == "POST" and r.url.path.endswith("/abort")]
+
+
+@pytest.mark.parametrize("abort_fails", [False, True])
+async def test_a_lost_run_id_is_aborted_and_never_launched_twice(ledger, abort_fails) -> None:
     api, store = Api(), MemorySourceRunStore(fail_save_run=True)
+    if abort_fails:
+        api.abort_status = 500
     source = runner(api, store)
     assert (await source.run(CAMPAIGN, INPUT, Sink())).error == "launch_unconfirmed"
     store.fail_save_run = False
     assert (await source.run(CAMPAIGN, INPUT, Sink())).status == "failed"
     assert len(api.launches()) == 1
+    assert [r.url.path for r in aborts(api)] == ["/v2/actor-runs/RUN1/abort"]
     assert [c[1:] for c in apify_costs(ledger)] == [(0.2, "estimated")]
 
 
@@ -221,8 +254,8 @@ async def test_empty_dataset_is_a_successful_run_with_nothing(ledger) -> None:
     assert sink.pages == []
 
 
-@pytest.mark.parametrize(("code", "outcome"), [(400, "failed"), (402, "failed"), (429, "retry")])
-async def test_refused_launch_drops_the_placeholder_and_books_nothing(ledger, code, outcome) -> None:
+@pytest.mark.parametrize(("code", "outcome"), [(402, "failed"), (429, "retry")])
+async def test_a_refusal_that_may_pass_drops_the_placeholder_and_is_tried_again(ledger, code, outcome) -> None:
     api, store = Api(launch=code), MemorySourceRunStore()
     source = runner(api, store)
     result = await source.run(CAMPAIGN, INPUT, Sink())
@@ -232,6 +265,28 @@ async def test_refused_launch_drops_the_placeholder_and_books_nothing(ledger, co
     api.launch = None  # nothing was started, so the input may be launched later
     assert (await source.run(CAMPAIGN, INPUT, Sink())).status == "succeeded"
     assert len(api.launches()) == 2
+
+
+@pytest.mark.parametrize("code", [400, 401, 404, 422])
+async def test_a_plain_4xx_fails_for_good(ledger, code) -> None:
+    api, store = Api(launch=code), MemorySourceRunStore()
+    source = runner(api, store)
+    assert (await source.run(CAMPAIGN, INPUT, Sink())).error == f"apify_http_{code}"
+    api.launch = None
+    again = await source.run(CAMPAIGN, INPUT, Sink())
+    assert (again.status, len(api.launches())) == ("failed", 1)  # the second tick POSTs nothing
+    assert row(store)["status"] == "failed" and row(store)["error_code"] == f"apify_http_{code}"
+    assert row(store)["run_id"] is None and apify_costs(ledger) == []
+
+
+@pytest.mark.parametrize("code", [402, 429])
+async def test_retryable_refusals_stop_after_max_attempts(ledger, code) -> None:
+    api, store = Api(launch=code), MemorySourceRunStore()
+    source = runner(api, store)
+    for _ in range(CONFIG.max_attempts + 2):
+        await source.run(CAMPAIGN, INPUT, Sink())
+    assert len(api.launches()) == CONFIG.max_attempts
+    assert row(store)["attempts"] == CONFIG.max_attempts and row(store)["status"] == "failed"
 
 
 async def test_failed_run_is_billed_and_closed(ledger) -> None:
