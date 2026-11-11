@@ -19,13 +19,19 @@ git status --short --untracked-files=no ; git rev-parse --short HEAD     # пу�
 docker compose --env-file .env config -q && echo "compose config ok"
 for k in POSTGRES_PASSWORD REDIS_PASSWORD DATABASE_URL TELEGRAM_TOKEN OPENROUTER_API_KEY APIFY_TOKEN; do
   printf '%-20s %s\n' "$k" "$(grep -c "^$k=." .env)"; done
-grep -E '^COMPOSE_PROFILES' .env || echo "профили не заданы"
+# снимок флагов до update.sh: файл вне репозитория, по нему делаются все откаты
+grep -nE '^(ACQUISITION_MODE|APIFY_[A-Z_]+_ENABLED|FEATURE_APIFY_FACEBOOK|LEADS_PROVIDER|CAMPAIGN_BUDGET_USD|APIFY_FACEBOOK_SCOPE|COMPOSE_PROFILES|CAMPAIGN_JOIN_NOTICES|CAMPAIGN_INVESTOR_REPORT|INTAKE_BOTH_MODE|CARD_EXTRA_FIELDS|ARCHITECT_PROVIDER|WATCHDOG_ENABLED|OPENROUTER_[A-Z_]+_MODEL)=' .env > /root/p0-flags-before.txt
+cat /root/p0-flags-before.txt; [ -s /root/p0-flags-before.txt ] || echo "ни одной строки: умолчания (всё выключено)"
 stat -c %g /var/run/docker.sock                                           # GID для блока (ж)
 psqlc() { docker compose --env-file .env exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$1"; }
 llmerr() { psqlc "select stage, code, item, count(*) from campaign_costs where kind='error' and created_at > now() - interval '30 minutes' group by 1,2,3 order by 4 desc"; }
 ```
 
 Норма: свободно ≥ 5 ГБ; дерево чистое; все шесть ключей `1`; версия Compose v2 (запишите её — `HANDOFF.md` §4 п. 16).
+Снимок `/root/p0-flags-before.txt` (`docs/v2/DEPLOY.md:56`): флаги выключены (`ACQUISITION_MODE=legacy`, `*_ENABLED=false`,
+`FEATURE_APIFY_FACEBOOK=false`, `LEADS_PROVIDER=browser`, `APIFY_FACEBOOK_SCOPE=campaign`, `CAMPAIGN_BUDGET_USD=5`) или строк нет.
+Что-то включено (на проде было `FEATURE_APIFY_FACEBOOK=true`, `docs/v2/HANDOFF.md:225-231`) — **стоп**, до `update.sh`
+написать разработчику. Откаты ниже написаны для умолчаний: если в снимке у ключа другое значение, возвращайте значение из снимка.
 Записать заранее: билды акторов `apify/facebook-groups-scraper` и `apify/facebook-comments-scraper` (вкладка Builds,
 вид `0.1.23`, не `latest`; `docs/v2/DEPLOY.md:25-26`), ссылки на посты O7 для G6/G8. `psqlc`/`llmerr` задавать в каждой новой SSH-сессии.
 
@@ -85,6 +91,8 @@ ENV
 docker compose --env-file .env up -d campaign-runner
 ```
 
+При профиле `analysis` после (а2) ещё `docker compose --env-file .env up -d analysis-pipeline` (и в откате (а2)).
+
 Норма (`docs/v2/DEPLOY.md:175-176`, `:192-193`, `:213-236`): бот задаёт уточняющий вопрос, в логе `telegram` нет
 `interview_unreadable`; в `analysis-worker` нет `request_refused|model_unavailable`; после одной небольшой кампании до
 отчёта — 0 строк `http_400` в `llmerr`, новые id видны в `campaign_costs.item`. Откат (по одной ступени, `:179`, `:196`, `:238-248`):
@@ -105,7 +113,7 @@ printf '%s\n' ACQUISITION_MODE=apify APIFY_MIN_LISTINGS=5 APIFY_FOTOCASA_ENABLED
 `psqlc "select name, state, error_code, jsonb_array_length(listings) from web_listing_source_runs order by updated_at desc limit 5"`
 → `fotocasa`, `completed`, `listings > 0`, `error_code` пуст. (б2) Yaencontre + Idealista и (б3) Pisos/Habitaclia/Milanuncios —
 только с вашим «ок» по O3, по одному порталу, норма как в (б1) (`docs/v2/DEPLOY.md:283-317`); без «ок» пропустить.
-Откат (`:280`, `:300`, `:316`; первые две строки — (б1)):
+Откат (`:280`, `:300`, `:316`; первые два значения — (б1)):
 
 ```bash
 printf '%s\n' ACQUISITION_MODE=legacy APIFY_FOTOCASA_ENABLED=false APIFY_YAENCONTRE_ENABLED=false APIFY_IDEALISTA_ENABLED=false APIFY_IDEALISTA_PROVIDER=axlymxp APIFY_PISOS_ENABLED=false APIFY_HABITACLIA_ENABLED=false APIFY_MILANUNCIOS_ENABLED=false >> .env && docker compose --env-file .env up -d campaign-runner
@@ -152,13 +160,15 @@ printf '%s\n' CAMPAIGN_JOIN_NOTICES=false CAMPAIGN_INVESTOR_REPORT=false INTAKE_
 
 ### (ж) Watchdog: алерты владельцу — `docs/v2/DEPLOY.md:495-532`
 
-Риск `HANDOFF.md` §4 п. 16: если `COMPOSE_PROFILES` уже есть, **дописать `ops` в ту же строку** (`collector,ops`), не второй строкой.
+Риск `HANDOFF.md` §4 п. 16: если `COMPOSE_PROFILES` уже есть, `ops` дописывается в ту же строку (`collector,ops`), второй строки нет.
 
 ```bash
-grep -E '^COMPOSE_PROFILES' .env || echo "COMPOSE_PROFILES не задан"
-printf '%s\n' COMPOSE_PROFILES=ops WATCHDOG_ENABLED=true WATCHDOG_DOCKER_SOCKET=/var/run/docker.sock 'WATCHDOG_DOCKER_GID=<GID из stat>' >> .env
+grep -q '^COMPOSE_PROFILES=' .env && sed -i '/^COMPOSE_PROFILES=/{/ops/!s/$/,ops/}' .env || echo COMPOSE_PROFILES=ops >> .env
+grep -E '^COMPOSE_PROFILES=' .env                       # одна строка, в ней ops
+printf '%s\n' WATCHDOG_ENABLED=true WATCHDOG_DOCKER_SOCKET=/var/run/docker.sock 'WATCHDOG_DOCKER_GID=<GID из stat>' >> .env
 docker compose --env-file .env up -d --build watchdog
-docker compose --env-file .env ps watchdog || docker compose --env-file .env --profile ops up -d watchdog
+docker compose --env-file .env ps -q watchdog | grep -q . || docker compose --env-file .env --profile ops up -d watchdog
+docker compose --env-file .env ps watchdog
 docker compose --env-file .env logs --tail=30 watchdog | grep -iE "started|permission|denied|docker" 
 docker compose --env-file .env stop analysis-worker    # ждать алерт «Сервис analysis-worker: exited» ≤ 2 мин
 docker compose --env-file .env up -d analysis-worker && docker compose --env-file .env ps analysis-worker
@@ -184,6 +194,8 @@ O1-1b: телефон для всех объявлений, включая ча�
 echo 'CARD_EXTRA_FIELDS=true' >> .env && docker compose --env-file .env up -d analysis-worker campaign-runner
 ```
 
+При профиле `analysis` ещё `docker compose --env-file .env up -d analysis-pipeline` (и в откате).
+
 Норма (`docs/v2/DEPLOY.md:547-548`): в новой карточке «Площадь» (участок отдельно), «Телефон», «Агентство», если портал
 их отдал; `logs --since=10m analysis-worker campaign-runner | grep Traceback` пусто. Откат (`:551`):
 
@@ -193,15 +205,26 @@ echo 'CARD_EXTRA_FIELDS=false' >> .env && docker compose --env-file .env up -d a
 
 ## 4. A4 (P0.2): одна открытая группа FB через Apify — `docs/v2/DEPLOY.md:319-360`
 
-≤ 50 постов, потолок $0.30. `CAMPAIGN_BUDGET_USD` читает каждый сервис сам, поэтому перезапускаются все, кто его читает.
-Риск `HANDOFF.md` §4 п. 17: `facebook-runner` должен быть в сети `egress`, иначе `apify_launch_unknown`.
+**Потолок A4: $0.30 на запуск актора групп, ≤ $0.6 на всю кампанию A4.** После (б) и (г) в кампании работают ещё
+порталы, LLM и Apify-комментарии под карточками (до $1 на пост), поэтому на время A4 `LEADS_PROVIDER=browser` и
+`CAMPAIGN_BUDGET_USD=0.5`. Бюджет проверяется до вызова: сверху возможен ещё один вызов. ≤ 50 постов.
+`CAMPAIGN_BUDGET_USD` каждый сервис читает сам, поэтому перезапускаются все четыре: `watchdog` — только если (ж) включён.
+Если в `COMPOSE_PROFILES` есть `collector` или `analysis`, добавляйте `facebook-collector` / `analysis-pipeline` во все
+`up -d` этого раздела и раздела 6 (они тоже читают `CAMPAIGN_BUDGET_USD`).
+
+Риск `HANDOFF.md` §4 п. 17: `facebook-runner` должен быть в сети `egress`, иначе `apify_launch_unknown`. Проверка до включения:
 
 ```bash
-docker compose --env-file .env run --rm facebook-runner python -m bot.facebook_collector.apify.retention --dry-run
-printf '%s\n' FEATURE_APIFY_FACEBOOK=true 'APIFY_FACEBOOK_ACTOR_BUILD=<билд групп>' APIFY_FACEBOOK_SCOPE=campaign APIFY_FACEBOOK_MAX_POSTS_PER_RUN=50 APIFY_FACEBOOK_MAX_USD_PER_RUN=0.3 APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN=0.3 CAMPAIGN_BUDGET_USD=1 >> .env
-docker compose --env-file .env up -d facebook-runner campaign-runner analysis-worker watchdog
-docker compose --env-file .env logs --tail=20 facebook-runner | grep -iE "build|token|traceback" || echo ok
 docker inspect "$(docker compose --env-file .env ps -q facebook-runner)" --format '{{json .NetworkSettings.Networks}}' | grep -o '"[a-z_-]*_\(backend\|egress\)"'
+docker compose --env-file .env run --rm facebook-runner python -m bot.facebook_collector.apify.retention --dry-run
+```
+
+Норма: обе строки, `…backend` и `…egress`; нет `egress` — стоп (compose не обновился, вернуться к п. 2).
+
+```bash
+printf '%s\n' FEATURE_APIFY_FACEBOOK=true 'APIFY_FACEBOOK_ACTOR_BUILD=<билд групп>' APIFY_FACEBOOK_SCOPE=campaign APIFY_FACEBOOK_MAX_POSTS_PER_RUN=50 APIFY_FACEBOOK_MAX_USD_PER_RUN=0.3 APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN=0.3 LEADS_PROVIDER=browser CAMPAIGN_BUDGET_USD=0.5 >> .env
+docker compose --env-file .env up -d facebook-runner campaign-runner analysis-worker watchdog   # watchdog — только если (ж) включён
+docker compose --env-file .env logs --tail=20 facebook-runner | grep -iE "build|token|traceback" || echo ok
 ```
 
 Создать в боте кампанию с одной открытой группой, затем (`docs/v2/DEPLOY.md:350-356`):
@@ -210,19 +233,22 @@ docker inspect "$(docker compose --env-file .env ps -q facebook-runner)" --forma
 psqlc "update campaigns set acquisition_provider='apify' where id='<campaign-uuid>'"
 psqlc "select run_id, status, items_imported, billed_usd from apify_runs order by launched_at desc limit 1"
 psqlc "select stage, kind, code, sum(units), sum(cost_usd) from campaign_costs where campaign_id='<campaign-uuid>' group by 1,2,3"
+psqlc "select round(sum(cost_usd),4) usd from campaign_costs where campaign_id='<campaign-uuid>' and kind='cost'"
 ```
 
-Норма: в сетях есть `…backend` и `…egress`; `status=SUCCEEDED` (в БД заглавными), `items_imported > 0`, `billed_usd`
-≤ 0.30 и совпадает с Apify Billing. После прогона вернуть лимиты (`docs/v2/DEPLOY.md:358-360`), `scope=all` не включать (O2):
+Норма: `status=SUCCEEDED` (в БД заглавными), `items_imported > 0`, `billed_usd` ≤ 0.30 и совпадает с Apify Billing;
+итог `campaign_costs` по кампании A4 ≤ $0.6. После A4 вернуть значения из снимка п. 0 и (г) (`docs/v2/DEPLOY.md:358-360`),
+`scope=all` не включать (O2):
 
 ```bash
-printf '%s\n' APIFY_FACEBOOK_MAX_POSTS_PER_RUN=500 APIFY_FACEBOOK_MAX_USD_PER_RUN=2 APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN=10 CAMPAIGN_BUDGET_USD=5 >> .env && docker compose --env-file .env up -d facebook-runner campaign-runner analysis-worker watchdog
+printf '%s\n' APIFY_FACEBOOK_MAX_POSTS_PER_RUN=500 APIFY_FACEBOOK_MAX_USD_PER_RUN=2 APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN=10 LEADS_PROVIDER=apify CAMPAIGN_BUDGET_USD=5 >> .env && docker compose --env-file .env up -d facebook-runner campaign-runner analysis-worker watchdog   # watchdog — если (ж) включён
 ```
 
-Откат (`docs/v2/DEPLOY.md:377`): ретеншн-крон (`:663`) добавлять только если A4 оставлен включённым.
+Откат A4 (`docs/v2/DEPLOY.md:377`; `LEADS_PROVIDER=apify` — если (г) оставлен, иначе `browser`). Ретеншн-крон (`:663`)
+добавлять только если A4 оставлен включённым.
 
 ```bash
-printf '%s\n' FEATURE_APIFY_FACEBOOK=false APIFY_FACEBOOK_SCOPE=campaign >> .env && docker compose --env-file .env up -d facebook-runner
+printf '%s\n' FEATURE_APIFY_FACEBOOK=false APIFY_FACEBOOK_SCOPE=campaign APIFY_FACEBOOK_MAX_POSTS_PER_RUN=500 APIFY_FACEBOOK_MAX_USD_PER_RUN=2 APIFY_FACEBOOK_MAX_USD_PER_CAMPAIGN=10 LEADS_PROVIDER=apify CAMPAIGN_BUDGET_USD=5 >> .env && docker compose --env-file .env up -d facebook-runner campaign-runner analysis-worker watchdog   # watchdog — если (ж) включён
 ```
 
 ## 5. Проверки после всего — `docs/v2/DEPLOY.md:554-575`
@@ -237,20 +263,24 @@ psqlc "select run_id, status, items_imported, billed_usd, launched_at from apify
 
 Норма: все `healthy`, `traceback нет`, `healthz ok`; `billed_usd` совпадает с Apify Billing. Эффективные значения
 флагов: `docker compose --env-file .env config | grep -E 'ACQUISITION_MODE|CARD_EXTRA_FIELDS|CAMPAIGN_BUDGET_USD|WATCHDOG_ENABLED'`
-(только эти ключи, не секреты). Откат всего сразу (`docs/v2/DEPLOY.md:604-606`): `cp .env.bak.<метка> .env && docker compose --env-file .env up -d`.
+(только эти ключи, не секреты). Откат всего сразу (`docs/v2/DEPLOY.md:600`, `:604-606`):
+
+```bash
+cp .env.bak.<метка> .env && docker compose --env-file .env up -d && docker compose --env-file .env --profile ops rm -sf watchdog
+```
 
 ## 6. Базовая линия G1–G9 (P0.4) — `docs/v2/GOLDEN_SET.md:27-49`
 
 Общий потолок **$7** на девять кампаний. Бот считает бюджет только на одну кампанию (`bot/utils/costs.py:317-326`):
 при `5` худший случай 9 × $5 = $45. Поэтому на время прогона `0.8` и лимит в Apify Console (Billing → Limits:
-текущий расход месяца + $7). Нужны ссылки на посты O7 для G6/G8.
-Если в `COMPOSE_PROFILES` есть `collector` или `analysis`, добавляйте `facebook-collector` / `analysis-pipeline` во все
-`up -d` этого раздела и раздела 4 (они тоже читают `CAMPAIGN_BUDGET_USD`).
+текущий расход месяца + $7). Нужны ссылки на посты O7 для G6/G8. Профили `collector`/`analysis` — как в разделе 4.
+На время прогона также `APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST=0.5` (читает `campaign-runner`).
 
 ```bash
 date -u +%FT%TZ                        # записать: начало прогона
-echo 'CAMPAIGN_BUDGET_USD=0.8' >> .env && docker compose --env-file .env up -d campaign-runner analysis-worker facebook-runner watchdog
-docker compose --env-file .env config | grep CAMPAIGN_BUDGET_USD    # везде 0.8
+printf '%s\n' CAMPAIGN_BUDGET_USD=0.8 APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST=0.5 >> .env
+docker compose --env-file .env up -d campaign-runner analysis-worker facebook-runner watchdog   # watchdog — если (ж) включён
+docker compose --env-file .env config | grep -E 'CAMPAIGN_BUDGET_USD|COMMENTS_MAX_USD_PER_POST'   # 0.8 и 0.5
 ```
 
 Запускать G1…G9 по одной (тексты задач — `docs/v2/GOLDEN_SET.md:12-22`). После каждой:
@@ -262,11 +292,11 @@ psqlc "select round(sum(cost_usd),2) usd from campaign_costs where kind='cost' a
 ```
 
 Норма: каждая кампания ≤ $0.8 (бюджет проверяется до вызова, перерасход на один вызов возможен); сумма с начала
-прогона < $7 — достигли $6.5, следующие не запускать. Числа (точных/отправлено, мусорных хостов, лидов, $, дата, id)
+прогона < $7 — достигли $5.7, следующие не запускать. Числа (точных/отправлено, мусорных хостов, лидов, $, дата, id)
 вписать в таблицу `docs/v2/GOLDEN_SET.md:12-22` по шагам `:39-48`. После прогона (и при откате) вернуть O10:
 
 ```bash
-echo 'CAMPAIGN_BUDGET_USD=5' >> .env && docker compose --env-file .env up -d campaign-runner analysis-worker facebook-runner watchdog
+printf '%s\n' CAMPAIGN_BUDGET_USD=5 APIFY_FACEBOOK_COMMENTS_MAX_USD_PER_POST=1.0 >> .env && docker compose --env-file .env up -d campaign-runner analysis-worker facebook-runner watchdog   # watchdog — если (ж) включён
 ```
 
 Лимит в Apify Console вернуть на прежний (O2). Итог мне: хэш коммита после `update.sh`, вывод п. 2, `apify_runs` A4,
