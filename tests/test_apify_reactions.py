@@ -24,9 +24,10 @@ from bot.acquisition.apify_facebook_reactions import (
     ReactionPage,
     ReactionsConfig,
     map_rows,
+    normalize_post_url,
     reaction_type,
 )
-from bot.acquisition.apify_source import MemorySourceRunStore
+from bot.acquisition.apify_source import MemorySourceRunStore, input_hash
 from bot.campaign.settings import CampaignRunnerSettings
 from bot.utils import costs
 
@@ -46,14 +47,18 @@ def reaction(n: int, kind: Any = "like", **kw: Any) -> dict[str, Any]:
 class Api:
     def __init__(self, dataset: list[Any]) -> None:
         self.dataset, self.calls = dataset, []
+        self.refuse: int | None = None
+        self.state = "SUCCEEDED"
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
         path = request.url.path
         if request.method == "POST" and path.endswith("/runs"):
+            if self.refuse is not None:
+                return httpx.Response(self.refuse, json={"error": {"type": "invalid-input"}})
             return httpx.Response(201, json={"data": {"id": "RUN1", "defaultDatasetId": "DS1", "status": "READY"}})
         if "/actor-runs/RUN1" in path:
-            return httpx.Response(200, json={"data": {"id": "RUN1", "status": "SUCCEEDED", "defaultDatasetId": "DS1",
+            return httpx.Response(200, json={"data": {"id": "RUN1", "status": self.state, "defaultDatasetId": "DS1",
                                                       "usageTotalUsd": 0.03}})
         if "/datasets/DS1/items" in path:
             offset, limit = int(request.url.params["offset"]), int(request.url.params["limit"])
@@ -274,11 +279,15 @@ def test_flag_on_without_a_pinned_build_or_token_does_not_start(env: dict[str, s
         _settings(APIFY_FACEBOOK_REACTIONS_ENABLED=True, **env)
 
 
-def test_a_cap_below_results_times_price_is_a_settings_error() -> None:
+def test_a_cap_below_results_times_price_is_a_settings_error_only_with_the_flag_on() -> None:
+    low = {"APIFY_FACEBOOK_REACTIONS_MAX_RESULTS": 200, "APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD": 0.70}
+    assert 200 * USD_PER_RESULT > 0.70
+    off = _settings(APIFY_FACEBOOK_REACTIONS_ENABLED=False, **low)  # ENABLED=false alone always rolls back
+    assert off.reactions_config() is None
+    on = {"APIFY_FACEBOOK_REACTIONS_ENABLED": True, "APIFY_TOKEN": "t", "APIFY_FACEBOOK_REACTIONS_ACTOR_BUILD": "0.0.7"}
     with pytest.raises(ValidationError, match="APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD"):
-        _settings(APIFY_FACEBOOK_REACTIONS_MAX_RESULTS=500, APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD=0.70)
-    assert 500 * USD_PER_RESULT > 0.70
-    _settings(APIFY_FACEBOOK_REACTIONS_MAX_RESULTS=500, APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD=3.10)
+        _settings(**on, **low)
+    _settings(**on, APIFY_FACEBOOK_REACTIONS_MAX_RESULTS=500, APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD=3.10)
     with pytest.raises(ValueError, match="max_charge_usd"):
         ReactionsConfig(actor_id="apify/facebook-likes-scraper", build="0.0.7", max_results=100, max_charge_usd=0.5)
 
@@ -287,3 +296,104 @@ def test_a_cap_below_results_times_price_is_a_settings_error() -> None:
 def test_max_results_range(value: int) -> None:
     with pytest.raises(ValidationError):
         _settings(APIFY_FACEBOOK_REACTIONS_MAX_RESULTS=value)
+
+
+# --- review fixes ----------------------------------------------------------------------------------------------
+
+
+def test_results_limit_is_shared_between_posts_and_max_items_is_the_run_cap(ledger) -> None:
+    src = source(Api([]))
+    posts = [f"https://www.facebook.com/someagency/posts/pfbid0P{n}" for n in range(3)]
+    assert src.actor_input(posts)["resultsLimit"] == 33
+    assert src.actor_input(posts[:1])["resultsLimit"] == 100
+    tiny = ReactionsConfig(actor_id="apify/facebook-likes-scraper", build="0.0.7", max_results=2, max_charge_usd=0.02)
+    assert source(Api([]), tiny).actor_input(posts)["resultsLimit"] == 1
+
+
+async def test_a_post_at_the_limit_is_marked_truncated(ledger, caplog) -> None:
+    config = ReactionsConfig(actor_id="apify/facebook-likes-scraper", build="0.0.7", max_results=4,
+                             max_charge_usd=0.05)
+    full, part = POST, "https://www.facebook.com/someagency/posts/pfbid0OTHER"
+    rows = [reaction(1, inputUrl=full), reaction(2, inputUrl=full, profileUrl=None),
+            reaction(3, inputUrl=part)]
+    api, sink = Api(rows), Sink()
+    with caplog.at_level("WARNING"):
+        outcome = await source(api, config).collect(CAMPAIGN, [full, part], sink)
+    assert json.loads(api.launch().content)["resultsLimit"] == 2
+    assert api.launch().url.params["maxItems"] == "4"
+    (page,) = sink.pages
+    assert page.truncated == {full: 2} and outcome.status == "succeeded"
+    assert any(r.message == "apify_reactions.truncated" for r in caplog.records)
+
+
+async def test_truncation_counts_across_pages(ledger) -> None:
+    config = ReactionsConfig(actor_id="apify/facebook-likes-scraper", build="0.0.7", max_results=150,
+                             max_charge_usd=1.0)
+    rows = [reaction(n) for n in range(150)]
+    sink = Sink()
+    await source(Api(rows), config).collect(CAMPAIGN, [POST], sink)
+    assert len(sink.pages) == 2  # page_size 100
+    assert [dict(p.truncated) for p in sink.pages] == [{}, {POST: 150}]
+
+
+@pytest.mark.parametrize("variant", [
+    "https://m.facebook.com/someagency/posts/pfbid0TEST?__tn__=x&mibextid=abc",
+    "https://www.facebook.com/someagency/posts/pfbid0TEST/",
+    "http://web.facebook.com/someagency/posts/pfbid0TEST#comments",
+    "https://mbasic.facebook.com/someagency/posts/pfbid0TEST?ref=share",
+    " https://facebook.com/someagency/posts/pfbid0TEST ",
+])
+def test_the_same_post_written_differently_is_one_input(variant: str) -> None:
+    src = source(Api([]))
+    assert src.actor_input([variant]) == src.actor_input([POST])
+    assert input_hash(CONFIG.actor_id, src.actor_input([variant])) == input_hash(CONFIG.actor_id, src.actor_input([POST]))
+    assert src.actor_input([variant, POST])["startUrls"] == [{"url": POST}]
+
+
+def test_post_id_parameters_are_kept() -> None:
+    url = "https://m.facebook.com/permalink.php?id=100000000000001&__tn__=x&story_fbid=1234567890"
+    assert normalize_post_url(url) == "https://www.facebook.com/permalink.php?id=100000000000001&story_fbid=1234567890"
+    assert normalize_post_url("https://www.facebook.com/photo.php?fbid=1234567&set=a.1") == (
+        "https://www.facebook.com/photo.php?fbid=1234567")
+    assert normalize_post_url("https://www.facebook.com/groups/1/?multi_permalinks=123456&ref=x") == (
+        "https://www.facebook.com/groups/1?multi_permalinks=123456")
+    with pytest.raises(ValueError):
+        normalize_post_url("https://www.facebook.com/")
+
+
+async def test_a_refused_launch_books_no_run_cost(ledger) -> None:
+    api = Api([])
+    api.refuse = 400
+    sink = Sink()
+    outcome = await source(api).collect(CAMPAIGN, [POST], sink)
+    assert outcome.status == "failed" and outcome.error == "apify_http_400" and outcome.cost_usd == 0
+    assert not [k for k in ledger.keys if k.startswith("apify:")] and sink.pages == []
+    assert len(api.calls) == 1
+
+
+async def test_a_failed_run_is_billed_once_at_its_usage(ledger) -> None:
+    api = Api([reaction(1)])
+    api.state = "FAILED"
+    sink = Sink()
+    outcome = await source(api).collect(CAMPAIGN, [POST], sink)
+    assert outcome.status == "failed" and outcome.error == "apify_run_failed" and sink.pages == []
+    assert [k for k in ledger.keys if k.startswith("apify:")] == ["apify:RUN1"]
+    entry = ledger.entries[ledger.keys["apify:RUN1"]]
+    assert entry.cost_usd == pytest.approx(0.03) and entry.code == ""
+
+
+def test_a_profile_without_a_scheme_has_its_reason() -> None:
+    page = map_rows([reaction(1, profileUrl="facebook.com/ana"), reaction(2, profileUrl="www.facebook.com/ana")])
+    assert page.engagements == [] and page.skipped == {"no_scheme": 2}
+
+
+@pytest.mark.parametrize("value", [0, 0.0, False, "", "  ", "false", "0", None])
+def test_a_falsy_error_is_no_error(value: Any) -> None:
+    page = map_rows([reaction(1, error=value)])
+    assert len(page.engagements) == 1 and page.errors == []
+
+
+@pytest.mark.parametrize(("value", "expected"), [(True, "error"), (404, "404"), ("blocked", "blocked")])
+def test_a_real_error_is_a_post_error(value: Any, expected: str) -> None:
+    page = map_rows([reaction(1, error=value)])
+    assert page.engagements == [] and [e.error for e in page.errors] == [expected]

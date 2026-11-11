@@ -200,13 +200,14 @@ class CampaignRunnerSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _reactions_ready(self) -> CampaignRunnerSettings:
-        """A cap below MAX_RESULTS x the result price is an error; the flag on without a token or build too."""
-        from bot.acquisition.apify_facebook_reactions import USD_PER_RESULT, min_charge_usd
-
-        if self.apify_reactions_max_charge_usd < min_charge_usd(self.apify_reactions_max_results):
-            raise ValueError("APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD is below "
-                             f"APIFY_FACEBOOK_REACTIONS_MAX_RESULTS x {USD_PER_RESULT}")
+        """With the flag on: no token, no pinned build or a cap below MAX_RESULTS x the result price is a start-up
+        error. With it off nothing is checked, so ENABLED=false alone always rolls it back."""
         if self.apify_reactions_enabled:
+            from bot.acquisition.apify_facebook_reactions import USD_PER_RESULT, min_charge_usd
+
+            if self.apify_reactions_max_charge_usd < min_charge_usd(self.apify_reactions_max_results):
+                raise ValueError("APIFY_FACEBOOK_REACTIONS_MAX_CHARGE_USD is below "
+                                 f"APIFY_FACEBOOK_REACTIONS_MAX_RESULTS x {USD_PER_RESULT}")
             missing = [name for name, value in (("APIFY_TOKEN", self.apify_token),
                                                 ("APIFY_FACEBOOK_REACTIONS_ACTOR_BUILD", self.apify_reactions_build))
                        if not value.strip()]
