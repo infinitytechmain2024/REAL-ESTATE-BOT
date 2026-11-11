@@ -1,19 +1,18 @@
-"""Rebuild docs/v2/board.html from docs/v2/tasks.json (the single source of truth for v2 task status).
+"""Rebuild docs/<plan>/board.html from docs/<plan>/tasks.json (the single source of truth for task status).
 
-Run after every status change: ``python3 scripts/build_v2_board.py``. Fails on a dependency that names no task or a
+Run after every status change: ``python3 scripts/build_v2_board.py [--plan v2|v3]`` (default ``v2``). Fails on a dependency that names no task or a
 dependency cycle, so the board never shows a plan that cannot be scheduled.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TASKS = ROOT / "docs/v2/tasks.json"
-TEMPLATE = ROOT / "docs/v2/board.template.html"
-BOARD = ROOT / "docs/v2/board.html"
+PLANS = ("v2", "v3")
 
 
 def check(tasks: list[dict]) -> list[str]:
@@ -38,15 +37,21 @@ def check(tasks: list[dict]) -> list[str]:
     return errors
 
 
-def main() -> int:
-    data = json.loads(TASKS.read_text(encoding="utf-8"))
+def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
+    parser = argparse.ArgumentParser(description="Rebuild docs/<plan>/board.html from docs/<plan>/tasks.json.")
+    parser.add_argument("--plan", choices=PLANS, default="v2")
+    plan = parser.parse_args(argv).plan
+    tasks_path = root / f"docs/{plan}/tasks.json"
+    template = root / f"docs/{plan}/board.template.html"
+    board = root / f"docs/{plan}/board.html"
+    data = json.loads(tasks_path.read_text(encoding="utf-8"))
     errors = check(data["tasks"])
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    BOARD.write_text(TEMPLATE.read_text(encoding="utf-8").replace("__TASKS_JSON__", payload), encoding="utf-8")
-    print(f"{BOARD.relative_to(ROOT)}: {len(data['tasks'])} tasks")
+    board.write_text(template.read_text(encoding="utf-8").replace("__TASKS_JSON__", payload), encoding="utf-8")
+    print(f"{board.relative_to(root)}: {len(data['tasks'])} tasks")
     return 0
 
 

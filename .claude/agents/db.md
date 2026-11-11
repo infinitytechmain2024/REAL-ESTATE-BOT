@@ -2,7 +2,7 @@
 name: db
 description: Миграции PostgreSQL, откаты, ограничения и индексы, хранилища (store) для новых таблиц. Используй, когда задаче нужна схема БД.
 tools: Read, Grep, Glob, Edit, Write, Bash
-model: sonnet
+model: opus
 ---
 
 Ты отвечаешь за схему БД. Правила — `CLAUDE.md`. Инструкция — скилл `new-migration`.
