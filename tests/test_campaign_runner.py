@@ -686,13 +686,14 @@ async def test_investor_groups_of_the_task_are_queued_without_a_browser_and_thei
     assert store.findings_state == {"inv1": "delivered"}
 
 
-async def test_a_task_without_groups_and_without_a_browser_pauses_with_a_human_text() -> None:
+async def test_a_legacy_task_without_groups_and_without_a_browser_pauses_with_a_human_text() -> None:
     from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
     from bot.campaign.runner import NO_GROUPS
 
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
-    discovery = FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="apify")
+    # apify mode runs on without groups (Q1, below); legacy with no browser cannot search Facebook at all
+    discovery = FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="legacy")
     runner = CampaignRunner(campaigns, store, FakeMessenger(), discovery, now=Clock(), owner_ids={7},
                             config=RunnerConfig(relevance_fail_closed=False))
     cid = await create(campaigns, plan_campaign(GOAL))
@@ -852,3 +853,49 @@ async def test_the_notice_of_an_ended_campaign_has_no_button() -> None:
     await runner.step(cid)
     assert messenger.buttons == []
     assert any("новом поиске" in t for _, _, t in messenger.sent)
+
+
+# --- Q1: a search without Facebook groups still ends with a report ---------------
+
+
+class _SiteStage:
+    """The web stage: busy until the test says the sites are done."""
+
+    def __init__(self) -> None:
+        from bot.web_search.models import WebStatus
+
+        self.status = WebStatus(True, "idealista.com", "сайты: страниц 3/60")
+
+    async def web_status(self, campaign_id: str):
+        return self.status
+
+
+async def _no_groups_run(discovery_of):
+    from bot.campaign.final_report import FinalReporter
+    from bot.web_search.models import WebStatus
+
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    web = _SiteStage()
+    runner = CampaignRunner(campaigns, store, messenger, discovery_of(campaigns), web=web, now=clock, owner_ids={7},
+                            final_report=FinalReporter(), config=RunnerConfig(relevance_fail_closed=False))
+    cid = await create(campaigns, plan_campaign(GOAL))
+    await runner.tick()
+    assert (await campaigns.get(cid)).state == "running", "no groups: the sites still run, nothing is finished"
+    assert not [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    web.status = WebStatus(False)
+    clock.advance(1)
+    await runner.tick()
+    campaign = await campaigns.get(cid)
+    assert campaign.state == "completed"
+    assert len([t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]) == 1
+    return campaign
+
+
+async def test_q1_apify_mode_without_groups_and_browser_runs_the_other_stages_and_reports() -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+
+    campaign = await _no_groups_run(
+        lambda campaigns: FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="apify"))
+    assert campaign.stop_reason == "queue_exhausted"
+

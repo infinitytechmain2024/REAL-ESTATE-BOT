@@ -502,12 +502,18 @@ async def test_apify_mode_queues_the_groups_of_the_task_and_never_opens_a_browse
     assert h.store.profile.state == "ready" and h.store.progress == {}
 
 
-async def test_apify_mode_without_groups_in_the_task_still_needs_the_browser_search() -> None:
+async def test_apify_mode_without_groups_in_the_task_runs_without_facebook_or_searches_with_a_browser() -> None:
     h = await setup_spec("apify", spec={"sources": {"required": ["https://www.idealista.com/"]}}, browser=None,
+                         reader=None)
+    report = await h.discovery.run(h.cid)  # Q1: no groups, no browser: the other stages still run
+    assert report.state == "running" and report.queued == 0
+    assert await h.store.groups(h.cid) == [] and h.store.profile.state == "ready"
+
+    h = await setup_spec("legacy", spec={"sources": {"required": ["https://www.idealista.com/"]}}, browser=None,
                          reader=None)
     with pytest.raises(DiscoveryRefused, match="no_groups_no_browser"):
         await h.discovery.run(h.cid)
-    assert (await h.campaigns.get(h.cid)).state == "planned" and await h.store.groups(h.cid) == []
+    assert (await h.campaigns.get(h.cid)).state == "planned"
 
     h = await setup_spec("apify", spec=None)
     await h.discovery.run(h.cid)  # no spec: the old search runs

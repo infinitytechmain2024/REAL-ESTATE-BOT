@@ -690,14 +690,17 @@ class FacebookDiscovery:
         ``apify`` with groups named in the task: they are queued and no browser is used here. The windows are still
         started by the runner, which needs a ready Facebook profile row; Apify reads them only for a campaign with
         ``acquisition_provider='apify'`` or with ``APIFY_FACEBOOK_SCOPE=all``. Without such groups and without a
-        browser: ``no_groups_no_browser``.
+        browser the campaign runs with no Facebook groups (the other stages go on); ``no_groups_no_browser`` is
+        raised in ``legacy`` mode only.
         """
         campaign = await self.campaigns.get(campaign_id)
         if campaign is None:
             raise DiscoveryRefused("campaign_not_found")
         if campaign.state not in RESUMABLE_STATES:
             raise DiscoveryRefused(f"campaign_{campaign.state}")
-        if self.acquisition_mode == "apify" and await self._seed_required_groups(campaign):  # the groups are given: no browser search for more
+        if self.acquisition_mode == "apify" and (await self._seed_required_groups(campaign) or self.browser is None):
+            # The groups are given: no browser search for more. None and no browser to search: Facebook has nothing to
+            # read, the campaign still runs (sites, Apify portals and networks, reach) and the runner drains it.
             if campaign.state != "running" and not await self.campaigns.set_state(campaign_id, "running", ACTOR):
                 raise DiscoveryRefused("campaign_state_changed")
             return await self._report(campaign_id, _Run())
