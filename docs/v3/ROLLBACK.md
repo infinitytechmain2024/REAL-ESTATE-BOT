@@ -13,6 +13,12 @@
 | 2б | То же, откат через `ACQUISITION_MODE=legacy` (P1.8) | `ACQUISITION_MODE=legacy` | Apify-воркер не строится. Если в `SOCIAL_SEARCH_PLATFORMS` есть `instagram`/`tiktok` и есть профиль, браузерный `social_search` доделает оставшиеся цели `planned` той же кампании из `social_search_queries` (раунды считаются вместе). Цель, прерванная в `running`, браузерный `recover` закроет как `failed worker_restarted` | `campaign-runner` | То же | Да |
 | 3 | LinkedIn через Apify в поиске инвесторов (P1.8) | `APIFY_LINKEDIN_ENABLED` (только при `ACQUISITION_MODE=apify`) | `APIFY_LINKEDIN_ENABLED=false`: LinkedIn снова ищется через `site:` в SearXNG | `campaign-runner` | Строки в `apify_source_runs`, контакты в `reach_contacts` (без `enriched_at`) | Да: контакты — обычные строки reach |
 
+Остановка `campaign-runner` при включённых Apify-источниках (P1.8). При `APIFY_INSTAGRAM_ENABLED`, `APIFY_TIKTOK_ENABLED`
+или `APIFY_LINKEDIN_ENABLED` (с `ACQUISITION_MODE=apify`) поставьте в `.env` `CAMPAIGN_RUNNER_STOP_GRACE=60s`. Так
+запуск, начатый до SIGTERM, успеет сохранить `run_id` (до 45 с), и строка не закроется как `launch_unconfirmed` с
+потолком в расходах. По умолчанию стоит `10s`, как было. Без флагов `python` работает как PID 1 без обработчика
+SIGTERM, и остановка всегда длится весь этот срок и кончается SIGKILL. При откате флагов можно вернуть `10s`.
+
 ## 4. Откат миграций (только если без него нельзя)
 
 Не нужен для отката функций: миграции v3 добавляющие. Если всё же нужно убрать схему: **сначала откат кода и

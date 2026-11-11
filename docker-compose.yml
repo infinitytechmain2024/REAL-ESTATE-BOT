@@ -523,10 +523,11 @@ services:
       context: .
       dockerfile: docker/campaign-runner.Dockerfile
     restart: unless-stopped
-    # With Apify runs on (v3 P1.8) the runner handles SIGTERM: no new launch, a launch in flight saves its run id
-    # (up to 45 s), then it exits. Without them python runs as PID 1 with no SIGTERM handler, so the signal is
-    # ignored and Docker sends SIGKILL after this grace period: such a stop takes the full 60 s (it was 10 s).
-    stop_grace_period: 60s
+    # How long Docker waits after SIGTERM before SIGKILL (CAMPAIGN_RUNNER_STOP_GRACE, default 10s as before). With
+    # Apify runs on (v3 P1.8) the runner handles SIGTERM: no new launch, a launch in flight saves its run id (up to
+    # 45 s), then it exits, so set 60s then (docs/v3/ROLLBACK.md). Without them python runs as PID 1 with no SIGTERM
+    # handler: the signal is ignored and the stop always takes this whole period, ending with SIGKILL.
+    stop_grace_period: ${CAMPAIGN_RUNNER_STOP_GRACE:-10s}
     depends_on:
       postgres:
         condition: service_healthy
