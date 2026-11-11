@@ -58,6 +58,34 @@ def test_every_image_is_listed() -> None:
 
 @pytest.mark.parametrize(("dockerfile", "module"), [(d, m) for d, mods in ENTRY_POINTS.items() for m in mods])
 def test_entry_point_imports_inside_its_image(dockerfile: str, module: str, tmp_path: Path) -> None:
+    _import_in_image(dockerfile, module, tmp_path)
+
+
+def _acquisition_modules() -> list[tuple[str, str]]:
+    """The shared Apify modules of bot/acquisition, in every image that copies that package: the light ones need
+    nothing else; ``apify_source`` also needs ``bot/utils`` (the cost ledger), so only where that is copied too."""
+    found = []
+    for dockerfile in sorted(ENTRY_POINTS):
+        copied = _copied_bot_paths(ROOT / "docker" / dockerfile)
+        if not any(p.rstrip("/") in ("bot", "bot/acquisition") for p in copied):
+            continue
+        found += [(dockerfile, "bot.acquisition.apify_util"), (dockerfile, "bot.acquisition.people")]
+        if any(p.rstrip("/") in ("bot", "bot/utils") for p in copied):
+            found.append((dockerfile, "bot.acquisition.apify_source"))
+    return found
+
+
+def test_apify_source_is_checked_in_the_facebook_collector_image() -> None:
+    assert ("facebook-collector.Dockerfile", "bot.acquisition.apify_source") in _acquisition_modules()
+    assert ("campaign-runner.Dockerfile", "bot.acquisition.apify_source") in _acquisition_modules()
+
+
+@pytest.mark.parametrize(("dockerfile", "module"), _acquisition_modules())
+def test_shared_acquisition_modules_import_inside_each_image(dockerfile: str, module: str, tmp_path: Path) -> None:
+    _import_in_image(dockerfile, module, tmp_path)
+
+
+def _import_in_image(dockerfile: str, module: str, tmp_path: Path) -> None:
     _build_tree(ROOT / "docker" / dockerfile, tmp_path)
     # Run from the image tree without PYTHONPATH, so the repo's own bot/ is not importable.
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}

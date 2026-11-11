@@ -23,7 +23,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -31,7 +31,24 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1"
 _E164 = re.compile(r"\+[1-9]\d{6,14}")
+Platform = Literal["facebook", "instagram", "tiktok", "linkedin"]
 _POST_ID = re.compile(r"/(?:posts|permalink|story_fbid=|p)/?(\d{5,})|[?&](?:story_fbid|fbid|multi_permalinks)=(\d{5,})")
+# The post's own id in its URL, per network (real link shapes):
+#   instagram.com/p/<shortcode>/, /reel/<shortcode>/, /tv/<shortcode>/ (also under /<user>/p/<shortcode>/);
+#   tiktok.com/@<user>/video/<digits>, /@<user>/photo/<digits>;
+#   linkedin.com/posts/<slug>-activity-<digits>-<tail>, /feed/update/urn:li:activity|share|ugcPost:<digits>.
+_POST_IDS: dict[str, re.Pattern[str]] = {
+    "facebook": _POST_ID,
+    "instagram": re.compile(r"^/(?:[A-Za-z0-9._]{1,30}/)?(?:p|reels?|tv)/([A-Za-z0-9_-]{5,40})(?:/|$)"),
+    "tiktok": re.compile(r"^/@[A-Za-z0-9._]{2,24}/(?:video|photo)/(\d{15,25})(?:/|$)"),
+    "linkedin": re.compile(r"^/posts/[^/]*-(?:activity|share|ugcPost)-(\d{15,25})(?:-|/|$)"
+                           r"|^/feed/update/urn:li:(?:activity|share|ugcPost):(\d{15,25})(?:/|$)"),
+}
+_POST_HOSTS: dict[str, re.Pattern[str]] = {
+    "instagram": re.compile(r"^(?:www\.|m\.)?instagram\.com$"),
+    "tiktok": re.compile(r"^(?:www\.|m\.)?tiktok\.com$"),
+    "linkedin": re.compile(r"^(?:(?:www|[a-z]{2})\.)?linkedin\.com$"),
+}
 
 
 def _no_empty_strings(data: Any) -> Any:
@@ -66,6 +83,7 @@ class Phone(_Strict):
 
 class Provenance(_Strict):
     provider: Literal["local", "apify"]
+    platform: Platform = "facebook"   # rows written before v3 have no platform: they are Facebook posts
     actor_id: str | None = Field(default=None, max_length=120)   # apify only: «owner/actor»
     run_id: str | None = Field(default=None, max_length=80)
     group_url: str = Field(max_length=2048)
@@ -134,11 +152,18 @@ class AcquiredPost(_Strict):
         return {k[:40]: v[:300] for k, v in value.items()}
 
     def platform_post_id(self) -> str:
-        """The post's own id from its URL (/posts/123…, story_fbid=123…), else a hash of the URL."""
-        found = _POST_ID.search(self.source.post_url)
+        """The post's own id from its URL by the source's network (Facebook /posts/123…, story_fbid=123…; Instagram
+        shortcode; TikTok video id; LinkedIn activity id), else a hash of the URL."""
+        url, platform = self.source.post_url, self.source.platform
+        if platform == "facebook":
+            found = _POST_ID.search(url)
+        else:
+            parts = urlsplit(url)
+            found = (_POST_IDS[platform].search(unquote(parts.path))
+                     if _POST_HOSTS[platform].match((parts.hostname or "").lower()) else None)
         if found:
-            return found.group(1) or found.group(2)
-        return "url:" + hashlib.sha256(self.source.post_url.encode()).hexdigest()[:32]
+            return next(g for g in found.groups() if g)
+        return "url:" + hashlib.sha256(url.encode()).hexdigest()[:32]
 
     def content_hash(self) -> str:
         """The same hash the browser collector stores (``PostgresCollectorStore.save_post``): a post read by both
@@ -148,6 +173,7 @@ class AcquiredPost(_Strict):
     def collected_post_row(self) -> dict[str, Any]:
         """The ``collected_posts`` columns this post fills (``source_id`` and ``acquisition_run_id`` are the store's)."""
         payload = {"schema_version": self.schema_version, "provider": self.source.provider,
+                   "platform": self.source.platform,
                    "actor_id": self.source.actor_id, "run_id": self.source.run_id, "group_url": self.source.group_url,
                    "collected_at": self.source.collected_at.isoformat(),
                    "provider_facts": self.provider_facts.model_dump(mode="json", exclude_defaults=True),

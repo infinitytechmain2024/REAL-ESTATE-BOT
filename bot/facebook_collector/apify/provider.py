@@ -26,7 +26,6 @@ import hashlib
 import json
 import logging
 import math
-import re
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -44,6 +43,7 @@ from bot.acquisition.apify_client import (
     actor_path,
     check_pinned_build,
 )
+from bot.acquisition.apify_util import scrub  # also re-exported (tests)
 from bot.utils import costs
 
 from ..models import BatchItem, BatchPlan, GroupState
@@ -107,18 +107,6 @@ class ApifyFacebookStore(Protocol):
     async def finish_batch(self, plan: BatchPlan, batch_run_id: str, state: str, reason: str | None = None) -> None: ...
     async def queue_browser_fallback(self, plan: BatchPlan, items: list[BatchItem],
                                      campaign_id: str | None) -> str | None: ...
-
-
-_SECRET_KEY = re.compile(r"cookie|session|token|password|secret|auth", re.IGNORECASE)
-
-
-def scrub(value: Any) -> Any:
-    """The raw item without any key that could carry session data (cookies, tokens): never stored, never logged."""
-    if isinstance(value, dict):
-        return {k: scrub(v) for k, v in value.items() if not _SECRET_KEY.search(str(k))}
-    if isinstance(value, list):
-        return [scrub(v) for v in value]
-    return value
 
 
 def _norm(url: str | None) -> str:
