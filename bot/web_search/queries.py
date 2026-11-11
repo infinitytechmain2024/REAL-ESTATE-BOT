@@ -185,6 +185,7 @@ class QueryTask:
     nearby_places: tuple[str, ...] = ()  # districts/towns explicitly named by the requester
     radius_km: float | None = None  # the user's explicit search radius; never inferred
     suburbs_only: bool = False
+    query_hygiene: bool = False  # SEARCH_QUERY_HYGIENE: neutral land terms (``kind_terms``); off: the old ones
 
     @property
     def text(self) -> str:
@@ -486,7 +487,7 @@ def portal_query(task: QueryTask, portal: str) -> GeneratedQuery:
     """A ``site:`` query for ``portal`` built from the task: property type, deal, size, budget, rooms, place, country."""
     language = "uk" if task.ukrainian else "es"
     kind = task_kind(task)
-    term = _KIND_TERMS[kind].get(language, ("",))[0]
+    term = (kind_terms(task, kind, language) or ("",))[0]
     deal_word = _DEAL_TERMS.get(task.constraints.get("deal"), _DEAL_TERMS[None]).get(language, ("",))[0]
     size = _size(task.task_text)
     words = [f"site:{portal}", term, deal_word, f"{size} m2" if size else "", *budget_words(task, language, kind),
@@ -610,6 +611,14 @@ _KIND_TERMS: dict[str, dict[str, tuple[str, ...]]] = {
     "investors": {"es": ("inversores", "business angels", "startups"), "en": ("investors", "angel investors"),
                   "ru": ("инвесторы", "стартапы"), "uk": ("інвестори", "стартапи")},
 }
+# SEARCH_QUERY_HYGIENE: the Spanish land terms carry no legal category the person did not name.
+_LAND_NEUTRAL_ES = ("terreno", "parcela", "solar")
+# «urbano» only right after a land word («parcela urbana», «uso urbano»): «servicios urbanos», «plan urbano» are not it.
+_LAND_WORD = re.compile(r"(?<!\w)(?:(rustic)[oa]s?|(urbanizable)s?|"
+                        r"(?:suelo|terreno|parcela|solar|uso|clasificacion|calificacion)e?s? (urban)[oa]s?)(?!\w)")
+_LAND_CATEGORY = {"rustic": "rústico", "urbanizable": "urbanizable", "urban": "urbano"}
+# «no urbanizable» / «no-urbanizable» is the legal category (rústico); «no es / no son …» only rules one out.
+_NEGATION = re.compile(r"(?<!\w)no ((?:es|son) )?(?:(?:suelo|terreno|parcela|solar)e?s? )?$")
 _DEAL_TERMS: dict[str | None, dict[str, tuple[str, ...]]] = {
     "sale": {"es": ("en venta", "comprar", "se vende"), "en": ("for sale", "buy"), "ru": ("купить", "продажа"),
              "uk": ("купити", "продаж")},
@@ -618,6 +627,33 @@ _DEAL_TERMS: dict[str | None, dict[str, tuple[str, ...]]] = {
     None: {"es": ("",), "en": ("",), "ru": ("",), "uk": ("",)},
 }
 _AROUND = {"es": "afueras", "en": "near", "ru": "пригород", "uk": "передмістя"}
+
+
+def land_category(task: QueryTask) -> str | None:
+    """The Spanish land category the task names (urbano, urbanizable, rústico); None when none or several."""
+    text = " ".join(_fold(task.text).replace("-", " ").split())
+    named: set[str] = set()
+    ruled_out: set[str] = set()
+    for found in _LAND_WORD.finditer(text):
+        category = _LAND_CATEGORY[next(g for g in found.groups() if g)]
+        before = text[:found.start()]
+        negated = _NEGATION.search(before)
+        if negated and negated.group(1) is None and category == "urbanizable":
+            named.add("rústico")  # suelo no urbanizable
+        elif negated:
+            ruled_out.add(category)
+        else:
+            named.add(category)
+    return next(iter(named)) if len(named) == 1 and not named & ruled_out else None  # several or contradictory: None
+
+
+def kind_terms(task: QueryTask, kind: str, language: str) -> tuple[str, ...]:
+    """The property words of a query; with ``query_hygiene`` Spanish land is neutral or the category named."""
+    if task.query_hygiene and kind == "land" and language == "es":
+        category = land_category(task)
+        feminine = {"rústico": "rústica", "urbano": "urbana"}.get(category or "", category)
+        return (f"terreno {category}", f"parcela {feminine}", "solar") if category else _LAND_NEUTRAL_ES
+    return _KIND_TERMS[kind].get(language, ())
 
 
 def _wants_a_room(text: str) -> bool:
@@ -693,7 +729,7 @@ class TemplateQueryGenerator:
         main = languages[0] if languages else "es"
         for lang in languages:
             city = task.place_alias(lang)
-            for term in _KIND_TERMS[kind].get(lang, ()):
+            for term in kind_terms(task, kind, lang):
                 extra = " ".join(budget_words(task, lang, kind))
                 for deal_word in _DEAL_TERMS.get(deal, _DEAL_TERMS[None]).get(lang, ("",)):
                     out.append(GeneratedQuery(" ".join(p for p in (term, deal_word, extra, city) if p), lang))
@@ -704,11 +740,11 @@ class TemplateQueryGenerator:
         if size and kind != "investors":
             for lang in languages:
                 city = task.place_alias(lang)
-                for term in _KIND_TERMS[kind].get(lang, ())[:2]:
+                for term in kind_terms(task, kind, lang)[:2]:
                     extra = " ".join(budget_words(task, lang, kind))
                     out.append(GeneratedQuery(" ".join(p for p in (term, f"{size} m2", extra, city) if p), lang))
         city = task.location_aliases.get(main) or task.location
-        first_term = _KIND_TERMS[kind].get(main, ("",))[0]
+        first_term = (kind_terms(task, kind, main) or ("",))[0]
         deal_word = _DEAL_TERMS.get(deal, _DEAL_TERMS[None]).get(main, ("",))[0]
         extra = " ".join(budget_words(task, main, kind))
         for nearby in task.nearby_places[:6]:

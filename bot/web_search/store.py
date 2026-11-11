@@ -159,12 +159,32 @@ def _empty_hosts(runs: list[SourceRun]) -> frozenset[str]:
                      and r.name in _SOURCE_HOSTS)
 
 
+# Codes the provider (Apify, the portal behind it) caused; anything else -- our budget/time caps, limits, claims,
+# checkpoints, a changed task -- is our own stop, and the portal said nothing.
+_PROVIDER_PREFIXES = ("apify_http_", "apify_run_")
+_PROVIDER_CODES = frozenset({"apify_transport", "apify_invalid_json", "apify_wait_timeout", "apify_dataset_timeout",
+                             "apify_response_too_large", "apify_billing_pending"})
+
+
+def _provider_error(code: str | None) -> bool:
+    return bool(code) and (code in _PROVIDER_CODES or code.startswith(_PROVIDER_PREFIXES)  # type: ignore[union-attr]
+                           # ``*_schema`` (apify_run_schema, apify_dataset_schema, apify_id_schema): Apify answered
+                           # with something its contract does not allow
+                           or code.endswith("_schema"))  # type: ignore[union-attr]
+
+
+def _failed_hosts(runs: list[SourceRun]) -> frozenset[str]:
+    """Portals whose source run failed on the provider's side (``apify_http_400`` ...), not on our own stops."""
+    return frozenset(_SOURCE_HOSTS[r.name] for r in runs if r.state == "failed" and _provider_error(r.error_code)
+                     and r.name in _SOURCE_HOSTS)
+
+
 def _reports(queries: dict[str, tuple[int, int]], urls: dict[str, list[int]],
              unverified: frozenset[str] = frozenset(), api_reads: dict[str, int] | None = None,
-             api_empty: frozenset[str] = frozenset()) -> list[SiteReport]:
-    hosts = sorted(set(queries) | set(urls) | api_empty)
+             api_empty: frozenset[str] = frozenset(), api_failed: frozenset[str] = frozenset()) -> list[SiteReport]:
+    hosts = sorted(set(queries) | set(urls) | api_empty | api_failed)
     return [SiteReport(h, *queries.get(h, (0, 0)), *urls.get(h, [0, 0, 0, 0]), h in unverified,
-                       (api_reads or {}).get(h, 0), h in api_empty) for h in hosts]
+                       (api_reads or {}).get(h, 0), h in api_empty, h in api_failed) for h in hosts]
 
 
 def _url_bucket(state: str, detail: str | None) -> int | None:
@@ -647,8 +667,9 @@ class PostgresWebStore:
                 unverified.add(r["host"])
             if r["state"] == "fetched" and r["layer"] == "api" and r["detail"] != "search_snippet":
                 api_reads[r["host"]] = api_reads.get(r["host"], 0) + r["n"]
+        runs = await self.source_runs(campaign_id)
         return _reports(_site_queries([(r["query_text"], r["results"]) for r in queries]), counts,
-                        frozenset(unverified), api_reads, _empty_hosts(await self.source_runs(campaign_id)))
+                        frozenset(unverified), api_reads, _empty_hosts(runs), _failed_hosts(runs))
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         row = await self.pool.fetchrow(
@@ -1318,8 +1339,9 @@ class MemoryWebStore:
                 unverified.add(u.host)
             if u.state == "fetched" and u.layer == "api" and u.detail != "search_snippet":
                 api_reads[u.host] = api_reads.get(u.host, 0) + 1
-        return _reports(_site_queries(queries), counts, frozenset(unverified), api_reads,
-                        _empty_hosts(await self.source_runs(campaign_id)))
+        runs = await self.source_runs(campaign_id)
+        return _reports(_site_queries(queries), counts, frozenset(unverified), api_reads, _empty_hosts(runs),
+                        _failed_hosts(runs))
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         state = self._campaign_state(campaign_id)

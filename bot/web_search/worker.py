@@ -35,7 +35,7 @@ from bot.campaign import geo
 from bot.campaign.architect import SearchPlanner, plan_with_model
 from bot.campaign.fblinks import post_link_only
 from bot.campaign.models import TERMINAL_STATES, Campaign
-from bot.campaign.search_plan import blocked_hosts_of, country_portals, source_hosts
+from bot.campaign.search_plan import blocked_hosts_of, country_portals, plan_languages, source_hosts
 from bot.campaign.spec import TaskSpec
 from bot.campaign.store import CampaignStore
 from bot.utils import costs
@@ -156,6 +156,9 @@ class WebSearchConfig:
     host_breaker_refusals: int = 3               # 0: off
     scrape_cost_usd: float = 0.0                 # what one scrape-API read costs (the ledger, CAMPAIGN_BUDGET_USD)
     query_cost_usd: float = 0.0                  # what one search query costs (paid backends; SearXNG is free)
+    # SEARCH_QUERY_HYGIENE: the query round writes only in the languages ``plan_languages`` allows and uses neutral
+    # Spanish land terms (or the category the task names). Off: all plan languages and the old terms.
+    query_hygiene: bool = False
     # apify: the portal sources run first and the search engine is only the fallback when they gave fewer than
     # ``apify_min_listings`` listings; legacy: the search engine runs next to the sources, as before.
     acquisition_mode: str = "legacy"
@@ -195,7 +198,18 @@ def known_hosts_of(campaign: Campaign) -> frozenset[str]:
     return frozenset(hosts)
 
 
-def query_task(campaign: Campaign) -> QueryTask:
+def hygienic_languages(campaign: Campaign) -> tuple[str, ...]:
+    """SEARCH_QUERY_HYGIENE: the plan's languages the search plan allows (``plan_languages``), in the plan's order."""
+    try:
+        spec = TaskSpec.model_validate(campaign.spec or {})
+    except ValueError:
+        spec = TaskSpec()
+    allowed = set(plan_languages(spec, campaign.source_text, campaign.plan.country))
+    kept = tuple(lang for lang in campaign.plan.languages if lang in allowed)
+    return kept or tuple(campaign.plan.languages)
+
+
+def query_task(campaign: Campaign, *, hygiene: bool = False) -> QueryTask:
     plan = campaign.plan
     place = (campaign.spec or {}).get("place") if isinstance(campaign.spec, dict) else None
     districts = place.get("districts") if isinstance(place, dict) else None
@@ -208,10 +222,11 @@ def query_task(campaign: Campaign) -> QueryTask:
                                    campaign.source_text, re.IGNORECASE))
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
-                     constraints=dict(plan.constraints), languages=tuple(plan.languages),
+                     constraints=dict(plan.constraints),
+                     languages=hygienic_languages(campaign) if hygiene else tuple(plan.languages),
                      country_code=plan.country, place_level=place_level_of(campaign.source_text, plan.location),
                      search_plan=plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country),
-                     nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only)
+                     nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only, query_hygiene=hygiene)
 
 
 class WebSearchWorker:
@@ -382,7 +397,7 @@ class WebSearchWorker:
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
-        task = query_task(campaign)
+        task = query_task(campaign, hygiene=cfg.query_hygiene)
         # The known portals (Idealista, Fotocasa first) are always searched: the ones not yet
         # searched take up to half of this round, written by the model or, if it skips one, from the task.
         if cfg.cover_portals:
