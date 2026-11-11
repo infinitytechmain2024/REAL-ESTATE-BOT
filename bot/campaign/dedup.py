@@ -40,9 +40,9 @@ street address, so the rules above never merge two ads of one portal): only plot
 by several agencies. Both are ``land`` and ``sale``, the same rooms (or none on both), the price within 1 %, the area
 within 2 % (both known; ``plot_m2`` when there is no ``area_m2``), the same city and, when both name a district, a
 shared district token (generic words such as «urbanización», «costa», «residencial» and regions dropped). The texts'
-small numbers must be the same list (as in the text rules). Never merged: a new development («obra nueva»,
+small numbers (zone codes aside, the zones are compared on their own) must be the same list. Never merged: a new development («obra nueva»,
 «promoción», «Residencial X»), the same agency or phone on one portal (one advertiser lists several plots there), two
-plots with a round area (a multiple of 100 up to 2000 m², typical plots of one estate) and neither a zone nor a
+plots with a round area (a multiple of 100 up to 10000 m², typical plots of one estate) and neither a zone nor a
 cadastral reference in either text. A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a cadastral reference
 stated in both texts must agree.
 
@@ -69,7 +69,7 @@ FACTS_PRICE_TOLERANCE = 0.01  # the cross-portal «same facts» rule is stricter
 BARE_PRICE_TOLERANCE = 0.01  # the rule without an address (``_same_bare_facts``)
 BARE_AREA_TOLERANCE = 0.02
 BARE_ROUND_AREA = 100  # a plot area that is a multiple of this, up to ``BARE_ROUND_MAX`` m², is a typical estate plot
-BARE_ROUND_MAX = 2000
+BARE_ROUND_MAX = 10000
 FACTS_MIN_FEATURES = 2
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
@@ -94,6 +94,10 @@ _CADASTRE = re.compile(r"ref(?:erencia|\.)?\s*catastral\s*:?\s*([0-9a-z]{14})(?:
 _NEW_BUILD_NAME = re.compile(r"(?<!\w)(?:[Rr]esidencial|RESIDENCIAL)\s+(?:[A-ZÁÉÍÓÚÑ]|(?:[Ee]l|[Ll]a|[Ll]os|[Ll]as)\s+[A-ZÁÉÍÓÚÑ])")
 _NEW_BUILD_WORDS = re.compile(r"(?<!\w)(?:obra\s+nueva|promoci[oó]n|(?:complejo|conjunto)\s+residencial)(?!\w)",
                               re.IGNORECASE)
+# «Residencial» as a zoning, not a complex: «Residencial Unifamiliar», «Uso: Residencial», «Zona Residencial X».
+_ZONING_AFTER = re.compile(r"\s*(?:unifamiliar|plurifamiliar|multifamiliar|intensiva|extensiva)(?!\w)", re.IGNORECASE)
+_ZONING_BEFORE = frozenset({"uso", "usos", "suelo", "calificacion", "zona", "urbanizacion"})
+_PROMOTION_PRICE = re.compile(r"precio\s+de\s*$", re.IGNORECASE)
 # District words that do not identify a place (estates, new builds, coasts) and Spain's regions.
 _PLACE_STOP = frozenset({
     "urbanizacion", "urbanizaciones", "urb", "obra", "nueva", "nuevo", "residencial", "promocion", "complejo",
@@ -139,6 +143,7 @@ class Listing:
     kind: str | None = None  # the payload's property_type (land, apartment ...)
     plot: float | None = None  # the payload's plot_m2
     zones: frozenset[str] = frozenset()  # planning zones of the body («N.Z. 8.1.A» -> "8.1.a")
+    bare_numbers: tuple[int, ...] = ()  # ``numbers`` without the zone codes (the rule without an address)
     cadastre: frozenset[str] = frozenset()  # cadastral references of the body (the 14-character parcel part)
     new_build: bool = False  # the body, title or location names a new development («obra nueva», «promoción» ...)
 
@@ -193,15 +198,26 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         kind=kind.strip().lower() if isinstance(kind, str) and kind.strip() else None,
         plot=_positive(payload.get("plot_m2")),
         zones=zones_of(excerpt),
+        bare_numbers=numbers_of(_ZONE.sub(" ", excerpt)),
         cadastre=frozenset(found.upper() for found in _CADASTRE.findall(excerpt)),
         new_build=is_new_build(" ".join((excerpt, title, place))),
     )
 
 
 def is_new_build(text: str) -> bool:
-    """«obra nueva», «promoción», «complejo / conjunto residencial» or a «Residencial <Name>» complex; a plain «uso
-    residencial» (the zoning of a plot) is not one."""
-    return bool(_NEW_BUILD_WORDS.search(text or "") or _NEW_BUILD_NAME.search(text or ""))
+    """«obra nueva», «promoción», «complejo / conjunto residencial» or a «Residencial <Name>» complex. A zoning is not
+    one: «uso residencial», «Residencial Unifamiliar», «Uso: Residencial», «Calificación: Residencial ...», «Zona /
+    Urbanización Residencial X»; nor is a «precio de promoción»."""
+    text = text or ""
+    for found in _NEW_BUILD_WORDS.finditer(text):
+        if not (found.group(0).lower().startswith("promoci") and _PROMOTION_PRICE.search(text[:found.start()])):
+            return True
+    for found in _NEW_BUILD_NAME.finditer(text):
+        word_end = found.start() + len("residencial")
+        before = _WORD.findall(_fold(text[max(0, found.start() - 60):found.start()]))[-3:]
+        if not (_ZONING_AFTER.match(text, word_end) or _ZONING_BEFORE & set(before)):
+            return True
+    return False
 
 
 def zones_of(text: str) -> frozenset[str]:
@@ -447,7 +463,7 @@ def _same_bare_facts(a: Listing, b: Listing) -> bool:
     several agencies), so an advertiser shared on one portal means two of its plots, not one."""
     if not (a.kind == b.kind == "land" and a.deal == b.deal == "sale") or a.rooms != b.rooms:
         return False
-    if a.new_build or b.new_build or a.numbers != b.numbers:
+    if a.new_build or b.new_build or a.bare_numbers != b.bare_numbers:
         return False
     host_a, host_b = _host(a.url), _host(b.url)
     if host_a and host_a == host_b and (a.phones & b.phones or (a.agency and a.agency == b.agency)):

@@ -4,7 +4,7 @@ the figures of the bench's case, invented texts, agencies and phones)."""
 from __future__ import annotations
 
 from bot.campaign import MemoryCampaignStore, plan_campaign
-from bot.campaign.dedup import listing_of, same_object
+from bot.campaign.dedup import is_new_build, listing_of, same_object
 from bot.campaign.runner import CampaignRunner, RunnerConfig
 from bot.campaign.runs import MemoryRunStore
 from bot.campaign.settings import CampaignRunnerSettings
@@ -66,6 +66,7 @@ def test_area_type_deal_and_stated_marks_must_agree() -> None:
     assert not same_object(*pair(plot(), plot(deal="rent")), without_address=True)
     long_form = COPY_BODY.replace("norma zonal 8.1.A", "Norma Zonal 8, grado 1.º, nivel A")
     assert same_object(*pair(plot(), plot(), copy_body=long_form), without_address=True)
+    assert same_object(*pair(plot(), plot(), copy_body=COPY_BODY.replace("8.1.A", "8")), without_address=True)
     other_zone = COPY_BODY.replace("8.1.A", "8.2.B")
     assert not same_object(*pair(plot(), plot(), copy_body=other_zone), without_address=True)
     assert not same_object(*pair(plot(), plot(), "Ref. Catastral: 1111111AA1111A0001AA",
@@ -90,6 +91,16 @@ def test_review_1_new_development_on_one_portal() -> None:
     assert not merged(plot(), plot(), body, COPY_BODY)
     assert not merged(plot(), plot(), "Residencial Los Robles: parcela N.Z. 8.1.A, tres plantas.", COPY_BODY)
     assert not merged(plot(), plot(location=f"Obra nueva, {DISTRICT}, Madrid"))
+
+
+def test_a_zoning_or_a_promotion_price_is_not_a_new_development() -> None:
+    for zoning in ("Uso: Residencial Unifamiliar.", "Calificación urbanística: Residencial Plurifamiliar.",
+                   "Zona Residencial Los Pinos.", "Urbanización Residencial El Bosque.", "Precio de promoción.",
+                   "Ordenanza Residencial Multifamiliar.", "Grado Residencial Extensiva."):
+        assert not is_new_build(zoning), zoning
+        assert merged(plot(), plot(), HEAD_BODY + " " + zoning, COPY_BODY + " " + zoning)
+    for development in ("Residencial Los Robles.", "Promoción de viviendas.", "Obra nueva.", "Complejo residencial."):
+        assert is_new_build(development), development
 
 
 def test_review_2_a_floor_or_number_only_in_the_text() -> None:
@@ -119,6 +130,10 @@ def test_review_5_typical_plots_of_one_estate() -> None:
     assert not merged(plot(area=1000, **estate), plot(area=1000, **estate), body, body)
     assert not merged(plot(area=None, plot_m2=1000, **estate), plot(area=None, plot_m2=1000, **estate), body, body)
     assert not merged(plot(area=1000, **estate), plot(area=1010, **estate), body, body)
+    # up to 10000 m²: two other plots of 2500 m² at one price in one district
+    big = {"district": "Urbanización Los Pinos", "city": "Valencia", "price": 400_000}
+    assert not merged(plot(area=2500, **big), plot(area=2500, **big), body, body)
+    assert not merged(plot(area=9000, **big), plot(area=9000, **big), body, body)
     # a zone in a text: the area may be round
     zoned = "Parcela urbana, N.Z. 5.2.B."
     assert merged(plot(area=1000, **estate), plot(area=1000, **estate), zoned, zoned)
