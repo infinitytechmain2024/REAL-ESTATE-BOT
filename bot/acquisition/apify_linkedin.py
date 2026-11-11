@@ -28,8 +28,9 @@ is not used (``mark_enriched=False``).
 The cap of one run is ``pages x price + 0.05`` (the start and the rounding; the price is
 ``APIFY_LINKEDIN_USD_PER_PAGE`` for people, ``APIFY_LINKEDIN_COMPANIES_USD_PER_PAGE`` for companies), never above
 ``APIFY_LINKEDIN_MAX_CHARGE_USD`` (:func:`charge_cap`). Each actor has its own pinned build
-(``APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD``, ``APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD``). A refused launch (429) is tried again at most
-``LINKEDIN_MAX_ATTEMPTS`` times (``SocialRunConfig.max_attempts``): a refusal starts nothing and costs nothing.
+(``APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD``, ``APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD``). A 429 on the launch is handled as in P1.2:
+retried within one call for ``RATE_LIMIT_SECONDS`` without spending an attempt, then at most ``LINKEDIN_MAX_ATTEMPTS``
+launches (``SocialRunConfig``); a refusal starts nothing and costs nothing.
 
 Nothing calls it yet: the campaign runner wires it in P1.8.
 """
@@ -44,6 +45,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from bot.acquisition.apify_client import ApifyHttp, actor_path, check_pinned_build
+from bot.acquisition.apify_social import RATE_LIMIT_PAUSE_SECONDS, RATE_LIMIT_SECONDS
 from bot.acquisition.apify_source import ApifySocialRun, RunOutcome, SocialRunConfig, SourceRunStore
 from bot.acquisition.people import profile_link
 
@@ -67,7 +69,9 @@ PEOPLE_PER_PAGE = 25       # short profiles on one search page of linkedin-profi
 COMPANIES_PER_PAGE = 50    # companies on one page of linkedin-company-search
 MAX_PAGES = 4
 START_USD = 0.05           # the start and the rounding on top of the pages
-LINKEDIN_MAX_ATTEMPTS = 5  # launches of one input; a 429 refusal starts nothing and costs nothing
+# A 429 on the launch as in P1.2 (bot.acquisition.apify_social): retried within one call for at most
+# RATE_LIMIT_SECONDS without spending an attempt; a 429 that outlasts it spends one of LINKEDIN_MAX_ATTEMPTS.
+LINKEDIN_MAX_ATTEMPTS = 3
 
 PEOPLE_INPUT_KEYS = frozenset({"profileScraperMode", "searchQuery", "locations", "functionIds", "industryIds",
                                "takePages", "maxItems"})
@@ -167,7 +171,8 @@ class LinkedInConfig:
             build=self.people_build if people else self.companies_build, max_charge_usd=self.cap_usd(kind),
             max_items=self.max_pages * (PEOPLE_PER_PAGE if people else COMPANIES_PER_PAGE),
             build_setting=PEOPLE_BUILD_SETTING if people else COMPANIES_BUILD_SETTING,
-            timeout_seconds=self.timeout_seconds, max_attempts=LINKEDIN_MAX_ATTEMPTS)
+            timeout_seconds=self.timeout_seconds, max_attempts=LINKEDIN_MAX_ATTEMPTS,
+            rate_limit_seconds=RATE_LIMIT_SECONDS, rate_limit_pause_seconds=RATE_LIMIT_PAUSE_SECONDS)
 
 
 # --- the rows -----------------------------------------------------------------------------------------------------
@@ -221,8 +226,14 @@ _SEPARATORS = re.compile(r"\s*([|·•,;])(?:\s*[|·•,;])+\s*")
 _EDGE = re.compile(r"^[\s|·•,;/:-]+|[\s|·•,;/:-]+$")
 
 
+_YEAR_RANGE = re.compile(r"\d{4}\s?-\s?\d{4}")
+
+
 def _keyword_phone(match: re.Match[str]) -> str:
-    digits = sum(ch.isdigit() for ch in match.group("number"))
+    number = match.group("number")
+    if _YEAR_RANGE.fullmatch(number.strip()):  # «Cold call 2015-2020»: years, not a phone
+        return match.group()
+    digits = sum(ch.isdigit() for ch in number)
     return " " if 8 <= digits <= 15 else match.group()
 
 
@@ -390,9 +401,9 @@ class _LinkedInSource:
     kind: Kind
     allowed: frozenset[str]
 
-    def __init__(self, store: SourceRunStore, http: ApifyHttp, config: LinkedInConfig) -> None:
-        self.config = config
-        self.runner = ApifySocialRun(store, http, config.run_config(self.kind))
+    def __init__(self, store: SourceRunStore, http: ApifyHttp, config: LinkedInConfig, **run_kw: Any) -> None:
+        self.config = config  # run_kw: ApifySocialRun's clock, sleep, poll_seconds (tests)
+        self.runner = ApifySocialRun(store, http, config.run_config(self.kind), **run_kw)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(actor={self.runner.config.actor_id})"

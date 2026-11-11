@@ -56,14 +56,18 @@ def company(n: int = 1, **kw: Any) -> dict[str, Any]:
 
 
 class Api:
-    def __init__(self, dataset: list[Any] | None = None, *, launch_status: int = 201) -> None:
+    def __init__(self, dataset: list[Any] | None = None, *, launch_status: int = 201,
+                 launches: list[int] | None = None) -> None:
         self.dataset, self.launch_status = dataset or [], launch_status
+        self.statuses = list(launches or [])  # one status per launch, the last repeats
         self.calls: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
         path = request.url.path
         if request.method == "POST" and path.endswith("/runs"):
+            if self.statuses:
+                self.launch_status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
             if self.launch_status != 201:
                 return httpx.Response(self.launch_status, json={"error": {"type": "rate-limit-exceeded"}})
             return httpx.Response(201, json={"data": {"id": "RUN1", "defaultDatasetId": "DS1", "status": "READY"}})
@@ -369,16 +373,43 @@ async def test_two_pages_reach_the_launch(ledger) -> None:
 # --- 429 ------------------------------------------------------------------------------------------------------------
 
 
-async def test_rate_limited_launch_is_retried_up_to_its_own_attempts(ledger) -> None:
-    api, runs = Api(launch_status=429), MemorySourceRunStore()
-    source = li.ApifyLinkedInPeople(runs, http(api), CONFIG)
-    assert source.runner.config.max_attempts == li.LINKEDIN_MAX_ATTEMPTS == 5
-    outcomes = [await source.run(CAMPAIGN, SEARCH, MemoryReachStore(), FakeJudge()) for _ in range(7)]
-    assert [o.status for o in outcomes[:5]] == ["retry"] * 5
-    assert outcomes[5].status == "failed" and outcomes[5].error == "max_attempts"
-    assert outcomes[6].status == "failed"
-    assert len(api.launches()) == 5  # a refusal starts nothing: no estimate booked
-    assert not [e for e in ledger.entries if e.cost_usd]
+class Clock:
+    """A fake monotonic clock that ``sleep`` advances (no real wait)."""
+
+    def __init__(self) -> None:
+        self.now, self.sleeps = 1000.0, []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+async def test_429_within_the_window_does_not_spend_an_attempt(ledger) -> None:
+    api, clock = Api([person()], launches=[429, 429, 201]), Clock()
+    runs = MemorySourceRunStore(clock=clock)
+    source = li.ApifyLinkedInPeople(runs, http(api), CONFIG, clock=clock, sleep=clock.sleep)
+    config = source.runner.config
+    assert (config.rate_limit_seconds, config.rate_limit_pause_seconds) == (120.0, 15.0)  # as P1.2
+    outcome = await source.run(CAMPAIGN, SEARCH, MemoryReachStore(), FakeJudge())
+    assert outcome.status == "succeeded" and len(api.launches()) == 3 and clock.sleeps == [15.0, 15.0]
+    (row,) = runs.rows.values()
+    assert row["attempts"] == 1
+
+
+async def test_429_past_the_window_spends_one_attempt_and_stops_after_max(ledger) -> None:
+    api, clock = Api(launch_status=429), Clock()
+    runs = MemorySourceRunStore(clock=clock)
+    source = li.ApifyLinkedInPeople(runs, http(api), CONFIG, clock=clock, sleep=clock.sleep)
+    assert source.runner.config.max_attempts == li.LINKEDIN_MAX_ATTEMPTS == 3
+    outcomes = [await source.run(CAMPAIGN, SEARCH, MemoryReachStore(), FakeJudge()) for _ in range(5)]
+    assert [(o.status, o.error) for o in outcomes[:3]] == [("retry", "apify_http_429")] * 3
+    assert (outcomes[3].status, outcomes[3].error) == ("failed", "max_attempts")
+    assert outcomes[4].status == "failed"
+    assert sum(clock.sleeps) == 3 * 120.0  # the whole wait for one input is bounded
+    assert not [e for e in ledger.entries if e.cost_usd]  # a refusal starts nothing: nothing booked
 
 
 # --- review fixes: personal data in the text, a failed enrichment, the reach's page cap -----------------------------
@@ -561,7 +592,7 @@ async def test_postgres_linkedin_enrichment_does_not_mark_enriched(pool) -> None
     "Fondos de 650 000 000 USD", "Ticket 900k", "Ticket 650 000 M", "Ticket 700.000-900.000",
     "Rango 600 - 900", "CEO · Inversiones 2010-2020 | Madrid", "Desde 1999 - 2024, 120 proyectos",
     "+100 000 000 euros", "Gestiono +200 000 000 en activos", "+1 000 000 m2", "Top +40 2023 2024",
-    "Fondos 600 000 000 EUR", "Call center 2023", "Kowa 600 111 22",
+    "Fondos 600 000 000 EUR", "Call center 2023", "Kowa 600 111 22", "Cold call 2015-2020", "Tel 2015 - 2020",
 ])
 def test_clean_text_keeps_sums_ranges_and_years(text) -> None:
     assert li.clean_text(text) == text
