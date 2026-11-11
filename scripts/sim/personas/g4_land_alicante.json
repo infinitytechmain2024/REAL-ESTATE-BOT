@@ -84,6 +84,21 @@
         "press": "task:skip",
         "weight": 1,
         "tag": "any"
+      },
+      {
+        "text": "пока просто вложение в землю",
+        "weight": 1
+      }
+    ],
+    "land_status": [
+      {
+        "text": "можно и рустико, сельхоз подходит",
+        "weight": 3
+      },
+      {
+        "text": "любая категория",
+        "weight": 1,
+        "tag": "any"
       }
     ],
     "must_have": [
@@ -94,6 +109,15 @@
       {
         "press": "task:skip",
         "weight": 2,
+        "tag": "any"
+      },
+      {
+        "text": "нужна вода, подъезд по грунтовке ок",
+        "weight": 2
+      },
+      {
+        "text": "не важно",
+        "weight": 1,
         "tag": "any"
       }
     ],

@@ -101,9 +101,40 @@ SKIP = (("Не важно", "task:skip"), ("Хватит, ищи", "task:enough"
     ("Вы писали до 250 тыс. €, а теперь 400 тыс. — что верно?", "clarify"),
     ("Какая площадь, м²? Например: от 50, 60–80.", "area"),
     ("Как зовут вашу кошку?", None),
+    # the pilot's questions about a plot (2026-11)
+    ("Понял: Бюджет не важен\n\nЧто планируете на участке? Например: дом для себя, жилой комплекс, склад или пока "
+     "просто вложение.", "details"),
+    ("Понял: Под строительство своего дома\n\nУчасток должен быть уже под застройку (suelo urbano, с лицензией) или "
+     "можно urbanizable/рустико? Например: «только urbano», «urbanizable тоже ок», «не знаю».", "land_status"),
+    ("Есть ли строгие требования к участку: категория земли (urbano, rústico), коммуникации, доступ?", "land_status"),
+    ("Понял: Желательно suelo urbano, чтобы можно было строить\n\nНужны ли уже подведённые коммуникации и подъезд? "
+     "Например: «вода и свет обязательно», «всё подключено», «не важно».", "must_have"),
+    ("Понял: Желательно вода, свет и нормальный подъезд\n\nИщем только в самом городе Мадрид или можно города вокруг? "
+     "Например: «только город», «вся провинция Мадрид», «север: Алькобендас, Трес-Кантос».", "district"),
+    ("Только город или окрестности тоже?", "district"),
+    # «категори» alone is not the land's category: the type, the budget, the place come first
+    ("Какой тип недвижимости, какая категория: квартира или дом?", "property_type"),
+    ("Какой бюджет на эту категорию?", "budget"),
+    ("В каком городе искать объекты этой категории?", "place"),
+    ("Какая категория у участка нужна?", "land_status"),
+    ("Категория suelo важна?", "land_status"),
 ])
 def test_the_slot_of_a_question(question: str, slot: str | None) -> None:
     assert answer_user.slot_of({"question": question}) == slot
+
+
+@pytest.mark.parametrize("name", ["g1_land_madrid", "g4_land_alicante", "g9_both_land_madrid",
+                                  "n4_solar_madrid_mixed"])
+def test_a_land_persona_answers_the_pilots_questions(name: str) -> None:
+    persona = load(PERSONAS / f"{name}.json")
+    for slot in ("land_status", "details", "must_have", "district"):
+        assert persona["replies"].get(slot), slot
+    if name in ("g1_land_madrid", "g4_land_alicante"):  # the truth allows the province: the user may widen it
+        district = persona["replies"]["district"]
+        province = [o for o in district if "вся провинция" in o.get("text", "") and not o.get("tag")]
+        assert len(province) == 1  # one province answer, no near-duplicate
+        # ≈3/5 widen to the province; the rest keeps a real share of a narrower answer (districts, «не важно»)
+        assert province[0]["weight"] / sum(o["weight"] for o in district) == pytest.approx(3 / 5)
 
 
 def test_the_helper_answers_by_weight_with_a_seed(tmp_path: Path) -> None:

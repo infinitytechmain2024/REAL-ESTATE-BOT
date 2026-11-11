@@ -74,6 +74,20 @@
         "press": "task:skip",
         "weight": 1,
         "tag": "any"
+      },
+      {
+        "text": "дом для себя",
+        "weight": 1
+      }
+    ],
+    "land_status": [
+      {
+        "text": "solo urbano",
+        "weight": 3
+      },
+      {
+        "text": "urbano, не рустико",
+        "weight": 1
       }
     ],
     "must_have": [
@@ -85,6 +99,10 @@
         "press": "task:skip",
         "weight": 1,
         "tag": "any"
+      },
+      {
+        "text": "agua y luz, acceso asfaltado",
+        "weight": 2
       }
     ],
     "deviation": [
@@ -143,7 +161,8 @@
         }
       },
       "soft": [
-        "urbano (не rústico)"
+        "urbano (не rústico)",
+        "agua y luz, acceso asfaltado"
       ],
       "not": [
         "площадь дома",
