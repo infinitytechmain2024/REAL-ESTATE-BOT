@@ -254,7 +254,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "review",
+      "status": "done",
       "day": "волна 2",
       "hours": 5
     },
@@ -310,7 +310,7 @@
         "P1.3",
         "P1.4"
       ],
-      "status": "blocked",
+      "status": "in_progress",
       "day": "волна 3",
       "hours": 5
     },
