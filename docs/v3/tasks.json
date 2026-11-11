@@ -82,7 +82,7 @@
     },
     {
       "id": "O8",
-      "title": "Слетевший вход в любую из 4 сетей блокирует новые задачи — подтверждено владельцем 2026-11-11",
+      "title": "Подтвердить: слетевший вход в любую из 4 сетей блокирует задачу",
       "stream": "owner",
       "agent": "owner",
       "deps": [],
@@ -230,7 +230,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "in_progress",
+      "status": "done",
       "day": "волна 2",
       "hours": 5
     },
@@ -242,7 +242,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "in_progress",
+      "status": "done",
       "day": "волна 2",
       "hours": 4
     },
@@ -254,7 +254,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "in_progress",
+      "status": "review",
       "day": "волна 2",
       "hours": 5
     },
@@ -279,7 +279,7 @@
       "deps": [
         "P1.1"
       ],
-      "status": "in_progress",
+      "status": "done",
       "day": "волна 2",
       "hours": 4
     },
