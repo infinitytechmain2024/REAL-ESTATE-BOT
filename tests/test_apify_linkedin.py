@@ -8,6 +8,7 @@ actors' schemas as recorded in ``docs/v3/ACTORS.md`` (``harvestapi/linkedin-prof
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -57,8 +58,9 @@ def company(n: int = 1, **kw: Any) -> dict[str, Any]:
 
 class Api:
     def __init__(self, dataset: list[Any] | None = None, *, launch_status: int = 201,
-                 launches: list[int] | None = None) -> None:
+                 launches: list[int] | None = None, run: dict[str, Any] | None = None) -> None:
         self.dataset, self.launch_status = dataset or [], launch_status
+        self.run = run or {}  # fields of the finished run on top of the defaults
         self.statuses = list(launches or [])  # one status per launch, the last repeats
         self.calls: list[httpx.Request] = []
 
@@ -73,7 +75,7 @@ class Api:
             return httpx.Response(201, json={"data": {"id": "RUN1", "defaultDatasetId": "DS1", "status": "READY"}})
         if "/actor-runs/RUN1" in path:
             return httpx.Response(200, json={"data": {"id": "RUN1", "status": "SUCCEEDED", "defaultDatasetId": "DS1",
-                                                      "usageTotalUsd": 0.1}})
+                                                      "usageTotalUsd": 0.1, **self.run}})
         if "/datasets/DS1/items" in path:
             offset, limit = int(request.url.params["offset"]), int(request.url.params["limit"])
             return httpx.Response(200, json=self.dataset[offset:offset + limit])
@@ -307,6 +309,23 @@ async def test_empty_dataset(ledger) -> None:
         CAMPAIGN, SEARCH, store, judge)
     assert (outcome.status, outcome.items_imported) == ("succeeded", 0)
     assert store.contacts == {} and judge.seen == []
+
+
+async def test_cap_below_one_search_page_is_cap_too_low(ledger, caplog) -> None:
+    """As the P1.7 sample (2026-11-11): at the default cap $0.15 the actor took no search page, ended SUCCEEDED with
+    0 rows and statusMessage «max charge reached», and charged nothing."""
+    caplog.set_level(logging.INFO)
+    assert CONFIG.cap_usd("person") == 0.15  # the formula is unchanged: 1 page x $0.10 + $0.05
+    api = Api([], run={"usageTotalUsd": 0, "statusMessage": "max charge reached"})
+    store, runs, judge = MemoryReachStore(), MemorySourceRunStore(), FakeJudge()
+    outcome = await li.ApifyLinkedInPeople(runs, http(api), CONFIG).run(CAMPAIGN, SEARCH, store, judge)
+    assert (outcome.status, outcome.error, outcome.items_imported, outcome.cost_usd, outcome.capped) == (
+        "failed", "apify_cap_too_low", 0, 0.0, True)
+    (saved,) = runs.rows.values()
+    assert (saved["status"], saved["error_code"], saved["billed_usd"]) == ("failed", "apify_cap_too_low", 0.0)
+    assert store.contacts == {} and judge.seen == []
+    (warning,) = [r for r in caplog.records if r.getMessage() == "apify_source.cap_too_low"]
+    assert (warning.actor_id, warning.max_charge_usd) == ("harvestapi/linkedin-profile-search", 0.15)
 
 
 async def test_rows_without_links_and_known_contacts_add_nothing(ledger) -> None:

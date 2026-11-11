@@ -27,7 +27,9 @@ is not used (``mark_enriched=False``).
 
 The cap of one run is ``pages x price + 0.05`` (the start and the rounding; the price is
 ``APIFY_LINKEDIN_USD_PER_PAGE`` for people, ``APIFY_LINKEDIN_COMPANIES_USD_PER_PAGE`` for companies), never above
-``APIFY_LINKEDIN_MAX_CHARGE_USD`` (:func:`charge_cap`). Each actor has its own pinned build
+``APIFY_LINKEDIN_MAX_CHARGE_USD`` (:func:`charge_cap`). At $0.15 (one people page) the live sample of P1.7
+(2026-11-11) took no search page: ``SUCCEEDED``, 0 rows, «max charge reached»; such a run ends ``failed
+apify_cap_too_low`` (``ApifySocialRun``), and the real minimum is still unknown, so the formula stays. Each actor has its own pinned build
 (``APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD``, ``APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD``). A 429 on the launch is handled as in P1.2:
 retried within one call for ``RATE_LIMIT_SECONDS`` without spending an attempt, then at most ``LINKEDIN_MAX_ATTEMPTS``
 launches (``SocialRunConfig``); a refusal starts nothing and costs nothing.

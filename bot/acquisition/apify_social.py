@@ -155,9 +155,10 @@ class SocialSourceConfig:
     comments_actor: str
     build: str
     max_results: int                  # items of one run (1-50): resultsLimit / resultsPerPage / commentsPerPost
-    max_charge_usd: float             # maxTotalChargeUsd of one run
+    max_charge_usd: float             # maxTotalChargeUsd of one run (the comments one too, unless set below)
     build_setting: str
     timeout_seconds: float = 300
+    comments_max_charge_usd: float | None = None  # the comments actor's own cap; None: max_charge_usd
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_results <= 50:
@@ -167,9 +168,12 @@ class SocialSourceConfig:
 
     def run_config(self, purpose: str) -> SocialRunConfig:
         actor = self.posts_actor if purpose == "posts" else self.comments_actor
+        cap = self.max_charge_usd
+        if purpose != "posts" and self.comments_max_charge_usd is not None:
+            cap = self.comments_max_charge_usd
         short = {"instagram": "ig", "tiktok": "tt"}.get(self.platform, self.platform)
         return SocialRunConfig(platform=self.platform, purpose=f"{short}:{purpose}", actor_id=actor,
-                               build=self.build, max_charge_usd=self.max_charge_usd, max_items=self.max_results,
+                               build=self.build, max_charge_usd=cap, max_items=self.max_results,
                                build_setting=self.build_setting, timeout_seconds=self.timeout_seconds,
                                rate_limit_seconds=RATE_LIMIT_SECONDS, rate_limit_pause_seconds=RATE_LIMIT_PAUSE_SECONDS)
 
