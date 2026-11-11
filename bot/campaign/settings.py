@@ -179,7 +179,9 @@ class CampaignRunnerSettings(BaseSettings):
     apify_tiktok_comments_actor: str = Field(default="clockworks/tiktok-comments-scraper", validation_alias="APIFY_TIKTOK_COMMENTS_ACTOR")
     apify_tiktok_build: str = Field(default="", max_length=40, validation_alias="APIFY_TIKTOK_ACTOR_BUILD")
     apify_tiktok_max_results: int = Field(default=30, ge=1, le=50, validation_alias="APIFY_TIKTOK_MAX_RESULTS")
-    apify_tiktok_max_charge_usd: float = Field(default=0.15, gt=0, le=5, validation_alias="APIFY_TIKTOK_MAX_CHARGE_USD")
+    # clockworks/tiktok-scraper refuses a cap below $0.50 (apify_tiktok.TIKTOK_MIN_CHARGE_USD, live sample 2026-11-11):
+    # the default is that minimum; MAX_RESULTS, not the cap, bounds what a run spends.
+    apify_tiktok_max_charge_usd: float = Field(default=0.50, gt=0, le=5, validation_alias="APIFY_TIKTOK_MAX_CHARGE_USD")
 
     @model_validator(mode="after")
     def _comments_ready(self) -> CampaignRunnerSettings:
@@ -222,6 +224,10 @@ class CampaignRunnerSettings(BaseSettings):
             if enabled and need > cap + 1e-9:
                 raise ValueError(f"{prefix}_MAX_RESULTS={results} costs up to ${need:.4f} per run, above "
                                  f"{prefix}_MAX_CHARGE_USD={cap}: lower the results or raise the cap")
+        if self.apify_tiktok_enabled and self.apify_tiktok_max_charge_usd < apify_tiktok.TIKTOK_MIN_CHARGE_USD - 1e-9:
+            raise ValueError(f"APIFY_TIKTOK_MAX_CHARGE_USD={self.apify_tiktok_max_charge_usd} is below the "
+                             f"${apify_tiktok.TIKTOK_MIN_CHARGE_USD:.2f} minimum of {apify_tiktok.POSTS_ACTOR}: "
+                             "every launch would be refused")
 
     def _social_flags(self) -> list[tuple[str, str, bool, str]]:
         return [("APIFY_INSTAGRAM_ENABLED", "APIFY_INSTAGRAM_ACTOR_BUILD", self.apify_instagram_enabled,

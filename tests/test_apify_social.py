@@ -41,7 +41,7 @@ IG = SocialSourceConfig(platform="instagram", posts_actor="apify/instagram-scrap
 IG_POST = "https://www.instagram.com/p/C1aBcDeFgHi/"
 TT = SocialSourceConfig(platform="tiktok", posts_actor="clockworks/tiktok-scraper",
                         comments_actor="clockworks/tiktok-comments-scraper", build="1.4.0", max_results=30,
-                        max_charge_usd=0.15, build_setting="APIFY_TIKTOK_ACTOR_BUILD")
+                        max_charge_usd=0.50, build_setting="APIFY_TIKTOK_ACTOR_BUILD")
 TT_VIDEO = "https://www.tiktok.com/@pisos_demo_mad/video/7430000000000000001"
 
 # --- synthetic rows (field names from the output schemas; values invented) -----------------------------------
@@ -508,7 +508,7 @@ async def test_tiktok_posts_launch_body_is_the_white_list_without_paid_add_ons(l
     assert set(body) <= tt.POSTS_INPUT_KEYS and not set(body) & tt.PAID_KEYS
     assert not keys_anywhere(body) & {"profiles", "proxyCountryCode", "scrapeRelatedVideos"}  # not needed, not sent
     params = launch.url.params
-    assert (params["maxTotalChargeUsd"], params["build"], params["maxItems"]) == ("0.15", "1.4.0", "30")
+    assert (params["maxTotalChargeUsd"], params["build"], params["maxItems"]) == ("0.5", "1.4.0", "30")
     assert_no_login_keys(launch)
 
 
@@ -519,7 +519,7 @@ async def test_tiktok_comments_launch_body_is_the_white_list(ledger) -> None:
     assert launch.url.path == "/v2/acts/clockworks~tiktok-comments-scraper/runs"
     assert api.body() == {"postURLs": [TT_VIDEO], "commentsPerPost": 30, "maxRepliesPerComment": 0}
     assert set(api.body()) <= tt.COMMENTS_INPUT_KEYS and not set(api.body()) & tt.PAID_KEYS
-    assert (launch.url.params["maxTotalChargeUsd"], launch.url.params["build"]) == ("0.15", "1.4.0")
+    assert (launch.url.params["maxTotalChargeUsd"], launch.url.params["build"]) == ("0.5", "1.4.0")
     assert_no_login_keys(launch)
 
 
@@ -638,7 +638,7 @@ def test_tiktok_flag_off_builds_no_source(monkeypatch: pytest.MonkeyPatch) -> No
     assert s.tiktok_sources(MemorySourceRunStore(), http(Api())) is None
     assert (s.apify_tiktok_posts_actor, s.apify_tiktok_comments_actor, s.apify_tiktok_max_results,
             s.apify_tiktok_max_charge_usd) == ("clockworks/tiktok-scraper", "clockworks/tiktok-comments-scraper",
-                                               30, 0.15)
+                                               30, 0.50)
 
 
 @pytest.mark.parametrize(("env", "message"), [
@@ -652,15 +652,37 @@ def test_tiktok_flag_on_without_what_it_needs_does_not_start(monkeypatch: pytest
         settings(monkeypatch, APIFY_TIKTOK_ENABLED="true", **env)
 
 
+def test_tiktok_cap_is_at_least_the_actor_minimum_only_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    on = {"APIFY_TIKTOK_ENABLED": "true", "APIFY_TOKEN": "x", "APIFY_TIKTOK_ACTOR_BUILD": "1.4.0"}
+    assert tt.TIKTOK_MIN_CHARGE_USD == 0.50  # live sample 2026-11-11: the actor refuses a lower maxTotalChargeUsd
+    # The old default: every launch would get a 4xx («less than the allowed minimum of $0.50»).
+    with pytest.raises(ValidationError, match=r"APIFY_TIKTOK_MAX_CHARGE_USD=0\.15 is below the \$0\.50 minimum"):
+        settings(monkeypatch, APIFY_TIKTOK_MAX_CHARGE_USD="0.15", **on)
+    with pytest.raises(ValidationError, match="below the"):
+        settings(monkeypatch, APIFY_TIKTOK_MAX_CHARGE_USD="0.49", **on)
+    assert settings(monkeypatch, APIFY_TIKTOK_MAX_CHARGE_USD="0.15").tiktok_config() is None  # off: valid
+    assert settings(monkeypatch, APIFY_TIKTOK_MAX_CHARGE_USD="0.50", **on).tiktok_config() is not None
+
+
+def test_tiktok_posts_source_refuses_a_cap_below_the_minimum() -> None:
+    low = SocialSourceConfig(platform="tiktok", posts_actor="clockworks/tiktok-scraper",
+                             comments_actor="clockworks/tiktok-comments-scraper", build="1.4.0", max_results=30,
+                             max_charge_usd=0.15, build_setting="APIFY_TIKTOK_ACTOR_BUILD")
+    with pytest.raises(ValueError, match=r"refuses a cap below \$0\.50"):
+        tt.tiktok_sources(low, MemorySourceRunStore(), http(Api()))
+
+
 def test_tiktok_results_must_fit_in_the_cap_only_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
     on = {"APIFY_TIKTOK_ENABLED": "true", "APIFY_TOKEN": "x", "APIFY_TIKTOK_ACTOR_BUILD": "1.4.0"}
-    # 50 x $0.0037 + $0.001 start = $0.186 > $0.15
+    # the defaults fit: 30 x $0.0037 + $0.001 start = $0.112 under the $0.50 cap (resultsPerPage bounds the run)
+    assert settings(monkeypatch, **on).tiktok_config() is not None
+    assert settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50", **on).tiktok_config() is not None  # $0.186
+    # a price rise past the cap is still caught: 50 x $0.0037 + $0.001 = $0.186 > a $0.15 cap
+    monkeypatch.setattr(tt, "TIKTOK_MIN_CHARGE_USD", 0.10)
     with pytest.raises(ValidationError, match=r"APIFY_TIKTOK_MAX_RESULTS=50 costs up to \$0\.1860"):
-        settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50", **on)
-    assert settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50").apify_tiktok_max_results == 50  # off: valid
-    assert settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50", APIFY_TIKTOK_MAX_CHARGE_USD="0.19",
-                    **on).tiktok_config() is not None
-    assert settings(monkeypatch, **on).tiktok_config() is not None  # the defaults fit: 30 -> $0.112
+        settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50", APIFY_TIKTOK_MAX_CHARGE_USD="0.15", **on)
+    off = settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50", APIFY_TIKTOK_MAX_CHARGE_USD="0.15")
+    assert off.apify_tiktok_max_results == 50  # off: valid
 
 
 def test_instagram_results_must_fit_in_the_cap_only_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -682,5 +704,5 @@ def test_tiktok_flag_on_builds_both_sources_and_instagram_stays_off(monkeypatch:
     assert (sources.comments.runner.config.actor_id, sources.comments.runner.config.purpose) == (
         "clockworks/tiktok-comments-scraper", "tt:comments")
     cfg = sources.comments.runner.config
-    assert (cfg.build, cfg.max_items, cfg.max_charge_usd) == ("1.4.0", 30, 0.15)
+    assert (cfg.build, cfg.max_items, cfg.max_charge_usd) == ("1.4.0", 30, 0.50)
     assert "apify_api_SECRET" not in repr(s) and "apify_api_SECRET" not in repr(sources)
