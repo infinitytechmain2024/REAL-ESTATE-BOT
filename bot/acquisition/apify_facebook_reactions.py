@@ -39,6 +39,7 @@ Nothing calls :meth:`ApifyFacebookReactions.collect` yet; the truncation count i
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ from pydantic import ValidationError
 
 from bot.acquisition.apify_client import ApifyHttp
 from bot.acquisition.apify_source import ApifySocialRun, RunOutcome, SocialRunConfig, SourceRunStore
+from bot.acquisition.contracts import _POST_ID
 from bot.acquisition.people import FB_HOSTS, Engagement, profile_link
 
 log = logging.getLogger(__name__)
@@ -64,9 +66,19 @@ OTHER = "other"
 _ALIASES = {"laugh": "haha"}
 # Hosts a post link may come with; it is always sent as www.facebook.com.
 POST_HOSTS = FB_HOSTS | {"mbasic.facebook.com"}
-# Query parameters that carry the post's id (``_POST_ID`` in bot/acquisition/contracts.py, plus the owner ``id`` of
-# ``permalink.php?story_fbid=…&id=…``); every other one (``__tn__``, ``ref``, ``mibextid``…) is dropped.
-POST_ID_PARAMS = frozenset({"story_fbid", "id", "fbid", "multi_permalinks"})
+# Query parameters that carry the post's id (``_POST_ID`` in bot/acquisition/contracts.py, the video ``v`` of
+# ``watch/?v=`` and ``video.php?v=``, the album ``set`` of ``media/set/?set=a.1``, plus the owner ``id`` of
+# ``permalink.php?story_fbid=…&id=…``), each with the shape its value must have; every other parameter
+# (``__tn__``, ``ref``, ``mibextid``…) is dropped.
+_PARAM_VALUES = {"story_fbid": re.compile(r"\d{1,25}|pfbid0[A-Za-z0-9]+"), "fbid": re.compile(r"\d{1,25}"),
+                 "multi_permalinks": re.compile(r"\d{1,25}"), "v": re.compile(r"\d{1,25}"),
+                 "set": re.compile(r"[A-Za-z]{1,10}\.[\w.\-]{1,80}"), "id": re.compile(r"\d{1,25}")}
+POST_ID_PARAMS = frozenset(_PARAM_VALUES)
+# Parameters that name the post by themselves (``id`` alone is its owner, not a post).
+_OWN_ID_PARAMS = POST_ID_PARAMS - {"id"}
+# A post id in the path: /posts/<id>, /permalink/<id>, /videos/<id>, /reel/<id>, /photos/<album>/<id>, a pfbid…
+_PATH_ID = re.compile(r"/(?:posts|permalink|videos|reels?|photos|story)/(?:[\w.\-]+/)*?(?:\d{1,25}|pfbid0[A-Za-z0-9]+)(?:/|$)"
+                      r"|/pfbid0[A-Za-z0-9]+(?:/|$)")
 # The only keys the actor ever gets: nothing else (cookies, sessions, proxies with accounts) can be passed.
 INPUT_KEYS = frozenset({"startUrls", "resultsLimit"})
 
@@ -120,24 +132,52 @@ class ReactionPage:
     truncated: Counter[str] = field(default_factory=Counter)      # post -> rows, set when a post reached the limit
 
 
+class PostUrlError(ValueError):
+    """A link that is not one post: ``reason`` is ``not_facebook`` or ``no_post_id``."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def normalize_post_url(url: object) -> str:
     """``https://www.facebook.com/<path>`` with only the post-id parameters (sorted), no fragment, no trailing ``/``.
-    Not an http(s) Facebook link -> ValueError."""
+
+    Not an http(s) Facebook link -> ``PostUrlError("not_facebook")``; a link with no post id left in its path or
+    parameters (a feed, a bare ``/watch``, a page) -> ``PostUrlError("no_post_id")``: never paid for."""
     value = url.strip() if isinstance(url, str) else ""
     parts = urlsplit(value)
     path = parts.path.rstrip("/")
-    if parts.scheme not in ("http", "https") or (parts.hostname or "").lower() not in POST_HOSTS or not path:
-        raise ValueError("a reactions post must be a facebook.com link")
-    query = urlencode(sorted((k, v) for k, v in parse_qsl(parts.query) if k in POST_ID_PARAMS))
-    return f"https://www.facebook.com{path}" + (f"?{query}" if query else "")
+    if parts.scheme not in ("http", "https") or (parts.hostname or "").lower() not in POST_HOSTS:
+        raise PostUrlError("not_facebook")
+    params = sorted({(k, v) for k, v in parse_qsl(parts.query) if k in _PARAM_VALUES and _PARAM_VALUES[k].fullmatch(v)})
+    query = urlencode(params)
+    canonical = f"https://www.facebook.com{path}" + (f"?{query}" if query else "")
+    has_id = (_PATH_ID.search(path) or _POST_ID.search(canonical) or any(k in _OWN_ID_PARAMS for k, _ in params))
+    if not path or not has_id:
+        raise PostUrlError("no_post_id")
+    return canonical
+
+
+def split_post_urls(urls: Iterable[str]) -> tuple[list[str], Counter[str]]:
+    """``(posts, rejected)``: the canonical posts, deduplicated and sorted (a stable input hash), and the links left
+    out of the input by reason (``not_facebook``, ``no_post_id``)."""
+    out: set[str] = set()
+    rejected: Counter[str] = Counter()
+    for url in urls:
+        try:
+            out.add(normalize_post_url(url))
+        except PostUrlError as exc:
+            rejected[exc.reason] += 1
+    return sorted(out), rejected
 
 
 def post_urls(urls: Iterable[str]) -> list[str]:
-    """The posts to read in their canonical form, deduplicated and sorted (a stable input hash)."""
-    out = {normalize_post_url(url) for url in urls}
+    """The posts to read in their canonical form; no post left (or too many) -> ValueError."""
+    out, _ = split_post_urls(urls)
     if not 1 <= len(out) <= MAX_POSTS_PER_RUN:
         raise ValueError(f"1-{MAX_POSTS_PER_RUN} posts per reactions run")
-    return sorted(out)
+    return out
 
 
 def per_post_limit(max_results: int, posts: int) -> int:
@@ -268,6 +308,10 @@ class ApifyFacebookReactions:
 
     async def collect(self, campaign_id: str, urls: Iterable[str], sink: ReactionSink, *,
                       owner_user_id: int | None = None) -> RunOutcome:
+        urls = list(urls)
+        rejected = split_post_urls(urls)[1]
+        if rejected:
+            log.info("apify_reactions.posts_rejected", extra={"campaign_id": campaign_id, "rejected": dict(rejected)})
         body = self.actor_input(urls)
         limit, rows = int(body["resultsLimit"]), Counter[str]()
 
@@ -292,6 +336,26 @@ class ApifyFacebookReactions:
         return await self._run.run(campaign_id, body, mapped, owner_user_id=owner_user_id)
 
 
-__all__ = ["ACTOR", "INPUT_KEYS", "OTHER", "POST_HOSTS", "POST_ID_PARAMS", "REACTION_TYPES", "USD_PER_RESULT", "ApifyFacebookReactions", "PostError",
-           "ReactionPage", "ReactionSink", "ReactionsConfig", "actor_input", "map_rows", "min_charge_usd", "normalize_post_url", "per_post_limit", "post_urls",
-           "reaction_type"]
+__all__ = [
+    "ACTOR",
+    "INPUT_KEYS",
+    "OTHER",
+    "POST_HOSTS",
+    "POST_ID_PARAMS",
+    "REACTION_TYPES",
+    "USD_PER_RESULT",
+    "ApifyFacebookReactions",
+    "PostError",
+    "PostUrlError",
+    "ReactionPage",
+    "ReactionSink",
+    "ReactionsConfig",
+    "actor_input",
+    "map_rows",
+    "min_charge_usd",
+    "normalize_post_url",
+    "per_post_limit",
+    "post_urls",
+    "reaction_type",
+    "split_post_urls",
+]

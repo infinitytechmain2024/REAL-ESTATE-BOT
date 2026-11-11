@@ -21,11 +21,13 @@ from bot.acquisition.apify_facebook_reactions import (
     REACTION_TYPES,
     USD_PER_RESULT,
     ApifyFacebookReactions,
+    PostUrlError,
     ReactionPage,
     ReactionsConfig,
     map_rows,
     normalize_post_url,
     reaction_type,
+    split_post_urls,
 )
 from bot.acquisition.apify_source import MemorySourceRunStore, input_hash
 from bot.campaign.settings import CampaignRunnerSettings
@@ -353,8 +355,8 @@ def test_the_same_post_written_differently_is_one_input(variant: str) -> None:
 def test_post_id_parameters_are_kept() -> None:
     url = "https://m.facebook.com/permalink.php?id=100000000000001&__tn__=x&story_fbid=1234567890"
     assert normalize_post_url(url) == "https://www.facebook.com/permalink.php?id=100000000000001&story_fbid=1234567890"
-    assert normalize_post_url("https://www.facebook.com/photo.php?fbid=1234567&set=a.1") == (
-        "https://www.facebook.com/photo.php?fbid=1234567")
+    assert normalize_post_url("https://www.facebook.com/photo.php?fbid=1234567&set=a.1&type=3") == (
+        "https://www.facebook.com/photo.php?fbid=1234567&set=a.1")
     assert normalize_post_url("https://www.facebook.com/groups/1/?multi_permalinks=123456&ref=x") == (
         "https://www.facebook.com/groups/1?multi_permalinks=123456")
     with pytest.raises(ValueError):
@@ -397,3 +399,57 @@ def test_a_falsy_error_is_no_error(value: Any) -> None:
 def test_a_real_error_is_a_post_error(value: Any, expected: str) -> None:
     page = map_rows([reaction(1, error=value)])
     assert page.engagements == [] and [e.error for e in page.errors] == [expected]
+
+
+# --- the post id survives normalization ------------------------------------------------------------------------
+
+
+def test_watch_videos_with_different_ids_stay_different() -> None:
+    a = normalize_post_url("https://m.facebook.com/watch/?v=111&ref=sharing")
+    b = normalize_post_url("https://www.facebook.com/watch/?v=222")
+    assert (a, b) == ("https://www.facebook.com/watch?v=111", "https://www.facebook.com/watch?v=222")
+    src = source(Api([]))
+    assert src.actor_input([a, b])["startUrls"] == [{"url": a}, {"url": b}]
+
+
+def test_video_php_keeps_v_and_media_set_keeps_set() -> None:
+    assert normalize_post_url("https://www.facebook.com/video.php?v=5&__tn__=x") == (
+        "https://www.facebook.com/video.php?v=5")
+    assert normalize_post_url("https://m.facebook.com/media/set/?set=a.1&type=3") == (
+        "https://www.facebook.com/media/set?set=a.1")
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.facebook.com/watch", "https://www.facebook.com/watch/?ref=x", "https://www.facebook.com/watch/?v=abc",
+    "https://www.facebook.com/someagency", "https://www.facebook.com/", "https://www.facebook.com/groups/123456",
+    "https://www.facebook.com/permalink.php?id=100000000000001", "https://www.facebook.com/media/set/?set=",
+])
+def test_a_link_without_a_post_id_is_rejected(url: str) -> None:
+    with pytest.raises(PostUrlError) as exc:
+        normalize_post_url(url)
+    assert exc.value.reason == "no_post_id"
+
+
+def test_rejected_links_stay_out_of_the_input() -> None:
+    urls = ["https://www.facebook.com/watch", POST, "https://www.instagram.com/p/abc/", "https://www.facebook.com/x"]
+    posts, rejected = split_post_urls(urls)
+    assert posts == [POST] and rejected == {"no_post_id": 2, "not_facebook": 1}
+    assert source(Api([])).actor_input(urls)["startUrls"] == [{"url": POST}]
+    with pytest.raises(ValueError):
+        source(Api([])).actor_input(["https://www.facebook.com/watch"])
+
+
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://www.facebook.com/groups/123456/posts/7890123/?__cft__=x", "https://www.facebook.com/groups/123456/posts/7890123"),
+    ("https://www.facebook.com/groups/123456/permalink/7890123/", "https://www.facebook.com/groups/123456/permalink/7890123"),
+    ("https://www.facebook.com/groups/1/?multi_permalinks=123456&ref=x", "https://www.facebook.com/groups/1?multi_permalinks=123456"),
+    ("https://m.facebook.com/permalink.php?story_fbid=1234567890&id=100000000000001",
+     "https://www.facebook.com/permalink.php?id=100000000000001&story_fbid=1234567890"),
+    ("https://m.facebook.com/story.php?story_fbid=pfbid0AbC&id=100000000000001",
+     "https://www.facebook.com/story.php?id=100000000000001&story_fbid=pfbid0AbC"),
+    ("https://www.facebook.com/someagency/videos/1234567890/", "https://www.facebook.com/someagency/videos/1234567890"),
+    ("https://www.facebook.com/reel/1234567890", "https://www.facebook.com/reel/1234567890"),
+    ("https://www.facebook.com/someagency/photos/a.123/4567890/", "https://www.facebook.com/someagency/photos/a.123/4567890"),
+])
+def test_groups_permalinks_and_paths_work_as_before(url: str, expected: str) -> None:
+    assert normalize_post_url(url) == expected
