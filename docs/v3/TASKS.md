@@ -23,15 +23,15 @@
 |---|---|---|---|
 | 1 | «`/forget` покрывает новые таблицы» (P3) | В живом боте `/forget` нет. Он есть только в `legacy/bot/handlers/privacy.py:45` и `legacy/bot/main.py:81`. Меню владельца без него (`bot/control_plane/menu.py:11-24`) | P3.4 пишет `/forget` с нуля, а не расширяет существующий |
 | 2 | «хранение 90 дней» | Удаляющей задачи нет. `CAMPAIGN_LEAD_DAYS=90` только фильтрует чтение (`bot/campaign/settings.py:144`, `COMPLIANCE.md:65-66`). Удаляет только `bot/facebook_collector/apify/retention.py` (сырые данные Apify, 7 дней) | P3.3 — новая задача очистки, ⛔ стоп 4 |
-| 3 | «`LiveViewController`» | В telegram это `LiveViewCoordinator` (`bot/control_plane/live_view.py:160`). `LiveViewController` — класс сервиса браузера (`bot/browser_session/live.py:254`) | В задачах используются оба имени, каждое на своём месте |
+| 3 | «`LiveViewController`» | В telegram это `LiveViewCoordinator` (`bot/control_plane/live_view.py:160`). `LiveViewController` — класс сервиса браузера (`bot/browser_session/live.py:49`) | В задачах используются оба имени, каждое на своём месте |
 | 4 | «Окно входа открывает только владелец» | Его открывает любой staff (owner, helper, operator): `is_operator` (`live_view.py:174`), `/login` (`service.py:518`). Только кнопка панели доступна одному владельцу (`service.py:315`) | P2.1 и P2.6 переводят окно на «свой профиль — своё окно» |
 | 5 | Внешняя ссылка (D12) | Уже есть `?for=<uid>` с подтверждением в чате: не больше 3 запросов, 600 с (`live_view.py:189`, `:249-288`, `:139-140`). Образец одноразового токена — `bot/verification/tokens.py:13-18` и таблица `verification_access_tokens` (`009_verification_flow.sql:22-34`) | P2.8 строит ссылку на этом образце: 10 минут, один раз, без подтверждения в чате |
 | 6 | «Виртуальный экран фиксированного размера» | Размер зашит дважды: в Xvfb `1440x1000x24` (`docker/browser-session.Dockerfile:23`) и во viewport Playwright (`bot/browser_session/manager.py:78`). noVNC масштабирует только картинку, `resize=scale` (`live_view.py:406`) | P2.7: RANDR + `xrandr` (пакет в образ, ⛔ стоп 2, O9) и смена viewport |
 | 7 | Один профиль на сеть | Индекс `browser_profiles_one_in_use_platform_idx` разрешает один `in_use` на платформу глобально (`003_orchestration.sql:64-65`). Имя профиля `<platform>-main` (`service.py:527`) | P2.2 меняет индекс на «один на (пользователь, платформа)», а очередь P2.4 обеспечивает «один браузер за раз» |
-| 8 | Очередь профилей (D10) | Очереди нет. Окно входа одно и отказывает, пока есть другая сессия (`bot/browser_session/live.py:215-218`). Занятый браузер отвечает 409 (`bot/browser_session/main.py:151-152`) | P2.4 — новая очередь FIFO в Redis |
+| 8 | Очередь профилей (D10) | Очереди нет. Окно входа одно и отказывает, пока есть другая сессия (`bot/browser_session/live.py:80-83`). Занятый браузер отвечает 409 (`bot/browser_session/main.py:79-80`) | P2.4 — новая очередь FIFO в Redis |
 | 9 | Прокси на профиль (D11) | У браузера прокси нет (`manager.py:76-81`). Единственный прокси — `WEB_SEARCH_PROXY_URL` для веб-этапа (`docker-compose.yml:656`) | P2.5 передаёт `proxy` в `launch_persistent_context` (`manager.py:527-532`) |
 | 10 | Шифрование (D20) | `cryptography` нет ни в `requirements*.txt`, ни в `docker/requirements-*.txt` | P2.3 ⛔ стоп 2: `cryptography` (Fernet), O9 |
-| 11 | «Роли operator и helper удаляются» | Роли используются в 6 модулях: `bot/operators.py:22-24`, `service.py` (около 15 мест), `bot/control_plane/main.py:113-185`, `bot/orchestra/dispatcher.py:80-144`, `bot/control_plane/auto.py:71-107`, `bot/verification/service.py:112-342`. **Helper сейчас проверяет находки вручную** (`STAFF_ROLES`, `operators.py:23-24`) | P2.1: проверку берёт владелец, а свою кампанию — её автор. Значения в БД переписываются (operator/helper → user), ⛔ стоп 4 |
+| 11 | «Роли operator и helper удаляются» | Роли используются в 6 модулях: `bot/operators.py:22-24`, `service.py` (около 15 мест), `bot/control_plane/main.py:113-185`, `bot/orchestra/dispatcher.py:80-144`, `bot/control_plane/auto.py:71-107`, `bot/verification/service.py:112-342`. **Helper сейчас проверяет находки вручную** (`STAFF_ROLES`, `operators.py:23-24`) | P2.1: проверку берёт владелец, а свою кампанию — её автор. Значения в БД не переписываются: helper/operator считаются user в коде (после ревью) |
 | 12 | Контракт соцсетей | `AcquiredPost`/`Provenance` настроены на FB: regex id поста (`bot/acquisition/contracts.py:34`), `extra="forbid"` (`:47`), поля платформы нет. `profile_link` принимает только хосты FB (`bot/campaign/leads.py:82`) | P1.1 — общий контракт (платформа, профиль по сети) до источников IG/TT/LI |
 | 13 | Учёт запусков Apify | `apify_runs.batch_id not null` ссылается на `acquisition_batches` FB (`046_facebook_apify_runs.sql:15`). Порталы ведутся в `web_listing_source_runs` (044). Посты по ссылке — в `campaign_post_reads` (048) | P1.1 — общая таблица `apify_source_runs` для новых соц-источников: claim, run id, биллинг один раз |
 | 14 | Сменный анализ (D18) | У каждого этапа уже свой Protocol: `Interviewer` (`bot/control_plane/interviewer.py:61`), `Understander` (`understanding.py:177`), `SearchPlanner` (`bot/campaign/search_plan.py:331`), `RelevanceJudge` (`relevance.py:114`), `Reviewer` (`:289`), `Recommender` (`final_report.py:455`), `LeadJudge` (`leads.py:196`), `ReachJudge` (`reach.py:341`). Общий транспорт — `OpenRouterJSON.complete` (`bot/agents/llm.py:60-88`). У анализатора своего Protocol нет (`bot/analysis_pipeline/openrouter.py:406`) | P7.1 не переписывает этапы, а добавляет маршрутизатор и Protocol для анализатора |
@@ -47,6 +47,7 @@
 | 24 | Зависимость P6 → P2 | Раздел «пользователи и входы» требует статусы сетей (P2.6) | P6.3 зависит от P2.6. Таблица фаз KICKOFF это не показывает |
 | 25 | Зависимость P7 → P2 | Ключ пользователя хранится шифрованным (P2.3) | P7.2 зависит от P2.3 |
 | 26 | Сигналы P4 → P1 | Реакции приходят из P1.6, а хранение с владельцем требует P3.1 | P1.6 даёт только контракт и мапперы без таблицы, а хранит P4.1 |
+| 27 | Ревью плана (Opus, 2026-11-11) | 20 находок, все блокирующие и важные подтверждены по коду | Исправления внесены в задачи ниже, сводка — §5 |
 
 ---
 
@@ -56,7 +57,8 @@
 
 #### R1 — Правки правил отдельным PR ⛔ стоп 5
 **Цель.** Убрать противоречия между D1, D9, D17, D5 и правилами. Закрывает D1, D9, D17, D5.
-**Файлы.** `CLAUDE.md` п. 10. `docs/v2/KICKOFF_FABLE.md:51` (строка про подписку). `COMPLIANCE.md`: новый раздел
+**Файлы.** `CLAUDE.md` п. 10. `docs/v2/KICKOFF_FABLE.md:50` (запрет «автоматизации LinkedIn-аккаунта») и `:51`
+(строка про подписку). `COMPLIANCE.md`: новый раздел
 §2.5 «v3» и §4a «вопросы клиенту по v3». Текст правок — `docs/v3/RULE_CHANGES.md`.
 **Приёмка.** Владелец видит дифф и отвечает «ок». PR `v3/rules` с зелёным CI.
 **Соседи.** Субагенты читают `CLAUDE.md`, поэтому до мержа R1 исполнители P2 работают по старому п. 10. LinkedIn
@@ -100,7 +102,8 @@
 Исполнитель: **owner**. Deps: P0.1. 2 ч.
 
 #### P0.4 — ⛔ D1: базовая линия G1–G9 (стоп 1)
-Девять кампаний золотого набора. Потолок — $7 суммарно (`CAMPAIGN_BUDGET_USD=5` на кампанию). Числа записываются в
+Девять кампаний золотого набора. Потолок — $7 суммарно. Бюджет считается только на кампанию (`costs.py:317-326`),
+поэтому на время прогона `CAMPAIGN_BUDGET_USD=0.8` и лимит в Apify Console; после — вернуть `5`. Числа записываются в
 `docs/v2/GOLDEN_SET.md` по `GOLDEN_SET.md` «Как снять базовую линию».
 Исполнитель: **owner** (+ analyst разбирает вывод). Deps: P0.2, P0.3, O7. 2 ч.
 
@@ -156,7 +159,7 @@ id поста IG/TT/LI); `tests/test_apify_source_run.py` (запуск один
 биллинг один раз, `over_budget` до запуска); Postgres-тест таблицы 051.
 **Соседи.** `facebook_collector/apify/mapper.py` и `post_leads.py` используют `Provenance`. Умолчание `facebook`
 сохраняет их поведение.
-Исполнитель: **sources + db**. Deps: P1.0. 5 ч.
+Исполнитель: **sources + db**. Deps: P1.0. 9 ч.
 
 #### P1.2 — Instagram через Apify (D2)
 **Цель.** Посты с объектами (хэштеги и слова из плана) и люди (авторы и комментаторы).
@@ -188,7 +191,8 @@ id поста IG/TT/LI); `tests/test_apify_source_run.py` (запуск один
 `ApifyLinkedInCompanies`. Выдача ложится в `reach_contacts` (`027_investor_reach.sql:34`) через существующий
 `OpenRouterReachJudge` (`bot/campaign/reach.py:410-447`), а `kind` — человек или компания (028).
 **Настройки.** `APIFY_LINKEDIN_ENABLED` `false`; `APIFY_LINKEDIN_PEOPLE_ACTOR`, `APIFY_LINKEDIN_COMPANIES_ACTOR`,
-`APIFY_LINKEDIN_ACTOR_BUILD`; `APIFY_LINKEDIN_MAX_PAGES` int 1 (1–4); `APIFY_LINKEDIN_MAX_CHARGE_USD` 0.15.
+`APIFY_LINKEDIN_ACTOR_BUILD`; `APIFY_LINKEDIN_MAX_PAGES` int 1 (1–4); потолок запуска считается как `MAX_PAGES × APIFY_LINKEDIN_USD_PER_PAGE
+(0.10) + 0.05` и не выше `APIFY_LINKEDIN_MAX_CHARGE_USD` (0.45); иначе вторая страница недостижима.
 **Тесты.** `tests/test_apify_linkedin.py`: вход без e-mail-режима, маппинг человека и компании, профиль
 `linkedin.com/in/…` нормализуется, cookie-поля во входе отсутствуют (тест сканирует тело запроса).
 **Соседи.** `reach.keep_query` (`reach.py:178-186`) правит P1.8, а не эта задача.
@@ -214,6 +218,7 @@ int 30 (1–50, предел `ApifyListingSource`, `apify.py:81`); `APIFY_CRAWLE
 
 #### P1.6 — Реакции и репосты: мапперы (D5)
 **Цель.** Там, где актор отдаёт людей с реакцией или репостом, превращать их в `Engagement(kind="reaction"|"repost")`.
+Обязательно — FB. LinkedIn-реакции — за линией отсечения.
 Хранение и сила сигнала — P4.1.
 **Файлы.** `bot/acquisition/apify_facebook_reactions.py` (`apify/facebook-likes-scraper`: тип реакции, имя,
 профиль); LinkedIn-реакции и комментарии к посту по ссылке (`harvestapi/linkedin-post-search` с
@@ -234,11 +239,11 @@ int 30 (1–50, предел `ApifyListingSource`, `apify.py:81`); `APIFY_CRAWLE
 | `apify/instagram-comment-scraper` | 5 | $0.02 |
 | TT посты | 5 | $0.02 |
 | `clockworks/tiktok-comments-scraper` | 5 | $0.01 |
-| `harvestapi/linkedin-profile-search` | 1 страница | $0.11 |
+| `harvestapi/linkedin-profile-search` | 1 страница | $0.15 |
 | `harvestapi/linkedin-post-search` (реакции, комментарии) | 5 | $0.03 |
 | `apify/facebook-likes-scraper` | 5 | $0.04 |
 | краулер, 1 сайт из O2 | 5 страниц | $0.05 |
-| **Итого** | | **≤ $0.30** |
+| **Итого** | | **≤ $0.34** |
 
 Выдача становится фикстурой с заменённой PII, мапперы правятся по реальным полям, `ACTORS.md` получает пометку
 «проверено живьём <дата>». Расход заносится в отчёт фазы.
@@ -248,8 +253,9 @@ int 30 (1–50, предел `ApifyListingSource`, `apify.py:81`); `APIFY_CRAWLE
 **Цель.** При `ACQUISITION_MODE=apify` социальная стадия идёт через Apify. Браузерная стадия сейчас выключается
 (`runner.py:1612`), вместо неё появляется `_apify_social_worker`. LinkedIn в reach — через P1.4.
 **Файлы.** `bot/campaign/runner.py:1610-1620` (новая ветка при `apify` и включённых флагах IG/TT);
-`bot/campaign/reach.py:168-186`: при `APIFY_LINKEDIN_ENABLED` в `APIFY_SKIPPED_PLATFORMS` добавляется `linkedin`, а
-вызывается Apify-источник. `runner.py:576-577` (ожидание `social_activity` в окне ожидания) учитывает новые
+`bot/campaign/reach.py:168-186`: при `APIFY_LINKEDIN_ENABLED` в пропуски добавляются платформа `linkedin` и хост
+`linkedin.com` (`_APIFY_SKIPPED_HOSTS`, `:169`); у `keep_query` (`:178`) появляется параметр `linkedin_apify: bool`,
+а вызывается Apify-источник. `runner.py:576-577` (ожидание `social_activity` в окне ожидания) учитывает новые
 запуски. Посты IG/TT отправляются в анализ существующим путём `collected_posts`.
 **Тесты.** `tests/test_campaign_social_apify.py`: при `apify` с флагами браузер не вызывается, Apify вызывается
 один раз на кампанию; без флагов поведение прежнее; LinkedIn `site:` не уходит в SearXNG при включённом
@@ -261,21 +267,21 @@ Apify-LinkedIn; `over_budget` → запуска нет.
 
 ### Поток `v3/roles` (фаза P2)
 
-#### P2.1 — Две роли: владелец и пользователь (D8) ⛔ стоп 4
+#### P2.1 — Две роли: владелец и пользователь (D8)
 **Цель.** Остаются владелец (из `TELEGRAM_OPERATOR_IDS`) и одобренный пользователь. Одобрение — одной кнопкой.
 **Файлы.** `bot/operators.py:22-24` (`ROLES=("user",)`; staff = owner); `bot/control_plane/access.py:105-110`
 (одна кнопка «Одобрить»), `:250` (кнопки ролей убираются); `/role` (`access.py:140`) удаляется из меню;
 `service.py` (места helper/operator, §0 п. 11); проверка находок вручную (`bot/verification/service.py:112-113`,
 `:164`, `:250`) — получатели: владелец и автор кампании.
-Миграция **053** `two_roles`: `update telegram_operators set role='user' where role in ('helper','operator')`,
-check `role in ('user')`. Откат возвращает старый check (значения не восстанавливаются, поэтому в откате есть
-проверка и `raise`). Перед применением владелец снимает `select role, count(*) from telegram_operators group by 1`.
+**Данные не переписываются** (после ревью). При `ACCESS_TWO_ROLES=true` код считает `helper` и `operator` ролью
+`user` (`bot/operators.py`), новые одобрения пишут `user`. Миграция **053** только меняет `default 'helper'`
+(`011_operator_access_requests.sql:26`) на `'user'` и не трогает check и строки, поэтому старая кнопка «Approve as
+helper» при `false` продолжает работать. Откат — одна строка `.env`; схема 053 откатывается возвратом default.
 **Настройки.** `ACCESS_TWO_ROLES` bool `false`: при `false` код работает с тремя ролями, при `true` — с двумя.
-Миграция применяется только при включении (она в отдельном списке, а не в `apply_migrations.sh`, до «ок»).
 **Тесты.** Расширить `tests/test_operator_access.py`: одна кнопка, одобренный — user, бывший helper видит то же,
 что user; `test_visibility_gate.py`, `test_auto_mode.py`.
 **Соседи.** `orchestra/dispatcher.py:80-85` отклоняет не-операторов: решить, кто запускает Orchestra (владелец).
-Исполнитель: **builder** (+ db для 053). Deps: P0.3. 6 ч.
+Исполнитель: **builder** (+ db для 053). Deps: P0.3. 12 ч (в `service.py` ≈ 39 проверок ролей).
 
 ### Поток `v3/accounts` (фаза P2)
 
@@ -283,7 +289,7 @@ check `role in ('user')`. Откат возвращает старый check (з
 **Цель.** У каждого пользователя свои профили 4 сетей. **Файлы.** Миграция **052**:
 `browser_profiles.owner_user_id bigint null` (null — старый общий профиль владельца); индекс
 `browser_profiles_one_in_use_platform_idx` (`003:64-65`) заменяется на `(coalesce(owner_user_id,0), platform)
-where state='in_use'`. `bot/browser_session/store.py:202-216` (`ensure_profile` с владельцем); имя профиля
+where state='in_use'`. `bot/control_plane/store.py:202-216` (`ensure_profile` с владельцем); имя профиля
 `<platform>-u<uid>` вместо `<platform>-main` (`service.py:527`, `:326`) при флаге.
 **Настройки.** `PERSONAL_PROFILES_ENABLED` bool `false` (сервисы `telegram`, `browser`, `facebook-runner`,
 `campaign-runner`).
@@ -306,13 +312,14 @@ where state='in_use'`. `bot/browser_session/store.py:202-216` (`ensure_profile` 
 #### P2.4 — Очередь профилей в одном браузере (D10)
 **Цель.** Один браузер на VPS. Задания разных профилей идут по очереди, окно входа одно на всех.
 **Файлы.** `bot/browser_session/queue.py`: FIFO в Redis (`LPUSH`/`BRPOP`, задание `{profile_id, kind:
-read|login, user_id}`), один исполнитель; `main.py:151-152` вместо 409 ставит в очередь и возвращает позицию;
-`live.py:215-218` берёт слот очереди. Telegram пишет пользователю: «Вы в очереди: N».
+read|login, user_id}`), один исполнитель; `main.py:79-80` вместо 409 ставит в очередь и возвращает позицию;
+`live.py:80-83` берёт слот очереди. Вызывающие, которые сейчас берут профиль синхронно, переходят на ожидание
+слота: `bot/web_search/render.py:93`, `facebook_collector`, `social_search`, окно входа. Telegram пишет пользователю: «Вы в очереди: N».
 **Настройки.** `BROWSER_QUEUE_ENABLED` `false`; `BROWSER_QUEUE_MAX` int 20; `BROWSER_JOB_TIMEOUT_SECONDS` int 900.
 **Тесты.** `tests/test_browser_queue.py` (фейковый Redis): порядок FIFO; окно входа не стартует, пока идёт чтение;
 таймаут освобождает слот; падение задания освобождает слот.
 **Соседи.** Аренда профиля в Redis и `flock` (`manager.py:188-222`) остаются, очередь работает над ними.
-Исполнитель: **builder**. Deps: P2.2. 6 ч.
+Исполнитель: **builder**. Deps: P2.2. 12 ч.
 
 #### P2.5 — Жилой прокси на профиль (D11)
 **Цель.** У каждого пользователя свой постоянный прокси, закреплённый за его профилями. Без подмены отпечатков.
@@ -322,29 +329,42 @@ updated_at)`; `manager.py:527-532`: `proxy={server, username, password}` в `lau
 хранится через `secretbox`.
 **Настройки.** `BROWSER_PROXY_REQUIRED` bool `false`: при `true` профиль без прокси не стартует и ошибка видна
 пользователю.
+Сообщение владельца с паролем прокси бот удаляет сразу после чтения (как ключ в P7.2).
 **Тесты.** `tests/test_browser_proxy.py`: прокси передан в Playwright (мок), пароль не попадает в лог, профиль
-без прокси при `REQUIRED` → отказ, при `false` → как раньше; тест-охранник: в `LAUNCH_OPTIONS` нет аргументов
-подмены (UA, WebGL, canvas).
-Исполнитель: **builder + db**. Deps: P2.2, P2.3, O3. 5 ч.
+без прокси при `REQUIRED` → отказ, при `false` → как раньше; тест-охранник: `LAUNCH_OPTIONS` не получает **новых**
+аргументов подмены (UA, WebGL, canvas) сверх списка, утверждённого владельцем (O10). Уже существующие
+`--disable-blink-features=AutomationControlled` и `ignore --enable-automation` (`manager.py:79-80`) задача не
+трогает: это вопрос O10 к `COMPLIANCE.md` §5.
+Исполнитель: **builder + db**. Deps: P2.2, P2.3, O3, O10. 5 ч.
 
 #### P2.6 — Обязательное подключение 4 сетей, блок при слетевшем входе (D9) ⛔ (O8)
 **Цель.** До первой задачи пользователь подключает Facebook, Instagram, TikTok и LinkedIn. Слетевший вход
 блокирует новые задачи.
 **Файлы.** `/connect`: список 4 сетей с кнопкой «Войти» (окно входа своего профиля, `live_view.py` `login`).
-Проверка «вход жив» — существующий `POST /v1/live/check` (`bot/browser_session/main.py:177-185`, проверка cookie
-`live_view.py:301-305`) раз в `ACCOUNT_CHECK_HOURS` через очередь P2.4. Блок задачи — в `intake` до карточки
+**Доступ к окну = свой профиль**: все проверки `is_operator` (`live_view.py:174`, `:251`, `:291`, `:419`, `:479`;
+`service.py:518`) заменяются на «владелец или хозяин профиля»; иначе после P2.1 пользователь получит «Only operators».
+Проверка «вход жив» — **новый** эндпоинт `POST /v1/profiles/{id}/check` в `bot/browser_session/main.py`: берёт профиль
+через очередь P2.4, открывает контекст без окна и проверяет cookie по тем же правилам, что `live_view.py:301-305`.
+Существующий `/v1/live/check` (`main.py:92-99`) проверяет только открытое окно и для этого не годится.
+Запуск — раз в `ACCOUNT_CHECK_HOURS`. Блок задачи — в `intake` до карточки
 «Проверьте задачу» (`bot/control_plane/intake.py`). Текст: какая сеть и кнопка «Войти».
 **Настройки.** `ACCOUNT_GATE_ENABLED` `false`; `ACCOUNT_CHECK_HOURS` int 24 (1–168).
 **Тесты.** `tests/test_network_gate.py`: 3 сети из 4 → задача не стартует; все 4 → стартует; вход слетел →
 блок и одно сообщение; владелец без флага не блокируется.
 **Соседи.** Автокампании Orchestra (`auto.py`) тоже проверяют блок.
-Исполнитель: **builder**. Deps: P2.2, P2.4, O8. 5 ч.
+Исполнитель: **builder**. Deps: P2.1, P2.2, P2.4, O8. 9 ч.
 
 #### P2.9 — «Отключить аккаунт» (D20) ⛔ стоп 4
 **Цель.** Кнопка у каждой сети в `/connect`. После подтверждения бот стирает каталог профиля
-(`/profiles/<id>`, `manager.py:175-182`) и строку `browser_profiles`, и это записывается в лог аудита без ПДн.
-**Тесты.** Подтверждение обязательно; занятый профиль сначала освобождается; ошибка удаления видна честно.
-Исполнитель: **builder**. Deps: P2.2, P2.4. 3 ч.
+(`/profiles/<id>`, `manager.py:175-182`), и это записывается в лог аудита без ПДн.
+**Как (после ревью).** Строку `browser_profiles` удалить нельзя: на неё ссылается `live_view_sessions` с
+`on delete restrict` (`007_live_view_sessions.sql:6`). Поэтому удаление мягкое (`state='deleted'`), а повторное
+подключение создаёт профиль с новым именем `<platform>-u<uid>-<n>`. Каталог лежит в volume сервиса `browser`
+(`docker-compose.yml:178-180`), поэтому его стирает новый эндпоинт `DELETE /v1/profiles/{id}` в
+`bot/browser_session/main.py`, а не telegram.
+**Тесты.** Подтверждение обязательно; занятый профиль сначала освобождается; ошибка удаления видна честно;
+повторное подключение после удаления работает.
+Исполнитель: **builder**. Deps: P2.2, P2.4. 6 ч.
 
 #### P2.10 — ⛔ Шифрованный раздел для профилей (стоп 3)
 Runbook владельцу `docs/v3/VPS_ENCRYPTED_PROFILES.md`: LUKS-том под volume `browser_profiles`
@@ -369,11 +389,16 @@ Runbook владельцу `docs/v3/VPS_ENCRYPTED_PROFILES.md`: LUKS-том по
 свой профиль.
 **Файлы.** Миграция **055** `live_view_links(token_sha256 pk, user_id, profile_id, expires_at, used_at)` по образцу
 `009:22-34`; токен — `secrets.token_urlsafe(32)` с хранением SHA-256 (`bot/verification/tokens.py:13-18`).
-`live_view.py`: маршрут `GET /live/link/<token>` выдаёт cookie сессии и редирект. Повтор → 410, после 10 минут →
-410. Существующий путь `?for=` (`:189`, `:249-288`) остаётся при выключенном флаге.
+**Гейт.** Middleware `known_ids_only` стоит на всём приложении и отдаёт 404 любому пути без `session`
+(`live_view.py:421-425`, `:546`). Задача выносит его в подприложение `/live/{session}`, иначе `/live/link/*` (и
+`/app/*` из P6.1) всегда 404.
+`GET /live/link/<token>` только показывает страницу с кнопкой «Открыть», а гасит токен `POST` (предпросмотр ссылок
+Telegram и префетч Safari иначе сожгут её). Ссылка уходит с `disable_web_page_preview`. Повтор → 410, после 10 минут
+→ 410. Подтверждение в чате, которое есть сейчас (`:249-288`), остаётся по умолчанию: `LIVE_VIEW_LINK_CONFIRM` bool
+`true`. Существующий путь `?for=` (`:189`) остаётся при выключенном флаге.
 **Настройки.** `LIVE_VIEW_ONE_TIME_LINK` `false`; `LIVE_VIEW_LINK_MINUTES` int 10 (1–30).
 **Тесты.** `tests/test_live_link.py`: одноразовость, срок, чужой профиль недоступен, токен не логируется.
-Исполнитель: **webapp**. Deps: P2.4. 4 ч.
+Исполнитель: **webapp**. Deps: P2.4, P2.6. 6 ч.
 
 ---
 
@@ -383,16 +408,21 @@ Runbook владельцу `docs/v3/VPS_ENCRYPTED_PROFILES.md`: LUKS-том по
 **Цель.** Закрыть `HANDOFF.md` §4 п. 11: общей базы между пользователями нет.
 **Файлы.** Миграция **056**: `owner_user_id bigint` в `investor_leads`, `reach_contacts`,
 `campaign_lead_deliveries`; заполняется из `campaigns.requested_by` по `campaign_id`. У строк без кампании —
-владелец из `TELEGRAM_OPERATOR_IDS[0]`, и это записывается в лог миграции. Уникальность `investor_leads`
-`(profile_key, post_url)` (`026:48`) → `(owner_user_id, profile_key, post_url)`. Запись — `leads.py:782-800`.
+владелец из `TELEGRAM_OPERATOR_IDS[0]`, и это записывается в лог миграции. После заполнения `owner_user_id not null` (в PG16 null
+в уникальном ключе даёт дубли). Уникальность `investor_leads` `(profile_key, post_url)` (`026:48`) →
+`(owner_user_id, profile_key, post_url)`, а `reach_contacts` `url_key` (`027_investor_reach.sql:36`) →
+`(owner_user_id, url_key)`.
+**В том же PR** меняются все `on conflict` и проверки «уже известно»: `save_leads` (`leads.py:791`),
+reach (`reach.py:768`, `:779`, `save_enrichment` `:793`). Иначе вставка падает с «no unique constraint matching».
+Флаг `PERSONAL_DATA_SCOPE` уникальность назад **не** откатывает: откат — только скриптом схемы.
 Перед и после — `select count(*)` по таблицам (числа совпадают).
 **Тесты.** Postgres: тот же комментатор у двух пользователей — две строки; миграция идемпотентна; откат отказывает,
 если есть дубли по старому ключу.
-Исполнитель: **db**. Deps: P2.1. 4 ч.
+Исполнитель: **db + builder**. Deps: P2.1. 8 ч.
 
 #### P3.2 — Запросы людей по владельцу
 **Файлы.** `bot/campaign/runs.py:881-907` (`stored_people`), `:958-984` (`stored_people_of_campaign`), `:935-949`
-(reach) — фильтр `owner_user_id = <автор кампании>`; `save_leads` пишет владельца.
+(reach) — фильтр `owner_user_id = <автор кампании>` (запись владельца уже сделана в P3.1).
 **Настройки.** `PERSONAL_DATA_SCOPE` bool `false`: при `false` поведение прежнее.
 **Тесты.** `tests/test_people_isolation_postgres.py` (в список `integration`): два пользователя, одна ссылка, каждый
 видит только своих (AC-4).
@@ -410,8 +440,10 @@ Runbook владельцу `docs/v3/VPS_ENCRYPTED_PROFILES.md`: LUKS-том по
 #### P3.3 — Хранение 90 дней (D20) ⛔ стоп 4
 **Цель.** Ежедневная очистка находок и лидов старше `PERSONAL_DATA_RETENTION_DAYS`.
 **Файлы.** `bot/ops/retention.py` по образцу `bot/facebook_collector/apify/retention.py` (`--dry-run`, счётчики);
-таблицы `investor_leads`, `reach_contacts`, `person_signals` (после P4.1), `campaign_findings`, `collected_posts`
-(через кампанию). Порядок: сначала дети, потом родители (`COMPLIANCE.md` §6). Запуск — из watchdog раз в сутки.
+таблицы берутся из общего реестра `bot/ops/personal_tables.py` (его же использует `/forget`): `investor_leads`,
+`reach_contacts`, `campaign_findings`; `person_signals` регистрирует P4.1. `collected_posts` общие для кампаний
+разных пользователей (`003_orchestration.sql:192`): пост удаляется, только когда **все** ссылающиеся кампании
+старше срока. Порядок: сначала дети, потом родители (`COMPLIANCE.md` §6). Запуск — из watchdog раз в сутки.
 **Настройки.** `PERSONAL_DATA_RETENTION_DAYS` int `0` = выключено (владелец ставит 90 по чек-листу).
 **Тесты.** `tests/test_retention_postgres.py`: 91 день удаляется, 89 остаётся, `--dry-run` ничего не удаляет,
 `0` — ничего.
@@ -420,14 +452,18 @@ Runbook владельцу `docs/v3/VPS_ENCRYPTED_PROFILES.md`: LUKS-том по
 #### P3.4 — `/forget` в живом боте (D20) ⛔ стопы 4 и 5
 **Цель.** Пользователь стирает всё о себе. Сначала бот спрашивает подтверждение, а неудачу удаления сообщает честно
 (`COMPLIANCE.md` §6).
-**Файлы.** `bot/control_plane/forget.py`: в одной транзакции удаляются кампании пользователя
-(`requested_by`) с каскадом, `investor_leads`/`reach_contacts`/`person_signals` по `owner_user_id`,
-`user_task_drafts`, `user_settings`, `user_proxies`, `user_credentials` (после P7.2), `live_view_links`. После
+**Файлы.** `bot/control_plane/forget.py`: в одной транзакции удаляется всё по реестру `bot/ops/personal_tables.py`.
+Реестр содержит только существующие таблицы; каждая задача, которая добавляет таблицу с пользователем (P2.5,
+P2.8, P4.1, P7.2), регистрирует её там, и это часть её приёмки. Удаляются кампании пользователя (`requested_by`),
+`investor_leads`/`reach_contacts`/`person_signals` по `owner_user_id`, `user_task_drafts`, `user_settings`,
+`telegram_access_requests` (`telegram_user_id`, `display_name`, `011:4-12`). Расходы `campaign_costs` не
+удаляются, а обезличиваются (`campaign_id`/`user_id` → null) до удаления кампаний: это учёт денег. После
 коммита профили браузера стираются через P2.9. Строка `telegram_operators` переводится в `revoked`.
 `menu.py:11-24` — команда в меню пользователя.
 **Настройки.** `FORGET_ENABLED` `false`.
-**Тесты.** `tests/test_forget_postgres.py`: после `/forget` по `user_id` ноль строк во всех таблицах (список в
-тесте сверяется с `information_schema`: каждая таблица с `owner_user_id`/`user_id` должна быть в списке);
+**Тесты.** `tests/test_forget_postgres.py`: после `/forget` по `user_id` ноль строк во всех таблицах (реестр
+сверяется с `information_schema`: каждая таблица с колонкой `owner_user_id`, `user_id`, `telegram_user_id` или
+`requested_by` должна быть в реестре или в явном списке исключений с причиной);
 у другого пользователя всё осталось; ошибка → честное сообщение.
 Исполнитель: **builder**. Deps: P3.1, P3.5, P2.9. 6 ч.
 
@@ -466,11 +502,11 @@ strength smallint, seen_at, unique(owner_user_id, platform, profile_key, post_ur
 Исполнитель: **builder**. Deps: P4.2. 5 ч.
 
 #### P4.4 — Способ 2: ссылка на любой пост или объявление (D6)
-**Цель.** `post_link` (`bot/control_plane/intake.py:342`) понимает ссылки IG, TT, LI и порталов, а не только FB.
-Ссылка портала → страница объявления → комментарии (если есть) и источник. Выбор читателя — по `platform` (P1.1).
-**Тесты.** `tests/test_people_delivery.py::link_*`: 4 сети и портал, неизвестный хост → понятный отказ, стоимость в
-`campaign_costs`.
-Исполнитель: **builder**. Deps: P4.2, P1.8. 5 ч.
+**Цель.** `post_link` (`bot/control_plane/intake.py:342`) понимает ссылки IG, TT и LI, а не только FB. У порталов
+комментариев нет, поэтому ветка порталов убрана (ревью). Выбор читателя — по `platform` (P1.1).
+**Тесты.** `tests/test_people_delivery.py::link_*`: 4 сети, ссылка портала и неизвестный хост → понятный отказ,
+стоимость в `campaign_costs`.
+Исполнитель: **builder**. Deps: P4.2, P1.8. 4 ч.
 
 #### P4.5 — Способ 3: автоматически с карточкой (D6)
 `people_delivery=auto`: после отправки карточки `_queue_comments` (`runner.py:878-888`) ставит чтение для любой
@@ -517,7 +553,8 @@ $Y».
 Миграция **060** `campaign_costs.user_id bigint null`, `costs.record(..., user_id=)` в интервью, STT и
 понимании задачи (`control_plane`). `user_spent` суммирует обе части.
 **Тесты.** Интервью без кампании попадает в месяц пользователя.
-Исполнитель: **db + builder**. Deps: P5.1. 3 ч. *Можно отложить (§6 мастер-плана).*
+Исполнитель: **db + builder**. Deps: P5.1. 3 ч. Не отрезать: без неё в месячный лимит не попадают интервью,
+голос и мониторинг FB (`facebook_collector/apify/provider.py:153`), и D16 течёт (ревью).
 
 ---
 
@@ -526,13 +563,16 @@ $Y».
 #### P6.1 — Каркас мини-аппа
 **Файлы.** `bot/control_plane/webapp/`: маршруты `/app/*` в гейте aiohttp telegram (`live_view.py:410-552`,
 порт 8081). Вход — `POST /app/auth` с initData → `verify_init_data` (`bot/telegram_webapp.py:20`, `max_age=600`)
-→ httponly-cookie. Права: owner — все разделы, user — только «Мои настройки». Статика — один HTML + vanilla JS,
+→ сессия в БД (миграция **062** `webapp_sessions`, переживает рестарт) и httponly-cookie. CSRF-токен выдаётся в
+`/app/auth` и проверяется на каждом POST: initData живёт 600 с (`telegram_webapp.py:16`) и для CSRF не годится.
+Гейт: используется подприложение из P2.8, иначе `known_ids_only` (`live_view.py:421-425`) отдаёт 404.
+Права: owner — все разделы, user — только «Мои настройки». Статика — один HTML + vanilla JS,
 без сборщика и новых зависимостей. `docker/caddy/Caddyfile`: `handle /app/* { reverse_proxy telegram:8081 }`
 перед catch-all (`:35-37`). Кнопка мини-аппа — в меню владельца и в `/settings`.
 **Настройки.** `OWNER_WEBAPP_ENABLED` `false`.
 **Тесты.** `tests/test_owner_webapp.py`: без initData → 401; подделанная подпись → 401; user в разделе владельца → 403;
-CSRF — POST только с cookie и заголовком `X-Telegram-Init`.
-Исполнитель: **webapp**. Deps: P3.5. 6 ч.
+CSRF — POST без токена → 403; сессия переживает перезапуск.
+Исполнитель: **webapp**. Deps: P3.5, P2.8. 8 ч.
 
 #### P6.2 — Раздел «Система и расходы»
 Состояние сервисов (тот же источник, что у watchdog, `ops/watchdog.py:205-217`), расходы по дням, пользователям и
@@ -557,7 +597,7 @@ CSRF — POST только с cookie и заголовком `X-Telegram-Init`.
 `/settings` в чате для пользователя (способ выдачи людей, глубина, черновики) и та же форма в мини-аппе. Оба пути
 вызывают `user_settings.set` (P3.5). **Тесты.** `tests/test_settings_two_ways.py`: значение из чата читается
 мини-аппом и наоборот; валидация одна.
-Исполнитель: **builder + webapp**. Deps: P6.1, P4.3. 4 ч.
+Исполнитель: **builder + webapp**. Deps: P6.1, P3.5. 4 ч.
 
 ---
 
@@ -572,13 +612,14 @@ CSRF — POST только с cookie и заголовком `X-Telegram-Init`.
 **Настройки.** `STAGE_ROUTER_ENABLED` `false`.
 **Тесты.** `tests/test_stage_router.py`: без флага — прежние объекты; у пользователя ключ → прямой режим; агент
 недоступен не владельцу (D19).
-Исполнитель: **builder + analyst**. Deps: P5.1. 6 ч.
+Исполнитель: **builder + analyst**. Deps: P3.5. 6 ч.
 
 #### P7.2 — Собственный ключ API пользователя (D17)
 **Файлы.** Миграция **061** `user_credentials(user_id, provider anthropic|openai|openrouter, kind key|subscription,
 ciphertext, last4, created_at, pk(user_id, provider, kind))`, шифрование через `secretbox` (P2.3). Ввод — мини-апп
 (P6.6) и чат: сообщение с ключом удаляется сразу после чтения. Проверка ключа одним дешёвым вызовом. Расходы по ключу
-пользователя пишутся в `campaign_costs` с `provider='user_key'` и считаются в месячном лимите (D16, допущение O1).
+пользователя пишутся в `campaign_costs` с `provider='user_key'`. Считать ли их в месячном лимите, который задаёт
+владелец, — вопрос O1 (по умолчанию не считаются: платит пользователь).
 **Тесты.** Ключ не хранится открытым (AC-13); `repr` и логи чистые; неверный ключ → понятная ошибка; `/forget`
 стирает (P3.4).
 Исполнитель: **builder**. Deps: P7.1, P2.3, P6.1, O1. 5 ч.
@@ -587,19 +628,21 @@ ciphertext, last4, created_at, pk(user_id, provider, kind))`, шифровани
 **Цель.** Подписка пользователя (сначала только владельца) запускает Claude Code или Codex в headless-режиме. Агент
 получает готовый JSON-пакет собранных данных и возвращает JSON по существующим схемам. Акторы он не запускает.
 **Файлы.** Новый сервис `agent-runner` (`docker/agent-runner.Dockerfile`): CLI агента закреплённой версии (⛔),
-без `APIFY_TOKEN`, сеть — только `egress` к API модели, read-only FS, tmpfs для пакета, таймаут. Вход и выход идут
-через Redis-очередь. Ответ валидируется pydantic-схемой этапа; ошибка → прямой режим (fallback, как
+без `APIFY_TOKEN`, read-only FS, tmpfs для пакета, таймаут. Сеть: `backend` (Redis) и выход в интернет **только
+через исходящий прокси со списком разрешённых хостов** (API модели); сеть `egress` — это весь интернет, а в пакете
+недоверенный текст комментариев и рядом токен подписки (prompt injection → утечка). Вход и выход — очередь Redis под
+отдельным ACL-пользователем, а не общим `REDIS_PASSWORD`. Токен подписки берётся из `user_credentials` (P7.2). Ответ валидируется pydantic-схемой этапа; ошибка → прямой режим (fallback, как
 `FallbackInterviewer`, `anthropic_interviewer.py:129-160`). Стоимость записывается как `provider='subscription'`,
 `cost_usd=0`, с длительностью в `units`.
 **Настройки.** `AGENT_MODE_ENABLED` `false`; `AGENT_MODE_OWNER_ONLY` `true`; `AGENT_TIMEOUT_SECONDS` 300.
 **Тесты.** На моках CLI: валидный ответ, ответ вне схемы → fallback, таймаут → fallback, в окружении агента нет
 `APIFY_TOKEN` (тест compose), не-владелец → прямой режим.
-Исполнитель: **builder + deployer**. Deps: P7.1, O4, O9. 12 ч.
+Исполнитель: **builder + deployer**. Deps: P7.1, P7.2, O4, O9. 16 ч.
 
 #### P7.4 — ⛔ Золотой набор в двух режимах (стоп 1)
 G1–G9 прогоняются в прямом режиме и в агентном. Результаты — в `docs/v3/GOLDEN_V3.md`. Решение D19: открыть агентный
 режим пользователям, только если он не хуже прямого по «точных/отправлено» и «разумных лидов». Потолок — $14 (два
-прохода по $7).
+прохода по $7), обеспечивается так же, как в P0.4: `CAMPAIGN_BUDGET_USD=0.8` на время прогона и лимит в Apify Console.
 Исполнитель: **analyst** (+ owner запускает). Deps: P7.2, P7.3, P0.4, O7. 4 ч.
 
 ---
@@ -635,7 +678,8 @@ P5.1 ─ P7.1 ─┬─ P7.2 (O1, P6.1) ─┐
 P3.5 ─ P6.1 ─ P6.2..P6.6                               все ─ Z1
 ```
 
-Точный граф — `docs/v3/tasks.json` и `docs/v3/board.html` (R3).
+После ревью (§5) изменились рёбра: P2.6 ← P2.1; P2.8 ← P2.6; P6.1 ← P2.8; P6.6 ← P3.5 (вместо P4.3);
+P7.1 ← P3.5 (вместо P5.1); P7.3 ← P7.2; P2.5 ← O10. Точный граф — `docs/v3/tasks.json` и `docs/v3/board.html` (R3).
 
 ## 3. План по потокам (≤ 3 исполнителя одновременно)
 
@@ -662,9 +706,9 @@ P7.1 → P7.3 → P7.4. Узкое место — узлы владельца (O
 |---|---|---|
 | R1 | 5 | «ок» на дифф `CLAUDE.md`, `KICKOFF_FABLE.md`, `COMPLIANCE.md` (`docs/v3/RULE_CHANGES.md`) |
 | P0.2, P0.3, P0.4 | 1, 3 | выполняет владелец на VPS; P0.2 ≤ $0.30, P0.4 ≤ $7 |
-| P1.7 | 1 | O6: живые сэмплы ≤ $0.30 суммарно (таблица P1.7) |
-| P2.1 | 4 | переписать роли helper/operator → user (миграция 053) |
+| P1.7 | 1 | O6: живые сэмплы ≤ $0.34 суммарно (таблица P1.7) |
 | P2.3 | 2 | зависимость `cryptography` (O9) |
+| P2.5 | — | O10: что делать с уже существующими флагами против детекта автоматизации |
 | P2.6 | — | O8: подтвердить блок при слетевшем входе |
 | P2.7 | 2 | пакет `x11-xserver-utils` в образ браузера (O9) |
 | P2.9 | 4 | удаление профиля пользователем |
@@ -676,3 +720,33 @@ P7.1 → P7.3 → P7.4. Узкое место — узлы владельца (O
 | P7.3 | 1, 2 | O4 письменно; CLI агента в образе (O9) |
 | P7.4 | 1 | золотой набор ×2, ≤ $14 |
 | каждый PR | 6 | мерж только при зелёном `check` и `integration` |
+
+## 5. Ревью плана (Opus, 2026-11-11): что исправлено
+
+Рецензент — отдельный Opus, план не писал. Все блокирующие и важные находки сверены по коду.
+
+| # | Находка | Исправлено в |
+|---|---|---|
+| 1 | Смена уникальности `investor_leads` ломает `on conflict` (`leads.py:791`); null в ключе даёт дубли | P3.1: схема и `save_leads` в одном PR, `not null`, флаг уникальность не откатывает |
+| 2 | `reach_contacts.url_key` уникален на всех (`027:36`, `reach.py:768`, `:779`), что нарушает D13 | P3.1: `(owner_user_id, url_key)`, проверка «уже известно» по владельцу |
+| 3 | `known_ids_only` отдаёт 404 на `/live/link/*` и `/app/*` (`live_view.py:421-425`) | P2.8 (подприложение), P6.1 зависит от P2.8 |
+| 4 | Окно входа пускает только staff, после P2.1 это только владелец | P2.6: доступ «свой профиль», зависит от P2.1 |
+| 5 | `/v1/live/check` проверяет только открытое окно (`main.py:92-99`) | P2.6: новый эндпоинт проверки, 9 ч |
+| 6 | `browser_profiles` не удалить (`007:6` restrict), каталог в volume `browser` | P2.9: мягкое удаление, эндпоинт в browser, 6 ч |
+| 7 | 053 не меняла `default 'helper'`, отдельный список миграций | P2.1: данные не переписываются, роли сводятся кодом, ⛔4 снят |
+| 8 | `/forget` и очистка зависели от ещё не созданных таблиц; проверка пропускала `telegram_user_id`, `requested_by`; каскад стирал расходы | P3.3, P3.4: общий реестр таблиц, расходы обезличиваются |
+| 9 | P7.3: нет зависимости от P7.2; сеть `egress` = весь интернет, Redis в `backend` | P7.3: прокси со списком хостов, ACL Redis, зависит от P7.2, 16 ч |
+| 10 | Одноразовую ссылку сжигает предпросмотр; убиралось подтверждение | P2.8: GET-страница, POST гасит, подтверждение по умолчанию остаётся |
+| 11 | CSRF на initData (600 с), сессии в памяти | P6.1: CSRF-токен, сессии в БД (062) |
+| 12 | Месячная сумма без расходов вне кампании | P5.3 убрана из отсечения; ключ пользователя — вопрос O1 |
+| 13 | Потолки $7 и $14 ничем не обеспечены | P0.4, P7.4: `CAMPAIGN_BUDGET_USD=0.8` на прогон и лимит Console |
+| 14 | LinkedIn: вторая страница недостижима при потолке $0.15 | P1.4: потолок = страницы × $0.10 + $0.05; сэмпл $0.15 |
+| 15 | Уже есть флаги против детекта (`manager.py:79-80`) при COMPLIANCE §5 | новый узел O10, P2.5 зависит от O10 |
+| 16 | `collected_posts` общие для пользователей | P3.3: удаляется, только когда все кампании старше срока |
+| 17 | `KICKOFF_FABLE.md:50` тоже про LinkedIn | R1 |
+| 18 | `linkedin.com` в `_APIFY_SKIPPED_HOSTS`, параметр `keep_query` | P1.8 |
+| 19 | AC-13 на `bytea::text` не работает | AC-13 переписан |
+| 20 | Лишние зависимости P7.1 → P5.1, P6.6 → P4.3 | P7.1 зависит от P3.5, P6.6 — от P6.1 и P3.5 |
+| — | Неверные строки `browser_session/live.py`, `main.py`, `store.py` | §0 п. 3, 8 и P2.2, P2.4 |
+| — | Недооценки: P2.1 6 → 12, P2.4 6 → 12, P3.1 4 → 8, P2.9 3 → 6, P1.1 5 → 9 | часы в задачах и `tasks.json` |
+| — | Ветка порталов в P4.4 лишняя | P4.4 |

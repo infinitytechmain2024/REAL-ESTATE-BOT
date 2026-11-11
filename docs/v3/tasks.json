@@ -1,5 +1,5 @@
 {
-  "updated": "2026-11-10",
+  "updated": "2026-11-11",
   "statuses": [
     "waiting_owner",
     "blocked",
@@ -93,6 +93,16 @@
     {
       "id": "O9",
       "title": "«Ок» на зависимости: cryptography, x11-xserver-utils, CLI агента",
+      "stream": "owner",
+      "agent": "owner",
+      "deps": [],
+      "status": "waiting_owner",
+      "day": "—",
+      "hours": 0
+    },
+    {
+      "id": "O10",
+      "title": "Флаги против детекта автоматизации в браузере (manager.py:79-80) при COMPLIANCE §5",
       "stream": "owner",
       "agent": "owner",
       "deps": [],
@@ -210,7 +220,7 @@
       ],
       "status": "blocked",
       "day": "волна 1",
-      "hours": 5
+      "hours": 9
     },
     {
       "id": "P1.2",
@@ -275,7 +285,7 @@
     },
     {
       "id": "P1.7",
-      "title": "⛔ Живые сэмплы новых акторов (≤ $0.30)",
+      "title": "⛔ Живые сэмплы новых акторов (≤ $0.34)",
       "stream": "sources",
       "agent": "sources",
       "deps": [
@@ -306,7 +316,7 @@
     },
     {
       "id": "P2.1",
-      "title": "Две роли: владелец и пользователь (миграция 053, ⛔4)",
+      "title": "Две роли: владелец и пользователь (код, default 053)",
       "stream": "roles",
       "agent": "builder+db",
       "deps": [
@@ -314,7 +324,7 @@
       ],
       "status": "blocked",
       "day": "волна 2",
-      "hours": 6
+      "hours": 12
     },
     {
       "id": "P2.2",
@@ -350,7 +360,7 @@
       ],
       "status": "blocked",
       "day": "волна 3",
-      "hours": 6
+      "hours": 12
     },
     {
       "id": "P2.5",
@@ -360,7 +370,8 @@
       "deps": [
         "P2.2",
         "P2.3",
-        "O3"
+        "O3",
+        "O10"
       ],
       "status": "blocked",
       "day": "волна 3",
@@ -372,13 +383,14 @@
       "stream": "accounts",
       "agent": "builder",
       "deps": [
+        "P2.1",
         "P2.2",
         "P2.4",
         "O8"
       ],
       "status": "blocked",
       "day": "волна 4",
-      "hours": 5
+      "hours": 9
     },
     {
       "id": "P2.7",
@@ -399,11 +411,12 @@
       "stream": "login",
       "agent": "webapp",
       "deps": [
-        "P2.4"
+        "P2.4",
+        "P2.6"
       ],
       "status": "blocked",
-      "day": "волна 4",
-      "hours": 4
+      "day": "волна 5",
+      "hours": 6
     },
     {
       "id": "P2.9",
@@ -416,7 +429,7 @@
       ],
       "status": "blocked",
       "day": "волна 4",
-      "hours": 3
+      "hours": 6
     },
     {
       "id": "P2.10",
@@ -430,15 +443,15 @@
     },
     {
       "id": "P3.1",
-      "title": "owner_user_id в лидах и reach, смена уникальности (056, ⛔4)",
+      "title": "owner_user_id в лидах и reach, уникальность и on conflict (056, ⛔4)",
       "stream": "privacy",
-      "agent": "db",
+      "agent": "db+builder",
       "deps": [
         "P2.1"
       ],
       "status": "blocked",
       "day": "волна 3",
-      "hours": 4
+      "hours": 8
     },
     {
       "id": "P3.2",
@@ -540,7 +553,7 @@
       ],
       "status": "blocked",
       "day": "волна 6",
-      "hours": 5
+      "hours": 4
     },
     {
       "id": "P4.5",
@@ -608,11 +621,12 @@
       "stream": "webapp",
       "agent": "webapp",
       "deps": [
-        "P3.5"
+        "P3.5",
+        "P2.8"
       ],
       "status": "blocked",
-      "day": "волна 5",
-      "hours": 6
+      "day": "волна 6",
+      "hours": 8
     },
     {
       "id": "P6.2",
@@ -624,7 +638,7 @@
         "P5.1"
       ],
       "status": "blocked",
-      "day": "волна 6",
+      "day": "волна 7",
       "hours": 4
     },
     {
@@ -639,7 +653,7 @@
         "P5.1"
       ],
       "status": "blocked",
-      "day": "волна 6",
+      "day": "волна 7",
       "hours": 5
     },
     {
@@ -651,7 +665,7 @@
         "P6.1"
       ],
       "status": "blocked",
-      "day": "волна 6",
+      "day": "волна 7",
       "hours": 3
     },
     {
@@ -664,7 +678,7 @@
         "P3.2"
       ],
       "status": "blocked",
-      "day": "волна 6",
+      "day": "волна 7",
       "hours": 4
     },
     {
@@ -674,7 +688,7 @@
       "agent": "builder+webapp",
       "deps": [
         "P6.1",
-        "P4.3"
+        "P3.5"
       ],
       "status": "blocked",
       "day": "волна 7",
@@ -686,10 +700,10 @@
       "stream": "analysis",
       "agent": "builder+analyst",
       "deps": [
-        "P5.1"
+        "P3.5"
       ],
       "status": "blocked",
-      "day": "волна 6",
+      "day": "волна 5",
       "hours": 6
     },
     {
@@ -714,12 +728,13 @@
       "agent": "builder+deployer",
       "deps": [
         "P7.1",
+        "P7.2",
         "O4",
         "O9"
       ],
       "status": "blocked",
-      "day": "волна 7",
-      "hours": 12
+      "day": "волна 8",
+      "hours": 16
     },
     {
       "id": "P7.4",
@@ -733,7 +748,7 @@
         "O7"
       ],
       "status": "blocked",
-      "day": "волна 8",
+      "day": "волна 9",
       "hours": 4
     },
     {
@@ -792,7 +807,7 @@
         "P7.4"
       ],
       "status": "blocked",
-      "day": "волна 9",
+      "day": "волна 10",
       "hours": 4
     }
   ]
