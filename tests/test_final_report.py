@@ -776,3 +776,10 @@ def test_the_report_does_not_repeat_the_machine_task_text_under_the_goal() -> No
     text = report_text("участок · Мадрид · покупка · от 2000 м²", Tally(), [], [], [], [], task_text=source)
     assert "🎯 участок · Мадрид · покупка · от 2000 м²" in text
     assert "Ваш запрос" not in text and "Тип: участок" not in text
+
+
+def test_the_report_keeps_the_persons_own_words() -> None:
+    """v3 Q6 review: only the machine-built text is hidden; the person's own wording still shows."""
+    own = "Хочу участок под дом недалеко от Мадрида, до 200 тысяч"
+    text = report_text("участок · Мадрид · покупка", Tally(), [], [], [], [], task_text=own)
+    assert f"Ваш запрос: {own}" in text

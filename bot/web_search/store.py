@@ -159,13 +159,20 @@ def _empty_hosts(runs: list[SourceRun]) -> frozenset[str]:
                      and r.name in _SOURCE_HOSTS)
 
 
-# The worker's own refusals to launch or import (limits, the source switched off): the portal itself said nothing.
-_OWN_STOPS = frozenset({"apify_launch_limits", "apify_import_limits", "apify_disabled_during_run"})
+# Codes the provider (Apify, the portal behind it) caused; anything else -- our budget/time caps, limits, claims,
+# checkpoints, a changed task -- is our own stop, and the portal said nothing.
+_PROVIDER_PREFIXES = ("apify_http_", "apify_run_")
+_PROVIDER_CODES = frozenset({"apify_transport", "apify_invalid_json", "apify_wait_timeout", "apify_dataset_timeout"})
+
+
+def _provider_error(code: str | None) -> bool:
+    return bool(code) and (code in _PROVIDER_CODES or code.startswith(_PROVIDER_PREFIXES)  # type: ignore[union-attr]
+                           or code.endswith("_schema"))  # type: ignore[union-attr]
 
 
 def _failed_hosts(runs: list[SourceRun]) -> frozenset[str]:
-    """Portals whose source run failed on the provider's side (``apify_http_400`` ...), not on our own limits."""
-    return frozenset(_SOURCE_HOSTS[r.name] for r in runs if r.state == "failed" and r.error_code not in _OWN_STOPS
+    """Portals whose source run failed on the provider's side (``apify_http_400`` ...), not on our own stops."""
+    return frozenset(_SOURCE_HOSTS[r.name] for r in runs if r.state == "failed" and _provider_error(r.error_code)
                      and r.name in _SOURCE_HOSTS)
 
 

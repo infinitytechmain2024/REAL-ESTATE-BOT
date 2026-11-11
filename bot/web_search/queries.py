@@ -613,9 +613,12 @@ _KIND_TERMS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 # SEARCH_QUERY_HYGIENE: the Spanish land terms carry no legal category the person did not name.
 _LAND_NEUTRAL_ES = ("terreno", "parcela", "solar")
-_LAND_CATEGORY = (("rústico", re.compile(r"(?<!\w)(?:rustic[oa]s?|no urbanizables?)(?!\w)")),
-                  ("urbanizable", re.compile(r"(?<!\w)(?<!no )urbanizables?(?!\w)")),
-                  ("urbano", re.compile(r"(?<!\w)(?:suelo|terreno|parcela|solar)e?s? urban[oa]s?(?!\w)")))
+_LAND_WORD = re.compile(r"(?<!\w)(?:(rustic)[oa]s?|(urbanizable)s?|(urban)[oa]s?)(?!\w)")
+_LAND_CATEGORY = {"rustic": "rústico", "urbanizable": "urbanizable", "urban": "urbano"}
+# «no urbanizable» / «no-urbanizable» is the legal category (rústico); «no es / no son …» only rules one out.
+_NEGATION = re.compile(r"(?<!\w)no ((?:es|son) )?(?:(?:suelo|terreno|parcela|solar)e?s? )?$")
+# «casco urbano», «zona urbana»: where it is, not the land's category.
+_NOT_LAND = re.compile(r"(?<!\w)(?:casco|nucleo|zona|centro|area|entorno|medio|ambito|transporte)s? $")
 _DEAL_TERMS: dict[str | None, dict[str, tuple[str, ...]]] = {
     "sale": {"es": ("en venta", "comprar", "se vende"), "en": ("for sale", "buy"), "ru": ("купить", "продажа"),
              "uk": ("купити", "продаж")},
@@ -628,9 +631,20 @@ _AROUND = {"es": "afueras", "en": "near", "ru": "пригород", "uk": "пе�
 
 def land_category(task: QueryTask) -> str | None:
     """The Spanish land category the task names (urbano, urbanizable, rústico); None when none or several."""
-    text = _fold(task.text)
-    named = [name for name, pattern in _LAND_CATEGORY if pattern.search(text)]
-    return named[0] if len(named) == 1 else None
+    text = " ".join(_fold(task.text).replace("-", " ").split())
+    named: set[str] = set()
+    ruled_out: set[str] = set()
+    for found in _LAND_WORD.finditer(text):
+        category = _LAND_CATEGORY[next(g for g in found.groups() if g)]
+        before = text[:found.start()]
+        negated = _NEGATION.search(before)
+        if negated and negated.group(1) is None and category == "urbanizable":
+            named.add("rústico")  # suelo no urbanizable
+        elif negated:
+            ruled_out.add(category)
+        elif not (category == "urbano" and _NOT_LAND.search(before)):
+            named.add(category)
+    return next(iter(named)) if len(named) == 1 and not named & ruled_out else None  # several or contradictory: None
 
 
 def kind_terms(task: QueryTask, kind: str, language: str) -> tuple[str, ...]:

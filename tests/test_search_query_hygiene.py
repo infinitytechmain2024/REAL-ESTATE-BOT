@@ -61,6 +61,23 @@ def test_hygiene_land_terms_are_neutral_unless_a_category_is_named() -> None:
     assert land_category(_land_task("solar urbano en Madrid", hygiene=True)) == "urbano"
 
 
+@pytest.mark.parametrize(("text", "category"), [
+    ("terreno urbanizable", "urbanizable"),
+    ("parcela urbanizable en Madrid", "urbanizable"),
+    ("terreno no urbanizable", "rústico"),
+    ("suelo no-urbanizable", "rústico"),
+    ("no  urbanizable", "rústico"),
+    ("no es urbanizable", None),
+    ("parcelas que no son urbanizables", None),
+    ("no rústico, urbano", "urbano"),
+    ("terreno urbanizable, no rústico", "urbanizable"),
+    ("urbanizable o rústico", None),
+    ("solar cerca del casco urbano", None),
+])
+def test_land_category_reads_negation_and_ambiguity(text: str, category: str | None) -> None:
+    assert land_category(_land_task(text, hygiene=True)) == category
+
+
 def test_without_hygiene_the_land_terms_are_as_before() -> None:
     texts = [q.text for q in TemplateQueryGenerator().candidates(_land_task("участок в Мадриде", hygiene=False))]
     assert any("solar urbanizable" in t for t in texts)
@@ -101,3 +118,10 @@ def test_the_flag_is_off_by_default_in_both_services(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("SEARCH_QUERY_HYGIENE", "true")
     assert ControlPlaneSettings.from_env().search_query_hygiene is True
     assert WebSearchSettings(_env_file=None).config().query_hygiene is True
+
+
+def test_without_hygiene_both_mode_seeds_are_unchanged() -> None:
+    """Golden: the flag off, ``both`` interleaves real estate (other deal last) and investors as before."""
+    plan = plan_campaign("Найди квартиры в аренду в Мадриде и инвесторов", vertical="both")
+    assert plan.query_seeds["es"] == ["alquiler pisos Madrid", "inversores Madrid", "habitaciones Madrid",
+                                      "startups Madrid", "compartir piso Madrid", "emprendedores Madrid"]

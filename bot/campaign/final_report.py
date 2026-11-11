@@ -748,6 +748,10 @@ def investors_section(leads: LeadsSummary | None) -> list[str]:
     return lines
 
 
+# The labels ``IntakeDraft.goal_text`` writes into a campaign's ``source_text``.
+_MACHINE_TASK = re.compile(r"(?:^|\s)(?:Задача|Тип|Кого ищем|Главное|Дополнительно|Районы или пригороды|Радиус поиска):")
+
+
 def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequence[str], unreadable: Sequence[Site],
                 recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None,
                 costs: Sequence[str] = (), evidence: Sequence[str] = (), task_text: str = "", section: str = "",
@@ -756,10 +760,10 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
     ``section``: a heading above the counts (the ``both`` report); ``reserve``: characters left for what follows."""
     limit = MAX_REPORT_CHARS - reserve
     head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
-    # The 🎯 line already says what is searched; the machine-built ``source_text`` («покупка Тип: участок. Задача: …»)
-    # is shown only when there is no goal to show.
-    if task_text and not goal.strip():
-        head = f"📋 Отчёт по поиску\nВаш запрос: {' '.join(task_text.split())[:220]}\n\n"
+    # The person's own words are shown; the intake's machine-built ``source_text`` («покупка Тип: участок. Задача: …»,
+    # bot/control_plane/intake.py ``goal_text``) only repeats the 🎯 line and is not.
+    if task_text and task_text.casefold() not in goal.casefold() and not _MACHINE_TASK.search(task_text):
+        head = f"📋 Отчёт по поиску\n🎯 {goal}\nВаш запрос: {' '.join(task_text.split())[:220]}\n\n"
     if counts.total == 0:
         summary = ["Объявлений для оценки не получено. Подтверждённых совпадений нет."]
     else:
