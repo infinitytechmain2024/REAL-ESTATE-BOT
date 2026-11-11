@@ -1280,9 +1280,9 @@ class CampaignRunner:
                     text += esc(f"\nСоцсети: {social.searching}{query}", quote=False)
                 text += "".join(esc(f"\n{note[:300]}", quote=False) for note in social.notes)
             return text
-        if terminal:
-            return campaign_label(campaign.state, found=await self.store.streamed_count(campaign.id),
-                                  reason=campaign.stop_reason)
+        if terminal:  # the lead cards (a post sent by link, people, reach) count too: never «ничего» after them
+            found = await self.store.streamed_count(campaign.id) + await self.store.people_sent(campaign.id)
+            return campaign_label(campaign.state, found=found, reason=campaign.stop_reason)
         if live is not None:
             return live
         if web_active:

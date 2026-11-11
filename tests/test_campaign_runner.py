@@ -855,7 +855,7 @@ async def test_the_notice_of_an_ended_campaign_has_no_button() -> None:
     assert any("новом поиске" in t for _, _, t in messenger.sent)
 
 
-# --- Q1-Q2: a search without Facebook groups still ends with a report ---------------
+# --- Q1-Q3: a search without Facebook groups still ends with a report; no «ничего» after leads ---------------
 
 
 class _SiteStage:
@@ -908,3 +908,18 @@ async def test_q2_an_empty_group_search_waits_for_the_sites_before_it_completes(
         campaigns, MemoryDiscoveryStore(), FakeBrowser(), FakeReader(), sleep=Sleeps(), max_seeds=1))
     assert campaign.stop_reason == "queue_exhausted"
 
+
+async def test_q3_a_post_link_with_leads_sent_never_ends_with_nothing_found() -> None:
+    from bot.campaign.runs import PostReadSummary
+    from bot.campaign.status_text import NOTHING
+
+    link = "https://www.facebook.com/groups/1/posts/2/"
+    store, messenger, runner, cid = await _investors_with_flag(link, post_reads=True)
+    store.post_read_rows[cid] = [PostReadSummary(link, "done", 3, 1, 0.05)]
+    store.deliveries[(cid, "fb:juan")] = 41  # the lead card was sent before the campaign ended
+    await runner.step(cid)
+    await runner.step(cid)
+    texts = [t for _, _, t in messenger.sent]
+    assert any(t.startswith("📋 Отчёт по поиску") for t in texts)
+    assert NOTHING not in texts and NOTHING not in [t for _, _, t in messenger.edits]
+    assert texts[-1] == "✅ Готово: отправлено 1"  # the status: the lead counts as sent
