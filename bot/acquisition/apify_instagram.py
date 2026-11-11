@@ -49,6 +49,10 @@ if TYPE_CHECKING:
 
 POSTS_ACTOR = "apify/instagram-scraper"
 COMMENTS_ACTOR = "apify/instagram-comment-scraper"
+# The dearer of the two actors' prices per result on the FREE tier (posts $0.0027, comments $0.0026), no start fee
+# (docs/v3/ACTORS.md, Instagram): MAX_RESULTS x this + START_USD must fit in the run's cap (settings check it).
+USD_PER_RESULT = 0.0027
+START_USD = 0.0
 POSTS_INPUT_KEYS = frozenset({"search", "directUrls", "resultsLimit"})
 COMMENTS_INPUT_KEYS = frozenset({"directUrls", "resultsLimit", "includeNestedComments"})
 INCLUDE_NESTED_COMMENTS = False  # replies would share resultsLimit with the comments they answer

@@ -53,6 +53,10 @@ if TYPE_CHECKING:
 
 POSTS_ACTOR = "clockworks/tiktok-scraper"
 COMMENTS_ACTOR = "clockworks/tiktok-comments-scraper"
+# The dearer of the two actors' prices on the FREE tier: posts $0.0037 per result + $0.001 per start (comments
+# $0.00125) (docs/v3/ACTORS.md, TikTok): MAX_RESULTS x USD_PER_RESULT + START_USD must fit in the run's cap.
+USD_PER_RESULT = 0.0037
+START_USD = 0.001
 POSTS_INPUT_KEYS = frozenset({"hashtags", "searchQueries", "searchSection", "postURLs", "resultsPerPage",
                               "maxFollowersPerProfile", "maxFollowingPerProfile", "commentsPerPost"})
 COMMENTS_INPUT_KEYS = frozenset({"postURLs", "commentsPerPost", "maxRepliesPerComment"})

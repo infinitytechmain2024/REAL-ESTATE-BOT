@@ -204,9 +204,24 @@ class CampaignRunnerSettings(BaseSettings):
                        if not value.strip()]
             if missing:
                 raise ValueError(f"{flag}=true needs {', '.join(missing)}")
+        self._social_caps_fit()
         self.instagram_config()  # an unpinned build («latest») or unsafe limits fail here too
         self.tiktok_config()
         return self
+
+    def _social_caps_fit(self) -> None:
+        """A run of MAX_RESULTS must fit in its cap at the actor's price (else the cap, not the limit, ends it)."""
+        from bot.acquisition import apify_instagram, apify_tiktok
+
+        for prefix, enabled, results, cap, prices in (
+                ("APIFY_INSTAGRAM", self.apify_instagram_enabled, self.apify_instagram_max_results,
+                 self.apify_instagram_max_charge_usd, apify_instagram),
+                ("APIFY_TIKTOK", self.apify_tiktok_enabled, self.apify_tiktok_max_results,
+                 self.apify_tiktok_max_charge_usd, apify_tiktok)):
+            need = results * prices.USD_PER_RESULT + prices.START_USD
+            if enabled and need > cap + 1e-9:
+                raise ValueError(f"{prefix}_MAX_RESULTS={results} costs up to ${need:.4f} per run, above "
+                                 f"{prefix}_MAX_CHARGE_USD={cap}: lower the results or raise the cap")
 
     def _social_flags(self) -> list[tuple[str, str, bool, str]]:
         return [("APIFY_INSTAGRAM_ENABLED", "APIFY_INSTAGRAM_ACTOR_BUILD", self.apify_instagram_enabled,

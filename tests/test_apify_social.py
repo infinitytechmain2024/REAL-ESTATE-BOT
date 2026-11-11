@@ -73,9 +73,10 @@ def ig_comment_row(n: int = 1, **kw: Any) -> dict[str, Any]:
 
 
 class Api:
-    """Launch answers in order (an int is a refusal status; the last repeats), one SUCCEEDED run, the dataset."""
+    """Launch answers in order (an int is a status, an exception a lost answer; the last repeats), one SUCCEEDED
+    run, the dataset."""
 
-    def __init__(self, *, launches: list[int] | None = None, dataset: list[Any] | None = None) -> None:
+    def __init__(self, *, launches: list[Any] | None = None, dataset: list[Any] | None = None) -> None:
         self.answers, self.dataset = launches or [201], dataset or []
         self.calls: list[httpx.Request] = []
 
@@ -84,6 +85,8 @@ class Api:
         path = request.url.path
         if request.method == "POST" and path.endswith("/runs"):
             status = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+            if isinstance(status, Exception):  # the answer is lost (timeout, network)
+                raise status
             if status != 201:
                 return httpx.Response(status, json={"error": {"type": "rate-limit-exceeded"}})
             return httpx.Response(201, json={"data": {"id": "RUN1", "defaultDatasetId": "DS1", "status": "READY"}})
@@ -338,6 +341,60 @@ async def test_instagram_429_past_the_window_spends_one_attempt_and_stops_after_
     assert [e for e in ledger.entries if e.cost_usd] == []  # refused launches cost nothing
 
 
+@pytest.mark.parametrize("lost", [500, httpx.ReadTimeout("lost")])
+async def test_429_then_a_lost_answer_is_never_launched_again_and_booked_at_its_cap(ledger, lost) -> None:
+    api, clock = Api(launches=[429, lost]), Clock()
+    store = MemorySourceRunStore(clock=clock)
+    source = build(ApifyInstagramComments, api, IG, store, clock)
+    result = await source.run(CAMPAIGN, [IG_POST], save=Saved())
+    assert (result.outcome.status, result.outcome.error) == ("failed", "launch_unconfirmed")
+    assert len(api.launches()) == 2 and clock.sleeps == [15.0]
+    (row,) = store.rows.values()
+    assert row["status"] == "failed" and row["run_id"].startswith("pending:") and row["billed_usd"] == 0.20
+    assert [(e.cost_usd, e.code) for e in ledger.entries if e.kind == "cost"] == [(0.20, "estimated")]
+    api.answers[:] = [201]
+    assert (await source.run(CAMPAIGN, [IG_POST], save=Saved())).outcome.status == "failed"
+    assert len(api.launches()) == 2  # a run may exist: never a second paid launch
+
+
+async def test_429_then_the_budget_runs_out_during_the_pause_is_skipped(ledger) -> None:
+    api, clock = Api(launches=[429, 201]), Clock()
+    store = MemorySourceRunStore(clock=clock)
+
+    async def spend_meanwhile(seconds: float) -> None:
+        await clock.sleep(seconds)
+        await costs.record_unique("api", key="other-stage", provider="openrouter", item="x", cost_usd=10, code="",
+                                  campaign_id=CAMPAIGN)
+
+    source = ApifyInstagramComments(store, http(api), IG, clock=clock, sleep=spend_meanwhile)
+    result = await source.run(CAMPAIGN, [IG_POST], save=Saved())
+    assert (result.outcome.status, result.outcome.error) == ("skipped", "budget_cap")
+    assert len(api.launches()) == 1  # no second POST once the budget is spent
+    (row,) = store.rows.values()
+    assert (row["status"], row["run_id"], row["attempts"]) == ("claimed", None, 0)
+
+
+async def test_429_then_another_worker_launches_during_the_pause_is_busy(ledger) -> None:
+    api, clock = Api(launches=[429], dataset=[ig_comment_row(1)]), Clock()
+    store = MemorySourceRunStore(clock=clock)
+    other = build(ApifyInstagramComments, api, IG, store, clock)
+    seen: list[str] = []
+
+    async def other_worker_meanwhile(seconds: float) -> None:
+        await clock.sleep(seconds)
+        if not seen:
+            api.answers[:] = [201]
+            seen.append((await other.run(CAMPAIGN, [IG_POST], save=Saved())).outcome.status)
+
+    first = ApifyInstagramComments(store, http(api), IG, clock=clock, sleep=other_worker_meanwhile)
+    result = await first.run(CAMPAIGN, [IG_POST], save=Saved())
+    assert seen == ["succeeded"]
+    assert result.outcome.status == "busy"
+    assert len(api.launches()) == 2  # the refused one and the other worker's: one run
+    (row,) = store.rows.values()
+    assert (row["status"], row["run_id"], row["attempts"]) == ("succeeded", "RUN1", 1)
+
+
 async def test_429_stays_an_attempt_when_the_window_is_off(ledger) -> None:
     from dataclasses import replace
 
@@ -582,6 +639,26 @@ def test_tiktok_flag_off_builds_no_source(monkeypatch: pytest.MonkeyPatch) -> No
 def test_tiktok_flag_on_without_what_it_needs_does_not_start(monkeypatch: pytest.MonkeyPatch, env, message) -> None:
     with pytest.raises(ValidationError, match=message):
         settings(monkeypatch, APIFY_TIKTOK_ENABLED="true", **env)
+
+
+def test_tiktok_results_must_fit_in_the_cap_only_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    on = {"APIFY_TIKTOK_ENABLED": "true", "APIFY_TOKEN": "x", "APIFY_TIKTOK_ACTOR_BUILD": "1.4.0"}
+    # 50 x $0.0037 + $0.001 start = $0.186 > $0.15
+    with pytest.raises(ValidationError, match=r"APIFY_TIKTOK_MAX_RESULTS=50 costs up to \$0\.1860"):
+        settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50", **on)
+    assert settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50").apify_tiktok_max_results == 50  # off: valid
+    assert settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50", APIFY_TIKTOK_MAX_CHARGE_USD="0.19",
+                    **on).tiktok_config() is not None
+    assert settings(monkeypatch, **on).tiktok_config() is not None  # the defaults fit: 30 -> $0.112
+
+
+def test_instagram_results_must_fit_in_the_cap_only_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    on = {"APIFY_INSTAGRAM_ENABLED": "true", "APIFY_TOKEN": "x", "APIFY_INSTAGRAM_ACTOR_BUILD": "0.3.1"}
+    assert settings(monkeypatch, APIFY_INSTAGRAM_MAX_RESULTS="50", **on).instagram_config() is not None  # $0.135
+    with pytest.raises(ValidationError, match="APIFY_INSTAGRAM_MAX_RESULTS=50 costs"):
+        settings(monkeypatch, APIFY_INSTAGRAM_MAX_RESULTS="50", APIFY_INSTAGRAM_MAX_CHARGE_USD="0.10", **on)
+    assert settings(monkeypatch, APIFY_INSTAGRAM_MAX_CHARGE_USD="0.10",
+                    APIFY_INSTAGRAM_MAX_RESULTS="50").instagram_config() is None
 
 
 def test_tiktok_flag_on_builds_both_sources_and_instagram_stays_off(monkeypatch: pytest.MonkeyPatch) -> None:
