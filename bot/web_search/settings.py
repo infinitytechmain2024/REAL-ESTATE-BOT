@@ -59,6 +59,8 @@ class WebSearchSettings(BaseSettings):
                                                                       validation_alias="APIFY_IDEALISTA_PROVIDER")
     apify_idealista_igolaizola_actor: str = Field(default="igolaizola/idealista-scraper",
                                                   validation_alias="APIFY_IDEALISTA_IGOLAIZOLA_ACTOR")
+    # igolaizola only: min_area above the actor's largest minSize (300 m2) is sorted "biggest", not "mostRecent".
+    idealista_sort_biggest: bool = Field(default=False, validation_alias="IDEALISTA_SORT_BIGGEST")
     # Portal actors on the same Apify token (bot/web_search/sources/portals.py), each off by default.
     apify_fotocasa_enabled: bool = Field(default=False, validation_alias="APIFY_FOTOCASA_ENABLED")
     apify_fotocasa_actor: str = Field(default="igolaizola/fotocasa-scraper", validation_alias="APIFY_FOTOCASA_ACTOR")
@@ -229,6 +231,7 @@ class WebSearchSettings(BaseSettings):
                                                     max_items=self.apify_idealista_max_results,
                                                     timeout_seconds=self.apify_idealista_timeout_seconds,
                                                     max_charge_usd=self.apify_idealista_max_charge_usd,
+                                                    sort_biggest=self.idealista_sort_biggest,
                                                     geocoder=geocoder()))
         elif self.apify_idealista_enabled:
             from .sources.apify import ApifyIdealistaSource
