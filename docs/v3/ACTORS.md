@@ -9,7 +9,8 @@
 «да» — поле есть в `outputSchema`; «частично» — `outputSchema` не снят или поле выводится косвенно;
 «нет» — поля нет совсем.
 
-Ни один выбранный актор не требует cookie или входа. Актор с cookie отклоняется (правило 10). У краулера есть
+Ни один выбранный актор не требует cookie или входа. Актор с cookie отклоняется (правило 10). Исключение — непроверенные входы TT (`tiktok-scraper`,
+`tiktok-comments-scraper`): проверить до P1.3. У краулера есть
 необязательные поля `initialCookies`, `customHttpHeaders`, `pageFunction` — не передаются никогда (D1).
 
 ## Instagram (D2)
@@ -41,7 +42,7 @@
 | Компании: поиск | `harvestapi/linkedin-company-search` | Short company $0.002, Full $0.004, старт $0.001 | 13.9k / 2k, 4.44, — | `scraperMode`, `searchQuery`, `locations`, `industryIds`, `companySize`, `maxItems`, `startPage`, `takePages` | — (схема не снята); снять `outputSchema` до P1.4 | частично (`outputSchema` не снят) | нет | — |
 | Компании: карточка по ссылке | `harvestapi/linkedin-company` | Company $0.004, старт $0.00005 | 33k / 7.1k, 4.86, — | `companies[]`, `searches[]` | адрес, телефоны, сайт, штат (по описанию) | частично (`outputSchema` не снят) | нет | телефоны и адрес компании брать как дал актор |
 | Сотрудники компании | `harvestapi/linkedin-company-employees` | Basic $0.003, Full $0.008, Full + email $0.012, **старт $0.02** | — | — | — | частично (схема не снята) | нет | **запрещено по умолчанию**: есть режим поиска e-mail, дорогой старт |
-| Посты + реакции + комментарии (D5) | `harvestapi/linkedin-post-search` | Post $0.002, Main profile $0.002, Full profile $0.004, Reaction $0.002, Comment $0.002, запрос без результата $0.001, старт $0.00005 | 42.5k / 11.6k, 4.95, — | `searchQueries`, `authorUrls`, `authorsCompanies`, `maxPosts`, `postedLimit`, `sortBy`, `scrapeReactions`, `maxReactions`, `reactionsProfileScraperMode`, `scrapeComments` (всего 24 поля) | `linkedinUrl`, `content`, `postedAt`, `author{name, linkedinUrl, type, info}`, `engagement{likes, comments, shares, reactions[]}`, `reactions[]{reactionType, actor{name, linkedinUrl, position}}`, `comments[]{commentary, linkedinUrl, actor{name, linkedinUrl, position}}` | да; репостнувшие — нет (только `engagement.shares`) | нет | реакция $0.002 + профиль реактора при `reactionsProfileScraperMode` (Main $0.002, Full $0.004): режим без профиля или Main, потолок `maxReactions × (0.002 + профиль)` |
+| Посты + реакции + комментарии (D5) | `harvestapi/linkedin-post-search` | Post $0.002, Main profile $0.002, Full profile $0.004, Reaction $0.002, Comment $0.002, запрос без результата $0.001, старт $0.00005 | 42.5k / 11.6k, 4.95, — | `searchQueries`, `authorUrls`, `authorsCompanies`, `maxPosts`, `postedLimit`, `sortBy`, `scrapeReactions`, `maxReactions`, `reactionsProfileScraperMode`, `scrapeComments` (всего 24 поля) | `linkedinUrl`, `content`, `postedAt`, `author{name, linkedinUrl, type, info}`, `engagement{likes, comments, shares, reactions[]}`, `reactions[]{reactionType, actor{name, linkedinUrl, position}}`, `comments[]{commentary, linkedinUrl, actor{name, linkedinUrl, position}}` | да; репостнувшие — нет (только `engagement.shares`) | нет | реакция $0.002 + профиль реактора при `reactionsProfileScraperMode` (Main $0.002, Full $0.004): режим Main; есть ли режим без профиля — проверить в `inputSchema` до P1.6; потолок `maxReactions × (0.002 + профиль)` |
 | Посты профиля / компании | `harvestapi/linkedin-profile-posts`, `harvestapi/linkedin-company-posts` | как у `linkedin-post-search` | — | `scrapeReactions`, `scrapeComments`, `includeReposts` | как у `linkedin-post-search` | частично (схема не снята, по описанию те же поля) | нет | — |
 
 ## Facebook (D5)
@@ -56,7 +57,7 @@
 
 | Назначение | Актор | Цена | Польз. / рейтинг / обновлён | Вход | Нужные поля выхода | Поля подтверждены схемой | Cookie | Риски |
 |---|---|---|---|---|---|---|---|---|
-| Сайты по заданным адресам | `apify/website-content-crawler` (официальный) | **модель оплаты FREE (compute)**: событий нет, платится платформа (compute units, прокси) | 176k / 12k, —, 2026-11-11 | обязательны `startUrls`, `proxyConfiguration`; ограничители `maxCrawlPages` и `maxResults` (по умолчанию 9999999 — без предела), `maxCrawlDepth` (20), `maxConcurrency`, `requestTimeoutSecs`, `maxRequestRetries`; `crawlerType`, `includeUrlGlobs`, `excludeUrlGlobs`, `useSitemaps`, `saveMarkdown`; не включать `summarize` (платный), `saveFiles`, `saveScreenshots`; память — параметр запуска, не входа | `url`, `text`/`markdown`, `metadata` страницы; цены, площади, телефона как полей нет, их извлекает `_normalize` из текста | частично (`inputSchema` снят, `outputSchema` не снят) | есть необязательные `initialCookies`/`customHttpHeaders`/`pageFunction` — не передавать никогда (D1) | `maxTotalChargeUsd` расход не ограничивает; без `maxCrawlPages` предела нет (см. ниже) |
+| Сайты по заданным адресам | `apify/website-content-crawler` (официальный) | **модель оплаты FREE (compute)**: событий нет, платится платформа (compute units, прокси) | 176k / 12k, —, 2026-11-11 | обязательны `startUrls`, `proxyConfiguration`; ограничители `maxCrawlPages` и `maxResults` (по умолчанию 9999999 — без предела), `maxCrawlDepth` (20), `maxConcurrency`, `requestTimeoutSecs`, `maxRequestRetries`; `crawlerType`, `includeUrlGlobs`, `excludeUrlGlobs`, `useSitemaps`, `saveMarkdown`; `respectRobotsTxtFile` (по умолчанию `false`) — ставим `true`; `maxSessionRotations` (ротация «on CAPTCHAs») — ставим `0`, капчу не обходим (`COMPLIANCE.md` §5); не включать `summarize` (платный), `saveFiles`, `saveScreenshots`; память — параметр запуска, не входа | `url`, `text`/`markdown`, `metadata` страницы; цены, площади, телефона как полей нет, их извлекает `_normalize` из текста | частично (`inputSchema` снят, `outputSchema` не снят) | есть необязательные `initialCookies`/`customHttpHeaders`/`pageFunction` — не передавать никогда (D1) | `maxTotalChargeUsd` расход не ограничивает; без `maxCrawlPages` предела нет (см. ниже) |
 
 ## Рекомендация
 
@@ -71,7 +72,7 @@
 | TT комментаторы | `clockworks/tiktok-comments-scraper` | $0.00125 / комментарий | текст, `uniqueId` — да; профиль — из `uniqueId`; имени нет | `apidojo/tiktok-comments-scraper` ($0.0003, есть `user.url`) |
 | LI люди | `harvestapi/linkedin-profile-search`, короткий режим | $0.10 / страница до 25 | имя, заголовок, место, должность, ссылка — да | — |
 | LI компании | `harvestapi/linkedin-company-search` (поиск) + `harvestapi/linkedin-company` (карточка) | $0.002 / короткая + $0.001 старт; $0.004 / компания | частично (схема не снята) | — |
-| LI реакции и комментарии | `harvestapi/linkedin-post-search` с `scrapeReactions`, `scrapeComments` | $0.002 / пост, комментарий; реакция $0.002 + профиль (Main $0.002, Full $0.004); режим без профиля или Main, потолок `maxReactions × (0.002 + профиль)` | тип реакции, имя, профиль — да; репостнувшие — нет | `linkedin-profile-posts`, `linkedin-company-posts` |
+| LI реакции и комментарии | `harvestapi/linkedin-post-search` с `scrapeReactions`, `scrapeComments` | $0.002 / пост, комментарий; реакция $0.002 + профиль (Main $0.002, Full $0.004); режим Main; есть ли режим без профиля — проверить в `inputSchema` до P1.6; потолок `maxReactions × (0.002 + профиль)` | тип реакции, имя, профиль — да; репостнувшие — нет | `linkedin-profile-posts`, `linkedin-company-posts` |
 | FB реакции | `apify/facebook-likes-scraper` | $0.0062 / реакция | имя, профиль, тип реакции — да | `scraper_one/facebook-reactions-scraper` ($0.004) |
 | Краулер | `apify/website-content-crawler` | модель оплаты FREE (compute) | url, текст — частично; объявление выделяем сами | — |
 
@@ -105,7 +106,11 @@
    - `memory` — параметр запуска, а `ApifyListingSource` его сейчас не передаёт
      (`bot/web_search/sources/apify.py:165-166`): P1.5 должна его добавить;
    - если `usageTotalUsd` не пришёл, `cap` не может быть верхней границей (`apify.py:256-258`): у модели с оплатой
-     за compute учёт — оценка с пометкой `estimated`, плюс жёсткий таймаут запуска.
+     за compute учёт — оценка с пометкой `estimated`, плюс жёсткий таймаут запуска. `cap` как оценка пишется и в
+     других местах (`apify.py:115`, `174`, `184`, `192`, `206`, `211`, `215`, `254`): для краулера эта оценка —
+     `APIFY_CRAWLER_MAX_CHARGE_USD` с пометкой `estimated`, и она **не** верхняя граница расхода;
+   - `respectRobotsTxtFile=true` (по умолчанию `false`); `maxSessionRotations=0`: ротация сессий — это реакция на
+     капчу, а капчу не обходим (`COMPLIANCE.md` §5).
    Нужна поправка формулировки правила 11 `CLAUDE.md` (для акторов с моделью оплаты FREE). Это предложение, сам не правлю.
 2. **P1.6 (D5).** Реакции — только FB (`apify/facebook-likes-scraper`) и LinkedIn (`harvestapi/linkedin-post-search`).
    Мапперы реакций для IG и TT не делаются. `Engagement(kind="repost")` ни один актор не наполняет: репост — только
