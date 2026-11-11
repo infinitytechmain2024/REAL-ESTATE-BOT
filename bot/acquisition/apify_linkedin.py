@@ -32,7 +32,7 @@ The cap of one run is ``pages x price + 0.05`` (the start and the rounding; the 
 retried within one call for ``RATE_LIMIT_SECONDS`` without spending an attempt, then at most ``LINKEDIN_MAX_ATTEMPTS``
 launches (``SocialRunConfig``); a refusal starts nothing and costs nothing.
 
-Nothing calls it yet: the campaign runner wires it in P1.8.
+The reach stage (``bot.campaign.reach``) runs it once per campaign with ``ACQUISITION_MODE=apify`` (P1.8).
 """
 
 from __future__ import annotations

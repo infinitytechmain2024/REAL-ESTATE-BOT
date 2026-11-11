@@ -278,6 +278,10 @@ class CampaignRunnerSettings(BaseSettings):
         """Instagram / TikTok posts through Apify in the campaign (P1.8): ACQUISITION_MODE=apify and a flag."""
         return self.acquisition_mode == "apify" and (self.apify_instagram_enabled or self.apify_tiktok_enabled)
 
+    def linkedin_apify_on(self) -> bool:
+        """LinkedIn people and companies through Apify in the reach (P1.8): ACQUISITION_MODE=apify and the flag."""
+        return self.acquisition_mode == "apify" and self.apify_linkedin_enabled
+
     def post_reads_config(self):  # -> bot.acquisition.apify_facebook_comments.CommentsConfig | None
         """The post comment reader's configuration, or None while APIFY_FACEBOOK_COMMENTS_ENABLED is off."""
         if not self.apify_comments_enabled:
@@ -425,7 +429,7 @@ class CampaignRunnerSettings(BaseSettings):
                            queries_per_tick=self.reach_queries_per_tick, queries_per_day=self.reach_queries_per_day,
                            model_queries=self.reach_model_queries,
                            enrich_per_campaign=self.reach_enrich_per_campaign,
-                           acquisition_mode=self.acquisition_mode)
+                           acquisition_mode=self.acquisition_mode, linkedin_apify=self.linkedin_apify_on())
 
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig

@@ -15,11 +15,23 @@ import pytest
 
 from bot.acquisition.apify_client import ApifyHttp
 from bot.acquisition.apify_instagram import ApifyInstagramPosts
+from bot.acquisition.apify_linkedin import (
+    ApifyLinkedInCompanies,
+    ApifyLinkedInPeople,
+    LinkedInSources,
+)
 from bot.acquisition.apify_source import MemorySourceRunStore
 from bot.acquisition.apify_tiktok import ApifyTikTokPosts
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign import runner as runner_module
 from bot.campaign.final_report import FinalReporter
+from bot.campaign.reach import (
+    MemoryReachStore,
+    ReachConfig,
+    ReachQuery,
+    ReachWorker,
+    keep_query,
+)
 from bot.campaign.runner import CampaignRunner, RunnerConfig
 from bot.campaign.runs import MemoryRunStore, SocialActivity, SourceCount
 from bot.campaign.social_apify import (
@@ -32,9 +44,13 @@ from bot.campaign.summary import summary_text
 from bot.campaign.tolerance import Request
 from bot.social_search.queries import QueryPlanner
 from bot.utils import costs
+from tests.test_apify_linkedin import CAMPAIGN as LI_CAMPAIGN
+from tests.test_apify_linkedin import CONFIG as LI_CONFIG
+from tests.test_apify_linkedin import FakeJudge, company, person
 from tests.test_apify_linkedin import settings as runner_settings
 from tests.test_apify_social import IG, TT, TT_VIDEO, ig_post_row
 from tests.test_campaign_runner import Clock, FakeMessenger
+from tests.test_investor_reach import FakeSearcher
 from tests.test_social_search import FakeDiscovery
 
 TOKEN = "apify_api_SECRETtoken123"
@@ -156,6 +172,7 @@ async def test_legacy_or_no_flag_changes_nothing(env: dict[str, str]) -> None:
     settings = runner_settings(BROWSER_SESSION_API_TOKEN="b", **env)
     assert not settings.apify_social_on() and runner_module._apify_tasks(settings) is None
     assert runner_module._apify_social_worker(settings, None, MemoryCampaignStore(), None) == (None, None)
+    assert settings.reach_config().linkedin_apify is False
     if env["ACQUISITION_MODE"] == "legacy":  # the browser social search is built as before
         worker, generator = runner_module._social_worker(settings, None, MemoryCampaignStore())
         assert worker is not None and generator is None
@@ -380,6 +397,101 @@ async def test_the_campaign_completes_once_the_apify_runs_are_done(ledger) -> No
     await runner.tick()
     assert (await campaigns.get(cid)).state == "completed"
     await tasks.http.aclose()
+
+
+# --- LinkedIn in the reach --------------------------------------------------------------------------------------
+
+
+def test_keep_query_skips_linkedin_only_with_the_apify_source() -> None:
+    li = ReachQuery("linkedin", "en", 'site:linkedin.com/in "real estate investor" Madrid')
+    hidden = ReachQuery("web", "en", "site:es.linkedin.com/company inmobiliaria Madrid")
+    assert keep_query(li, "apify") and keep_query(hidden, "apify")  # the default: as before
+    assert not keep_query(li, "apify", linkedin_apify=True) and not keep_query(hidden, "apify", linkedin_apify=True)
+    assert keep_query(li, "legacy", linkedin_apify=True)
+    assert keep_query(ReachQuery("telegram", "ru", "site:t.me инвестиции Мадрид"), "apify", linkedin_apify=True)
+
+
+def li_rows(n: int) -> list[dict[str, Any]]:
+    return [person(1), person(2)] if n == 1 else [company(1)]
+
+
+async def reach_world(api: Api, *, linkedin_apify: bool = True):
+    tasks = ApifyTasks(apify_http(api))
+    runs = MemorySourceRunStore()
+    sources = LinkedInSources(ApifyLinkedInPeople(runs, tasks.http, LI_CONFIG, sleep=tasks.sleep, poll_seconds=0),
+                              ApifyLinkedInCompanies(runs, tasks.http, LI_CONFIG, sleep=tasks.sleep, poll_seconds=0))
+    store = MemoryReachStore([LI_CAMPAIGN])
+    searcher = FakeSearcher()
+    worker = ReachWorker(store, searcher, FakeJudge(),
+                         config=ReachConfig(acquisition_mode="apify", linkedin_apify=linkedin_apify,
+                                            queries_per_tick=10, queries_per_campaign=100),
+                         linkedin=sources, tasks=tasks)
+    return tasks, runs, store, searcher, worker
+
+
+async def test_linkedin_apify_replaces_site_searches_and_runs_once(ledger) -> None:
+    api = Api(li_rows)
+    tasks, _runs, store, searcher, worker = await reach_world(api)
+    for _ in range(4):
+        await worker.tick()
+        await tasks.wait()
+    assert searcher.queries and not any("linkedin" in q.lower() for q, _ in searcher.queries)
+    launches = api.launches()
+    assert len(launches) == 2  # people once, companies once
+    assert {"profileScraperMode", "scraperMode"} == {k for b in launches for k in b if k.endswith("raperMode")}
+    linkedin = [s for s in store.contacts.values() if s.candidate.platform == "linkedin"]
+    assert len(linkedin) == 3
+    assert await store.enriched_count(LI_CAMPAIGN.id) == 0 and store.unmarked  # enriched_at never set
+    assert LI_CAMPAIGN.id in store.done
+    await tasks.http.aclose()
+
+
+async def test_the_reach_is_not_done_while_its_linkedin_run_goes_on(ledger) -> None:
+    gate = asyncio.Event()
+    api = Api(li_rows, gate=gate)
+    tasks, _runs, store, _searcher, worker = await reach_world(api)
+    for _ in range(4):
+        await worker.tick()
+    assert LI_CAMPAIGN.id not in store.done  # its LinkedIn run still goes: the reach waits (reach_pending)
+    gate.set()
+    await tasks.wait()
+    await worker.tick()
+    assert LI_CAMPAIGN.id in store.done and len(api.launches()) == 2
+    await tasks.http.aclose()
+
+
+async def test_linkedin_without_the_flag_keeps_the_site_searches(ledger) -> None:
+    api = Api(li_rows)
+    tasks, _runs, _store, searcher, worker = await reach_world(api, linkedin_apify=False)
+    await worker.tick()
+    await tasks.wait()
+    assert api.launches() == [] and any("linkedin" in q.lower() for q, _ in searcher.queries)
+    await tasks.http.aclose()
+
+
+async def test_linkedin_over_budget_or_a_source_error_never_stops_the_reach(ledger) -> None:
+    api = Api(li_rows)
+    tasks, _runs, _store, searcher, worker = await reach_world(api)
+    await costs.record("api", cost_usd=5.0, campaign_id=LI_CAMPAIGN.id)
+    await worker.tick()
+    await tasks.wait()
+    assert api.launches() == [] and searcher.queries
+
+    class Failing:
+        kind = "person"
+
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            raise ValueError("refused input")
+
+    costs.install(costs.MemoryLedger(), budget_usd=5)
+    tasks2, _runs2, store2, _searcher2, worker2 = await reach_world(api)
+    worker2.linkedin = LinkedInSources(Failing(), Failing())  # type: ignore[arg-type]
+    for _ in range(4):
+        await worker2.tick()
+        await tasks2.wait()
+    assert LI_CAMPAIGN.id in store2.done
+    await tasks.http.aclose()
+    await tasks2.http.aclose()
 
 
 # --- the report knows the new platforms -------------------------------------------------------------------------

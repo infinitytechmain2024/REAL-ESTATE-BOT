@@ -1496,7 +1496,8 @@ async def main() -> None:
     comments, lead_judge = _comment_worker(settings, pool)
     post_reads, post_closers = _post_worker(settings, pool, lead_judge)
     apify_tasks = _apify_tasks(settings)
-    reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None)
+    reach, reach_closers = _reach_worker(settings, pool, fetcher=getattr(web[0], "fetcher", None) if web else None,
+                                         tasks=apify_tasks)
     config = settings.runner_config()
     if comments is None:
         config = replace(config, comment_leads="off")
@@ -1656,8 +1657,10 @@ def _social_worker(settings: Any, pool: Any, campaigns: CampaignStore) -> tuple[
 
 def _apify_tasks(settings: Any) -> Any:
     """The background Apify runs (``social_apify.ApifyTasks``) when ACQUISITION_MODE=apify turns a P1.8 source on:
-    Instagram / TikTok posts; None otherwise (nothing changes)."""
-    if not getattr(settings, "apify_social_on", lambda: False)():
+    Instagram / TikTok posts or LinkedIn people in the reach; None otherwise (nothing changes)."""
+    social = getattr(settings, "apify_social_on", lambda: False)()
+    linkedin = getattr(settings, "linkedin_apify_on", lambda: False)() and settings.reach_enabled
+    if not (social or linkedin):
         return None
     from bot.acquisition.apify_client import ApifyHttp
 
@@ -1693,11 +1696,28 @@ def _apify_social_worker(settings: Any, pool: Any, campaigns: CampaignStore, tas
     return worker, generator
 
 
-def _reach_worker(settings: Any, pool: Any, fetcher: Any = None) -> tuple[Any, list[Any]]:
+def _linkedin_sources(settings: Any, pool: Any, tasks: Any) -> Any:
+    """LinkedIn people and companies through Apify for the reach (P1.8), or None (the site: searches stay)."""
+    if tasks is None or not getattr(settings, "linkedin_apify_on", lambda: False)():
+        return None
+    from bot.acquisition.apify_linkedin import (
+        ApifyLinkedInCompanies,
+        ApifyLinkedInPeople,
+        LinkedInSources,
+    )
+    from bot.acquisition.apify_source import PostgresSourceRunStore
+
+    runs, config = PostgresSourceRunStore(pool), settings.linkedin_config()
+    return LinkedInSources(ApifyLinkedInPeople(runs, tasks.http, config, sleep=tasks.sleep),
+                           ApifyLinkedInCompanies(runs, tasks.http, config, sleep=tasks.sleep))
+
+
+def _reach_worker(settings: Any, pool: Any, fetcher: Any = None, tasks: Any = None) -> tuple[Any, list[Any]]:
     """The investor reach across platforms (search engines only), unless INVESTOR_REACH_ENABLED=false.
 
     ``fetcher``: the web stage's PageFetcher, which opens the public page of a relevant result for its contacts
-    (None when the web stage is off: no enrichment).
+    (None when the web stage is off: no enrichment). ``tasks``: the background Apify runs; with
+    ACQUISITION_MODE=apify and APIFY_LINKEDIN_ENABLED, LinkedIn is read by its Apify source there (P1.8).
     """
     if not settings.reach_enabled:
         return None, []
@@ -1715,7 +1735,8 @@ def _reach_worker(settings: Any, pool: Any, fetcher: Any = None) -> tuple[Any, l
                                      acquisition_mode=settings.acquisition_mode)
     else:
         log.warning("campaign.runner.reach_rules_only", extra={"hint": "set OPENROUTER_API_KEY"})
-    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), fetcher=fetcher)
+    worker = ReachWorker(PostgresReachStore(pool), searcher, judge, config=settings.reach_config(), fetcher=fetcher,
+                         linkedin=_linkedin_sources(settings, pool, tasks), tasks=tasks)
     return worker, [searcher.aclose] + ([judge.aclose] if judge else [])
 
 
