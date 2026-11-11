@@ -684,6 +684,11 @@ class FacebookDiscovery:
             queued += 1
         return queued
 
+    def reads_nothing(self, campaign: Campaign) -> bool:
+        """``apify`` without a browser and without groups in the task: Facebook has nothing to read or search, so the
+        campaign needs no Facebook profile (the runner skips its wait and drains the other stages)."""
+        return self.acquisition_mode == "apify" and self.browser is None and not required_groups(campaign.spec)
+
     async def run(self, campaign_id: str) -> DiscoveryReport:
         """Discover, (re)start or resume; raises ``DiscoveryRefused`` without side effects.
 

@@ -331,9 +331,18 @@ async def test_time_budget_stops_the_search_and_still_finalizes() -> None:
     ticks = iter([0.0, 0.0, 5.0, 50.0, 500.0, 5000.0] + [9999.0] * 50)
     h = await setup(
         clock=lambda: next(ticks), time_budget_seconds=100)
+    finalized: list[str] = []
+    finalize = h.store.finalize
+
+    async def spy(campaign_id: str, **kwargs: Any) -> int:
+        finalized.append(campaign_id)
+        return await finalize(campaign_id, **kwargs)
+
+    h.store.finalize = spy
     report = await h.discovery.run(h.cid)
     assert report.budget_exhausted and len(h.browser.navigations) == 3
-    assert report.state == "running"  # finalized with no group: the runner's drain completes it
+    assert report.state == "running" and report.queued == 0  # finalized with no group: the runner's drain ends it
+    assert finalized == [h.cid]  # the budget stop still finalizes the groups found
 
 
 async def test_a_search_challenge_stops_everything_and_resume_continues() -> None:
@@ -513,7 +522,7 @@ async def test_apify_mode_without_groups_in_the_task_runs_without_facebook_or_se
                          reader=None)
     with pytest.raises(DiscoveryRefused, match="no_groups_no_browser"):
         await h.discovery.run(h.cid)
-    assert (await h.campaigns.get(h.cid)).state == "planned"
+    assert (await h.campaigns.get(h.cid)).state == "planned" and await h.store.groups(h.cid) == []
 
     h = await setup_spec("apify", spec=None)
     await h.discovery.run(h.cid)  # no spec: the old search runs

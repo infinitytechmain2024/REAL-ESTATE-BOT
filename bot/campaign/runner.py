@@ -436,7 +436,8 @@ class CampaignRunner:
             await self._metrics(campaign, final=True)
             await self._summary(campaign)
             await self._final_report(campaign)
-            line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
+            found = await self.store.streamed_count(campaign_id) + await self.store.lead_cards_sent(campaign_id)
+            line = self._final_line(campaign, found)  # property cards and the people / lead cards sent
         await self._show(campaign, line)
 
     # -- phases --
@@ -461,6 +462,12 @@ class CampaignRunner:
 
         if self.discovery is None:
             return NO_GROUPS
+        reads_nothing = getattr(self.discovery, "reads_nothing", None)
+        if reads_nothing is not None and reads_nothing(campaign):
+            # apify, no browser, no groups: no Facebook profile is needed; the other sources finish the search.
+            if campaign.state != "running":
+                await self.campaigns.set_state(campaign.id, "running", ACTOR)
+            return await self._drain(campaign, await self.store.get_run(campaign.id), "queue_exhausted")
         if (waiting := await self._facebook_wait()) is not None:
             return waiting
         if await self.store.busy_elsewhere(campaign.id):
@@ -1281,7 +1288,7 @@ class CampaignRunner:
                 text += "".join(esc(f"\n{note[:300]}", quote=False) for note in social.notes)
             return text
         if terminal:  # the lead cards (a post sent by link, people, reach) count too: never «ничего» after them
-            found = await self.store.streamed_count(campaign.id) + await self.store.people_sent(campaign.id)
+            found = await self.store.streamed_count(campaign.id) + await self.store.lead_cards_sent(campaign.id)
             return campaign_label(campaign.state, found=found, reason=campaign.stop_reason)
         if live is not None:
             return live
