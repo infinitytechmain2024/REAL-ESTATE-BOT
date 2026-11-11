@@ -165,8 +165,8 @@ class CampaignRunnerSettings(BaseSettings):
     apify_comments_max_per_day: int = Field(default=40, ge=0, le=100_000, validation_alias="APIFY_FACEBOOK_COMMENTS_MAX_PER_DAY")
 
     # Instagram through Apify (v3 P1.2, bot/acquisition/apify_instagram.py): posts and the people under them, no
-    # account. Off by default; on, it needs APIFY_TOKEN and a pinned build or the service does not start. Not wired
-    # into the runner yet (P1.8): only instagram_sources() builds it.
+    # account. Off by default; on, it needs APIFY_TOKEN and a pinned build or the service does not start. Runs in
+    # the campaign only with ACQUISITION_MODE=apify (P1.8, bot/campaign/social_apify.py).
     apify_instagram_enabled: bool = Field(default=False, validation_alias="APIFY_INSTAGRAM_ENABLED")
     apify_instagram_posts_actor: str = Field(default="apify/instagram-scraper", validation_alias="APIFY_INSTAGRAM_POSTS_ACTOR")
     apify_instagram_comments_actor: str = Field(default="apify/instagram-comment-scraper", validation_alias="APIFY_INSTAGRAM_COMMENTS_ACTOR")
@@ -185,6 +185,9 @@ class CampaignRunnerSettings(BaseSettings):
     # The comments actor's own cap: its minimum is not measured; on a 4xx refusal or apify_cap_too_low, raise it.
     apify_tiktok_comments_max_charge_usd: float = Field(default=0.15, gt=0, le=5,
                                                         validation_alias="APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD")
+    # Instagram and TikTok targets (hashtags or words, one per paid run) per campaign in all, with ACQUISITION_MODE=apify
+    # and a flag above (v3 P1.8, bot/campaign/social_apify.py); fewer when the run caps do not fit CAMPAIGN_BUDGET_USD.
+    apify_social_max_targets: int = Field(default=3, ge=1, le=10, validation_alias="APIFY_SOCIAL_MAX_TARGETS")
 
     @model_validator(mode="after")
     def _comments_ready(self) -> CampaignRunnerSettings:
@@ -255,14 +258,14 @@ class CampaignRunnerSettings(BaseSettings):
                                   max_charge_usd=self.apify_instagram_max_charge_usd,
                                   build_setting="APIFY_INSTAGRAM_ACTOR_BUILD")
 
-    def instagram_sources(self, store, http):  # -> bot.acquisition.apify_instagram.InstagramSources | None
+    def instagram_sources(self, store, http, **kw):  # -> bot.acquisition.apify_instagram.InstagramSources | None
         """The Instagram posts and comments sources on ``store`` and ``http``; None while the flag is off."""
         config = self.instagram_config()
         if config is None:
             return None
         from bot.acquisition.apify_instagram import instagram_sources
 
-        return instagram_sources(config, store, http)
+        return instagram_sources(config, store, http, **kw)
 
     def tiktok_config(self):  # -> bot.acquisition.apify_social.SocialSourceConfig | None
         """The TikTok sources' configuration, or None while APIFY_TIKTOK_ENABLED is off."""
@@ -277,14 +280,22 @@ class CampaignRunnerSettings(BaseSettings):
                                   comments_max_charge_usd=self.apify_tiktok_comments_max_charge_usd,
                                   build_setting="APIFY_TIKTOK_ACTOR_BUILD")
 
-    def tiktok_sources(self, store, http):  # -> bot.acquisition.apify_tiktok.TikTokSources | None
+    def tiktok_sources(self, store, http, **kw):  # -> bot.acquisition.apify_tiktok.TikTokSources | None
         """The TikTok posts and comments sources on ``store`` and ``http``; None while the flag is off."""
         config = self.tiktok_config()
         if config is None:
             return None
         from bot.acquisition.apify_tiktok import tiktok_sources
 
-        return tiktok_sources(config, store, http)
+        return tiktok_sources(config, store, http, **kw)
+
+    def apify_social_on(self) -> bool:
+        """Instagram / TikTok posts through Apify in the campaign (P1.8): ACQUISITION_MODE=apify and a flag."""
+        return self.acquisition_mode == "apify" and (self.apify_instagram_enabled or self.apify_tiktok_enabled)
+
+    def linkedin_apify_on(self) -> bool:
+        """LinkedIn people and companies through Apify in the reach (P1.8): ACQUISITION_MODE=apify and the flag."""
+        return self.acquisition_mode == "apify" and self.apify_linkedin_enabled
 
     def post_reads_config(self):  # -> bot.acquisition.apify_facebook_comments.CommentsConfig | None
         """The post comment reader's configuration, or None while APIFY_FACEBOOK_COMMENTS_ENABLED is off."""
@@ -433,7 +444,7 @@ class CampaignRunnerSettings(BaseSettings):
                            queries_per_tick=self.reach_queries_per_tick, queries_per_day=self.reach_queries_per_day,
                            model_queries=self.reach_model_queries,
                            enrich_per_campaign=self.reach_enrich_per_campaign,
-                           acquisition_mode=self.acquisition_mode)
+                           acquisition_mode=self.acquisition_mode, linkedin_apify=self.linkedin_apify_on())
 
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig
