@@ -550,3 +550,32 @@ async def test_postgres_linkedin_enrichment_does_not_mark_enriched(pool) -> None
     assert list(unscored) == [keys[0]] and unscored[keys[0]].kind == "investor" and unscored[keys[0]].keep
     assert await sink([person(1), person(2)], "RUN1") == 0
     assert await store.unscored(keys) == {}
+
+
+# --- clean_text keeps sums, ranges and years ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "Ticket 500.000 - 3.000.000€", "Tickets 1.000.000-5.000.000 €", "Inversión 250 000 - 1 000 000 EUR",
+    "Proyectos de 100.000.000 €", "2015-2018 2019-2023", "Ticket 700 000 000 €", "Ticket 600 000 000€",
+    "Fondos de 650 000 000 USD", "Ticket 900k", "Ticket 650 000 M", "Ticket 700.000-900.000",
+    "Rango 600 - 900", "CEO · Inversiones 2010-2020 | Madrid", "Desde 1999 - 2024, 120 proyectos",
+])
+def test_clean_text_keeps_sums_ranges_and_years(text) -> None:
+    assert li.clean_text(text) == text
+
+
+@pytest.mark.parametrize(("text", "clean"), [
+    ("+34 600 111 222", ""), ("600 111 222", ""), ("600-111-222", ""), ("(+34) 912 34 56 78", ""),
+    ("Tel 912345678", "Tel"), ("Llámame +34 600 111 222 ya", "Llámame ya"),
+    ("Agente | ana@gmail.com | +34 600 111 222", "Agente"),
+])
+def test_clean_text_cuts_phones(text, clean) -> None:
+    assert li.clean_text(text) == clean
+
+
+async def test_a_ticket_in_the_headline_reaches_the_judge(ledger) -> None:
+    store, judge = MemoryReachStore(), FakeJudge()
+    row = person(headline="Real estate investor · Ticket 500.000 - 3.000.000€")
+    await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([row])), CONFIG).run(CAMPAIGN, SEARCH, store, judge)
+    assert judge.seen[0][0].title == "Real estate investor · Ticket 500.000 - 3.000.000€"

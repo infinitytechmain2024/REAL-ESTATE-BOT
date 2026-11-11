@@ -203,8 +203,17 @@ class LinkedInContact:
         return " · ".join(p for p in parts if p)[:600]
 
 
-# A phone number written into a text (the reach leads' pattern: an optional +, at least 9 digits).
-_PHONE = re.compile(r"(?<![\w+])\+?\d[\d \-().]{7,17}\d(?!\w)")
+# A phone number written into a text. Narrow on purpose (a sum or a year cut out is worse than a phone left in):
+# * international: «+34 …» or «(+34) …», then 2-4 digit groups split by one space or hyphen;
+# * Spanish national: 9 digits starting 6-9, grouped «6xx xxx xxx» or «9xx xx xx xx» (one space or hyphen, or none).
+# Never a dot (a thousands separator), never «number - number» with spaces (a range), never next to a currency or a
+# multiplier (€, EUR, USD, $, k, M, mill., млн), never inside a longer number.
+_NOT_AFTER = r"(?![ -]?\d)(?![.,]\d)(?!\s?(?:€|EUR|USD|\$|[kKM]\b|mill|млн))"
+_PHONE = re.compile(
+    r"(?<![\w.,€$+])(?:"
+    r"(?:\(\+\d{1,3}\)|\+\d{1,3})[ -]?\d{2,4}(?:[ -]\d{2,4}){1,4}"
+    r"|[6-9]\d{2}(?:[ -]?\d{3}[ -]?\d{3}|[ -]?\d{2}[ -]?\d{2}[ -]?\d{2})"
+    r")" + _NOT_AFTER)
 _SEPARATORS = re.compile(r"\s*([|·•,;])(?:\s*[|·•,;])+\s*")
 _EDGE = re.compile(r"^[\s|·•,;/:-]+|[\s|·•,;/:-]+$")
 
@@ -214,7 +223,7 @@ def clean_text(text: str) -> str:
     from bot.campaign.people import _EMAIL
 
     out = _EMAIL.sub(" ", text)
-    out = _PHONE.sub(lambda m: " " if len(re.sub(r"\D", "", m.group())) >= 9 else m.group(), out)
+    out = _PHONE.sub(" ", out)
     out = _SEPARATORS.sub(r" \1 ", " ".join(out.split()))
     return _EDGE.sub("", out)
 
