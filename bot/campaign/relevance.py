@@ -117,10 +117,11 @@ class RelevanceJudge(Protocol):
     async def judge(self, task: dict[str, Any], finding: dict[str, Any]) -> Relevance: ...
 
 
-def task_data(campaign: Campaign, *, review: bool = False) -> dict[str, Any]:
+def task_data(campaign: Campaign, *, review: bool = False, soft_wishes: bool = False) -> dict[str, Any]:
     """What the model is told about the campaign: goal, task text, place and the numbers.
 
-    ``review``: for the reviewer, also the hard criteria (from the spec or the plan) and the tolerance.
+    ``review``: for the reviewer, also the hard criteria (from the spec or the plan) and the tolerance;
+    ``soft_wishes`` (``RELEVANCE_SOFT_WISHES``, reviewer only): also the soft wishes apart, as ``wishes``.
     """
     plan = campaign.plan
     country = plan.country or geo.country_of(plan.location)
@@ -143,7 +144,7 @@ def task_data(campaign: Campaign, *, review: bool = False) -> dict[str, Any]:
     if review:
         from bot.agents.reviewer import review_task  # lazy: the reviewer imports this module
 
-        data.update(review_task(campaign), text=data["task"][:600], campaign_id=campaign.id)
+        data.update(review_task(campaign, soft_wishes=soft_wishes), text=data["task"][:600], campaign_id=campaign.id)
     return data
 
 
@@ -315,6 +316,11 @@ class ReviewerJudge:
     @property
     def model(self) -> str:
         return self.reviewer.model
+
+    @property
+    def soft_wishes(self) -> bool:
+        """``RELEVANCE_SOFT_WISHES``: the runner hands over the task's wishes apart, marked soft."""
+        return bool(getattr(self.reviewer, "soft_wishes", False))
 
     async def aclose(self) -> None:
         for part in (self.reviewer, self.fallback):
