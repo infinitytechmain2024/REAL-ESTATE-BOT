@@ -474,21 +474,30 @@ def _task_wish_ids(task_wishes: Sequence[Any]) -> dict[int, str]:
 def _row_id(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
-    return int(value.strip()) if isinstance(value, str) and value.strip().isdigit() else None
+    text = value.strip() if isinstance(value, str) else ""
+    if not (text.isascii() and text.isdecimal()):  # "²" is a digit but not a number int() reads
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def _wish_rows(raw: object, task_wishes: Sequence[Any]) -> tuple[Criterion, ...]:
     """The model's rows for the task's wishes, once each, with the task's text: matched by ``id``, else (no or an
-    unknown id) by the text; anything else (not an object, a wish the task does not have) is dropped."""
+    unknown id) by the text; anything else (not an object, a wish the task does not have, an id and a text that name
+    two different wishes of the task) is dropped."""
     known, ids = _task_wishes(task_wishes), _task_wish_ids(task_wishes)
     rows: dict[str, Criterion] = {}
     for row in raw if isinstance(raw, list) else []:
         if not isinstance(row, dict):
             continue
-        key = ids.get(_row_id(row.get("id")))  # type: ignore[arg-type]
-        if key is None:
-            text = row.get("text")
-            key = _fold(text) if isinstance(text, str) else ""
+        by_id = ids.get(_row_id(row.get("id")))  # type: ignore[arg-type]
+        text = row.get("text")
+        by_text = _fold(text) if isinstance(text, str) else ""
+        if by_id is not None and by_text in known and by_text != by_id:
+            continue  # the id and the text point at different wishes: not trusted either way
+        key = by_id if by_id is not None else by_text
         if key in known and key not in rows:
             verdict = _VERDICT_WORDS.get(str(row.get("verdict") or "").strip().casefold(), "unknown")
             rows[key] = Criterion(known[key][0], verdict, _clip(row.get("quote"), MAX_QUOTE_CHARS) or None)  # type: ignore[arg-type]

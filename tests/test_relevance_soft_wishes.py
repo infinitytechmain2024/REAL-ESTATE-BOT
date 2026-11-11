@@ -330,3 +330,33 @@ async def test_duplicate_wishes_merge_with_the_highest_weight() -> None:
                               {"id": 2, "text": "вид на горы", "weight": 3}]}
     rows = [{"id": 1, "text": "вид на горы", "verdict": "fail", "quote": None}]
     assert (await reviewer(True, [], wish_rows=rows).review(dup, FINDING)).overall == "near"
+
+
+async def test_a_row_whose_id_and_text_name_different_wishes_is_dropped() -> None:
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)  # 1: вид на горы, 2: рядом со школой
+    rows = [{"id": 2, "text": "вид на горы", "verdict": "fail", "quote": None},
+            {"id": 1, "text": "рядом со школой", "verdict": "pass", "quote": None}]
+    review = await reviewer(True, [], wish_rows=rows).review(task, FINDING)
+    assert review.wishes == () and review.overall == "near"  # swapped ids never make a match
+    # a paraphrase (a text that is no known wish) still matches by id
+    rows = [{"id": 1, "text": "горы видно", "verdict": "fail", "quote": None}]
+    assert (await reviewer(True, [], wish_rows=rows).review(task, FINDING)).overall == "match"
+
+
+@pytest.mark.parametrize("bad_id", ["²", "1²", "١", " ", "-1", "1.0", True])
+async def test_an_id_that_is_not_a_plain_number_falls_back_to_the_text(bad_id) -> None:
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)
+    rows = [{"id": bad_id, "text": "вид на горы", "verdict": "fail", "quote": None}]
+    review = await reviewer(True, [], wish_rows=rows).review(task, FINDING)
+    assert [(w.name, w.verdict) for w in review.wishes] == [("вид на горы", "fail")] and review.overall == "match"
+    rows = [{"id": bad_id, "text": "горы видно", "verdict": "fail", "quote": None}]
+    assert (await reviewer(True, [], wish_rows=rows).review(task, FINDING)).wishes == ()
+
+
+async def test_near_reason_other_with_an_unmet_wish_and_all_hard_pass_stays_near() -> None:
+    task = task_data(valencia(SPEC), review=True, soft_wishes=True)
+    review = await reviewer(True, [], near_reason="other", deviation="промоция из нескольких квартир").review(
+        task, FINDING)
+    assert all(c.verdict == "pass" for c in review.criteria) and any(w.verdict == "fail" for w in review.wishes)
+    assert review.overall == "near" and review.deviation_ru == "промоция из нескольких квартир"
+    assert review_match(Match("exact"), review.to_dict()).bucket == "similar"
