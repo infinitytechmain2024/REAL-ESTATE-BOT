@@ -62,6 +62,9 @@ START_USD = 0.001
 # actor's pricing card; found by the live sample of P1.7 on 2026-11-11 (a launch with maxTotalChargeUsd=0.03).
 # The cap is only a ceiling: resultsPerPage and maxItems bound a run (30 results ~ $0.112 under a $0.50 cap).
 TIKTOK_MIN_CHARGE_USD = 0.50
+# clockworks/tiktok-comments-scraper: $0.00125 per comment; its own cap (APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD) must
+# hold MAX_RESULTS comments. Its minimum cap has not been measured: a 4xx or apify_cap_too_low means raise it.
+COMMENTS_USD_PER_RESULT = 0.00125
 POSTS_INPUT_KEYS = frozenset({"hashtags", "searchQueries", "searchSection", "postURLs", "resultsPerPage",
                               "maxFollowersPerProfile", "maxFollowingPerProfile", "commentsPerPost"})
 COMMENTS_INPUT_KEYS = frozenset({"postURLs", "commentsPerPost", "maxRepliesPerComment"})

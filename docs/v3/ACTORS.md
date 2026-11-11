@@ -80,7 +80,7 @@
 
 | Актор | Минимум потолка | Что при низком потолке | Что делает код |
 |---|---|---|---|
-| `clockworks/tiktok-scraper` | $0.50 (`apify_tiktok.TIKTOK_MIN_CHARGE_USD`) | отказ на старте: «Maximum cost per run is less than the allowed minimum of $0.50» (4xx, запуска нет, денег нет) | `APIFY_TIKTOK_MAX_CHARGE_USD` по умолчанию 0.50; при включённом флаге ниже минимума — сервис не стартует. Объём держат `resultsPerPage` и `maxItems`: 30 результатов ≈ $0.112 при потолке $0.50 |
+| `clockworks/tiktok-scraper` | $0.50 (`apify_tiktok.TIKTOK_MIN_CHARGE_USD`) | отказ на старте: «Maximum cost per run is less than the allowed minimum of $0.50» (4xx, запуска нет, денег нет) | `APIFY_TIKTOK_MAX_CHARGE_USD` по умолчанию 0.50; при включённом флаге ниже минимума — сервис не стартует. Объём держат `resultsPerPage` и `maxItems`: 30 результатов ≈ $0.112 при потолке $0.50 (расчёт по цене, не измерено живьём). Комментарии (`clockworks/tiktok-comments-scraper`) — свой потолок `APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD` = 0.15: минимум актора не измерен, при отказе 4xx или `apify_cap_too_low` — поднять |
 | `harvestapi/linkedin-profile-search` | > $0.15, точно не известен (нужен повторный сэмпл) | `SUCCEEDED`, 0 строк, `statusMessage` «max charge reached»; в логе актора `chargeableWithinLimit: { 'search-page': 0 }`; ничего не начислено | формула `pages × $0.10 + $0.05` не менялась; такой прогон — `failed apify_cap_too_low` |
 | все акторы `ApifySocialRun` | — | `SUCCEEDED` + `statusMessage` содержит «max charge reached» | 0 строк в датасете — `failed apify_cap_too_low` (деньги по `usageTotalUsd`, warning с актором и потолком, без повторного запуска); строки есть — `succeeded`, `capped=True` в исходе и в логе |
 

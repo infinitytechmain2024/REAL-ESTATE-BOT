@@ -8,6 +8,7 @@ invented; there is no real person in them. A field the facts do not list is not 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -704,5 +705,27 @@ def test_tiktok_flag_on_builds_both_sources_and_instagram_stays_off(monkeypatch:
     assert (sources.comments.runner.config.actor_id, sources.comments.runner.config.purpose) == (
         "clockworks/tiktok-comments-scraper", "tt:comments")
     cfg = sources.comments.runner.config
-    assert (cfg.build, cfg.max_items, cfg.max_charge_usd) == ("1.4.0", 30, 0.50)
+    assert (cfg.build, cfg.max_items, cfg.max_charge_usd) == ("1.4.0", 30, 0.15)  # the comments actor's own cap
+    assert sources.posts.runner.config.max_charge_usd == 0.50
     assert "apify_api_SECRET" not in repr(s) and "apify_api_SECRET" not in repr(sources)
+
+
+def test_tiktok_comments_have_their_own_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    on = {"APIFY_TIKTOK_ENABLED": "true", "APIFY_TOKEN": "x", "APIFY_TIKTOK_ACTOR_BUILD": "1.4.0"}
+    assert settings(monkeypatch).apify_tiktok_comments_max_charge_usd == 0.15
+    s = settings(monkeypatch, APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD="0.30", **on)
+    config = s.tiktok_config()
+    assert config is not None
+    assert (config.run_config("posts").max_charge_usd, config.run_config("comments").max_charge_usd) == (0.50, 0.30)
+    # 50 comments x $0.00125 = $0.0625 must fit the comments cap
+    with pytest.raises(ValidationError, match=r"APIFY_TIKTOK_MAX_RESULTS=50 comments cost up to \$0\.0625"):
+        settings(monkeypatch, APIFY_TIKTOK_MAX_RESULTS="50", APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD="0.05", **on)
+    assert settings(monkeypatch, APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD="0.05").tiktok_config() is None  # off: valid
+
+
+async def test_tiktok_comments_launch_with_their_own_cap(ledger) -> None:
+    config = replace(TT, comments_max_charge_usd=0.15)
+    api = Api()
+    await build(tt.ApifyTikTokComments, api, config).run(CAMPAIGN, [TT_VIDEO], save=Saved())
+    (launch,) = api.launches()
+    assert launch.url.params["maxTotalChargeUsd"] == "0.15"

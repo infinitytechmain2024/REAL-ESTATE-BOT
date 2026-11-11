@@ -399,3 +399,29 @@ async def test_cap_reached_on_a_failed_run_keeps_the_run_status(ledger) -> None:
     outcome = await runner(Api(states=["FAILED"], message="max charge reached"), MemorySourceRunStore()).run(
         CAMPAIGN, INPUT, Sink())
     assert (outcome.status, outcome.error) == ("failed", "apify_run_failed")
+
+
+async def test_resume_after_rows_were_imported_and_an_empty_last_page_is_a_capped_success(ledger) -> None:
+    """Rows came in before a failure; the next call reads only the empty last page: still a capped success."""
+
+    class Flaky(Api):
+        failures = 2  # the page at offset 2 answers 500 twice (one retry), then the rest of the dataset (none)
+
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if "/datasets/DS1/items" in request.url.path and request.url.params["offset"] == "2" and self.failures:
+                self.calls.append(request)
+                self.failures -= 1
+                return httpx.Response(500)
+            return super().__call__(request)
+
+    api = Flaky(dataset=[comment(1), comment(2)], usage=0.2, message="max charge reached")
+    store, sink = MemorySourceRunStore(), Sink()
+    source = runner(api, store)
+    first = await source.run(CAMPAIGN, INPUT, sink)
+    assert first.status == "retry" and row(store)["status"] == "running"
+    assert (row(store)["import_checkpoint"], row(store)["items_imported"]) == (2, 2)
+    again = await source.run(CAMPAIGN, INPUT, sink)
+    assert (again.status, again.items_imported, again.capped, again.error) == ("succeeded", 2, True, None)
+    assert row(store)["status"] == "succeeded" and len(api.launches()) == 1
+    assert [len(p) for p in sink.pages] == [2]  # the empty last page reached no sink
+    assert apify_costs(ledger) == [("apify:RUN1", 0.2, "")]

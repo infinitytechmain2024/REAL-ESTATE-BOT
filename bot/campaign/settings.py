@@ -182,6 +182,9 @@ class CampaignRunnerSettings(BaseSettings):
     # clockworks/tiktok-scraper refuses a cap below $0.50 (apify_tiktok.TIKTOK_MIN_CHARGE_USD, live sample 2026-11-11):
     # the default is that minimum; MAX_RESULTS, not the cap, bounds what a run spends.
     apify_tiktok_max_charge_usd: float = Field(default=0.50, gt=0, le=5, validation_alias="APIFY_TIKTOK_MAX_CHARGE_USD")
+    # The comments actor's own cap: its minimum is not measured; on a 4xx refusal or apify_cap_too_low, raise it.
+    apify_tiktok_comments_max_charge_usd: float = Field(default=0.15, gt=0, le=5,
+                                                        validation_alias="APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD")
 
     @model_validator(mode="after")
     def _comments_ready(self) -> CampaignRunnerSettings:
@@ -228,6 +231,11 @@ class CampaignRunnerSettings(BaseSettings):
             raise ValueError(f"APIFY_TIKTOK_MAX_CHARGE_USD={self.apify_tiktok_max_charge_usd} is below the "
                              f"${apify_tiktok.TIKTOK_MIN_CHARGE_USD:.2f} minimum of {apify_tiktok.POSTS_ACTOR}: "
                              "every launch would be refused")
+        need = self.apify_tiktok_max_results * apify_tiktok.COMMENTS_USD_PER_RESULT
+        if self.apify_tiktok_enabled and need > self.apify_tiktok_comments_max_charge_usd + 1e-9:
+            raise ValueError(f"APIFY_TIKTOK_MAX_RESULTS={self.apify_tiktok_max_results} comments cost up to "
+                             f"${need:.4f} per run, above APIFY_TIKTOK_COMMENTS_MAX_CHARGE_USD="
+                             f"{self.apify_tiktok_comments_max_charge_usd}: lower the results or raise the cap")
 
     def _social_flags(self) -> list[tuple[str, str, bool, str]]:
         return [("APIFY_INSTAGRAM_ENABLED", "APIFY_INSTAGRAM_ACTOR_BUILD", self.apify_instagram_enabled,
@@ -266,6 +274,7 @@ class CampaignRunnerSettings(BaseSettings):
                                   comments_actor=self.apify_tiktok_comments_actor.strip(),
                                   build=self.apify_tiktok_build.strip(), max_results=self.apify_tiktok_max_results,
                                   max_charge_usd=self.apify_tiktok_max_charge_usd,
+                                  comments_max_charge_usd=self.apify_tiktok_comments_max_charge_usd,
                                   build_setting="APIFY_TIKTOK_ACTOR_BUILD")
 
     def tiktok_sources(self, store, http):  # -> bot.acquisition.apify_tiktok.TikTokSources | None
