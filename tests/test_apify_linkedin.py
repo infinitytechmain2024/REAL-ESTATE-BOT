@@ -21,10 +21,12 @@ from bot.acquisition.apify_source import MemorySourceRunStore
 from bot.campaign.reach import Judged, MemoryReachStore, ReachCampaign
 from bot.campaign.settings import CampaignRunnerSettings
 from bot.utils import costs
+from tests.test_near_match import needs_db
+from tests.test_near_match import pool as pool
 
 TOKEN = "apify_api_SECRETtoken123"
 CAMPAIGN = ReachCampaign("00000000-0000-0000-0000-000000000001", "Madrid", {}, ("es", "en"))
-CONFIG = li.LinkedInConfig(build="1.2.3")
+CONFIG = li.LinkedInConfig(people_build="1.2.3", companies_build="0.4.1")
 SEARCH = li.LinkedInSearch("real estate investor", ("Madrid",), function_ids=(li.REAL_ESTATE_FUNCTION_ID,))
 
 
@@ -109,6 +111,9 @@ def ledger():
         costs.install(None)
 
 
+BUILDS = {"APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD": "1.2.3", "APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD": "0.4.1"}
+
+
 def settings(**env: str) -> CampaignRunnerSettings:
     return CampaignRunnerSettings(_env_file=None, DATABASE_URL="postgresql://x", TELEGRAM_TOKEN="t", **env)
 
@@ -159,7 +164,8 @@ async def test_companies_launch_short_white_list(ledger) -> None:
     assert body == {"scraperMode": "short", "searchQuery": "inmobiliaria", "locations": ["Madrid"],
                     "industryIds": ["44"], "takePages": 1, "maxItems": 50}
     assert set(body) <= li.COMPANY_INPUT_KEYS
-    assert launch.url.params["maxTotalChargeUsd"] == "0.15" and launch.url.params["build"] == "1.2.3"
+    # Its own price per page (50 x $0.002 + $0.001) and its own pinned build.
+    assert launch.url.params["maxTotalChargeUsd"] == "0.151" and launch.url.params["build"] == "0.4.1"
     assert not [k for k in keys_of(body) if _COOKIE_LIKE.search(k)]
 
 
@@ -314,17 +320,20 @@ def test_flag_off_builds_no_source() -> None:
 
 
 def test_flag_on_needs_token_and_pinned_build() -> None:
-    for env in ({"APIFY_TOKEN": "x"}, {"APIFY_TOKEN": "x", "APIFY_LINKEDIN_ACTOR_BUILD": "latest"},
-                {"APIFY_LINKEDIN_ACTOR_BUILD": "1.2.3"}):
+    for env in ({"APIFY_TOKEN": "x"}, {"APIFY_TOKEN": "x", **BUILDS, "APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD": "latest"},
+                {"APIFY_TOKEN": "x", **BUILDS, "APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD": ""},
+                {"APIFY_TOKEN": "x", "APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD": "1.2.3"}, BUILDS):
         with pytest.raises(ValidationError):
             settings(APIFY_LINKEDIN_ENABLED="true", **env)
-    on = settings(APIFY_LINKEDIN_ENABLED="true", APIFY_TOKEN="x", APIFY_LINKEDIN_ACTOR_BUILD="1.2.3")
+    on = settings(APIFY_LINKEDIN_ENABLED="true", APIFY_TOKEN="x", **BUILDS)
     config = on.linkedin_config()
     assert config is not None and config.people_actor == li.PEOPLE_ACTOR and config.companies_actor == li.COMPANIES_ACTOR
     sources = li.build_sources(config, MemorySourceRunStore(), http(Api()))
     assert sources is not None
     assert sources.people.runner.config.build == "1.2.3"
-    assert sources.people.runner.config.build_setting == "APIFY_LINKEDIN_ACTOR_BUILD"
+    assert sources.people.runner.config.build_setting == "APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD"
+    assert sources.companies.runner.config.build == "0.4.1"
+    assert sources.companies.runner.config.build_setting == "APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD"
 
 
 # --- money ----------------------------------------------------------------------------------------------------------
@@ -335,11 +344,12 @@ def test_charge_cap_formula() -> None:
     assert li.charge_cap(2, 0.10, 0.45) == 0.25
     assert li.charge_cap(4, 0.10, 0.45) == 0.45  # 0.45 = the ceiling, not 0.45 by chance
     assert li.charge_cap(4, 0.10, 0.30) == 0.30
-    config = settings(APIFY_LINKEDIN_ENABLED="true", APIFY_TOKEN="x", APIFY_LINKEDIN_ACTOR_BUILD="1.2.3",
+    config = settings(APIFY_LINKEDIN_ENABLED="true", APIFY_TOKEN="x", **BUILDS,
                       APIFY_LINKEDIN_MAX_PAGES="2").linkedin_config()
-    assert config is not None and config.cap_usd == 0.25
+    assert config is not None and config.cap_usd("person") == 0.25
+    assert config.cap_usd("company") == 0.252  # 2 x 0.101 + 0.05
     people, companies = config.run_config("person"), config.run_config("company")
-    assert people.max_charge_usd == companies.max_charge_usd == 0.25
+    assert (people.max_charge_usd, companies.max_charge_usd) == (0.25, 0.252)
     assert (people.max_items, companies.max_items) == (50, 100)
     for pages in ("0", "5"):
         with pytest.raises(ValidationError):
@@ -348,7 +358,7 @@ def test_charge_cap_formula() -> None:
 
 async def test_two_pages_reach_the_launch(ledger) -> None:
     api = Api([person()])
-    config = li.LinkedInConfig(build="1.2.3", max_pages=2)
+    config = li.LinkedInConfig(people_build="1.2.3", companies_build="0.4.1", max_pages=2)
     await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(api), config).run(
         CAMPAIGN, SEARCH, MemoryReachStore(), FakeJudge())
     (launch,) = api.launches()
@@ -369,3 +379,174 @@ async def test_rate_limited_launch_is_retried_up_to_its_own_attempts(ledger) -> 
     assert outcomes[6].status == "failed"
     assert len(api.launches()) == 5  # a refusal starts nothing: no estimate booked
     assert not [e for e in ledger.entries if e.cost_usd]
+
+
+# --- review fixes: personal data in the text, a failed enrichment, the reach's page cap -----------------------------
+
+
+async def test_email_and_phone_in_the_text_never_reach_title_snippet_or_judge(ledger) -> None:
+    row = person(headline="Agente | ana@gmail.com | +34 600 111 222", firstName="Ana",
+                 lastName="Ejemplo 600111222",
+                 currentPosition=[{"companyName": "Ejemplo (tel. 912 345 678)", "position": "Socia, ana@ejemplo.es"}])
+    store, judge = MemoryReachStore(), FakeJudge()
+    await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([row])), CONFIG).run(CAMPAIGN, SEARCH, store, judge)
+    (stored,) = store.contacts.values()
+    assert stored.candidate.title == "Agente"
+    assert stored.candidate.snippet == "Socia, Ejemplo (tel. ) · Madrid"
+    kept = repr(store.contacts) + repr(store.enrichments) + repr(judge.seen)
+    for leaked in ("@", "gmail", "600 111 222", "600111222", "912 345 678"):
+        assert leaked not in kept, leaked
+    assert stored.judged.name == "Ana Ejemplo"
+
+
+def test_clean_text_keeps_ordinary_text() -> None:
+    assert li.clean_text("CEO · Inversiones 2010-2020 | Madrid") == "CEO · Inversiones 2010-2020 | Madrid"
+    assert li.clean_text("ana@gmail.com") == ""
+    assert li.clean_text("Llámame +34 600 111 222 ya") == "Llámame ya"
+
+
+async def test_company_phone_only_in_contacts(ledger) -> None:
+    row = company(name="Ejemplo Inmuebles +34 900 000 000", industry="Real Estate · info@ejemplo.es")
+    store = MemoryReachStore()
+    await li.ApifyLinkedInCompanies(MemorySourceRunStore(), http(Api([row])), CONFIG).run(
+        CAMPAIGN, li.LinkedInSearch("inmobiliaria"), store, FakeJudge("agency"))
+    (stored,) = store.contacts.values()
+    assert stored.candidate.title == "Ejemplo Inmuebles" and "900" not in stored.candidate.snippet
+    assert "@" not in repr(store.contacts)
+    assert store.enrichments[stored.candidate.url_key].phones == ("+34 900 000 000",)
+
+
+class FlakyReachStore(MemoryReachStore):
+    """``save_enrichment`` fails on its n-th call (an Exception, or a crash: ``CancelledError``)."""
+
+    def __init__(self, fail_on: int, error: BaseException) -> None:
+        super().__init__()
+        self.fail_on, self.error, self.calls = fail_on, error, 0
+
+    async def save_enrichment(self, url_key, enrichment, score, *, mark_enriched=True):
+        self.calls += 1
+        if self.calls == self.fail_on:
+            raise self.error
+        await super().save_enrichment(url_key, enrichment, score, mark_enriched=mark_enriched)
+
+
+def keys_in_order(rows: list[dict[str, Any]]) -> list[str]:
+    from bot.campaign.reach import Candidate
+
+    out = []
+    for row in rows:
+        contact = li.map_person(row)
+        assert contact is not None
+        out.append(Candidate(contact.url, "linkedin", "profile", contact.title, contact.snippet).url_key)
+    return out
+
+
+async def test_failed_enrichment_is_logged_and_repaired_when_the_row_comes_again(ledger) -> None:
+    rows = [person(n) for n in range(1, 6)]
+    keys = keys_in_order(rows)
+    store = FlakyReachStore(3, RuntimeError("db down"))
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api(rows)), CONFIG).run(
+        CAMPAIGN, SEARCH, store, FakeJudge())
+    assert outcome.status == "succeeded" and outcome.items_imported == 5  # the contacts are stored
+    assert [k in store.scores for k in keys] == [True, True, False, True, True]
+    judge = FakeJudge()
+    assert await li.ReachSink("person", CAMPAIGN, store, judge)(rows, "RUN2") == 0
+    assert all(k in store.scores for k in keys) and judge.seen == []  # repaired, not judged again
+
+
+async def test_crash_between_save_and_enrichment_resumes_without_a_second_launch(ledger) -> None:
+    import asyncio
+
+    rows = [person(n) for n in range(1, 6)]
+    keys = keys_in_order(rows)
+    api, runs = Api(rows), MemorySourceRunStore()
+    store = FlakyReachStore(3, asyncio.CancelledError())
+    source = li.ApifyLinkedInPeople(runs, http(api), CONFIG)
+    with pytest.raises(asyncio.CancelledError):
+        await source.run(CAMPAIGN, SEARCH, store, FakeJudge())
+    assert len(store.contacts) == 5 and [k in store.scores for k in keys] == [True, True, False, False, False]
+    outcome = await source.run(CAMPAIGN, SEARCH, store, FakeJudge())
+    assert outcome.status == "succeeded"
+    assert all(k in store.scores for k in keys) and len(store.contacts) == 5
+    assert len(api.launches()) == 1
+
+
+async def test_linkedin_contacts_do_not_use_the_reach_page_cap(ledger) -> None:
+    from bot.campaign.reach import ReachConfig
+
+    store = MemoryReachStore()
+    sink = li.ReachSink("person", CAMPAIGN, store, FakeJudge())
+    for start in (1, 26, 51):
+        assert await sink([person(n) for n in range(start, start + 25)], "RUN1") == 25
+    assert len(store.contacts) == 75 and len(store.enrichments) == 75  # each has its company
+    cap = ReachConfig().enrich_per_campaign
+    assert cap - await store.enriched_count(CAMPAIGN.id) == cap  # the reach's room is untouched
+
+
+# --- review fixes: failures ---------------------------------------------------------------------------------------
+
+
+async def test_failed_run_stores_nothing(ledger) -> None:
+    class Failed(Api):
+        def __call__(self, request):
+            if "/actor-runs/RUN1" in request.url.path:
+                self.calls.append(request)
+                return httpx.Response(200, json={"data": {"id": "RUN1", "status": "FAILED", "usageTotalUsd": 0.02}})
+            return super().__call__(request)
+
+    api, store = Failed([person()]), MemoryReachStore()
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(api), CONFIG).run(
+        CAMPAIGN, SEARCH, store, FakeJudge())
+    assert (outcome.status, outcome.error, outcome.cost_usd) == ("failed", "apify_run_failed", 0.02)
+    assert store.contacts == {} and not [r for r in api.calls if "/datasets/" in r.url.path]
+
+
+@pytest.mark.parametrize("status", [400, 402, 404])
+async def test_refused_launch_stores_nothing(ledger, status) -> None:
+    api, store = Api(launch_status=status), MemoryReachStore()
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(api), CONFIG).run(
+        CAMPAIGN, SEARCH, store, FakeJudge())
+    assert outcome.status == "failed" and outcome.error == f"apify_http_{status}"
+    assert store.contacts == {} and len(api.launches()) == 1
+    assert not [e for e in ledger.entries if e.cost_usd]  # a refusal starts nothing: nothing booked
+
+
+async def test_judge_failure_falls_back_to_the_rules(ledger, caplog) -> None:
+    class Broken(FakeJudge):
+        async def judge(self, campaign, candidates):
+            raise TimeoutError
+
+    store = MemoryReachStore()
+    outcome = await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([person()])), CONFIG).run(
+        CAMPAIGN, SEARCH, store, Broken())
+    assert outcome.status == "succeeded"
+    (stored,) = store.contacts.values()
+    assert stored.judged_by == "rules" and stored.judged.kind == "investor"
+    assert "apify_linkedin.judge_failed" in caplog.text
+
+
+# --- PostgreSQL (027, 028, 037): mark_enriched and unscored ----------------------------------------------------------
+
+@needs_db
+async def test_postgres_linkedin_enrichment_does_not_mark_enriched(pool) -> None:
+    from bot.campaign import plan_campaign
+    from bot.campaign.reach import PostgresReachStore
+    from bot.campaign.store import PostgresCampaignStore
+
+    goal = "Найди инвесторов в Мадриде"
+    cid = await PostgresCampaignStore(pool).create(plan_campaign(goal), chat_id=1, requested_by=8, source_text=goal,
+                                                   actor="t")
+    campaign = ReachCampaign(cid, "Madrid", {}, ("es", "en"))
+    store = PostgresReachStore(pool)
+    sink = li.ReachSink("person", campaign, store, FakeJudge())
+    assert await sink([person(1), person(2)], "RUN1") == 2
+    assert await store.enriched_count(cid) == 0
+    rows = await pool.fetch("select enriched_at, contacts::text as c, score, kind from reach_contacts order by url")
+    assert all(r["enriched_at"] is None and r["score"] is not None and r["kind"] == "investor" for r in rows)
+    assert json.loads(rows[0]["c"]) == {"company": "Ejemplo Capital"}
+    await pool.execute("update reach_contacts set score = null where url like '%-1'")
+    keys = keys_in_order([person(1), person(2)])
+    unscored = await store.unscored(keys)
+    assert list(unscored) == [keys[0]] and unscored[keys[0]].kind == "investor" and unscored[keys[0]].keep
+    assert await sink([person(1), person(2)], "RUN1") == 0
+    assert await store.unscored(keys) == {}

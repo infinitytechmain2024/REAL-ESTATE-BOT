@@ -8,7 +8,7 @@ bill once, import page by page):
   ``"Short"`` (the actor's own default is ``"Full"``); ``"Full + email search"`` is refused (an e-mail is personal data
   the bot never asks for). One search page is up to 25 short profiles, $0.10 a page;
 * :class:`ApifyLinkedInCompanies` -- ``harvestapi/linkedin-company-search`` with ``scraperMode="short"``. One page is
-  up to 50 companies, $0.002 each (+ $0.001 a start), so a page costs about the same $0.10.
+  up to 50 companies, $0.002 each (+ $0.001 a start): $0.101 a page.
 
 Only people and companies: LinkedIn is not searched for listings. The actor input is built from a **white list** of
 keys (``PEOPLE_INPUT_KEYS``, ``COMPANY_INPUT_KEYS``) and checked again before every launch (:func:`check_input`): the
@@ -19,11 +19,16 @@ The rows go where the investor reach keeps its contacts (``reach_contacts``, mig
 own path: ``ReachStore.known`` -> the reach judge (``OpenRouterReachJudge``, the rules without a key) ->
 ``ReachStore.save`` -> ``ReachStore.save_enrichment``. Only what is public and asked for is kept: the name, the
 headline or position, the company, the city and the link; for a company also its website, industry and the company's
-own phone, as the actor gave them. **An e-mail is never kept**, even when a row carries ``emails``. Nothing is guessed:
-a missing field stays empty.
+own phone, as the actor gave them, and only in ``contacts.phones``. **An e-mail is never kept**: ``emails`` is never
+read, and an e-mail or a phone number written into a name, headline, position or company is cut out of the text
+before it is stored or sent to the judge (:func:`clean_text`). Nothing is guessed: a missing field stays empty. The
+contacts come with the row itself (no page is opened), so ``enriched_at`` is not set and the reach stage's page cap
+is not used (``mark_enriched=False``).
 
-The cap of one run is ``pages x APIFY_LINKEDIN_USD_PER_PAGE + 0.05`` (the start and the rounding), never above
-``APIFY_LINKEDIN_MAX_CHARGE_USD`` (:func:`charge_cap`). A refused launch (429) is tried again at most
+The cap of one run is ``pages x price + 0.05`` (the start and the rounding; the price is
+``APIFY_LINKEDIN_USD_PER_PAGE`` for people, ``APIFY_LINKEDIN_COMPANIES_USD_PER_PAGE`` for companies), never above
+``APIFY_LINKEDIN_MAX_CHARGE_USD`` (:func:`charge_cap`). Each actor has its own pinned build
+(``APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD``, ``APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD``). A refused launch (429) is tried again at most
 ``LINKEDIN_MAX_ATTEMPTS`` times (``SocialRunConfig.max_attempts``): a refusal starts nothing and costs nothing.
 
 Nothing calls it yet: the campaign runner wires it in P1.8.
@@ -49,7 +54,8 @@ log = logging.getLogger(__name__)
 
 PEOPLE_ACTOR = "harvestapi/linkedin-profile-search"
 COMPANIES_ACTOR = "harvestapi/linkedin-company-search"
-BUILD_SETTING = "APIFY_LINKEDIN_ACTOR_BUILD"
+PEOPLE_BUILD_SETTING = "APIFY_LINKEDIN_PEOPLE_ACTOR_BUILD"
+COMPANIES_BUILD_SETTING = "APIFY_LINKEDIN_COMPANIES_ACTOR_BUILD"
 
 # The profile mode is always sent: the actor's default is «Full» ($0.004 a profile on top of the page).
 PROFILE_SCRAPER_MODE = "Short"
@@ -129,34 +135,39 @@ class LinkedInSearch:
 
 @dataclass(frozen=True, slots=True)
 class LinkedInConfig:
-    """The ``APIFY_LINKEDIN_*`` settings of both sources (one pinned build for both actors)."""
+    """The ``APIFY_LINKEDIN_*`` settings of both sources (each actor with its own pinned build)."""
 
-    build: str
+    people_build: str
+    companies_build: str
     people_actor: str = PEOPLE_ACTOR
     companies_actor: str = COMPANIES_ACTOR
     max_pages: int = 1
-    usd_per_page: float = 0.10
+    usd_per_page: float = 0.10             # people: one search page of up to 25 short profiles
+    companies_usd_per_page: float = 0.101  # companies: 50 x $0.002 + the $0.001 start
     max_charge_usd: float = 0.45
     timeout_seconds: float = 300
 
     def __post_init__(self) -> None:
         actor_path(self.people_actor)
         actor_path(self.companies_actor)
-        check_pinned_build(BUILD_SETTING, self.build)
-        charge_cap(self.max_pages, self.usd_per_page, self.max_charge_usd)
+        check_pinned_build(PEOPLE_BUILD_SETTING, self.people_build)
+        check_pinned_build(COMPANIES_BUILD_SETTING, self.companies_build)
+        self.cap_usd("person")
+        self.cap_usd("company")
 
-    @property
-    def cap_usd(self) -> float:
-        return charge_cap(self.max_pages, self.usd_per_page, self.max_charge_usd)
+    def cap_usd(self, kind: Kind) -> float:
+        price = self.usd_per_page if kind == "person" else self.companies_usd_per_page
+        return charge_cap(self.max_pages, price, self.max_charge_usd)
 
     def run_config(self, kind: Kind) -> SocialRunConfig:
         people = kind == "person"
         return SocialRunConfig(
             platform="linkedin", purpose="li_people" if people else "li_companies",
-            actor_id=self.people_actor if people else self.companies_actor, build=self.build,
-            max_charge_usd=self.cap_usd,
+            actor_id=self.people_actor if people else self.companies_actor,
+            build=self.people_build if people else self.companies_build, max_charge_usd=self.cap_usd(kind),
             max_items=self.max_pages * (PEOPLE_PER_PAGE if people else COMPANIES_PER_PAGE),
-            build_setting=BUILD_SETTING, timeout_seconds=self.timeout_seconds, max_attempts=LINKEDIN_MAX_ATTEMPTS)
+            build_setting=PEOPLE_BUILD_SETTING if people else COMPANIES_BUILD_SETTING,
+            timeout_seconds=self.timeout_seconds, max_attempts=LINKEDIN_MAX_ATTEMPTS)
 
 
 # --- the rows -----------------------------------------------------------------------------------------------------
@@ -192,11 +203,27 @@ class LinkedInContact:
         return " · ".join(p for p in parts if p)[:600]
 
 
+# A phone number written into a text (the reach leads' pattern: an optional +, at least 9 digits).
+_PHONE = re.compile(r"(?<![\w+])\+?\d[\d \-().]{7,17}\d(?!\w)")
+_SEPARATORS = re.compile(r"\s*([|·•,;])(?:\s*[|·•,;])+\s*")
+_EDGE = re.compile(r"^[\s|·•,;/:-]+|[\s|·•,;/:-]+$")
+
+
+def clean_text(text: str) -> str:
+    """``text`` without the e-mail addresses and phone numbers written into it, and without the separators left."""
+    from bot.campaign.people import _EMAIL
+
+    out = _EMAIL.sub(" ", text)
+    out = _PHONE.sub(lambda m: " " if len(re.sub(r"\D", "", m.group())) >= 9 else m.group(), out)
+    out = _SEPARATORS.sub(r" \1 ", " ".join(out.split()))
+    return _EDGE.sub("", out)
+
+
 def _text(value: object, limit: int) -> str | None:
+    """A text field as the actor gave it, without e-mails and phone numbers (``clean_text``), or None."""
     if not isinstance(value, str):
         return None
-    text = " ".join(value.split())
-    return text[:limit] or None
+    return clean_text(" ".join(value.split()))[:limit] or None
 
 
 def _dict(value: object) -> dict[str, Any]:
@@ -209,8 +236,9 @@ def _city(location: object) -> str | None:
 
 
 def _website(value: object) -> str | None:
-    text = _text(value, 300)
-    return text if text and re.match(r"^https?://[^\s/]+\.[^\s]+$", text) else None
+    """The company's own site as the actor gave it, only an http(s) address (never ``mailto:``)."""
+    text = value.strip()[:300] if isinstance(value, str) else ""
+    return text if re.match(r"^https?://[^\s/@]+\.[^\s@]+$", text) else None
 
 
 def map_person(row: Mapping[str, Any]) -> LinkedInContact | None:
@@ -241,7 +269,15 @@ def map_company(row: Mapping[str, Any]) -> LinkedInContact | None:
     city = (_text(_dict(head.get("parsed")).get("city"), 200) or _text(head.get("city"), 200)) if head else None
     return LinkedInContact("company", link[0], link[1], name=_text(row.get("name"), 200),
                            city=city or _city(row.get("location")), website=_website(row.get("website")),
-                           industry=industry, phone=_text(_dict(row.get("phone")).get("number"), 40))
+                           industry=industry, phone=_phone(_dict(row.get("phone")).get("number")))
+
+
+def _phone(value: object) -> str | None:
+    """The company's own phone as the actor gave it (only whitespace folded): kept in ``contacts.phones`` only."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    return text[:40] if len(re.sub(r"\D", "", text)) >= 6 else None
 
 
 # --- into reach_contacts --------------------------------------------------------------------------------------------
@@ -258,7 +294,8 @@ def _kind_for(contact: LinkedInContact, judged: Judged) -> Judged:
 
 class ReachSink:
     """A page of actor rows -> new ``reach_contacts`` rows, by the reach stage's own path. Idempotent: a page seen
-    twice adds nothing (``known``, and the insert is ``on conflict do nothing``)."""
+    twice adds no row (``known``, and the insert is ``on conflict do nothing``); a kept row of it whose score was never
+    saved (a crash or a failed write between ``save`` and ``save_enrichment``) gets its score and contacts then."""
 
     def __init__(self, kind: Kind, campaign: ReachCampaign, store: ReachStore, judge: ReachJudge | None) -> None:
         self.kind, self.campaign, self.store, self.judge = kind, campaign, store, judge
@@ -279,31 +316,38 @@ class ReachSink:
         if not found:
             return 0
         known = await self.store.known(list(found))
+        unscored = await self.store.unscored([k for k in found if k in known]) if known else {}
         fresh = [pair for key, pair in found.items() if key not in known]
-        if not fresh:
-            return 0
-        judged, judged_by = await self._judge([c for _, c in fresh])
-        stored = []
-        for (contact, candidate), verdict in zip(fresh, judged, strict=True):
-            verdict = _kind_for(contact, verdict)
-            if contact.name:  # the name as LinkedIn wrote it, not as the judge read it
-                verdict = replace(verdict, name=contact.name)
-            stored.append((contact, Stored(candidate, verdict, self.campaign.location, self.campaign.id, judged_by)))
-        saved = await self.store.save([s for _, s in stored])
+        saved = 0
+        verdicts: dict[str, Stored] = {}
+        if fresh:
+            judged, judged_by = await self._judge([c for _, c in fresh])
+            for (contact, candidate), verdict in zip(fresh, judged, strict=True):
+                verdict = _kind_for(contact, verdict)
+                if contact.name:  # the name as LinkedIn wrote it, not as the judge read it
+                    verdict = replace(verdict, name=contact.name)
+                verdicts[candidate.url_key] = Stored(candidate, verdict, self.campaign.location, self.campaign.id,
+                                                     judged_by)
+            saved = await self.store.save(list(verdicts.values()))
+        for key, verdict in unscored.items():
+            verdicts[key] = Stored(found[key][1], verdict, self.campaign.location, self.campaign.id, "")
         places = [self.campaign.location, *self.campaign.aliases.values()]
-        for contact, item in stored:
-            if not item.judged.keep:
+        for key, (contact, _) in found.items():  # in the page's order
+            item = verdicts.get(key)
+            if item is None or not item.judged.keep:
                 continue
             enrichment = campaign_people.Enrichment(
                 phones=(contact.phone,) if contact.phone else (), website=contact.website,
                 company=contact.company)  # never an e-mail
-            probe = Contact(item.candidate.url_key, item.candidate.url, "linkedin", item.judged.kind,
-                            item.judged.name, item.candidate.title, item.candidate.snippet, item.judged.summary_ru,
+            probe = Contact(key, item.candidate.url, "linkedin", item.judged.kind, item.judged.name,
+                            item.candidate.title, item.candidate.snippet, item.judged.summary_ru,
                             contacts=enrichment.contacts())
             points, _ = campaign_people.score(probe, self.campaign.investor, places=places)
-            # Nothing beyond the row itself: only the score (no page was opened, ``enriched_at`` stays empty).
-            await self.store.save_enrichment(item.candidate.url_key, enrichment if enrichment.contacts() else None,
-                                             points)
+            try:  # the contacts came with the row (no page was opened): enriched_at and the reach's page cap stay
+                await self.store.save_enrichment(key, enrichment if enrichment.contacts() else None, points,
+                                                 mark_enriched=False)
+            except Exception:  # noqa: BLE001 - the contact is stored; its score is saved when the page comes again
+                log.warning("apify_linkedin.enrichment_save_failed", extra={"campaign_id": self.campaign.id})
         return saved
 
     async def _judge(self, candidates: Sequence[Any]) -> tuple[list[Judged], str]:
@@ -390,8 +434,27 @@ def build_sources(config: LinkedInConfig | None, store: SourceRunStore, http: Ap
     return LinkedInSources(ApifyLinkedInPeople(store, http, config), ApifyLinkedInCompanies(store, http, config))
 
 
-__all__ = ["COMPANIES_ACTOR", "COMPANY_INPUT_KEYS", "FORBIDDEN_INPUT_KEYS", "FORBIDDEN_PROFILE_MODE",
-           "LINKEDIN_MAX_ATTEMPTS", "PEOPLE_ACTOR", "PEOPLE_INPUT_KEYS", "PROFILE_SCRAPER_MODE",
-           "REAL_ESTATE_FUNCTION_ID", "ApifyLinkedInCompanies", "ApifyLinkedInPeople", "LinkedInConfig",
-           "LinkedInContact", "LinkedInSearch", "LinkedInSources", "ReachSink", "build_sources", "charge_cap",
-           "check_input", "map_company", "map_person"]
+__all__ = [
+    "COMPANIES_ACTOR",
+    "COMPANY_INPUT_KEYS",
+    "FORBIDDEN_INPUT_KEYS",
+    "FORBIDDEN_PROFILE_MODE",
+    "LINKEDIN_MAX_ATTEMPTS",
+    "PEOPLE_ACTOR",
+    "PEOPLE_INPUT_KEYS",
+    "PROFILE_SCRAPER_MODE",
+    "REAL_ESTATE_FUNCTION_ID",
+    "ApifyLinkedInCompanies",
+    "ApifyLinkedInPeople",
+    "LinkedInConfig",
+    "LinkedInContact",
+    "LinkedInSearch",
+    "LinkedInSources",
+    "ReachSink",
+    "build_sources",
+    "charge_cap",
+    "check_input",
+    "clean_text",
+    "map_company",
+    "map_person",
+]
