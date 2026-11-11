@@ -140,6 +140,13 @@ if JSONLD_RULE not in INSTRUCTIONS:  # pragma: no cover - a guard for whoever ed
 INSTRUCTIONS_LOCATION_FROM_TEXT = INSTRUCTIONS.replace(JSONLD_RULE, LOCATION_FROM_TEXT_RULE)
 
 
+LOCATION_PROMPT_VERSION = f"{PROMPT_VERSION}-loc"  # findings analysed with ANALYSIS_LOCATION_FROM_TEXT=true
+
+
+def prompt_version(location_from_text: bool = False) -> str:
+    return LOCATION_PROMPT_VERSION if location_from_text else PROMPT_VERSION
+
+
 def instructions(location_from_text: bool = False) -> str:
     """The analysis prompt: the old one, or (ANALYSIS_LOCATION_FROM_TEXT) the one with the place taken from the text."""
     return INSTRUCTIONS_LOCATION_FROM_TEXT if location_from_text else INSTRUCTIONS

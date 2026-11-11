@@ -7,7 +7,7 @@ from typing import Any
 from .filters import filter_evidence
 from .formatters import investors, real_estate
 from .models import AnalysisResult, Evidence
-from .openrouter import PROMPT_VERSION
+from .openrouter import prompt_version
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class PipelineOutcome:
     language: str
     result: AnalysisResult | None = None
     formatted: str | None = None
+    location_from_text: bool = False  # ANALYSIS_LOCATION_FROM_TEXT of the analyzer: its own prompt version
 
 
 class AnalysisPipeline:
@@ -39,7 +40,8 @@ class AnalysisPipeline:
             return PipelineOutcome(False, "model_not_relevant", decision.language, result=result)
         formatter = real_estate if vertical == "real_estate" else investors
         return PipelineOutcome(
-            True, "accepted", decision.language, result, formatter(result, evidence, decision.language)
+            True, "accepted", decision.language, result, formatter(result, evidence, decision.language),
+            location_from_text=getattr(self.analyzer, "location_from_text", False) is True,
         )
 
 
@@ -47,5 +49,6 @@ def finding_key(evidence: Evidence, vertical: str) -> str:
     return hashlib.sha256(f"{vertical}:{evidence.post_id}".encode()).hexdigest()
 
 
-def metadata(language: str, model: str) -> dict[str, str]:
-    return {"prompt_version": PROMPT_VERSION, "model": model, "language": language}
+def metadata(language: str, model: str, *, location_from_text: bool = False) -> dict[str, str]:
+    """``analysis_metadata`` of a finding; ``location_from_text`` (ANALYSIS_LOCATION_FROM_TEXT) marks its prompt."""
+    return {"prompt_version": prompt_version(location_from_text), "model": model, "language": language}

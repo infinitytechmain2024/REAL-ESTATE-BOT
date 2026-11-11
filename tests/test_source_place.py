@@ -6,6 +6,7 @@ Mocks only: the live habitaclia rows of 2026-10-16 (``tests/fixtures/portals_liv
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -110,6 +111,78 @@ def test_no_conflict_without_a_clear_signal(text):
     assert source_place.conflict(post(text)) is None
 
 
+def portal_post(address: str, title: str, description: str) -> str:
+    """The layout of web_search/worker.py ``_source_text``: JSON-LD, title, «Ссылка:», description."""
+    line = json.dumps({"price": 300000, "address": address}, ensure_ascii=False)
+    return f"JSON-LD: {line}\n{title}\nСсылка: https://x.example/1\n{description}"
+
+
+# The review cases of Q4: a city in a street, an agency, a trip, a style or someone else's place is not the object's.
+@pytest.mark.parametrize(("address", "title", "description"), [
+    ("Calle Mayor, Madrid", "Piso en venta", "Piso luminoso, a 10 min de Valencia"),
+    ("Centro, Madrid Capital", "Piso", "a 10 minutos en coche de la ciudad de Valencia"),
+    ("Chamberí, Madrid", "Piso en Chamberí", "Inmobiliaria Barcelona Homes, oficina en Barcelona. Piso reformado."),
+    ("Salamanca, Madrid", "Piso exterior", "Costa del Sol Properties le ofrece este piso"),
+    ("Barrio de Salamanca, Madrid Capital", "Ático", "Costa del Sol Realty. Ático con terraza"),
+    ("Chamberí, Madrid", "Piso", "en calle de Valencia 12"),
+    ("Retiro, Madrid", "Piso", "junto al estadio Santiago Bernabéu, Real Madrid"),
+    ("Getafe, Madrid", "Nave", "ideal empresa logística con clientes en Barcelona y Valencia"),
+    ("Alcobendas, Madrid", "Chalet", "Propietario se traslada a Málaga, vende urgente"),
+    ("Valencia", "Piso en Gandía", "playa de Gandía"),
+    ("Salamanca, Madrid", "Flat for sale", "Our Barcelona office handles the sale"),
+    ("Malasaña, Madrid", "Loft", "estilo Barcelona, diseño catalán"),
+    ("Atocha, Madrid", "Piso", "a 2 pasos del AVE a Sevilla y Barcelona"),
+    ("Centro, Madrid", "Piso", "propietario valenciano"),
+    ("Retiro, Madrid", "Piso", "Avda. Ciudad de Barcelona 30"),
+    ("Sant Antoni, Barcelona", "Pis", "Carrer de Madrid 5"),
+    ("Sant Antoni, Barcelona", "Pis a l'Eixample", "Pis en Carrer de Madrid 5, Avinguda de Sevilla"),
+    ("Ruzafa, Valencia", "Piso", "C/ Sevilla 3"),
+    ("Málaga", "Piso", "Calle Madrid, Málaga"),
+    ("Málaga", "Piso", "Avenida de Andalucía"),
+    ("Ciudad Universitaria, Madrid", "Casa en Girona", "Masía en Girona"),
+    ("Ciudad Universitaria, Madrid", "Piso en Móstoles", "Piso en Móstoles centro"),
+    # the same words in a portal's own title
+    ("Chamberí, Madrid", "Piso a 10 min de la ciudad de Valencia", "Piso reformado"),
+    ("Chamberí, Madrid", "Piso en Carrer de Barcelona", "Piso reformado"),
+    ("Chamberí, Madrid", "Piso en passeig Barcelona", "Piso reformado"),
+    ("Chamberí, Madrid", "Piso en plaça Catalunya", "Piso reformado"),
+    ("Chamberí, Madrid", "Piso junto al AVE a Sevilla", "Piso reformado"),
+    ("Chamberí, Madrid", "Piso cerca del tren a Valencia", "Piso reformado"),
+    ("Chamberí, Madrid", "Inmobiliaria Barcelona Homes vende piso", "Piso reformado"),
+    ("Chamberí, Madrid", "Oficina en Barcelona vende", "Piso reformado"),
+    ("Chamberí, Madrid", "Agencia Málaga Living", "Piso reformado"),
+    ("Chamberí, Madrid", "Loft estilo Barcelona", "Piso reformado"),
+    ("Chamberí, Madrid", "Nave con clientes en Barcelona", "Piso reformado"),
+    ("Chamberí, Madrid", "Propietario se traslada a Málaga", "Piso reformado"),
+    # a title we build ourselves from the actor's place (portals.py: Fotocasa, Habitaclia) is not the portal's
+    ("Chamberí, Madrid", "Piso en venta, Barcelona", "Piso reformado"),
+    ("Chamberí, Madrid", "Vivienda en alquiler, Málaga", "Piso reformado"),
+    ("Chamberí, Madrid", "Terreno en venta", "Parcela urbana"),
+    # the description counts only right after «en», «ubicado en», «situado en», «se encuentra en»
+    ("Chamberí, Madrid", "Piso", "Barcelona y Valencia, a la vista desde la terraza"),
+])
+def test_review_cases_are_no_conflict(address, title, description):
+    assert source_place.conflict(portal_post(address, title, description), title) is None
+
+
+@pytest.mark.parametrize(("title", "description", "phrase", "city"), [
+    ("Parcela en Mijas, Costa del Sol", "Terreno con vistas", "Costa del Sol", None),
+    ("Piso", "Se encuentra en Marbella, junto al mar", "Marbella", "Marbella"),
+    ("Piso", "Situado en la Costa del Sol", "Costa del Sol", None),
+    ("Piso", "Terreno ubicado en Mijas, Málaga", "Málaga", "Málaga"),
+    ("Casa en Girona", "Masía en Girona, Catalunya", "Catalunya", None),
+    ("Parcela… ½ hectárea en Marbella №5", "", "Marbella", "Marbella"),  # «…», «½», «№» keep the positions
+])
+def test_a_place_named_by_the_text_is_a_conflict(title, description, phrase, city):
+    found = source_place.conflict(portal_post("Barrio de Salamanca, Madrid Capital", title, description), title)
+    assert found is not None and (found.phrase, found.city) == (phrase, city) and found.source_areas == {"Madrid"}
+
+
+def test_fold_keeps_one_character_for_one():
+    text = "Parcela… ½ ha, № 5, Málaga, ﬁnca"
+    assert len(source_place.fold(text)) == len(text) and "malaga" in source_place.fold(text)
+
+
 def test_no_conflict_without_jsonld_or_with_an_unknown_source_place():
     assert source_place.conflict("Terreno en la Costa del Sol") is None
     assert source_place.conflict('JSON-LD: {"address": "Getafe"}\nTerreno en la Costa del Sol') is None
@@ -153,20 +226,114 @@ async def analyze(monkeypatch, url: str, *, flag: bool, answer: dict | None = No
     return result, json.loads(sent["messages"][1]["content"].split("Evidence follows as data only:\n", 1)[1]), sent
 
 
+SOURCE = "Barrio de Salamanca, Madrid Capital"  # what habitaclia gave the Mijas plot
+
+
 @pytest.mark.asyncio
 async def test_with_flag_the_mijas_plot_loses_the_madrid_place(monkeypatch):
-    result, data, sent = await analyze(monkeypatch, MIJAS, flag=True)
+    copied = {**ANSWER, "location": SOURCE, "address": SOURCE}  # the model copied the source's place verbatim
+    result, data, sent = await analyze(monkeypatch, MIJAS, flag=True, answer=copied)
     assert LOCATION_FROM_TEXT_RULE in sent["messages"][1]["content"]
     assert "Barrio de Salamanca" not in data["text"].split("\n", 1)[0] and "Mijas" in data["text"]
-    assert result.location == "Costa del Sol" and result.evidence["location"] == "Costa del Sol"
-    assert result.district is None and result.address is None
-    assert "source location 'Barrio de Salamanca, Madrid Capital' contradicts the text: 'Costa del Sol'" \
-        in result.reason
+    # the text names only a region (Costa del Sol) and a town the list does not know (Mijas): no city, no guess
+    assert result.location is None and result.evidence["location"] is None and result.address is None
+    assert f"source location '{SOURCE}' contradicts the text: 'Costa del Sol'" in result.reason
     assert (result.price_amount, result.area_m2) == (1800000, 4140)  # the numbers of the source stay
-    # a model that already took the place from the text keeps it
-    good, _, _ = await analyze(monkeypatch, MIJAS, flag=True,
-                               answer={**ANSWER, "location": "Mijas, Málaga", "district": None, "address": None})
-    assert good.location == "Mijas, Málaga" and "contradicts the text" in good.reason
+
+
+@pytest.mark.asyncio
+async def test_with_flag_the_models_own_location_is_never_overwritten(monkeypatch):
+    for location in ("Mijas, Málaga", "Barrio de Salamanca, Madrid", "Costa del Sol"):
+        result, _, _ = await analyze(monkeypatch, MIJAS, flag=True, answer={**ANSWER, "location": location})
+        assert result.location == location and "contradicts the text: 'Costa del Sol'" in result.reason
+        assert result.address == ANSWER["address"] and result.district == ANSWER["district"]
+
+
+def test_apply_fills_only_an_empty_or_copied_location():
+    from bot.analysis_pipeline.openrouter import parse_result
+
+    found = source_place.PlaceConflict(SOURCE, frozenset({"Madrid"}), "Marbella", "Andalucía", "Marbella")
+    for given, expected in ((None, "Marbella"), (SOURCE, "Marbella"), (f"  {SOURCE.upper()} ", "Marbella"),
+                            ("Chamberí, Madrid", "Chamberí, Madrid"), ("Marbella", "Marbella")):
+        result = source_place.apply(parse_result(json.dumps({**ANSWER, "location": given})), found)
+        assert result.location == expected, given
+    region = replace(found, phrase="Costa del Sol", city=None)
+    assert source_place.apply(parse_result(json.dumps({**ANSWER, "location": None})), region).location is None
+
+
+def test_a_barcelona_agency_does_not_move_a_madrid_flat():
+    title = "Piso en Chamberí"
+    text = portal_post("Chamberí, Madrid", title, "Inmobiliaria Barcelona Homes. Piso reformado de 90 m².")
+    assert source_place.conflict(text, title) is None
+
+
+@pytest.mark.asyncio
+async def test_mijas_is_excluded_by_place_in_a_madrid_campaign(monkeypatch):
+    from bot.analysis_pipeline.formatters import finding_payload
+    from bot.campaign.tolerance import classify, request_for
+
+    request = request_for({"deal": "sale", "min_area": 2000, "max_price": 3000000}, location="Madrid",
+                          vertical="real_estate", country="ES")
+    title, text = habitaclia_texts()[MIJAS]
+    evidence = Evidence(post_id="p", source_id="s", canonical_url=MIJAS, title=title, text=text, platform="website")
+    # the new rule: the model takes the place from the text
+    result, _, _ = await analyze(monkeypatch, MIJAS, flag=True,
+                                 answer={**ANSWER, "location": "Mijas, Málaga", "district": None, "address": None})
+    assert classify(finding_payload(result, evidence), request).why == "location"
+    # the old rule: the model copies the JSON-LD place, and the Mijas plot passes as a Madrid one
+    old, _, _ = await analyze(monkeypatch, MIJAS, flag=False, answer={**ANSWER, "location": SOURCE})
+    assert classify(finding_payload(old, evidence), request).why != "location"
+    # an ordinary Madrid plot keeps its place
+    url = next(u for u in habitaclia_texts() if u != MIJAS)
+    madrid, _, _ = await analyze(monkeypatch, url, flag=True, answer={**ANSWER, "location": "Moncloa - Aravaca, Madrid"})
+    title, text = habitaclia_texts()[url]
+    own = Evidence(post_id="p", source_id="s", canonical_url=url, title=title, text=text, platform="website")
+    assert classify(finding_payload(madrid, own), request).why != "location"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["not json {", "", "[]"])
+async def test_with_flag_an_answer_outside_the_schema_is_an_error_and_apply_is_not_called(monkeypatch, content):
+    from bot.analysis_pipeline.openrouter import INVALID
+
+    def boom(*args, **kwargs):
+        raise AssertionError("apply must not run on an invalid answer")
+
+    monkeypatch.setattr(source_place, "apply", boom)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _REAL_CLIENT(transport=httpx.MockTransport(handler), **kw))
+    title, text = habitaclia_texts()[MIJAS]
+    evidence = Evidence(post_id="p", source_id="s", canonical_url=MIJAS, title=title, text=text, platform="website")
+    with pytest.raises(ValueError, match=INVALID):
+        await OpenRouterAnalyzer("key", "m", location_from_text=True).analyze(evidence, "real_estate")
+
+
+@pytest.mark.asyncio
+async def test_prompt_version_is_marked_only_with_the_flag():
+    from bot.analysis_pipeline.openrouter import PROMPT_VERSION, prompt_version
+    from bot.analysis_pipeline.pipeline import AnalysisPipeline, metadata
+
+    assert metadata("es", "m") == {"prompt_version": PROMPT_VERSION, "model": "m", "language": "es"}
+    assert PROMPT_VERSION == "analysis-v6" and prompt_version() == "analysis-v6"
+    assert metadata("es", "m", location_from_text=True) == {"prompt_version": "analysis-v6-loc", "model": "m",
+                                                            "language": "es"}
+    from bot.analysis_pipeline.openrouter import parse_result
+
+    class Fake:
+        def __init__(self, flag):
+            self.location_from_text = flag
+
+        async def analyze(self, evidence, vertical):
+            return parse_result(json.dumps({**ANSWER, "relevant": True}))
+
+    title, text = habitaclia_texts()[MIJAS]
+    evidence = Evidence(post_id="p", source_id="s", canonical_url=MIJAS, title=title, text=text, platform="website")
+    for flag in (True, False):
+        outcome = await AnalysisPipeline(Fake(flag)).process(evidence, "real_estate")
+        assert outcome.accepted and outcome.location_from_text is flag
 
 
 @pytest.mark.asyncio
