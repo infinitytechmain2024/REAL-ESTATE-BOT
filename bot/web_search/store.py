@@ -162,11 +162,14 @@ def _empty_hosts(runs: list[SourceRun]) -> frozenset[str]:
 # Codes the provider (Apify, the portal behind it) caused; anything else -- our budget/time caps, limits, claims,
 # checkpoints, a changed task -- is our own stop, and the portal said nothing.
 _PROVIDER_PREFIXES = ("apify_http_", "apify_run_")
-_PROVIDER_CODES = frozenset({"apify_transport", "apify_invalid_json", "apify_wait_timeout", "apify_dataset_timeout"})
+_PROVIDER_CODES = frozenset({"apify_transport", "apify_invalid_json", "apify_wait_timeout", "apify_dataset_timeout",
+                             "apify_response_too_large", "apify_billing_pending"})
 
 
 def _provider_error(code: str | None) -> bool:
     return bool(code) and (code in _PROVIDER_CODES or code.startswith(_PROVIDER_PREFIXES)  # type: ignore[union-attr]
+                           # ``*_schema`` (apify_run_schema, apify_dataset_schema, apify_id_schema): Apify answered
+                           # with something its contract does not allow
                            or code.endswith("_schema"))  # type: ignore[union-attr]
 
 

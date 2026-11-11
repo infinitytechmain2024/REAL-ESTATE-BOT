@@ -245,7 +245,8 @@ async def test_our_own_stops_are_not_a_portal_error(code: str) -> None:
 
 
 @pytest.mark.parametrize("code", ["apify_http_400", "apify_run_failed", "apify_transport", "apify_dataset_schema",
-                                  "apify_invalid_json", "apify_wait_timeout", "apify_dataset_timeout"])
+                                  "apify_invalid_json", "apify_wait_timeout", "apify_dataset_timeout",
+                                  "apify_response_too_large", "apify_billing_pending"])
 async def test_provider_failures_are_a_portal_error(code: str) -> None:
     web = MemoryWebStore()
     web.sources[("c1", "apify_idealista")] = SourceRun("c1", "apify_idealista", "failed", error_code=code)

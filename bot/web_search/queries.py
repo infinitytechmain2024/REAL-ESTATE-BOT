@@ -613,12 +613,12 @@ _KIND_TERMS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 # SEARCH_QUERY_HYGIENE: the Spanish land terms carry no legal category the person did not name.
 _LAND_NEUTRAL_ES = ("terreno", "parcela", "solar")
-_LAND_WORD = re.compile(r"(?<!\w)(?:(rustic)[oa]s?|(urbanizable)s?|(urban)[oa]s?)(?!\w)")
+# «urbano» only right after a land word («parcela urbana», «uso urbano»): «servicios urbanos», «plan urbano» are not it.
+_LAND_WORD = re.compile(r"(?<!\w)(?:(rustic)[oa]s?|(urbanizable)s?|"
+                        r"(?:suelo|terreno|parcela|solar|uso|clasificacion|calificacion)e?s? (urban)[oa]s?)(?!\w)")
 _LAND_CATEGORY = {"rustic": "rústico", "urbanizable": "urbanizable", "urban": "urbano"}
 # «no urbanizable» / «no-urbanizable» is the legal category (rústico); «no es / no son …» only rules one out.
 _NEGATION = re.compile(r"(?<!\w)no ((?:es|son) )?(?:(?:suelo|terreno|parcela|solar)e?s? )?$")
-# «casco urbano», «zona urbana»: where it is, not the land's category.
-_NOT_LAND = re.compile(r"(?<!\w)(?:casco|nucleo|zona|centro|area|entorno|medio|ambito|transporte)s? $")
 _DEAL_TERMS: dict[str | None, dict[str, tuple[str, ...]]] = {
     "sale": {"es": ("en venta", "comprar", "se vende"), "en": ("for sale", "buy"), "ru": ("купить", "продажа"),
              "uk": ("купити", "продаж")},
@@ -642,7 +642,7 @@ def land_category(task: QueryTask) -> str | None:
             named.add("rústico")  # suelo no urbanizable
         elif negated:
             ruled_out.add(category)
-        elif not (category == "urbano" and _NOT_LAND.search(before)):
+        else:
             named.add(category)
     return next(iter(named)) if len(named) == 1 and not named & ruled_out else None  # several or contradictory: None
 
