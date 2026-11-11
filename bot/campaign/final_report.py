@@ -520,6 +520,9 @@ def task_facts(request: Request) -> dict[str, Any]:
 _CRITERION_LABELS = {"place": "местоположение", "deal": "тип сделки", "type": "тип объекта",
                      "budget": "цена", "rooms": "число комнат", "area": "площадь"}
 _LEGAL = re.compile(r"застрой|строительств|разрешен|разрешён|зонир|urbaniz|suelo|permit", re.IGNORECASE)
+# Reviewer prompts that already carry the legal-buildability rule (a «pass» of such a must-have is trusted);
+# reviewer-v3-soft is reviewer-v3 with the soft wishes apart (RELEVANCE_SOFT_WISHES).
+_LEGAL_RULE_PROMPTS = ("reviewer-v3", "reviewer-v3-soft")
 
 
 def _criterion_label(name: str) -> str:
@@ -556,7 +559,7 @@ def held_evidence_lines(held: Sequence[HeldEvidence], *, total: int, task_text: 
             name, verdict = entry["name"], entry.get("verdict")
             if verdict not in ("pass", "fail", "unknown"):
                 continue
-            if verdict == "pass" and name.startswith("must_have:") and _LEGAL.search(name) and review.get("prompt") != "reviewer-v3":
+            if verdict == "pass" and name.startswith("must_have:") and _LEGAL.search(name) and review.get("prompt") not in _LEGAL_RULE_PROMPTS:
                 verdict = "unknown"
             states[name] = verdict
         matrices.append(states)
@@ -628,7 +631,7 @@ def evidence_actions(held: Sequence[HeldEvidence]) -> list[str]:
                 continue  # the price is on the card: nothing to ask the seller
             unknown = entry.get("verdict") == "unknown" or (
                 entry.get("verdict") == "pass" and name.startswith("must_have:")
-                and _LEGAL.search(name) and review.get("prompt") != "reviewer-v3")
+                and _LEGAL.search(name) and review.get("prompt") not in _LEGAL_RULE_PROMPTS)
             if unknown:
                 counts[name] += 1
     actions: list[str] = []

@@ -807,8 +807,9 @@ class CampaignRunner:
             return None, UNVERIFIED_CAP, False
         try:
             review = bool(getattr(self.relevance, "reviews", False))  # the reviewer also gets the hard criteria
+            soft = review and bool(getattr(self.relevance, "soft_wishes", False))  # RELEVANCE_SOFT_WISHES
             verdict = await self.relevance.judge(
-                task_data(campaign, review=review),
+                task_data(campaign, review=review, soft_wishes=soft),
                 finding_data(finding.payload, fallback_text=finding.text, original=finding.original, review=review,
                              vertical=finding.vertical))
         except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules (or closed, see ``_judge``)
