@@ -4,8 +4,8 @@ Reads the judge's lines (``docs/v3/SIM_RUBRIC.md`` §6), one per run, checks the
 (one pass of the persona set), prints the score of every role and their mean per batch, and checks the owner's goal:
 the mean by roles >= 90 % on at least 3 batches in a row with different seeds, ending with the last one. Every
 persona of ``scripts/sim/personas/`` is expected in every batch; ``--exclude`` drops some (until the owner gives the
-post links, O7), and the goal is then only «conditionally» met. ``--check``: exit code 0 — met, 2 — met only
-conditionally (with ``--exclude``), 1 — not met.
+post links, O7), and the goal is then only «conditionally» met, as it is while a run of the streak flagged «check
+by hand» has no ``checked_by_hand: true``. ``--check``: exit code 0 — met, 2 — met only conditionally, 1 — not met.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ class RunScore:
     done: bool = True
     failed: list[str] = field(default_factory=list)  # why the run scored 0 or less than it looks
     review: list[str] = field(default_factory=list)  # «check by hand»: the judge's count of the good ones may be low
+    checked: bool = False  # ``checked_by_hand: true``: the orchestrator has looked at the review flags
 
 
 def _int(line: dict[str, Any], key: str, where: str) -> int:
@@ -138,7 +139,7 @@ def run_score(line: dict[str, Any]) -> RunScore:
             line["reasonable_available"] == line["leads_reasonable"]):
         review.append(f"{line['leads_sent']} leads sent and reasonable_available = reasonable = "
                       f"{line['leads_reasonable']}")
-    return RunScore(run, persona, role, score, failed=why, review=review)
+    return RunScore(run, persona, role, score, failed=why, review=review, checked=line.get("checked_by_hand") is True)
 
 
 @dataclass
@@ -168,6 +169,10 @@ class Batch:
         problems += [f"{name}: not run (no line)" for name in sorted((expected or set()) - self.personas())]
         known = [v for v in scores.values() if v is not None]
         return (sum(known) / len(known) if known else None), problems
+
+    def unchecked(self) -> list[RunScore]:
+        """Runs flagged «check by hand» that nobody has checked yet (no ``checked_by_hand: true``)."""
+        return [r for runs in self.roles.values() for r in runs if r.review and not r.checked]
 
     def passed(self, expected: set[str] | None = None) -> bool:
         mean, problems = self.mean(expected)
@@ -221,8 +226,9 @@ def _seed(line: dict[str, Any], where: str) -> int | None:
 
 def load(path: Path, personas: PersonaSet | None = None, latest: bool = False) -> list[Batch]:
     """The batches in the order they first appear, one line per persona in a batch: a second line of the same
-    persona (a retry under a new run id, a judge again) is a ``ValueError`` unless ``latest`` (the last line in
-    the file wins). Every line is checked (``ValueError``); the lines of excluded personas are skipped."""
+    persona (a retry under a new run id, a judge again) is a ``ValueError``. ``latest`` lets it replace only an
+    unfinished one (``status`` not ``done``): a finished run is never rerun or rejudged into a better score. Every
+    line is checked (``ValueError``); the lines of excluded personas are skipped."""
     batches: dict[str, dict[str, dict[str, Any]]] = {}
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not raw.strip():
@@ -247,11 +253,18 @@ def load(path: Path, personas: PersonaSet | None = None, latest: bool = False) -
                 continue
         check_numbers(line, where)
         line["seed"] = _seed(line, where)
+        if not isinstance(line.get("checked_by_hand", False), bool):
+            raise ValueError(f"{where}: checked_by_hand must be true or false, got {line['checked_by_hand']!r}")
         runs = batches.setdefault(str(line["batch"]), {})
         persona = str(line["persona"])
-        if persona in runs and not latest:
-            raise ValueError(f"{where}: batch {line['batch']}: a second line of persona {persona!r} "
-                             f"(runs {runs[persona]['run']!r}, {line['run']!r}); one per batch, or --latest")
+        if persona in runs:
+            before = runs[persona]
+            if not latest:
+                raise ValueError(f"{where}: batch {line['batch']}: a second line of persona {persona!r} "
+                                 f"(runs {before['run']!r}, {line['run']!r}); one per batch, or --latest")
+            if before["status"] == "done":
+                raise ValueError(f"{where}: batch {line['batch']}: persona {persona!r} already has a finished run "
+                                 f"{before['run']!r}; --latest replaces only a run that is not done")
         runs.pop(persona, None)
         runs[persona] = line
     out: list[Batch] = []
@@ -279,6 +292,12 @@ def streak(batches: list[Batch], expected: set[str] | None = None) -> int:
     return count
 
 
+def unchecked(batches: list[Batch], last: int) -> list[str]:
+    """The «check by hand» runs nobody has checked in the ``last`` batches (the last 3 of the streak): the goal
+    is then only conditional."""
+    return [f"{b.name}/{r.run}" for b in batches[len(batches) - last:] if last for r in b.unchecked()]
+
+
 def _pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value * 100:.0f} %"
 
@@ -297,12 +316,15 @@ def report(batches: list[Batch], personas: PersonaSet | None = None) -> str:
                      f"{'yes' if batch.passed(expected) else 'no'} |")
         for runs in batch.roles.values():
             notes += [f"{batch.name}/{r.run}: {'; '.join(r.failed)}" for r in runs if r.failed and r.done]
-            notes += [f"{batch.name}/{r.run}: check by hand: {'; '.join(r.review)}" for r in runs if r.review]
+            notes += [f"{batch.name}/{r.run}: {'checked by hand' if r.checked else 'check by hand'}: "
+                      f"{'; '.join(r.review)}" for r in runs if r.review]
         notes += [f"{batch.name}: {p}" for p in problems]
     run = streak(batches, expected)
     goal = "not met"
     if run >= STREAK:
-        goal = "met conditionally (personas excluded)" if personas and personas.excluded else "met"
+        reasons = (["personas excluded"] if personas and personas.excluded else []) + (
+            ["runs to check by hand"] if unchecked(batches, min(run, STREAK)) else [])
+        goal = f"met conditionally ({', '.join(reasons)})" if reasons else "met"
     lines += ["", f"streak: {run} batch(es) in a row >= {TARGET * 100:.0f} % with different seeds; "
               f"goal ({STREAK} in a row): {goal}"]
     if personas and personas.excluded:
@@ -319,9 +341,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="the persona set: every persona in it is expected in every batch")
     parser.add_argument("--exclude", default="", help="persona ids or names not expected yet, e.g. G6,G8 (until O7)")
     parser.add_argument("--latest", action="store_true",
-                        help="a persona judged twice in a batch: take its last line (default: an error)")
+                        help="a rerun of a persona whose earlier run is not done replaces it (default: an error)")
     parser.add_argument("--check", action="store_true",
-                        help="exit code 0 met, 2 met only conditionally (--exclude), 1 not met")
+                        help="exit code 0 met, 2 met only conditionally (--exclude, unchecked runs), 1 not met")
     args = parser.parse_args(argv)
     personas = PersonaSet.load(Path(args.personas), args.exclude)
     if not Path(args.scores).is_file():
@@ -331,9 +353,10 @@ def main(argv: list[str] | None = None) -> int:
     print(report(batches, personas))
     if not args.check:
         return 0
-    if streak(batches, personas.expected) < STREAK:
+    run = streak(batches, personas.expected)
+    if run < STREAK:
         return 1
-    return 2 if personas.excluded else 0
+    return 2 if personas.excluded or unchecked(batches, min(run, STREAK)) else 0
 
 
 if __name__ == "__main__":

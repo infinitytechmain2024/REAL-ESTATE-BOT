@@ -233,10 +233,10 @@ def good_batch(name: str) -> list[dict]:
 
 def test_the_streak_of_three(tmp_path: Path, persona_set: Path, capsys: pytest.CaptureFixture[str]) -> None:
     personas = score.PersonaSet.load(persona_set)
-    lines = [*good_batch("b1"), *good_batch("b2"), *good_batch("b3")]
-    # b1 judged again: with --latest the last line of a persona wins (home_a 1/10 -> buyer_home (10 + 100) / 2 =
-    # 55 %, the mean by roles (55 + 100 + 90 + 100) / 4 = 86 %: b1 fails)
-    lines.append(objects("b1", "home_a", 1))
+    # b1: home_a stalled, its rerun replaces it with --latest (home_a 1/10 -> buyer_home (10 + 100) / 2 = 55 %,
+    # the mean by roles (55 + 100 + 90 + 100) / 4 = 86 %: b1 fails)
+    b1 = [line("b1", "home_a", status="stalled"), *good_batch("b1")[1:]]
+    lines = [*b1, *good_batch("b2"), *good_batch("b3"), {**objects("b1", "home_a", 1), "run": "b1-home_a-rerun"}]
     path = write(tmp_path, lines)
     batches = score.load(path, personas, latest=True)
     assert [b.name for b in batches] == ["b1", "b2", "b3"]
@@ -394,17 +394,61 @@ def test_one_line_per_persona_in_a_batch(tmp_path: Path, persona_set: Path,
     path = write(tmp_path, [*lines, *retries])
     with pytest.raises(ValueError, match="a second line of persona 'home_a'"):
         score.load(path, personas)
-    batch = score.load(path, personas, latest=True)[0]
-    assert batch.role_scores()["buyer_home"] == pytest.approx(0.6)  # (100 + 20) / 2, not (100*3 + 20) / 4
-    assert [r.run for r in batch.roles["buyer_home"]] == ["b1-home_b", "b1-home_a-retry2"]
-    # the last line in the file wins with --latest, even if it is worse
-    worse = write(tmp_path, [*lines, {**objects("b1", "home_a", 1), "run": "b1-home_a-retry3"}])
-    assert score.load(worse, personas, latest=True)[0].role_scores()["buyer_home"] == pytest.approx(0.15)
+    # --latest never replaces a finished run: no rerunning or rejudging until the score is good
+    with pytest.raises(ValueError, match="already has a finished run 'b1-home_a'"):
+        score.load(path, personas, latest=True)
+    worse_first = write(tmp_path, [{**objects("b1", "home_a", 1)}, *lines[1:], *retries])
+    with pytest.raises(ValueError, match="replaces only a run that is not done"):
+        score.load(worse_first, personas, latest=True)
     args = ["--scores", str(path), "--personas", str(persona_set)]
     with pytest.raises(ValueError, match="one per batch, or --latest"):
         score.main(args)
-    assert score.main([*args, "--latest"]) == 0
+    with pytest.raises(ValueError, match="already has a finished run"):
+        score.main([*args, "--latest"])
+    # an unfinished run (stalled twice) is replaced by its rerun: one line, the role counted once
+    stalled = [line("b1", "home_a", status="stalled"), {**line("b1", "home_a", status="waiting"), "run": "b1-a2"},
+               {**objects("b1", "home_a", 10), "run": "b1-a3"}]
+    path = write(tmp_path, [*stalled, *lines[1:]])
+    batch = score.load(path, personas, latest=True)[0]
+    assert batch.role_scores()["buyer_home"] == pytest.approx(0.6)  # (100 + 20) / 2, the stalled lines gone
+    assert sorted(r.run for r in batch.roles["buyer_home"]) == ["b1-a3", "b1-home_b"]
+    # and a done rerun after it is again refused
+    with pytest.raises(ValueError, match="already has a finished run 'b1-a3'"):
+        score.load(write(tmp_path, [*stalled, *lines[1:], {**objects("b1", "home_a", 10), "run": "b1-a4"}]),
+                   personas, latest=True)
+    path = write(tmp_path, [*stalled, *lines[1:]])
+    assert score.main(["--scores", str(path), "--personas", str(persona_set), "--latest"]) == 0
     capsys.readouterr()
+
+
+def test_unchecked_flags_keep_the_goal_conditional(tmp_path: Path, persona_set: Path,
+                                                   capsys: pytest.CaptureFixture[str]) -> None:
+    # three passing batches, one run in b3 flagged «check by hand» (2 cards, exact_available = exact = 2)
+    flagged = objects("b3", "home_a", 2, sent=2, available=2)
+    lines = [*good_batch("b1"), *good_batch("b2"), flagged, *good_batch("b3")[1:]]
+    args = ["--scores", str(write(tmp_path, lines)), "--personas", str(persona_set), "--check"]
+    assert score.main(args) == 2
+    out = capsys.readouterr().out
+    assert "met conditionally (runs to check by hand)" in out and "b3/b3-home_a: check by hand" in out
+    # the orchestrator checked it: checked_by_hand true, the goal is met
+    lines[10] = {**flagged, "checked_by_hand": True}
+    args[1] = str(write(tmp_path, lines))
+    assert score.main(args) == 0
+    out = capsys.readouterr().out
+    assert "goal (3 in a row): met" in out and "b3/b3-home_a: checked by hand" in out
+    # a flag outside the streak does not matter; a non-bool mark is refused
+    old = [objects("b0", "home_a", 2, sent=2, available=2), *good_batch("b0")[1:]]
+    args[1] = str(write(tmp_path, [*old, *good_batch("b1"), *good_batch("b2"), *good_batch("b3")]))
+    assert score.main(args) == 0
+    capsys.readouterr()
+    with pytest.raises(ValueError, match="checked_by_hand must be true or false"):
+        score.load(write(tmp_path, [{**flagged, "checked_by_hand": "yes"}]))
+    # both: excluded personas and unchecked runs
+    no_post = [x for x in lines if x["persona"] != "post_a"]
+    no_post[8] = flagged
+    args[1] = str(write(tmp_path, no_post))
+    assert score.main([*args, "--exclude", "X5"]) == 2
+    assert "personas excluded, runs to check by hand" in capsys.readouterr().out
 
 
 def test_check_by_hand_and_seeds(tmp_path: Path, persona_set: Path, capsys: pytest.CaptureFixture[str]) -> None:
