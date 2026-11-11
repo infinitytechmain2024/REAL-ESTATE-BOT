@@ -392,7 +392,7 @@ async def test_email_and_phone_in_the_text_never_reach_title_snippet_or_judge(le
     await li.ApifyLinkedInPeople(MemorySourceRunStore(), http(Api([row])), CONFIG).run(CAMPAIGN, SEARCH, store, judge)
     (stored,) = store.contacts.values()
     assert stored.candidate.title == "Agente"
-    assert stored.candidate.snippet == "Socia, Ejemplo (tel. ) · Madrid"
+    assert stored.candidate.snippet == "Socia, Ejemplo ( ) · Madrid"  # «tel. 912 345 678» cut with its keyword
     kept = repr(store.contacts) + repr(store.enrichments) + repr(judge.seen)
     for leaked in ("@", "gmail", "600 111 222", "600111222", "912 345 678"):
         assert leaked not in kept, leaked
@@ -560,6 +560,8 @@ async def test_postgres_linkedin_enrichment_does_not_mark_enriched(pool) -> None
     "Proyectos de 100.000.000 €", "2015-2018 2019-2023", "Ticket 700 000 000 €", "Ticket 600 000 000€",
     "Fondos de 650 000 000 USD", "Ticket 900k", "Ticket 650 000 M", "Ticket 700.000-900.000",
     "Rango 600 - 900", "CEO · Inversiones 2010-2020 | Madrid", "Desde 1999 - 2024, 120 proyectos",
+    "+100 000 000 euros", "Gestiono +200 000 000 en activos", "+1 000 000 m2", "Top +40 2023 2024",
+    "Fondos 600 000 000 EUR", "Call center 2023", "Kowa 600 111 22",
 ])
 def test_clean_text_keeps_sums_ranges_and_years(text) -> None:
     assert li.clean_text(text) == text
@@ -567,12 +569,15 @@ def test_clean_text_keeps_sums_ranges_and_years(text) -> None:
 
 @pytest.mark.parametrize(("text", "clean"), [
     ("+34 600 111 222", ""), ("600 111 222", ""), ("600-111-222", ""), ("(+34) 912 34 56 78", ""),
-    ("Tel 912345678", "Tel"), ("Llámame +34 600 111 222 ya", "Llámame ya"),
+    ("912345678", ""), ("Tel: +44 20 7946 0958", ""), ("WhatsApp +1 415 555 0101", ""),
+    ("📞 0033 6 12 34 56 78", ""), ("tlf. 912-34-56-78", ""), ("Móvil 600111222 Madrid", "Madrid"),
+    ("Tel 912345678", ""), ("Llámame +34 600 111 222 ya", "Llámame ya"),
     ("Agente | ana@gmail.com | +34 600 111 222", "Agente"),
     ("+34600111222", ""), ("+34 600111222", ""), ("0034 600 111 222", ""), ("0034600111222", ""),
     ("(+34)600111222", ""), ("(0034) 600 111 222", ""), ("Agente +34600111222 Madrid", "Agente Madrid"),
 ])
 def test_clean_text_cuts_phones(text, clean) -> None:
+    """The narrow rule: Spanish numbers, and any number after a keyword."""
     assert li.clean_text(text) == clean
 
 
@@ -586,8 +591,15 @@ async def test_a_ticket_in_the_headline_reaches_the_judge(ledger) -> None:
 def test_clean_text_is_linear_on_long_text() -> None:
     import time
 
-    texts = ["1" * 10_000, "+3" * 5_000, "6 " * 5_000, "600-" * 2_500, "0034 " * 2_000, "9" * 9 + " €" * 4_995]
+    units = ["1", "+3", "6 ", "600-", "0034 ", " €", "tel ", "tel: 1-", "📞 (", "+34 6", "wa 1 2 3 ", "Tel: +44 20 "]
+    texts = [(unit * (10_000 // len(unit) + 1))[:10_000] for unit in units]
     for text in texts:
         start = time.perf_counter()
         li.clean_text(text)
         assert time.perf_counter() - start < 0.05, text[:20]
+
+
+@pytest.mark.parametrize("text", ["+44 20 7946 0958", "+1 415 555 0101", "0033 6 12 34 56 78"])
+def test_a_foreign_number_without_a_keyword_may_stay(text) -> None:
+    """Owner decision 2026-11-11: better a foreign phone left in than a sum cut out."""
+    assert li.clean_text(text) == text

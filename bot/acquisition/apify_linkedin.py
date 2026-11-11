@@ -203,28 +203,40 @@ class LinkedInContact:
         return " · ".join(p for p in parts if p)[:600]
 
 
-# A phone number written into a text. Narrow on purpose (a sum or a year cut out is worse than a phone left in):
-# * international: «+34», «(+34)», «0034» or «(0034)», then 8-12 digits in one run or 2-4 digit groups split by one
-#   space or hyphen (the prefix is cut together with the number);
-# * Spanish national: 9 digits starting 6-9, grouped «6xx xxx xxx» or «9xx xx xx xx» (one space or hyphen, or none).
-# Never a dot (a thousands separator), never «number - number» with spaces (a range), never next to a currency or a
-# multiplier (€, EUR, USD, $, k, M, mill., млн), never inside a longer number.
-_NOT_AFTER = r"(?![ -]?\d)(?![.,]\d)(?!\s?(?:€|EUR|USD|\$|[kKM]\b|mill|млн))"
-_PHONE = re.compile(
-    r"(?<![\w.,€$+])(?:"
-    r"(?:\((?:\+|00)\d{1,3}\)|(?:\+|00)\d{1,3})[ -]?(?:\d{8,12}|\d{2,4}(?:[ -]\d{2,4}){1,4})"
-    r"|[6-9]\d{2}(?:[ -]?\d{3}[ -]?\d{3}|[ -]?\d{2}[ -]?\d{2}[ -]?\d{2})"
-    r")" + _NOT_AFTER)
+# Phone numbers written into a text: a narrow rule (owner decision 2026-11-11, a sum or a year cut out is worse than
+# a phone left in). Only these are cut:
+# 1. Spanish international: «+34» or «0034», optionally in brackets, then a Spanish number (below);
+# 2. Spanish national: exactly 9 digits, the first 6-9, in one run or grouped 3-3-3 / 3-2-2-2 by one space or hyphen;
+#    no letter or digit, dot, comma, «€» or «$» next to it, no currency or multiplier after it;
+# 3. any number after a keyword (tel, tlf, telf, teléfono, móvil, mov, whatsapp, wa, phone, call, ☎, 📞): the keyword
+#    and the number (a «+» or a digit first, 8-15 digits with spaces, hyphens and brackets) are cut together.
+_ES9 = r"[6-9](?:\d{8}|\d{2}[ -]\d{3}[ -]\d{3}|\d{2}[ -]\d{2}[ -]\d{2}[ -]\d{2})"
+_NOT_AFTER = r"(?![\w])(?![.,]\d)(?!\s?(?:€|\$|EUR\b|USD\b|euros?\b|[kKM]\b|mill|млн|m2|m²))"
+_PHONE_ES = re.compile(
+    r"(?:(?<![\w+])(?:\((?:\+|00)34\)|(?:\+|00)34)[ -]?|(?<![\w.,€$+]))" + _ES9 + _NOT_AFTER)
+_PHONE_KEYWORD = re.compile(
+    r"(?:(?<!\w)(?i:tel[ée]fono|telf|tlf|tel|m[óo]vil|mov|whatsapp|wa|phone|call)(?!\w)|☎\ufe0f?|📞)"
+    r"[.:]{0,2}\s{0,3}(?P<number>(?:\(?\+|\(?\d)[\d \-()]{6,30}\d)(?!\w)")
 _SEPARATORS = re.compile(r"\s*([|·•,;])(?:\s*[|·•,;])+\s*")
 _EDGE = re.compile(r"^[\s|·•,;/:-]+|[\s|·•,;/:-]+$")
 
 
+def _keyword_phone(match: re.Match[str]) -> str:
+    digits = sum(ch.isdigit() for ch in match.group("number"))
+    return " " if 8 <= digits <= 15 else match.group()
+
+
 def clean_text(text: str) -> str:
-    """``text`` without the e-mail addresses and phone numbers written into it, and without the separators left."""
+    """``text`` without the e-mail addresses and phone numbers written into it, and without the separators left.
+
+    Phones by the narrow rule above: Spanish numbers (with or without +34 / 0034) and any number after a keyword
+    (tel, móvil, whatsapp, 📞 …). A foreign number without a keyword may stay (owner decision 2026-11-11).
+    """
     from bot.campaign.people import _EMAIL
 
     out = _EMAIL.sub(" ", text)
-    out = _PHONE.sub(" ", out)
+    out = _PHONE_KEYWORD.sub(_keyword_phone, out)
+    out = _PHONE_ES.sub(" ", out)
     out = _SEPARATORS.sub(r" \1 ", " ".join(out.split()))
     return _EDGE.sub("", out)
 
