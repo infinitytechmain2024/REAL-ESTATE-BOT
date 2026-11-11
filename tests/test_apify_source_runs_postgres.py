@@ -225,3 +225,22 @@ async def test_store_fresh_launch_is_busy_and_an_old_one_is_closed(conn, pool):
     await conn.execute("update public.apify_source_runs set launched_at = now() - interval '10 minutes'")
     assert (await runner(api, store).run(cid, INPUT, Sink())).error == "launch_unconfirmed"
     assert api.launches() == []
+
+
+async def test_store_refunds_a_rate_limited_launch_and_keeps_other_refusals(conn, pool):
+    """P1.2: a 429 inside the window does not count as an attempt (``unmark_launching(refund=True)``)."""
+    from bot.acquisition.apify_source import PostgresSourceRunStore, input_hash
+    from tests.test_apify_source_run import CONFIG, INPUT
+
+    cid = await _campaign(conn)
+    store = PostgresSourceRunStore(pool)
+    run = await store.claim(cid, CONFIG, input_hash(CONFIG.actor_id, INPUT))
+    token = await store.mark_launching(run)
+    await store.unmark_launching(run, token, refund=True)
+    saved = await conn.fetchrow("select status, run_id, attempts, launched_at from public.apify_source_runs")
+    assert (saved["status"], saved["run_id"], saved["attempts"], saved["launched_at"]) == ("claimed", None, 0, None)
+    token = await store.mark_launching(run)
+    await store.unmark_launching(run, token)  # any other refusal stays an attempt
+    assert await conn.fetchval("select attempts from public.apify_source_runs") == 1
+    await store.unmark_launching(run, token, refund=True)  # not launching any more: nothing changes
+    assert await conn.fetchval("select attempts from public.apify_source_runs") == 1
