@@ -1,0 +1,189 @@
+{
+  "name": "g3_house_marbella",
+  "id": "G3",
+  "role": "buyer_home",
+  "language": "en",
+  "mode": "real_estate",
+  "task": "looking to buy a house in Marbella, 200 m2 or more, must have pool",
+  "task_source": "text",
+  "voice": false,
+  "confirm_card": true,
+  "env": {},
+  "fixtures": "нужны записи порталов по Marbella",
+  "replies": {
+    "budget": [
+      {
+        "text": "up to 2 million euros",
+        "weight": 3
+      },
+      {
+        "text": "до 1,5 млн €",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      },
+      {
+        "text": "max 300k",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "place": [
+      {
+        "text": "Marbella",
+        "weight": 3
+      },
+      {
+        "text": "Marbella or nearby, Benahavís is fine",
+        "weight": 1
+      }
+    ],
+    "district": [
+      {
+        "text": "all of Marbella",
+        "weight": 2
+      },
+      {
+        "text": "Nueva Andalucía, Golden Mile",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "area": [
+      {
+        "text": "200 m2 built, at least",
+        "weight": 3
+      },
+      {
+        "text": "150",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "rooms": [
+      {
+        "text": "3+ bedrooms",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 2,
+        "tag": "any"
+      }
+    ],
+    "property_type": [
+      {
+        "text": "house / villa",
+        "weight": 1
+      }
+    ],
+    "deal": [
+      {
+        "press": "Покупка",
+        "weight": 3
+      }
+    ],
+    "details": [
+      {
+        "text": "doesn't matter",
+        "weight": 2,
+        "tag": "any"
+      },
+      {
+        "text": "renovated preferred",
+        "weight": 1
+      }
+    ],
+    "must_have": [
+      {
+        "text": "pool",
+        "weight": 3
+      }
+    ],
+    "deviation": [
+      {
+        "press": "Только точные",
+        "weight": 3
+      },
+      {
+        "press": "±10 %",
+        "weight": 2
+      },
+      {
+        "text": "не знаю, на ваше усмотрение",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "clarify": [
+      {
+        "text": "buy, house 200 m2+ with pool in Marbella",
+        "weight": 1
+      }
+    ],
+    "card": [
+      {
+        "press": "task:launch",
+        "weight": 8
+      },
+      {
+        "text": "pool is mandatory",
+        "weight": 1,
+        "tag": "edit"
+      }
+    ]
+  },
+  "truth": {
+    "objects": {
+      "hard": {
+        "property_type": {
+          "value": "house",
+          "from": "task"
+        },
+        "deal": {
+          "value": "sale",
+          "from": "task"
+        },
+        "place": {
+          "value": {
+            "city": "Marbella"
+          },
+          "from": "task",
+          "accept": [
+            "Benahavís",
+            "Estepona"
+          ],
+          "note": "соседние — только если пользователь разрешил; иначе «похоже»"
+        },
+        "area_min_m2": {
+          "value": 200,
+          "from": "task",
+          "kind": "built"
+        },
+        "pool": {
+          "value": true,
+          "from": "task",
+          "note": "бассейн упомянут в объявлении"
+        },
+        "price_max_eur": {
+          "value": null,
+          "from": "budget"
+        }
+      },
+      "soft": [
+        "3+ спальни"
+      ],
+      "not": [
+        "площадь участка выдана за площадь дома",
+        "квартира вместо дома"
+      ]
+    }
+  }
+}

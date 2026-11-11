@@ -1,0 +1,199 @@
+{
+  "name": "g9_both_land_madrid",
+  "id": "G9",
+  "role": "both",
+  "language": "ru",
+  "mode": "both",
+  "task": "участок под застройку в Мадриде от 2000 м² и инвесторы под проект",
+  "task_source": "text",
+  "voice": false,
+  "confirm_card": true,
+  "env": {},
+  "fixtures": "tests/fixtures/portals_live (Madrid, solares) — объекты есть; инвесторы — нужны записи",
+  "replies": {
+    "budget": [
+      {
+        "text": "до 2 млн €",
+        "weight": 3
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "place": [
+      {
+        "text": "Мадрид",
+        "weight": 3
+      },
+      {
+        "text": "провинция Мадрид",
+        "weight": 1
+      }
+    ],
+    "district": [
+      {
+        "text": "вся провинция",
+        "weight": 2
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "area": [
+      {
+        "text": "от 2000 м²",
+        "weight": 3
+      },
+      {
+        "text": "от 200 м²",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "property_type": [
+      {
+        "text": "участок",
+        "weight": 1
+      }
+    ],
+    "deal": [
+      {
+        "press": "Покупка",
+        "weight": 3
+      }
+    ],
+    "ticket": [
+      {
+        "text": "от 100 тыс €",
+        "weight": 2
+      },
+      {
+        "text": "500 тыс – 2 млн €",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "investor_who": [
+      {
+        "text": "инвесторы в недвижимость, девелоперы",
+        "weight": 2
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "investor_role": [
+      {
+        "press": "Ищу деньги",
+        "weight": 3
+      }
+    ],
+    "details": [
+      {
+        "text": "под жилой дом на 10-20 квартир, нужно 1,5 млн €",
+        "weight": 2
+      },
+      {
+        "text": "не знаю пока",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "must_have": [
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "deviation": [
+      {
+        "press": "Только точные",
+        "weight": 3
+      },
+      {
+        "press": "±10 %",
+        "weight": 2
+      },
+      {
+        "text": "не знаю, на ваше усмотрение",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "clarify": [
+      {
+        "text": "участок от 2000 м² и инвесторы, которые вложат в стройку",
+        "weight": 1
+      }
+    ],
+    "card": [
+      {
+        "press": "task:launch",
+        "weight": 8
+      }
+    ]
+  },
+  "truth": {
+    "objects": {
+      "hard": {
+        "property_type": {
+          "value": "land",
+          "from": "task",
+          "note": "urbano/urbanizable предпочтительно; rústico — «похоже»"
+        },
+        "deal": {
+          "value": "sale",
+          "from": "task"
+        },
+        "place": {
+          "value": {
+            "province": "Madrid"
+          },
+          "from": "task"
+        },
+        "area_min_m2": {
+          "value": 2000,
+          "from": "task",
+          "kind": "plot"
+        },
+        "price_max_eur": {
+          "value": null,
+          "from": "budget"
+        }
+      },
+      "soft": [
+        "под застройку (urbano/urbanizable)"
+      ],
+      "not": [
+        "площадь дома"
+      ]
+    },
+    "leads": {
+      "roles": [
+        "инвестор в недвижимость",
+        "девелопер-партнёр",
+        "соинвестор"
+      ],
+      "geo": [
+        "Madrid",
+        "España"
+      ],
+      "not": [
+        "продаёт участок",
+        "ищет инвестора сам"
+      ],
+      "soft": []
+    }
+  }
+}

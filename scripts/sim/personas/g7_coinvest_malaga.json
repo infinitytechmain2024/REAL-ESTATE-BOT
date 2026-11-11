@@ -1,0 +1,129 @@
+{
+  "name": "g7_coinvest_malaga",
+  "id": "G7",
+  "role": "investor_coinvest",
+  "language": "ru",
+  "mode": "investors",
+  "task": "ищу соинвесторов в проекты в Малаге, тикет от 50 000 €",
+  "task_source": "text",
+  "voice": false,
+  "confirm_card": true,
+  "env": {},
+  "fixtures": "нужны записи групп/комментариев Apify по Малаге",
+  "replies": {
+    "ticket": [
+      {
+        "text": "от 50 тыс €",
+        "weight": 3
+      },
+      {
+        "text": "50-200 тыс евро",
+        "weight": 1
+      },
+      {
+        "text": "от 5 тыс",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "place": [
+      {
+        "text": "Малага и Коста-дель-Соль",
+        "weight": 3
+      },
+      {
+        "text": "Малага",
+        "weight": 1
+      }
+    ],
+    "investor_who": [
+      {
+        "text": "частные инвесторы в недвижимость",
+        "weight": 3
+      },
+      {
+        "text": "любые инвесторы",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "investor_role": [
+      {
+        "press": "Ищу деньги",
+        "weight": 3
+      },
+      {
+        "text": "хочу вкладывать",
+        "weight": 1,
+        "tag": "contradiction"
+      }
+    ],
+    "term": [
+      {
+        "text": "проекты на 1-2 года",
+        "weight": 1
+      },
+      {
+        "press": "task:skip",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "details": [
+      {
+        "text": "реновация квартир под перепродажу, 300 тыс €",
+        "weight": 2
+      },
+      {
+        "text": "не знаю, разные",
+        "weight": 1,
+        "tag": "any"
+      }
+    ],
+    "clarify": [
+      {
+        "text": "ищу соинвесторов для своих проектов в Малаге, тикет от 50 тыс €",
+        "weight": 1
+      }
+    ],
+    "card": [
+      {
+        "press": "task:launch",
+        "weight": 8
+      },
+      {
+        "text": "тикет от 50 000 €, не меньше",
+        "weight": 1,
+        "tag": "edit"
+      }
+    ]
+  },
+  "truth": {
+    "leads": {
+      "roles": [
+        "частный инвестор",
+        "соинвестор",
+        "фонд/клуб инвесторов в недвижимость"
+      ],
+      "geo": [
+        "Málaga",
+        "Costa del Sol",
+        "Andalucía"
+      ],
+      "not": [
+        "ищет инвестора сам (конкурент)",
+        "агент продаёт объект",
+        "кредит/ипотека"
+      ],
+      "soft": [
+        "интерес к недвижимости",
+        "контакт или профиль"
+      ],
+      "ticket_eur": {
+        "min": 50000,
+        "max": null,
+        "from": "task"
+      }
+    }
+  }
+}
