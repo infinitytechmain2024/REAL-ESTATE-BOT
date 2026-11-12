@@ -235,19 +235,22 @@ assert SYSTEM.count(_QUOTABLE_V3) == 1
 _BEFORE_NUMBERS = "- budget, rooms, area: numbers compare with the tolerance:"
 _NON_RESIDENTIAL = """- Not a home: when "type" is apartment or house (a place to live), a unit the listing shows is not legal housing
   is a different kind: "type" is "fail", quote the sign. Signs:
-  * in a RENT only: VAT charged on the monthly rent itself («alquiler 900 € + IVA», «900 €/mes más IVA», «IVA
-    incluido, ya que se trata de un estudio»). Not a sign: VAT on the agency fee («honorarios + IVA»), on a garage
-    or storage room, on utilities or services («gastos + IVA», «limpieza con IVA»).
+  * in a RENT only: VAT on the monthly rent that the listing explains by a non-residential use («IVA incluido, ya
+    que se trata de un estudio», «+ IVA por ser local», «+ IVA, uso de oficina»). VAT on the rent alone, with no
+    word about the use («alquiler 900 € + IVA», «900 €/mes más IVA»), is only an indirect sign: "unknown". Not a
+    sign at all: VAT on the agency fee («honorarios + IVA»), on a garage or storage room, on utilities or services
+    («gastos + IVA», «limpieza con IVA»); a rent to a company for its staff («alquiler a empresa para empleados
+    + IVA»).
   * In a SALE, above all obra nueva / promoción, «+ IVA» and «IVA incluido» are normal: never a sign.
   * «sin cédula de habitabilidad», «no apto para vivienda», «no es vivienda».
   * «uso profesional», «local reconvertido», «oficina reconvertida», «antiguo local» only when the listing says
     plainly that it is not housing («solo uso profesional», «local sin cambio de uso a vivienda»). Housing, no sign:
     «vivienda o uso profesional», «apto para vivienda y despacho», «reconvertido en vivienda con cédula».
-  * A tourist flat is housing, no sign: VUT, «vivienda de uso turístico», «uso turístico», «licencia turística».
+  * A tourist flat is housing, no sign: VUT, «vivienda de uso turístico», «uso turístico», «licencia turística»,
+    also «licencia turística en trámite».
   "A studio counts" means a residential studio flat, not a professional «estudio». An indirect sign only (a «local»
-  or «estudio» without saying it is not housing, «ideal para despacho», «licencia en trámite», VAT on the rent
-  without a word about the use): "type" is "unknown" with that quote. For a task about a commercial unit these
-  signs are no fail.
+  or «estudio» without saying it is not housing, «ideal para despacho», VAT on the rent without a word about the
+  use): "type" is "unknown" with that quote. For a task about a commercial unit these signs are no fail.
 """
 assert SYSTEM.count(_BEFORE_NUMBERS) == 1
 
