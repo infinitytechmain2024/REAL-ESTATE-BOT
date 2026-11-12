@@ -92,16 +92,22 @@ async def test_flag_off_keeps_the_city_name_even_with_a_geocoder(ledger):
     found.resolve.assert_not_awaited()
 
 
-async def test_flag_on_sends_the_city_centre_and_a_circle(ledger):
+async def test_flag_on_sends_the_name_with_the_city_centre_and_a_small_circle(ledger):
     found = geocoder()
     sent = await _input(geocoder=found, unambiguous_place=True)
     assert sent == {"maxItems": 5, "operation": "sale", "propertyType": "lands", "country": "es",
-                    "sortBy": "mostRecent", "latitude": 39.4699, "longitude": -0.3763, "distanceKm": 15,
-                    "maxPrice": "300000"}
+                    "sortBy": "mostRecent", "location": "Valencia", "latitude": 39.4699, "longitude": -0.3763,
+                    "distanceKm": 5, "maxPrice": "300000"}
     found.resolve.assert_awaited_once_with("Valencia")
 
 
-@pytest.mark.parametrize("found", [None, geocoder(None)])
+def broken():
+    found = AsyncMock()
+    found.resolve.side_effect = RuntimeError("redis down")
+    return found
+
+
+@pytest.mark.parametrize("found", [None, geocoder(None), broken()])
 async def test_flag_on_without_a_centre_keeps_the_name(ledger, found):
     sent = await _input(geocoder=found, unambiguous_place=True)
     assert sent["location"] == "Valencia" and "latitude" not in sent and "distanceKm" not in sent
@@ -112,6 +118,54 @@ async def test_flag_on_leaves_province_and_radius_tasks_as_they_were(ledger):
     assert province["location"] == "Valencia" and "latitude" not in province
     radius = await _input(task(radius_km=30.0), geocoder=geocoder(), unambiguous_place=True)
     assert radius["distanceKm"] == 30 and "location" not in radius
+
+
+BURJASSOT = (39.5097, -0.4131)
+
+
+def valencia_near_burjassot(code):
+    """A Valencia row 3 km from Burjassot's centre: inside the circle the actor was given."""
+    return row(propertyCode=code, url=f"https://www.idealista.com/inmueble/{code}/", latitude=39.4890, longitude=-0.3870)
+
+
+async def test_flag_on_suburb_rows_of_the_big_city_inside_the_circle_are_not_wrong_place(ledger):
+    rows = [valencia_near_burjassot(str(100000010 + i)) for i in range(3)]
+    adapter = source(rows, [], geocoder=geocoder(BURJASSOT), unambiguous_place=True)
+    with source_run_scope(context()):
+        assert await adapter.search(task(location="Burjassot"), limit=5) == []
+    assert [(e.code, e.units) for e in ledger.entries if e.kind == "skip"] == [("apify_invalid_listing", 3)]
+    await adapter.aclose()
+
+
+async def test_flag_on_empty_dataset_is_an_empty_run_not_wrong_place(ledger):
+    adapter = source([], [], geocoder=geocoder(), unambiguous_place=True)
+    with source_run_scope(context()):
+        assert await adapter.search(task(), limit=5) == []
+    assert not [e for e in ledger.entries if e.kind == "skip"]
+    await adapter.aclose()
+
+
+async def test_flag_on_resumed_run_launches_nothing_and_still_tells_the_place(ledger):
+    requests = []
+    found = geocoder(BURJASSOT)
+    resumed = replace(context(), run_id="run1")
+
+    def handler(request):
+        requests.append(request)
+        if "actor-runs" in request.url.path:
+            return httpx.Response(200, json={"data": {"status": "SUCCEEDED", "defaultDatasetId": "data1",
+                                                      "usageTotalUsd": .01}})
+        return httpx.Response(200, json=[valencia_near_burjassot("100000020"), lleida("100000021")])
+
+    adapter = ApifyIdealistaPortalSource("secret-token", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                                         sleep=AsyncMock(), geocoder=found, unambiguous_place=True)
+    with source_run_scope(resumed):
+        assert await adapter.search(task(location="Burjassot"), limit=5) == []
+    assert not any(r.method == "POST" and "/acts/" in r.url.path for r in requests)
+    found.resolve.assert_awaited_with("Burjassot")
+    skips = sorted((e.code, e.units) for e in ledger.entries if e.kind == "skip")
+    assert skips == [("apify_invalid_listing", 1), ("apify_wrong_place", 1)]
+    await adapter.aclose()
 
 
 async def test_flag_on_lleida_rows_end_the_run_as_wrong_place(ledger):
@@ -150,6 +204,8 @@ def test_wrong_place_needs_a_place_the_row_gives():
     assert adapter._wrong_place(lleida("1"), task(), VALENCIA)
     assert not adapter._wrong_place(row(municipality="", province=""), task(), VALENCIA)  # no place: not «elsewhere»
     assert not adapter._wrong_place(row(), task(), VALENCIA)
+    assert not adapter._wrong_place(valencia_near_burjassot("1"), task(location="Burjassot"), BURJASSOT)
+    assert adapter._wrong_place(valencia_near_burjassot("1"), task(location="Burjassot"), None)  # name only
     assert adapter._wrong_place(lleida("1"), task(place_level="province"), None)
     assert adapter._wrong_place(lleida("1"), task(radius_km=20.0), VALENCIA)
     assert not ApifyIdealistaPortalSource("secret-token")._wrong_place(lleida("1"), task(), VALENCIA)  # flag off
