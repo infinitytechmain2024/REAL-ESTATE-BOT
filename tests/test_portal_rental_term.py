@@ -123,12 +123,22 @@ def test_flag_on_habitaclia_and_milanuncios_have_no_term():
     ("на 2 года", "long"), ("год и дольше", "long"), ("на лето", "short"), ("на 1–3 месяца", "short"),
     ("посуточно", "short"), ("от 6 месяцев", None), ("не на год", None), (SOURCE_TEXT, None),
     ("на год, но можно и на лето", None),
+    # review: «длительн» only as «длительный срок»; a negation among the 3 words before a term
+    ("длительность не важна", None), ("на длительный срок", "long"),
+    ("не обязательно долгосрочно", None), ("не обязательно на год", None), ("без долгосрочного контракта", None),
+    ("not long term", None), ("срок не важен, можно и долгосрочно и временно", None),
+    ("не обязательно на лето", None), ("не на лето, а на год", "long"),
+    ("на 12 месяцев", "long"), ("на 1-2 года", "long"), ("минимум год", "long"), ("на 11 месяцев", "short"),
 ])
 def test_task_rental_term(text, term):
     assert task_rental_term(None, text) == term
 
 
 def test_task_term_from_the_answers_not_the_questions():
+    # the bot's question names one long term only: were it read, «на год» would make the task long
+    one_example = {"context": {"answers": [{"question": "На какой срок нужна аренда? Например: на год.",
+                                            "answer": "без разницы"}]}}
+    assert task_rental_term(one_example, SOURCE_TEXT) is None
     assert task_rental_term(YEAR_SPEC, SOURCE_TEXT) == "long"
     asked = {"context": {"answers": [{"question": TERM_QUESTION, "answer": "без разницы"}]}}
     assert task_rental_term(asked, SOURCE_TEXT) is None
