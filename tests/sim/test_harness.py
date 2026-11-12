@@ -19,6 +19,7 @@ import pytest
 from scripts.sim import db
 from scripts.sim.cassette import SimNet, SimStop, digest, llm_request, mark_now, offline
 from scripts.sim.fixtures import answer as answer_apify
+from scripts.sim.harness import _questions
 from tests.sim import model
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -253,6 +254,83 @@ def test_a_reply_with_inline_buttons_does_not_change_the_bottom_keyboard(tmp_pat
     bench._say("bot", Reply("Какой бюджет?", (Button("Не важно", callback_data="task:skip"),), keyboard=()))
     assert bench.keyboard == shown
     assert "keyboard" not in bench.dialogue[-1]
+
+
+# --- the runner's «Показать?» after the cards ---------------------------------------------------------------------
+
+
+class _Control:
+    def __init__(self) -> None:
+        self.pressed: list[str] = []
+
+    async def handle_callback(self, user_id: int, data: str, *, chat_id: int):
+        from bot.control_plane.models import Reply
+
+        self.pressed.append(data)
+        return Reply("Хорошо, пришлю похожие варианты.")
+
+
+def _offer_bench(root: Path):
+    from scripts.sim.harness import USER, Bench, Persona
+
+    bench = Bench(root, "near", Persona(name="p", task="дом в Марбелье"))
+    bench.control = _Control()
+    campaign = "00000000-0000-4000-8000-00000000000b"
+    bench.net.telegram.messages += [
+        {"message_id": 1001, "chat_id": USER, "text": "Карточка 1", "buttons": [], "edits": 0, "deleted": False},
+        {"message_id": 1002, "chat_id": USER, "text": "Есть ещё похожие варианты (таунхаус). Показать?",
+         "buttons": [{"text": "Одобрить", "data": f"near:yes:similar:{campaign}"},
+                     {"text": "Нет", "data": f"near:no:similar:{campaign}"}], "edits": 0, "deleted": False}]
+    return bench
+
+
+@pytest.mark.asyncio
+async def test_the_show_similar_question_waits_for_the_user_and_the_answer_presses_it(tmp_path: Path) -> None:
+    from scripts.sim import answer_user
+    from scripts.sim.harness import AnswerStop
+
+    bench = _offer_bench(tmp_path)
+    with pytest.raises(AnswerStop) as stop:  # nothing answered yet: the run waits, like an interview question
+        await bench._offer()
+    pending = json.loads(stop.value.path.read_text(encoding="utf-8"))
+    assert pending["offer"] is True and pending["index"] == 0 and pending["question"].endswith("Показать?")
+    assert [b["text"] for b in pending["buttons"]] == ["Одобрить", "Нет"]
+    assert bench.dialogue[-1]["source"] == "offer"
+    persona = {"replies": {"near": [{"press": "Одобрить", "weight": 1}]}}
+    assert answer_user.answer_pending(tmp_path, "near", persona, 0)[0] == answer_user.EXIT_ANSWERED
+
+    again = _offer_bench(tmp_path)  # the next pass replays the answer
+    assert await again._offer() is True
+    assert again.control.pressed == ["near:yes:similar:00000000-0000-4000-8000-00000000000b"]
+    assert again.offers == [{"question": "Есть ещё похожие варианты (таунхаус). Показать?", "index": 0, "tag": None,
+                             "press": "near:yes:similar:00000000-0000-4000-8000-00000000000b"}]
+    assert {"question": "Есть ещё похожие варианты (таунхаус). Показать?",
+            "answer": "[near:yes:similar:00000000-0000-4000-8000-00000000000b]"} in _questions(again.dialogue)
+    assert await again._offer() is False  # asked once
+
+
+@pytest.mark.asyncio
+async def test_without_a_near_reply_the_answer_is_no_and_the_result_says_so(tmp_path: Path) -> None:
+    from scripts.sim import answer_user
+    from scripts.sim.harness import AnswerStop
+
+    with pytest.raises(AnswerStop):
+        await _offer_bench(tmp_path)._offer()
+    assert answer_user.answer_pending(tmp_path, "near", {"replies": {}}, 0)[0] == answer_user.EXIT_ANSWERED
+    bench = _offer_bench(tmp_path)
+    await bench._offer()
+    assert bench.control.pressed == ["near:no:similar:00000000-0000-4000-8000-00000000000b"]
+    assert bench.offers[0]["tag"] == "default"
+    result = await bench.result()  # no pool: the dialogue part only
+    assert result["offers"] == bench.offers
+
+
+@pytest.mark.asyncio
+async def test_a_missing_model_answer_lets_the_pass_go_on_before_the_question(tmp_path: Path) -> None:
+    bench = _offer_bench(tmp_path)
+    bench.net.pending_llm.append("abc")
+    assert await bench._offer() is False  # collected first: the question waits for the next pass
+    assert not (tmp_path / "pending_answers" / "near.json").exists() and bench.offers == []
 
 
 # --- the rest of the world ---------------------------------------------------------------------------------------

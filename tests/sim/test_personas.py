@@ -15,7 +15,7 @@ from scripts.sim.harness import Persona
 PERSONAS = Path(__file__).resolve().parents[2] / "scripts" / "sim" / "personas"
 FILES = sorted(PERSONAS.glob("*.json"))
 ROLES = set(score.KINDS)
-SLOTS = {slot for slot, _ in answer_user.SLOT_PATTERNS} | {answer_user.CARD}
+SLOTS = {slot for slot, _ in answer_user.SLOT_PATTERNS} | {answer_user.CARD, answer_user.NEAR}
 
 
 def load(path: Path) -> dict:
@@ -248,6 +248,49 @@ def test_the_card_and_what_is_left_pending(tmp_path: Path) -> None:
     assert answer_user.answer_pending(tmp_path, "r", persona, 1)[0] == answer_user.EXIT_NOTHING
     (tmp_path / "pending_answers" / "r.json").unlink()
     assert answer_user.answer_pending(tmp_path, "r", persona, 1)[0] == answer_user.EXIT_NOTHING
+
+
+CAMPAIGN = "00000000-0000-4000-8000-000000000008"
+NEAR = (("Одобрить", f"near:yes:similar:{CAMPAIGN}"), ("Нет", f"near:no:similar:{CAMPAIGN}"))
+SHOW_SIMILAR = "Есть ещё похожие варианты (таунхаус с общим бассейном). Показать?"
+
+
+def test_the_show_similar_question_is_the_near_slot() -> None:
+    assert answer_user.slot_of({"question": SHOW_SIMILAR, "buttons": [{"text": t, "data": d} for t, d in NEAR]}) == \
+        answer_user.NEAR
+    # by the pending's mark too, whatever the text names (here: «бассейн», «площадь» would be other slots)
+    assert answer_user.slot_of({"question": "Площадь не указана. Показать?", "offer": True}) == answer_user.NEAR
+
+
+def test_every_persona_answers_the_show_similar_question_by_its_role() -> None:
+    shares = {}
+    for path in FILES:
+        options = load(path)["replies"]["near"]
+        assert {o["press"] for o in options} == {"Одобрить", "Нет"}, path.stem
+        weight = {o["press"]: o["weight"] for o in options}
+        shares[path.stem] = weight["Одобрить"] / (weight["Одобрить"] + weight["Нет"])
+    assert shares["g7_coinvest_malaga"] > 0.5 and shares["n2_agent_buyers_estepona"] > 0.5  # investors: more «да»
+    assert shares["g2_flat_valencia"] < 0.5 and shares["g3_house_marbella"] < 0.5  # strict buyers: more «нет»
+
+
+def test_the_show_similar_answer_by_weight_and_the_default_no(tmp_path: Path) -> None:
+    persona = load(PERSONAS / "g7_coinvest_malaga.json")
+    picks = set()
+    for seed in range(30):
+        root = tmp_path / str(seed)
+        pending(root, "r", SHOW_SIMILAR, buttons=NEAR)
+        assert answer_user.answer_pending(root, "r", persona, seed)[0] == answer_user.EXIT_ANSWERED
+        data = load(root / "answers" / "r.json")
+        assert data["log"][0]["slot"] == "near" and data["log"][0]["tag"] is None
+        picks.add(data["answers"][0]["press"])
+    assert picks == {"Одобрить", "Нет"}
+    # no ``near`` in the persona: «Нет», and the log says it was not the persona's choice
+    pending(tmp_path, "d", SHOW_SIMILAR, buttons=NEAR)
+    code, message = answer_user.answer_pending(tmp_path, "d", {"replies": {}}, 0)
+    assert code == answer_user.EXIT_ANSWERED and "default" in message
+    data = load(tmp_path / "answers" / "d.json")
+    assert data["answers"] == [{"press": "Нет"}]
+    assert data["log"] == [{"index": 0, "slot": "near", "tag": "default", "seed": 0}]
 
 
 def test_the_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

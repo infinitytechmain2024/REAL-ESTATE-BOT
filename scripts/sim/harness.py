@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import db
-from .answer_user import keyboard_label
+from .answer_user import NEAR_PREFIX, keyboard_label
 from .cassette import _DATETIME, SimNet, SimStop, mark_now, normalize, offline
 
 log = logging.getLogger("scripts.sim")
@@ -218,6 +218,8 @@ class Bench:
         self.net = SimNet(self.root, strict=self.strict, run_id=self.run_id, responder=self.responder)
         self.trap = LogTrap()
         self.answers_used = 0
+        self.offers: list[dict[str, Any]] = []  # the runner's «Показать?» questions and what the user pressed
+        self._offered: set[int] = set()  # their Telegram message ids, asked once
 
     # -- the run --
 
@@ -429,6 +431,7 @@ class Bench:
                     break
             else:
                 reply = await text(str(answer.get("text", "")))
+        self._user_text = text
         if not launched:
             self.status, self.stop_reason = "stalled", "the interview did not reach «Запустить»"
             return None
@@ -488,15 +491,15 @@ class Bench:
     def _card_confirmed(answers: list[Any]) -> bool:
         return any(isinstance(a, dict) and a.get("press") in ("task:launch", "Запустить") for a in answers)
 
-    def _ask(self, reply: Any, card: bool = False) -> None:
+    def _ask(self, reply: Any, card: bool = False, offer: bool = False) -> None:
         """Stop for the agent-user's answer (``AnswerStop``), or for the model's when one is missing: after a miss
-        the interview went on with the rules, the question may be theirs."""
-        if self.net.pending_llm:
+        the interview went on with the rules, the question may be theirs. ``offer``: the runner's «Показать?»."""
+        if self.net.pending_llm and not offer:
             raise SimStop("llm", self.root / "pending" / f"{self.net.pending_llm[0]}.json")
         path = self.root / "pending_answers" / f"{self.run_id}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
-            "kind": "answer", "run": self.run_id, "index": self.answers_used, "card": card,
+            "kind": "answer", "run": self.run_id, "index": self.answers_used, "card": card, "offer": offer,
             "question": reply.text if reply is not None else "",
             "buttons": [{"text": b.text, "data": b.callback_data} for b in (reply.buttons if reply else ())
                         if b.callback_data],
@@ -640,6 +643,8 @@ class Bench:
                 if apify_tasks is not None:
                     await apify_tasks.wait()
                 self._check()
+            if await self._offer():  # the user answered «Показать?»: the approved ones stream in the next rounds
+                idle = after_end = 0
             campaign = await campaigns.get(self.campaign_id)
             if campaign is None:
                 break
@@ -661,6 +666,50 @@ class Bench:
                 idle = 0
         self.status, self.stop_reason = "stalled", "the campaign did not end"
 
+    async def _offer(self) -> bool:
+        """The runner's «Есть ещё похожие варианты (…). Показать?» (``near:`` buttons, ``bot/campaign/offers.py``)
+        is the user's question like the interview's: the next answer of ``sim/answers/<run>.json`` presses its
+        button through the control plane, else the run stops for it (pending ``offer: true``, slot ``near``).
+        While a model or an Apify answer is missing the pass goes on collecting them: the question waits for the
+        next pass. True when an answer was given."""
+        from bot.control_plane.models import Button, Reply
+
+        answered = False
+        for message in self.net.telegram.messages:
+            buttons = message.get("buttons") or []
+            if (message["chat_id"] != USER or message["message_id"] in self._offered or message.get("deleted")
+                    or not any(str(b.get("data") or "").startswith(NEAR_PREFIX) for b in buttons)):
+                continue
+            if self.answers_used >= len(self._answers()) and (self.net.pending_llm or self.net.pending_apify):
+                return answered
+            self._offered.add(message["message_id"])
+            reply = Reply(message["text"], tuple(Button(b["text"], callback_data=b["data"]) for b in buttons
+                                                 if b.get("data")))
+            self._say("bot", reply, source="offer")
+            index = self.answers_used
+            answer = self._answer(reply, False)
+            if answer is None:
+                self._ask(reply, offer=True)
+            record: dict[str, Any] = {"question": reply.text, "index": index, "tag": self._logged_tag(index)}
+            if "press" in answer:
+                data = _callback(reply, str(answer["press"]))
+                self._say("user", f"[{data}]", press=data)
+                self._say("bot", await self.control.handle_callback(USER, data, chat_id=USER), source="offer")
+                record["press"] = data
+            else:  # a typed answer goes to the chat as any message would
+                await self._user_text(str(answer.get("text", "")))
+                record["text"] = str(answer.get("text", ""))
+            self.offers.append(record)
+            answered = True
+        return answered
+
+    def _logged_tag(self, index: int) -> str | None:
+        """The ``log`` tag of answer ``index`` (``default``: the persona had no ``near`` reply, «Нет» was pressed)."""
+        path = self.root / "answers" / f"{self.run_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        log_ = data.get("log", []) if isinstance(data, dict) else []
+        return next((line.get("tag") for line in log_ if line.get("index") == index), None)
+
     # -- the result --
 
     async def result(self) -> dict[str, Any]:
@@ -673,6 +722,7 @@ class Bench:
             "dialogue": self.dialogue,
             "questions": _questions(self.dialogue),
             "check_card": self.check_card,
+            "offers": self.offers,  # «Показать?» after the cards: the press and its log tag (``default``: «Нет»)
         }
         if pool is not None and campaign_id is not None:
             data.update(await self._campaign_data(pool, campaign_id))
@@ -865,7 +915,7 @@ def _callback(reply: Any, wanted: str) -> str:
 def _questions(dialogue: list[dict[str, Any]]) -> list[dict[str, Any]]:
     pairs, question = [], None
     for item in dialogue:
-        if item["from"] == "bot" and item.get("source") == "intake":
+        if item["from"] == "bot" and item.get("source") in ("intake", "offer"):
             question = item
         elif item["from"] == "user" and question is not None:
             pairs.append({"question": question["text"], "answer": item["text"]})
