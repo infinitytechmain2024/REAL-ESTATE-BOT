@@ -686,13 +686,14 @@ async def test_investor_groups_of_the_task_are_queued_without_a_browser_and_thei
     assert store.findings_state == {"inv1": "delivered"}
 
 
-async def test_a_task_without_groups_and_without_a_browser_pauses_with_a_human_text() -> None:
+async def test_a_legacy_task_without_groups_and_without_a_browser_pauses_with_a_human_text() -> None:
     from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
     from bot.campaign.runner import NO_GROUPS
 
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
-    discovery = FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="apify")
+    # apify mode runs on without groups (Q1, below); legacy with no browser cannot search Facebook at all
+    discovery = FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="legacy")
     runner = CampaignRunner(campaigns, store, FakeMessenger(), discovery, now=Clock(), owner_ids={7},
                             config=RunnerConfig(relevance_fail_closed=False))
     cid = await create(campaigns, plan_campaign(GOAL))
@@ -852,3 +853,108 @@ async def test_the_notice_of_an_ended_campaign_has_no_button() -> None:
     await runner.step(cid)
     assert messenger.buttons == []
     assert any("новом поиске" in t for _, _, t in messenger.sent)
+
+
+# --- Q1-Q3: a search without Facebook groups still ends with a report; no «ничего» after leads ---------------
+
+
+class _SiteStage:
+    """The web stage: busy until the test says the sites are done."""
+
+    def __init__(self) -> None:
+        from bot.web_search.models import WebStatus
+
+        self.status = WebStatus(True, "idealista.com", "сайты: страниц 3/60")
+
+    async def web_status(self, campaign_id: str):
+        return self.status
+
+
+async def _no_groups_run(discovery_of):
+    from bot.campaign.final_report import FinalReporter
+    from bot.web_search.models import WebStatus
+
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    web = _SiteStage()
+    runner = CampaignRunner(campaigns, store, messenger, discovery_of(campaigns), web=web, now=clock, owner_ids={7},
+                            final_report=FinalReporter(), config=RunnerConfig(relevance_fail_closed=False))
+    cid = await create(campaigns, plan_campaign(GOAL))
+    await runner.tick()
+    assert (await campaigns.get(cid)).state == "running", "no groups: the sites still run, nothing is finished"
+    assert not [t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]
+    web.status = WebStatus(False)
+    clock.advance(1)
+    await runner.tick()
+    campaign = await campaigns.get(cid)
+    assert campaign.state == "completed"
+    assert len([t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]) == 1
+    return campaign
+
+
+async def test_q1_apify_mode_without_groups_and_browser_runs_the_other_stages_and_reports() -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+
+    campaign = await _no_groups_run(
+        lambda campaigns: FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="apify"))
+    assert campaign.stop_reason == "queue_exhausted"
+
+
+@pytest.mark.parametrize("profile", [None, "human_verification_required", "disabled"])
+async def test_q1_apify_without_groups_and_browser_never_waits_for_the_facebook_profile(profile) -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+    from bot.campaign.final_report import FinalReporter
+    from bot.web_search.models import WebStatus
+
+    campaigns = MemoryCampaignStore()
+    store, messenger, clock = MemoryRunStore(campaigns), FakeMessenger(), Clock()
+    store.profile = profile  # no facebook row in browser_profiles (only live view creates it), or not ready
+    web = _SiteStage()
+    discovery = FacebookDiscovery(campaigns, MemoryDiscoveryStore(), None, None, acquisition_mode="apify")
+    runner = CampaignRunner(campaigns, store, messenger, discovery, web=web, now=clock, owner_ids={7},
+                            final_report=FinalReporter(), config=RunnerConfig(relevance_fail_closed=False))
+    cid = await create(campaigns, plan_campaign(GOAL))
+    await runner.tick()
+    assert (await campaigns.get(cid)).state == "running"  # the sites still run
+    web.status = WebStatus(False)
+    clock.advance(1)
+    await runner.tick()
+    campaign = await campaigns.get(cid)
+    assert (campaign.state, campaign.stop_reason) == ("completed", "queue_exhausted")
+    assert len([t for _, _, t in messenger.sent if t.startswith("📋 Отчёт по поиску")]) == 1
+
+
+async def test_q2_an_empty_group_search_waits_for_the_sites_before_it_completes() -> None:
+    from bot.campaign.discovery import FacebookDiscovery, MemoryDiscoveryStore
+    from tests.test_campaign_discovery import FakeBrowser, FakeReader, Sleeps
+
+    campaign = await _no_groups_run(lambda campaigns: FacebookDiscovery(
+        campaigns, MemoryDiscoveryStore(), FakeBrowser(), FakeReader(), sleep=Sleeps(), max_seeds=1))
+    assert campaign.stop_reason == "queue_exhausted"
+
+
+async def test_q3_a_post_link_with_leads_sent_never_ends_with_nothing_found() -> None:
+    from bot.campaign.runs import PostReadSummary
+    from bot.campaign.status_text import NOTHING
+
+    link = "https://www.facebook.com/groups/1/posts/2/"
+    store, messenger, runner, cid = await _investors_with_flag(link, post_reads=True)
+    store.post_read_rows[cid] = [PostReadSummary(link, "done", 3, 1, 0.05)]
+    store.deliveries[(cid, "fb:juan")] = 41  # the lead card was sent before the campaign ended
+    store.deliveries[(cid, "reach:juan")] = 41  # the same card under a second key: still one card
+    store.deliveries[(cid, "fb:ana")] = None  # claimed, never sent (a crash while sending): not counted
+    await runner.step(cid)
+    await runner.step(cid)
+    texts = [t for _, _, t in messenger.sent]
+    assert any(t.startswith("📋 Отчёт по поиску") for t in texts)
+    assert NOTHING not in texts and NOTHING not in [t for _, _, t in messenger.edits]
+    assert texts[-1] == "✅ Готово: отправлено 1"  # the status: the lead counts as sent
+
+
+async def test_q3_the_owner_final_line_counts_the_lead_cards_sent() -> None:
+    store, messenger, runner, cid = await _investors_with_flag()
+    runner.owner_ids = {8}
+    store.deliveries[(cid, "fb:juan")] = 41
+    store.deliveries[(cid, "fb:ana")] = 42
+    await runner.step(cid)
+    assert messenger.sent[-1][2].endswith("Кампания завершена · найдено 2")

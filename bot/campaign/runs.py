@@ -257,6 +257,9 @@ class RunStore(Protocol):
     async def stored_people(self, campaign_id: str, location: str, days: int, limit: int) -> list[Person]: ...
     async def people_sent(self, campaign_id: str) -> int: ...
     async def reach_sent(self, campaign_id: str) -> int: ...
+    async def lead_cards_sent(self, campaign_id: str) -> int:
+        """Lead messages really sent (people, reach, a post's leads): one per Telegram message, ``sending`` not counted."""
+        ...
     async def claim_person(self, campaign_id: str, profile_key: str) -> bool: ...
     async def person_sent(self, campaign_id: str, profile_key: str, message_id: int) -> None: ...
     async def release_person(self, campaign_id: str, profile_key: str) -> None: ...
@@ -916,6 +919,11 @@ class PostgresRunStore:
             """select count(*) from campaign_lead_deliveries
                 where campaign_id = $1::uuid and profile_key like 'reach:%'""", campaign_id))
 
+    async def lead_cards_sent(self, campaign_id: str) -> int:
+        return int(await self.pool.fetchval(
+            """select count(distinct telegram_message_id) from campaign_lead_deliveries
+                where campaign_id = $1::uuid and state = 'sent'""", campaign_id))
+
     async def claim_person(self, campaign_id: str, profile_key: str) -> bool:
         return bool(await self.pool.fetchval(
             """insert into campaign_lead_deliveries (campaign_id, profile_key) values ($1::uuid, $2)
@@ -1475,6 +1483,9 @@ class MemoryRunStore:
 
     async def reach_sent(self, campaign_id: str) -> int:
         return sum(1 for cid, key in self.deliveries if cid == campaign_id and key.startswith("reach:"))
+
+    async def lead_cards_sent(self, campaign_id: str) -> int:
+        return len({m for (cid, _), m in self.deliveries.items() if cid == campaign_id and m is not None})
 
     async def claim_person(self, campaign_id: str, profile_key: str) -> bool:
         if (campaign_id, profile_key) in self.deliveries:

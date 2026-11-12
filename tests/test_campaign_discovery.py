@@ -316,7 +316,7 @@ async def test_bounds_on_seeds_results_candidates_visits_and_pacing() -> None:
     assert len(h.reader.visited) == 2
     navigations = len(h.browser.navigations) + len(h.reader.visited)
     assert len(h.sleeps.calls) == navigations - 1 and all(4.0 <= s <= 9.0 for s in h.sleeps.calls)
-    assert report.state == "completed" and report.stop_reason == "no_active_groups"
+    assert report.state == "running" and report.queued == 0  # Q2: no groups never ends it; the runner drains it
     assert {g.reject_reason for g in groups} == {"activity_unknown"}
 
 
@@ -331,9 +331,18 @@ async def test_time_budget_stops_the_search_and_still_finalizes() -> None:
     ticks = iter([0.0, 0.0, 5.0, 50.0, 500.0, 5000.0] + [9999.0] * 50)
     h = await setup(
         clock=lambda: next(ticks), time_budget_seconds=100)
+    finalized: list[str] = []
+    finalize = h.store.finalize
+
+    async def spy(campaign_id: str, **kwargs: Any) -> int:
+        finalized.append(campaign_id)
+        return await finalize(campaign_id, **kwargs)
+
+    h.store.finalize = spy
     report = await h.discovery.run(h.cid)
     assert report.budget_exhausted and len(h.browser.navigations) == 3
-    assert report.state == "completed"
+    assert report.state == "running" and report.queued == 0  # finalized with no group: the runner's drain ends it
+    assert finalized == [h.cid]  # the budget stop still finalizes the groups found
 
 
 async def test_a_search_challenge_stops_everything_and_resume_continues() -> None:
@@ -502,8 +511,14 @@ async def test_apify_mode_queues_the_groups_of_the_task_and_never_opens_a_browse
     assert h.store.profile.state == "ready" and h.store.progress == {}
 
 
-async def test_apify_mode_without_groups_in_the_task_still_needs_the_browser_search() -> None:
+async def test_apify_mode_without_groups_in_the_task_runs_without_facebook_or_searches_with_a_browser() -> None:
     h = await setup_spec("apify", spec={"sources": {"required": ["https://www.idealista.com/"]}}, browser=None,
+                         reader=None)
+    report = await h.discovery.run(h.cid)  # Q1: no groups, no browser: the other stages still run
+    assert report.state == "running" and report.queued == 0
+    assert await h.store.groups(h.cid) == [] and h.store.profile.state == "ready"
+
+    h = await setup_spec("legacy", spec={"sources": {"required": ["https://www.idealista.com/"]}}, browser=None,
                          reader=None)
     with pytest.raises(DiscoveryRefused, match="no_groups_no_browser"):
         await h.discovery.run(h.cid)

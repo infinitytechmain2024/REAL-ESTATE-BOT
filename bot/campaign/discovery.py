@@ -684,20 +684,28 @@ class FacebookDiscovery:
             queued += 1
         return queued
 
+    def reads_nothing(self, campaign: Campaign) -> bool:
+        """``apify`` without a browser and without groups in the task: Facebook has nothing to read or search, so the
+        campaign needs no Facebook profile (the runner skips its wait and drains the other stages)."""
+        return self.acquisition_mode == "apify" and self.browser is None and not required_groups(campaign.spec)
+
     async def run(self, campaign_id: str) -> DiscoveryReport:
         """Discover, (re)start or resume; raises ``DiscoveryRefused`` without side effects.
 
         ``apify`` with groups named in the task: they are queued and no browser is used here. The windows are still
         started by the runner, which needs a ready Facebook profile row; Apify reads them only for a campaign with
         ``acquisition_provider='apify'`` or with ``APIFY_FACEBOOK_SCOPE=all``. Without such groups and without a
-        browser: ``no_groups_no_browser``.
+        browser the campaign runs with no Facebook groups (the other stages go on); ``no_groups_no_browser`` is
+        raised in ``legacy`` mode only.
         """
         campaign = await self.campaigns.get(campaign_id)
         if campaign is None:
             raise DiscoveryRefused("campaign_not_found")
         if campaign.state not in RESUMABLE_STATES:
             raise DiscoveryRefused(f"campaign_{campaign.state}")
-        if self.acquisition_mode == "apify" and await self._seed_required_groups(campaign):  # the groups are given: no browser search for more
+        if self.acquisition_mode == "apify" and (await self._seed_required_groups(campaign) or self.browser is None):
+            # The groups are given: no browser search for more. None and no browser to search: Facebook has nothing to
+            # read, the campaign still runs (sites, Apify portals and networks, reach) and the runner drains it.
             if campaign.state != "running" and not await self.campaigns.set_state(campaign_id, "running", ACTOR):
                 raise DiscoveryRefused("campaign_state_changed")
             return await self._report(campaign_id, _Run())
@@ -731,12 +739,11 @@ class FacebookDiscovery:
                 await self.campaigns.set_state(campaign_id, "failed", ACTOR, reason=f"discovery_error:{type(exc).__name__}")
                 raise
             if run.stopped_state is None:
-                queued = await self.store.finalize(campaign_id, max_groups=campaign.plan.limits.max_groups,
-                                                   window_size=campaign.plan.limits.window_size, actor=ACTOR)
-                if queued:
-                    await self.campaigns.set_state(campaign_id, "running", ACTOR)
-                else:
-                    await self.campaigns.set_state(campaign_id, "completed", ACTOR, reason="no_active_groups")
+                await self.store.finalize(campaign_id, max_groups=campaign.plan.limits.max_groups,
+                                          window_size=campaign.plan.limits.window_size, actor=ACTOR)
+                # No group found is no reason to end the search: the runner completes it once the sites, networks
+                # and analysis are done (its drain), as for a campaign whose groups were all read.
+                await self.campaigns.set_state(campaign_id, "running", ACTOR)
             return await self._report(campaign_id, run)
         finally:
             try:
