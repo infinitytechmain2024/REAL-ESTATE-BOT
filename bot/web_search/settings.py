@@ -61,8 +61,8 @@ class WebSearchSettings(BaseSettings):
                                                   validation_alias="APIFY_IDEALISTA_IGOLAIZOLA_ACTOR")
     # igolaizola only: min_area above the actor's largest minSize (300 m2) is sorted "biggest", not "mostRecent".
     idealista_sort_biggest: bool = Field(default=False, validation_alias="IDEALISTA_SORT_BIGGEST")
-    # Q17, igolaizola only: a city task goes as its name plus its geocoded centre + 5 km (the name "Valencia" ran as
-    # València d'Àneu, Lleida); an output wholly from elsewhere ends the run with ``apify_wrong_place``.
+    # Q17, igolaizola only: a city task goes as its name plus its geocoded centre and a circle of the municipality's
+    # size (the name "Valencia" ran as València d'Àneu, Lleida); an output wholly from elsewhere is ``apify_wrong_place``.
     idealista_unambiguous_place: bool = Field(default=False, validation_alias="IDEALISTA_UNAMBIGUOUS_PLACE")
     # Portal actors on the same Apify token (bot/web_search/sources/portals.py), each off by default.
     apify_fotocasa_enabled: bool = Field(default=False, validation_alias="APIFY_FOTOCASA_ENABLED")
