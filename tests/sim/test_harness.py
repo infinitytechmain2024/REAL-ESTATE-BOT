@@ -303,7 +303,7 @@ async def test_the_show_similar_question_waits_for_the_user_and_the_answer_press
     assert await again._offer() is True
     assert again.control.pressed == ["near:yes:similar:00000000-0000-4000-8000-00000000000b"]
     assert again.offers == [{"question": "Есть ещё похожие варианты (таунхаус). Показать?", "index": 0, "tag": None,
-                             "press": "near:yes:similar:00000000-0000-4000-8000-00000000000b"}]
+                             "press": "near:yes:similar:00000000-0000-4000-8000-00000000000b", "bucket": "similar"}]
     assert {"question": "Есть ещё похожие варианты (таунхаус). Показать?",
             "answer": "[near:yes:similar:00000000-0000-4000-8000-00000000000b]"} in _questions(again.dialogue)
     assert await again._offer() is False  # asked once
@@ -331,6 +331,68 @@ async def test_a_missing_model_answer_lets_the_pass_go_on_before_the_question(tm
     bench.net.pending_llm.append("abc")
     assert await bench._offer() is False  # collected first: the question waits for the next pass
     assert not (tmp_path / "pending_answers" / "near.json").exists() and bench.offers == []
+
+
+class _Interview:
+    """The control plane's draft for ``Bench._talk``: one question (the budget), then «Проверьте задачу»."""
+
+    def __init__(self) -> None:
+        from types import SimpleNamespace
+
+        self.step = "budget"
+        self.intake = SimpleNamespace(store=self)
+        self.said: list[str] = []
+
+    async def get(self, user_id: int):
+        from types import SimpleNamespace
+
+        return None if self.step == "launched" else SimpleNamespace(step=self.step)
+
+    async def text(self, body: str):
+        from bot.control_plane.models import Reply
+
+        self.said.append(body)
+        self.step = "summary"
+        return Reply("Проверьте задачу:\nдом в Марбелье, до 1,5 млн €")
+
+    async def press(self, data: str):
+        from bot.control_plane.models import Reply
+
+        self.said.append(f"[{data}]")
+        if data == "task:launch":
+            self.step = "launched"
+        return Reply("Принято. Начинаю поиск.")
+
+
+@pytest.mark.asyncio
+async def test_a_card_launched_as_shown_leaves_the_next_answer_to_show_similar(tmp_path: Path) -> None:
+    from bot.control_plane.models import Reply
+
+    (tmp_path / "answers").mkdir()
+    (tmp_path / "answers" / "near.json").write_text(json.dumps(
+        {"answers": [{"text": "до 1,5 млн €"}, {"press": "Одобрить"}]}, ensure_ascii=False), encoding="utf-8")
+    bench = _offer_bench(tmp_path)
+    assert bench.persona.confirm_card is False
+    interview = _Interview()
+    launched = await bench._talk(interview, Reply("Какой бюджет?"), interview.text, interview.press, interview.press)
+    assert launched and interview.said == ["до 1,5 млн €", "[task:launch]"]
+    assert bench.answers_used == 1 and bench.check_card == "Проверьте задачу:\nдом в Марбелье, до 1,5 млн €"
+    assert await bench._offer() is True  # answer 1 is the one for «Показать?», not eaten by the card
+    assert bench.control.pressed == ["near:yes:similar:00000000-0000-4000-8000-00000000000b"]
+    assert bench.offers[0]["index"] == 1 and bench.offers[0]["bucket"] == "similar"
+
+
+@pytest.mark.asyncio
+async def test_a_press_of_no_button_on_screen_is_the_runs_error(tmp_path: Path) -> None:
+    from scripts.sim.harness import PressError
+
+    (tmp_path / "answers").mkdir()
+    (tmp_path / "answers" / "near.json").write_text(json.dumps({"answers": [{"press": "task:launch"}]}),
+                                                     encoding="utf-8")
+    bench = _offer_bench(tmp_path)
+    with pytest.raises(PressError, match="task:launch"):  # ``Bench._run`` turns it into status error, code 4
+        await bench._offer()
+    assert bench.control.pressed == []
 
 
 # --- the rest of the world ---------------------------------------------------------------------------------------
@@ -428,11 +490,12 @@ def sim_root(tmp_path: Path) -> Path:
     return root
 
 
-async def run(root: Path, *, responder=None, run_id: str = "land") -> tuple[int, dict]:
+async def run(root: Path, *, responder=None, run_id: str = "land", confirm_card: bool = False) -> tuple[int, dict]:
     from scripts.sim.harness import Bench, Persona
 
     persona = Persona.load(str(FIXTURES / "personas" / "land_madrid.json"))
     persona.env.update(SECRETS)
+    persona.confirm_card = confirm_card
     try:
         return await Bench(root, run_id, persona, database_url=URL, responder=responder).run()
     finally:
@@ -486,7 +549,7 @@ async def test_the_card_is_launched_from_the_bottom_keyboard(tmp_path: Path) -> 
     (root / "answers" / "land.json").write_text(json.dumps(
         {"answers": [{"text": "до 3 млн евро"}, {"press": "▶️ Запустить"}, {"press": "Нет"}, {"press": "Нет"}]},
         ensure_ascii=False), encoding="utf-8")
-    code, result = await run(root, responder=model.answer)
+    code, result = await run(root, responder=model.answer, confirm_card=True)  # the card reads its answer
     assert code == 0 and result["status"] == "done", result["stop_reason"]
     shown = next(d for d in result["dialogue"] if d["from"] == "bot" and d["text"].startswith("Проверьте задачу:"))
     assert shown["keyboard"] == [["▶️ Запустить", "✏️ Изменить"], ["❌ Отмена"]]

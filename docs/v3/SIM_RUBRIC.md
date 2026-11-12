@@ -63,11 +63,13 @@
 Дубль (тот же объект под другой ссылкой или повтор номера): второй и дальше — `junk` с причиной `duplicate`.
 
 **Одобренные похожие.** После карточек бот может спросить «Есть ещё похожие варианты (…). Показать?» или «Показать
-более далёкие варианты?». Ответ пользователя записан в `result.json` → `offers` (`press` `near:yes:…` — «Одобрить»).
-Карточки, которые пришли после «Одобрить» (`findings[].bucket` — `similar` / `other`, отправлены после ответа),
-размечаются по тем же правилам, вердикт не смягчается. Судья отмечает их `"approved": true` в `cards` и считает
+более далёкие варианты?». Ответ пользователя записан в `result.json` → `offers` (`press` `near:yes:<bucket>:…` —
+«Одобрить», `bucket` — `similar` или `other`). Одобренные — **только карточки того `bucket`, по которому нажато
+`near:yes`** (`findings[].bucket`), отправленные после ответа; карточка другого `bucket` (точная, или похожая при
+«Нет» на её вопрос) одобренной не считается. Они размечаются по тем же правилам, вердикт не смягчается. Судья отмечает их `"approved": true` в `cards` и считает
 отдельно: `approved_sent`, `approved_similar`, `approved_miss`, `approved_junk`. Одобренная карточка с вердиктом
-`exact` в этих полях не отдельна: это `approved_sent` минус три остальных.
+`exact` в этих полях не отдельна: это `approved_sent` минус три остальных. `near_yes` — сколько раз в `offers`
+нажато «Одобрить» (`near:yes:…`); `0` — одобренных карточек нет (`approved_sent: 0`).
 
 ## 2. Лид (инвесторы, агент ищет покупателей, пост по ссылке, both)
 
@@ -163,7 +165,7 @@
 {"batch": "b003", "run": "b003-g1_land_madrid", "persona": "g1_land_madrid", "persona_id": "G1",
  "role": "buyer_land", "seed": 3, "status": "done", "judge": "claude-opus", "rubric": "T2",
  "cards_sent": 2, "exact": 1, "similar": 1, "miss": 0, "junk": 0, "exact_available": 3,
- "approved_sent": 1, "approved_similar": 1, "approved_miss": 0, "approved_junk": 0,
+ "near_yes": 1, "approved_sent": 1, "approved_similar": 1, "approved_miss": 0, "approved_junk": 0,
  "available_refs": ["https://www.idealista.com/inmueble/<id1>/", "finding:<uuid2>", "finding:<uuid3>"],
  "junk_hosts": [], "junk_hosts_funnel": ["blog.example"],
  "contradiction": {"said": 1, "clarified": 1},
@@ -190,7 +192,8 @@
 `reasonable_refs`; `junk_hosts` (список, пустой — `[]`); `seed`. `score.py` отвергает строку (`ValueError`), если
 `exact > cards_sent`, `exact + similar + miss + junk != cards_sent`, `exact > exact_available`, длина
 `available_refs` (без повторов) не равна `exact_available`, массив `cards` есть, а его длина или вердикты не
-сходятся с числами, `seed` не целое; `approved_*` не целые ≥ 0, `approved_sent > cards_sent`,
+сходятся с числами, `seed` не целое; `approved_*`, `near_yes` не целые ≥ 0, `approved_sent > 0` при
+`near_yes` `0` или без него, `approved_sent > cards_sent`,
 `approved_similar + approved_miss + approved_junk > approved_sent`, одобренных с вердиктом больше, чем карточек
 с ним (`approved_miss > miss`, одобренных точных `approved_sent − …` больше `exact`), в `cards` число
 `"approved": true` или их вердикты не сходятся с `approved_*`, `checked_by_hand` не `true`/`false`, вторая строка той же персоны в партии

@@ -26,7 +26,8 @@ KINDS = {"buyer_home": "objects", "buyer_land": "objects", "renter": "objects", 
 OBJECT_VERDICTS = ("exact", "similar", "miss", "junk")
 LEAD_VERDICTS = ("reasonable", "doubtful", "miss")
 # The cards sent after the user's «Одобрить» on «Показать?» (``result.json`` → ``offers``), counted apart too
-# (``SIM_RUBRIC.md`` §5): ``approved_<verdict>`` of ``approved_sent``, the rest of them exact. A line without them: 0.
+# (``SIM_RUBRIC.md`` §5): ``approved_<verdict>`` of ``approved_sent``, the rest of them exact; ``near_yes`` — how many
+# «Одобрить» were pressed (none: no approved card). A line without them: 0.
 APPROVED_VERDICTS = ("similar", "miss", "junk")
 
 
@@ -85,6 +86,9 @@ def _check_approved(line: dict[str, Any], where: str) -> None:
     """The approved cards are some of the sent ones, and their verdicts some of the line's."""
     sent = _approved(line, "approved_sent", where)
     counts = {verdict: _approved(line, f"approved_{verdict}", where) for verdict in APPROVED_VERDICTS}
+    near_yes = _approved(line, "near_yes", where)  # the «Одобрить» presses of ``offers``
+    if near_yes == 0 and sent:
+        raise ValueError(f"{where}: approved_sent {sent} but near_yes 0 (no «Одобрить» in offers)")
     if sent > line["cards_sent"]:
         raise ValueError(f"{where}: approved_sent {sent} > cards_sent {line['cards_sent']}")
     if sum(counts.values()) > sent:

@@ -197,6 +197,10 @@ class AnswerStop(SimStop):
     pass
 
 
+class PressError(ValueError):
+    """An answer presses a button that is not on screen: ``answers/<run>.json`` is wrong."""
+
+
 @dataclass
 class Bench:
     root: Path
@@ -308,7 +312,7 @@ class Bench:
             FallbackInterviewer,
         )
         from bot.control_plane.auto import PostgresSettingsStore
-        from bot.control_plane.intake import PostgresIntakeStore, key_command
+        from bot.control_plane.intake import PostgresIntakeStore
         from bot.control_plane.interviewer import Interviewer, OpenRouterInterviewer
         from bot.control_plane.models import IncomingMessage, Reply, TranscriptResult
         from bot.control_plane.service import ControlPlane
@@ -404,19 +408,42 @@ class Bench:
                 self._say("bot", reply)
         else:
             reply = await text(task)
+        launched = await self._talk(control, reply, text, press, tap)
+        self._user_text = text
+        if not launched:
+            self.status, self.stop_reason = "stalled", "the interview did not reach «Запустить»"
+            return None
+        while await orchestra.process_once():
+            pass
+        campaign_id = await self.pool.fetchval("select id::text from campaigns order by created_at desc limit 1")
+        if campaign_id is None:
+            self.status, self.stop_reason = "stalled", "no campaign was created"
+        self.control = control
+        return campaign_id
+
+    async def _talk(self, control: Any, reply: Any, text: Callable[[str], Awaitable[Any]],
+                    press: Callable[[str], Awaitable[Any]], tap: Callable[[str], Awaitable[Any]]) -> bool:
+        """The interview after the task: each question gets the next answer, up to «Проверьте задачу» and its launch
+        (True when launched)."""
+        from bot.control_plane.intake import key_command
+
         launched = False
         for _ in range(60):
             self._check()
             draft = await control.intake.store.get(USER)
             if draft is None:
                 break
-            answer = self._answer(reply, draft.step == "summary")
             if draft.step == "summary":
                 self.check_card = reply.text if reply is not None else None
-                if answer is None:
+                if not self.persona.confirm_card:  # launched as shown: no answer is read, the next one is not its
                     reply = await press("task:launch")
                     launched = True
                     break
+            answer = self._answer(reply, draft.step == "summary")
+            if draft.step == "summary" and answer is None:  # confirmed: «Запустить» (or no answer left)
+                reply = await press("task:launch")
+                launched = True
+                break
             if answer is None:
                 self._ask(reply)
             if "press" in answer:
@@ -431,17 +458,7 @@ class Bench:
                     break
             else:
                 reply = await text(str(answer.get("text", "")))
-        self._user_text = text
-        if not launched:
-            self.status, self.stop_reason = "stalled", "the interview did not reach «Запустить»"
-            return None
-        while await orchestra.process_once():
-            pass
-        campaign_id = await self.pool.fetchval("select id::text from campaigns order by created_at desc limit 1")
-        if campaign_id is None:
-            self.status, self.stop_reason = "stalled", "no campaign was created"
-        self.control = control
-        return campaign_id
+        return launched
 
     def _say(self, who: str, reply: Any, *, chat_id: int = USER, source: str = "intake", press: str | None = None
              ) -> None:
@@ -696,6 +713,7 @@ class Bench:
                 self._say("user", f"[{data}]", press=data)
                 self._say("bot", await self.control.handle_callback(USER, data, chat_id=USER), source="offer")
                 record["press"] = data
+                record["bucket"] = data.split(":")[2] if data.count(":") >= 3 else None
             else:  # a typed answer goes to the chat as any message would
                 await self._user_text(str(answer.get("text", "")))
                 record["text"] = str(answer.get("text", ""))
@@ -905,11 +923,12 @@ def _has_button(reply: Any, wanted: str) -> bool:
 
 
 def _callback(reply: Any, wanted: str) -> str:
-    """A button by its text or its data (the agent-user may write either)."""
+    """A button by its text or its data (the agent-user may write either). A press of no button on screen is the
+    run's error (code 4), never a callback the user could not send."""
     for button in getattr(reply, "buttons", ()):
         if wanted in (button.text, button.callback_data):
             return button.callback_data or wanted
-    return wanted
+    raise PressError(f"the answer presses {wanted!r}: no such button under {getattr(reply, 'text', '')[:80]!r}")
 
 
 def _questions(dialogue: list[dict[str, Any]]) -> list[dict[str, Any]]:
