@@ -18,6 +18,7 @@ class PipelineOutcome:
     result: AnalysisResult | None = None
     formatted: str | None = None
     location_from_text: bool = False  # ANALYSIS_LOCATION_FROM_TEXT of the analyzer: its own prompt version
+    agency_rule: bool = False  # PORTAL_DESCRIPTION_FULL (Q18) of the analyzer: «-agency» on the «-loc» version
 
 
 class AnalysisPipeline:
@@ -42,6 +43,7 @@ class AnalysisPipeline:
         return PipelineOutcome(
             True, "accepted", decision.language, result, formatter(result, evidence, decision.language),
             location_from_text=getattr(self.analyzer, "location_from_text", False) is True,
+            agency_rule=getattr(self.analyzer, "agency_rule", False) is True,
         )
 
 
@@ -49,6 +51,8 @@ def finding_key(evidence: Evidence, vertical: str) -> str:
     return hashlib.sha256(f"{vertical}:{evidence.post_id}".encode()).hexdigest()
 
 
-def metadata(language: str, model: str, *, location_from_text: bool = False) -> dict[str, str]:
-    """``analysis_metadata`` of a finding; ``location_from_text`` (ANALYSIS_LOCATION_FROM_TEXT) marks its prompt."""
-    return {"prompt_version": prompt_version(location_from_text), "model": model, "language": language}
+def metadata(language: str, model: str, *, location_from_text: bool = False,
+             agency_rule: bool = False) -> dict[str, str]:
+    """``analysis_metadata`` of a finding; ``location_from_text`` (ANALYSIS_LOCATION_FROM_TEXT) and ``agency_rule``
+    (PORTAL_DESCRIPTION_FULL) mark its prompt."""
+    return {"prompt_version": prompt_version(location_from_text, agency_rule), "model": model, "language": language}

@@ -31,6 +31,11 @@ from bot.web_search.sources.base import SourceListing
 from bot.web_search.urls import classify_url, deal_conflict, fetchable, host_of
 
 _DESCRIPTION_CHARS = 1500
+# PORTAL_DESCRIPTION_FULL (Q18): the description up to the analysis limit, not 1500 characters. Pilot G3 lost the
+# «piscina» of 4 houses at characters 1693, 2036, 2097 and 3408. 8000 = ``WebSearchConfig.max_post_chars``
+# (bot/web_search/worker.py), the size of the post the analysis gets: ``_source_text`` cuts the description again
+# to fit it after the facts block, so a longer limit here would never reach the model.
+_DESCRIPTION_CHARS_FULL = 8000
 _DEALS = ("sale", "rent")
 
 
@@ -158,9 +163,11 @@ class _PortalSource(ApifyListingSource):
     deals: ClassVar[dict[str, str]] = {"sale": "sale", "rent": "rent"}  # campaign deal -> the actor's operation
     agency_ref = False  # DEDUP_DISTRICT_NOT_STREET (Q15): pass the row's agency reference on
 
-    def __init__(self, token: str, *, facts_from_row: bool = False, **kwargs: Any) -> None:
+    def __init__(self, token: str, *, facts_from_row: bool = False, description_full: bool = False,
+                 **kwargs: Any) -> None:
         super().__init__(token, **kwargs)
         self.facts_from_row = facts_from_row  # PORTAL_FACTS_FROM_ROW (Q16)
+        self.description_full = description_full  # PORTAL_DESCRIPTION_FULL (Q18)
 
     def supports(self, task: QueryTask) -> bool:
         return bool(self._token and task.location.strip() and task.country == "ES"
@@ -210,7 +217,7 @@ class _PortalSource(ApifyListingSource):
             property_type, deal = row_type, row_deal
         else:
             deal = self._deal(task)
-        description = description[:_DESCRIPTION_CHARS]
+        description = description[:_DESCRIPTION_CHARS_FULL if self.description_full else _DESCRIPTION_CHARS]
         land = task_kind(task) == "land"
         reported = _number(area, positive=True)
         amount = _number(price, positive=True)

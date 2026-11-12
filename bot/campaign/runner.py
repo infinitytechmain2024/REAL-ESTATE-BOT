@@ -814,10 +814,16 @@ class CampaignRunner:
         try:
             review = bool(getattr(self.relevance, "reviews", False))  # the reviewer also gets the hard criteria
             soft = review and bool(getattr(self.relevance, "soft_wishes", False))  # RELEVANCE_SOFT_WISHES
+            terms: list[str] = []
+            if review and bool(getattr(self.relevance, "quote_hits", False)):  # PORTAL_DESCRIPTION_FULL (Q18)
+                from bot.agents.reviewer import hard_criteria
+
+                hard = hard_criteria(campaign)
+                terms = [*(hard.get("must_have") or []), *(hard.get("exclude") or [])]
             verdict = await self.relevance.judge(
                 task_data(campaign, review=review, soft_wishes=soft),
                 finding_data(finding.payload, fallback_text=finding.text, original=finding.original, review=review,
-                             vertical=finding.vertical))
+                             vertical=finding.vertical, hit_terms=terms))
         except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules (or closed, see ``_judge``)
             self._relevance_paused_until = self.now() + timedelta(seconds=RELEVANCE_PAUSE_SECONDS)
             code = getattr(exc, "code", type(exc).__name__)

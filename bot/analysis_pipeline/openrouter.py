@@ -138,18 +138,31 @@ LOCATION_FROM_TEXT_RULE = (
 if JSONLD_RULE not in INSTRUCTIONS:  # pragma: no cover - a guard for whoever edits INSTRUCTIONS
     raise RuntimeError("INSTRUCTIONS lost the JSON-LD rule that ANALYSIS_LOCATION_FROM_TEXT replaces")
 INSTRUCTIONS_LOCATION_FROM_TEXT = INSTRUCTIONS.replace(JSONLD_RULE, LOCATION_FROM_TEXT_RULE)
+# PORTAL_DESCRIPTION_FULL (Q18): a long portal description ends with the agency's offices («oficina central situada en
+# Madrid»); with ANALYSIS_LOCATION_FROM_TEXT the rule says they are not the object's place.
+AGENCY_OFFICE_SENTENCE = "An agency's office or headquarters named in the text is not the object's place. "
+_OTHERWISE = "Otherwise location and address may be taken from the JSON-LD. "
+assert LOCATION_FROM_TEXT_RULE.count(_OTHERWISE) == 1
+LOCATION_FROM_TEXT_RULE_AGENCY = LOCATION_FROM_TEXT_RULE.replace(_OTHERWISE, AGENCY_OFFICE_SENTENCE + _OTHERWISE)
+INSTRUCTIONS_LOCATION_AGENCY = INSTRUCTIONS.replace(JSONLD_RULE, LOCATION_FROM_TEXT_RULE_AGENCY)
 
 
 LOCATION_PROMPT_VERSION = f"{PROMPT_VERSION}-loc"  # findings analysed with ANALYSIS_LOCATION_FROM_TEXT=true
+AGENCY_PROMPT_VERSION = f"{LOCATION_PROMPT_VERSION}-agency"  # ... and PORTAL_DESCRIPTION_FULL=true (Q18)
 
 
-def prompt_version(location_from_text: bool = False) -> str:
-    return LOCATION_PROMPT_VERSION if location_from_text else PROMPT_VERSION
+def prompt_version(location_from_text: bool = False, agency_rule: bool = False) -> str:
+    if not location_from_text:
+        return PROMPT_VERSION
+    return AGENCY_PROMPT_VERSION if agency_rule else LOCATION_PROMPT_VERSION
 
 
-def instructions(location_from_text: bool = False) -> str:
-    """The analysis prompt: the old one, or (ANALYSIS_LOCATION_FROM_TEXT) the one with the place taken from the text."""
-    return INSTRUCTIONS_LOCATION_FROM_TEXT if location_from_text else INSTRUCTIONS
+def instructions(location_from_text: bool = False, agency_rule: bool = False) -> str:
+    """The analysis prompt: the old one, or (ANALYSIS_LOCATION_FROM_TEXT) the one with the place taken from the text;
+    ``agency_rule`` (PORTAL_DESCRIPTION_FULL, Q18, only with it) adds that an agency's office is not the place."""
+    if not location_from_text:
+        return INSTRUCTIONS
+    return INSTRUCTIONS_LOCATION_AGENCY if agency_rule else INSTRUCTIONS_LOCATION_FROM_TEXT
 
 
 _CATEGORY_WORDS = {
@@ -437,11 +450,15 @@ INVALID = "invalid_structured_model_response"
 
 class OpenRouterAnalyzer:
     def __init__(self, api_key: str, model: str, *, timeout_seconds: int = 30, invalid_retry: bool = False,
-                 fallback_model: str = "", location_from_text: bool = False, area_text_check: bool = False) -> None:
+                 fallback_model: str = "", location_from_text: bool = False, area_text_check: bool = False,
+                 place_description_chars: int | None = None) -> None:
         self.api_key, self.model, self.timeout_seconds = api_key, model, timeout_seconds
         self.invalid_retry, self.fallback_model = invalid_retry, fallback_model.strip()
         self.location_from_text = location_from_text  # ANALYSIS_LOCATION_FROM_TEXT (Q4)
         self.area_text_check = area_text_check  # ANALYSIS_AREA_TEXT_CHECK (Q13)
+        # PORTAL_DESCRIPTION_FULL (Q18): the place check reads this much of a source listing's description (None: all)
+        self.place_description_chars = place_description_chars
+        self.agency_rule = place_description_chars is not None  # the same flag: the agency sentence in the Q4 rule
 
     async def analyze(self, evidence: Evidence, vertical: str, task_hint: dict[str, Any] | None = None) -> AnalysisResult:
         if not self.invalid_retry:
@@ -470,7 +487,8 @@ class OpenRouterAnalyzer:
                             model: str) -> AnalysisResult:
         # Limit evidence, do not accept any untrusted prompt controls or raw task instruction.
         # ANALYSIS_LOCATION_FROM_TEXT: a JSON-LD place the title/description clearly contradict is not shown to the model.
-        found = source_place.conflict(evidence.text, evidence.title) if self.location_from_text else None
+        found = (source_place.conflict(evidence.text, evidence.title, description_chars=self.place_description_chars)
+                 if self.location_from_text else None)
         if found is not None:
             log.info("analysis.source_location_conflict %s", found.area)
         data = {
@@ -491,7 +509,7 @@ class OpenRouterAnalyzer:
             "response_format": {"type": "json_schema", "json_schema": {"name": "analysis_result", "strict": True, "schema": RESULT_SCHEMA}},
             "messages": [
                 {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": instructions(self.location_from_text) + json.dumps(data, ensure_ascii=False)},
+                {"role": "user", "content": instructions(self.location_from_text, self.agency_rule) + json.dumps(data, ensure_ascii=False)},
             ],
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
