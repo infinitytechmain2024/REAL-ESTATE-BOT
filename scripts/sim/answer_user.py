@@ -42,25 +42,31 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
                r"скільки готові вкласти|ticket|cheque|inversi[oó]n m[ií]nima"),
     ("term", r"на какой срок|какой срок|когда (?:нужно|планируете|хотите)|срок аренды|на який термін|який термін|"
              r"how long|plazo|cu[aá]nto tiempo"),
-    ("budget", r"бюджет|сколько готовы|какая цена|\bцен[аеуы]\b|до какой суммы|скільки готові|\bцін[аиу]\b|"
-               r"budget|price|presupuesto|precio"),
+    # the price per m² is about the area on every language, before ``budget``
+    ("area", r"за м²|за м2|за кв\.? ?м|per square met|per m²|per m2|por m²|por m2|por metro"),
+    # a bare «цена/price» is not the budget («цена включает мебель?»): only the maximum price asked for
+    ("budget", r"бюджет|сколько готовы|какая цена|какую цену|до какой цены|до какой суммы|скільки готові|"
+               r"яка ціна|до якої ціни|budget|max(?:imum)? price|presupuesto|precio m[aá]ximo|hasta qu[eé] precio"),
     ("property_type", r"что ищете|какой тип|тип (?:объекта|недвижимости)|квартиру, дом|що шукаєте|який тип|"
                       r"тип (?:об.єкта|нерухомості)|what type|what kind of property|qu[eé] tipo"),
-    ("area", r"площ|м²|м2|\bm2\b|m²|square|superficie|metros"),
+    ("area", r"площ(?!адк)|м²|м2|\bm2\b|m²|square|superficie|metros"),
     ("rooms", r"комнат|спальн|спален|спалень|кімнат|bedroom|\brooms?\b|habitaci|dormitorio"),
     ("deal", r"аренда или покупка|аренду или покупку|купить или снять|снять или купить|оренда чи купівля|"
              r"купити чи орендувати|rent or buy|alquiler o compra|alquilar o comprar"),
     # «только в самом городе или можно города вокруг?» widens the place: before ``place``, which «город» matches
     ("district", r"в самом городе|города вокруг|вся провинция|окрестност|міста навколо|вся провінція|околиц"),
-    ("place", r"в каком городе|где искать|в каких странах|в якому місті|де шукати|в яких країнах|in which city|"
+    ("place", r"в каком городе|где искать|в каких странах|в якому місті|де шукати|\bв яких країнах|in which city|"
               r"en qu[eé] ciudad"),
     ("district", r"район|пригород|населённые пункты|населенные пункты|передмі|населені пункти|district|"
                  r"neighbou?rhood|barrio|zona"),
-    ("place", r"город|где искать|регион|стран|провинци|міст|країн|провінці|\bcity\b|where|ciudad|d[oó]nde"),
-    ("must_have", r"обязательно должно быть|что обязательно|коммуникац|подвед|подъезд|обов.язково|комунікац|"
+    ("place", r"город|где искать|регион|стран|провинци|\bміст[оіау]|\bкраїн|провінці|\bcity\b|where|ciudad|d[oó]nde"),
+    ("must_have", r"обязательно должно быть|что обязательно|коммуникац|подвед|подъезд|що обов.язково має бути|комунікац|"
                   r"під.їзд|must have|imprescindible"),
     ("sources", r"какие сайты|какие группы|які сайти|які групи|which sites|qu[eé] webs"),
 )
+# What to exclude («Что исключить? Например: без цены, агентства») has no slot: checked before every slot (a human
+# answers it), whatever the floor, the price or the state it names.
+EXCLUDE = r"исключ|виключ|skip|exclude|excluir|без цен|без ціни|sin precio"
 CARD = "card"  # «Проверьте задачу»: the pending has ``card: true``
 REPEAT_SKIP_TAGS = frozenset({"any", "contradiction", "low_budget", "edit"})  # asked again: only a straight answer
 EXIT_ANSWERED, EXIT_NOTHING, EXIT_DEFERRED = 0, 1, 2
@@ -83,6 +89,8 @@ def slot_of(pending: dict[str, Any], extra: dict[str, list[str]] | None = None) 
     if question.startswith("Понял:") and "\n\n" in question:
         question = question.split("\n\n", 1)[1]
     text = question.casefold()
+    if re.search(EXCLUDE, text, re.IGNORECASE):
+        return None
     for slot, patterns in (extra or {}).items():
         if any(re.search(p, text, re.IGNORECASE) for p in patterns):
             return slot
