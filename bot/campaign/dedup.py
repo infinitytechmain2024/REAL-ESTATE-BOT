@@ -129,6 +129,9 @@ _STREET_WORD = re.compile(
     r"|ronda|travesia|carretera|ctra|glorieta|callejon|via|rambla|bulevar|boulevard|street|road|avenue|square|улица"
     r"|ул|проспект)(?![^\W_])")
 # The agency's reference in the post's «JSON-LD» line (``SourceListing.agency_ref``, Q15).
+# Street words that also name districts («Camí Fondo», «Gran Vía», «La Rambla»): a street only when the address is
+# more than the listing's district (``_named_street``); the other street words are always a street.
+_DISTRICT_STREET_WORD = re.compile(r"(?<![^\W_])(?:camino|cami|via|ronda|rambla|bulevar|boulevard|glorieta)(?![^\W_])")
 _AGENCY_REF_FIELD = re.compile(r',?\s*"agency_ref":\s*"((?:[^"\\]|\\.)*)"')
 _SOCIAL_HOSTS = frozenset({"facebook.com", "web.facebook.com", "fb.com", "fb.watch", "instagram.com"})
 _STOP = frozenset({
@@ -461,7 +464,8 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
         # Q15: an address is only a district, named differently by two portals: the agency reference or the text only
         if _named_street(a) != _named_street(b) and not (place_a & place_b):
             return False  # a street on one side, another district on the other
-        return _same_reference(a, b, price, area) or _same_text(a, b, price, area)
+        return _same_reference(a, b, price, area) or (
+            not a.new_build and not b.new_build and _same_text(a, b, price, area))  # a template of a development
     if _same_facts(a, b):
         return True
     if without_address and not both_addressed and _same_bare_facts(a, b, stop):
@@ -491,12 +495,17 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
 
 
 def _named_street(listing: Listing) -> bool:
-    """Q15: the address names a street (``has_street``) that is not just the listing's district («Camí Fondo» is a
-    district of Valencia: the address «Camí Fondo, Valencia» with that district names no street)."""
+    """Q15: the address names a street (``has_street``). Only a street word that also names districts
+    (``_DISTRICT_STREET_WORD``) in an address that is just the listing's district names none («Camí Fondo» is a
+    district of Valencia: «Camí Fondo, Valencia» with that district); «Calle Colón» is a street, district Colón or not."""
     if not has_street(listing.address):
         return False
+    folded = _fold(listing.address)
+    if _house_number(listing.address) or _STREET_WORD.sub(" ", _DISTRICT_STREET_WORD.sub(" ", folded)) != \
+            _DISTRICT_STREET_WORD.sub(" ", folded):
+        return True  # a house number or another street word («calle», «C/», «plaza» ...)
     own = tokens(listing.address) - _DISTRICT_STOP
-    return not own or not own <= tokens(listing.district) or bool(_house_number(listing.address))
+    return not own or not own <= tokens(listing.district)
 
 
 def _cities(listing: Listing) -> frozenset[str]:
@@ -514,10 +523,13 @@ def strong_ref(key: str) -> bool:
 
 def _same_reference(a: Listing, b: Listing, price: bool | None, area: bool | None) -> bool:
     """Q15: across two sites the same strong agency reference (on both sides), the price and the area matching (both
-    known), the same rooms (or none on both) and one city; never for a new development (one reference per project)."""
+    known), the same rooms (or none on both) and one city; never for a new development (one reference per project) or two
+    agencies named on both sides."""
     host_a, host_b = _host(a.url), _host(b.url)
     if not host_a or not host_b or host_a == host_b or a.new_build or b.new_build:
         return False
+    if a.agency and b.agency and a.agency != b.agency:
+        return False  # two agencies: one reference by chance
     return bool(a.agency_ref and a.agency_ref == b.agency_ref and strong_ref(a.agency_ref) and price is True
                 and area is True and a.rooms == b.rooms and _cities(a) == _cities(b))
 

@@ -288,3 +288,29 @@ async def _cards(flag: bool) -> tuple[int, dict]:
 async def test_runner_sends_one_card_only_with_the_flag() -> None:
     assert await _cards(False) == (2, {})
     assert await _cards(True) == (1, {"f2": "f1"})
+
+
+def test_guard_a_a_calle_named_like_its_district_is_a_street() -> None:
+    a = flat("Colón", address="Calle Colón, Valencia")
+    b = flat("Xàtiva", address="Calle Xàtiva, Valencia")
+    for kw in ({"body_a": TEXT, "body_b": TEXT}, {"body_a": body(TEXT, "AB-12345"), "body_b": body(TEXT, "AB-12345")}):
+        assert not merged(a, b, flag=False, url_a=IDE, url_b=FOTO, **kw)
+        assert not merged(a, b, flag=True, url_a=IDE, url_b=FOTO, **kw)
+    # «Camí Fondo» (a district word) with that district is still a district
+    camí = flat("Camí Fondo", address="Camí Fondo, Valencia")
+    assert merged(camí, flat("Algirós"), flag=True, url_a=FOTO, url_b=HAB, body_a=body(TEXT, "AB-12345"),
+                  body_b=body(OTHER_TEXT, "ab12345"))
+
+
+def test_guard_b_the_same_text_of_a_new_development_does_not_merge_without_a_street() -> None:
+    a, b = flat("Benicalap"), flat("Torrefiel")
+    assert merged(a, b, flag=True, url_a=IDE, url_b=FOTO, body_a=TEXT, body_b=TEXT)
+    promo = "Obra nueva en Valencia. " + TEXT
+    assert not merged(a, b, flag=True, url_a=IDE, url_b=FOTO, body_a=promo, body_b=promo)
+
+
+def test_guard_c_two_agencies_do_not_merge_by_one_reference() -> None:
+    kw = {"body_a": body(TEXT, "V001"), "body_b": body(OTHER_TEXT, "V001")}
+    assert not merged(flat("Benicalap", agency="A"), flat("Torrefiel", agency="B"), flag=True, **kw)
+    assert merged(flat("Benicalap", agency="A"), flat("Torrefiel", agency="A"), flag=True, **kw)
+    assert merged(flat("Benicalap", agency="A"), flat("Torrefiel"), flag=True, **kw)  # one agency unknown
