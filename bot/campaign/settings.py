@@ -100,6 +100,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q9: the task's soft wishes go to the reviewer apart, marked soft (prompt reviewer-v3-soft); an unmet wish no
     # longer turns «exact» into «similar». false (default): the reviewer-v3 prompt and decision as before.
     relevance_soft_wishes: bool = Field(default=False, validation_alias="RELEVANCE_SOFT_WISHES")
+    # Q18: a terraced / semi-detached house (adosado, pareado, townhouse) is a house for the reviewer unless the task
+    # asks for a detached one (prompts reviewer-v3-th / reviewer-v3-soft-th). false (default): the prompts as before.
+    review_townhouse_is_house: bool = Field(default=False, validation_alias="REVIEW_TOWNHOUSE_IS_HOUSE")
     # The most one campaign may spend in USD (LLM, scrape API, paid search, listing APIs), summed over every service
     # from the campaign_costs ledger (bot/utils/costs.py). Reached: the web stage stops (budget_cap), the analysis
     # worker and the AI check skip the campaign's findings, the report says so. 0: no limit.
@@ -124,7 +127,8 @@ class CampaignRunnerSettings(BaseSettings):
 
         return ReviewerJudge(OpenRouterReviewer(api_key=self.openrouter_api_key, model=self.review_model,
                                                 timeout_seconds=float(self.review_timeout_seconds),
-                                                soft_wishes=self.relevance_soft_wishes), legacy,
+                                                soft_wishes=self.relevance_soft_wishes,
+                                                townhouse_is_house=self.review_townhouse_is_house), legacy,
                              max_calls=self.review_max_calls)
 
     def final_reporter(self):  # -> bot.campaign.final_report.FinalReporter | None

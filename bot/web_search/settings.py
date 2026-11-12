@@ -76,6 +76,9 @@ class WebSearchSettings(BaseSettings):
     # the task's, and ``auction: true`` when the row names a «subasta»; campaign/tolerance.py files such a purchase
     # as similar. Off: the type and the deal of the line are the task's, as before.
     portal_facts_from_row: bool = Field(default=False, validation_alias="PORTAL_FACTS_FROM_ROW")
+    # Q18: true = a portal row's description is kept up to 8000 characters (the analysis post limit), not 1500; the
+    # analysis model reads more of it (a «piscina» far down the text). Off: 1500 characters, as before.
+    portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")
     apify_yaencontre_enabled: bool = Field(default=False, validation_alias="APIFY_YAENCONTRE_ENABLED")
     apify_yaencontre_actor: str = Field(default="igolaizola/yaencontre-scraper", validation_alias="APIFY_YAENCONTRE_ACTOR")
     apify_yaencontre_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_YAENCONTRE_MAX_RESULTS")
@@ -248,6 +251,7 @@ class WebSearchSettings(BaseSettings):
                                                     max_charge_usd=self.apify_idealista_max_charge_usd,
                                                     sort_biggest=self.idealista_sort_biggest,
                                                     facts_from_row=self.portal_facts_from_row,
+                                                    description_full=self.portal_description_full,
                                                     unambiguous_place=self.idealista_unambiguous_place,
                                                     geocoder=geocoder()))
         elif self.apify_idealista_enabled:
@@ -269,7 +273,8 @@ class WebSearchSettings(BaseSettings):
                                              timeout_seconds=self.apify_portals_timeout_seconds,
                                              max_charge_usd=self.apify_fotocasa_max_charge_usd, geocoder=geocoder(),
                                              default_point_guard=self.portal_default_point_guard,
-                                             facts_from_row=self.portal_facts_from_row))
+                                             facts_from_row=self.portal_facts_from_row,
+                                             description_full=self.portal_description_full))
         if self.apify_yaencontre_enabled:
             from .sources.portals import ApifyYaencontreSource
 
@@ -278,6 +283,7 @@ class WebSearchSettings(BaseSettings):
                                                timeout_seconds=self.apify_portals_timeout_seconds,
                                                max_charge_usd=self.apify_yaencontre_max_charge_usd,
                                                facts_from_row=self.portal_facts_from_row,
+                                               description_full=self.portal_description_full,
                                                geocoder=geocoder()))
         if self.apify_pisos_enabled:
             from .sources.portals import ApifyPisosSource
@@ -286,7 +292,8 @@ class WebSearchSettings(BaseSettings):
                                           max_items=self.apify_pisos_max_results,
                                           timeout_seconds=self.apify_portals_timeout_seconds,
                                           max_charge_usd=self.apify_pisos_max_charge_usd, geocoder=geocoder(),
-                                          facts_from_row=self.portal_facts_from_row))
+                                          facts_from_row=self.portal_facts_from_row,
+                                          description_full=self.portal_description_full))
         if self.apify_habitaclia_enabled:
             from .sources.portals import ApifyHabitacliaSource
 
@@ -294,7 +301,8 @@ class WebSearchSettings(BaseSettings):
                                     max_items=self.apify_habitaclia_max_results,
                                                timeout_seconds=self.apify_portals_timeout_seconds,
                                                max_charge_usd=self.apify_habitaclia_max_charge_usd, geocoder=geocoder(),
-                                               facts_from_row=self.portal_facts_from_row))
+                                               facts_from_row=self.portal_facts_from_row,
+                                               description_full=self.portal_description_full))
         if self.apify_milanuncios_enabled:
             from .sources.portals import ApifyMilanunciosSource
 
@@ -302,7 +310,8 @@ class WebSearchSettings(BaseSettings):
                                     max_items=self.apify_milanuncios_max_results,
                                                 timeout_seconds=self.apify_portals_timeout_seconds,
                                                 max_charge_usd=self.apify_milanuncios_max_charge_usd, geocoder=geocoder(),
-                                                facts_from_row=self.portal_facts_from_row))
+                                                facts_from_row=self.portal_facts_from_row,
+                                                description_full=self.portal_description_full))
         return tuple(found)
 
     def backend_names(self) -> list[str]:

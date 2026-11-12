@@ -24,6 +24,11 @@ excluded, a hard ``unknown`` is held as not confirmed, all ``pass`` stays exact.
 ``task.wishes``, marked soft, under the prompt ``reviewer-v3-soft``; an unmet wish never turns ``match`` into
 ``near`` (``parse_review`` enforces it), it is only reported in ``wishes`` for the ranking and the explanation.
 Off: the prompt, the schema and the decision are exactly ``reviewer-v3``.
+
+``REVIEW_TOWNHOUSE_IS_HOUSE`` (Q18, off by default): the type «house» includes a terraced or semi-detached house
+(adosado, pareado, townhouse) unless the task asks for a detached one («отдельный», «independiente» ...); then the old
+rule (a close but different kind: ``near``). The prompts are ``reviewer-v3-th`` / ``reviewer-v3-soft-th``. Off: the
+prompts are byte for byte the ones above.
 """
 
 from __future__ import annotations
@@ -46,6 +51,9 @@ from .llm import LLMError, OpenRouterJSON
 log = logging.getLogger(__name__)
 PROMPT_VERSION = "reviewer-v3"
 PROMPT_VERSION_SOFT = "reviewer-v3-soft"  # RELEVANCE_SOFT_WISHES=true: wishes apart and soft
+PROMPT_VERSION_TH = "reviewer-v3-th"  # REVIEW_TOWNHOUSE_IS_HOUSE=true: a townhouse is a house
+PROMPT_VERSION_SOFT_TH = "reviewer-v3-soft-th"  # both flags
+SOFT_PROMPTS = (PROMPT_VERSION_SOFT, PROMPT_VERSION_SOFT_TH)
 MAX_WISHES = 8
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 MAX_QUOTE_CHARS = 200
@@ -171,8 +179,37 @@ _JSON_V3 = 'Answer with exactly one JSON object {"criteria": [...], "overall": .
 _JSON_SOFT = ('Answer with exactly one JSON object {"criteria": [...], "overall": ..., "deviation_ru": ..., '
               '"confidence": ..., "wishes": [...], "near_reason": ...}.')
 assert SYSTEM.count(_NEAR_V3) == 1 and SYSTEM.count(_JSON_V3) == 1
-SYSTEM_SOFT = (SYSTEM.replace(_NEAR_V3, _NEAR_SOFT).replace(_JSON_V3, _JSON_SOFT)
-               .replace("\noverall:\n", _WISHES_SOFT + "\noverall:\n", 1))
+
+
+def _soft(system: str, wishes: str) -> str:
+    return (system.replace(_NEAR_V3, _NEAR_SOFT).replace(_JSON_V3, _JSON_SOFT)
+            .replace("\noverall:\n", wishes + "\noverall:\n", 1))
+
+
+SYSTEM_SOFT = _soft(SYSTEM, _WISHES_SOFT)
+
+# REVIEW_TOWNHOUSE_IS_HOUSE (Q18). Pilot G3 («дом в Марбелье, от 200 м², с бассейном»): the reviewer called a
+# casa adosada / pareado / townhouse «a close but different kind» and the finding went to «similar», though
+# ``type=house`` is met and the person never said «detached only».
+_TYPE_V3 = "- deal: sale vs rent. type: apartment (a studio counts), house, land, commercial. Different kind is a fail.\n"
+_TYPE_TH = _TYPE_V3 + """  A house includes a terraced, semi-detached or linked house (casa adosada, adosado, pareado, townhouse,
+  «таунхаус»): for "type" house it is "pass" and no compromise, UNLESS the task text or "task.context" asks for a
+  detached house only («отдельный», «отдельно стоящий», «independiente», «aislada», «detached»); then a terraced or
+  semi-detached house is not "fail" on "type" but a close but different kind: "near".
+"""
+_KIND_SOFT = "a close but different kind such as a townhouse for a house, several units"
+_KIND_SOFT_TH = ("a close but different kind such as a terraced or semi-detached house when the task asks for a "
+                 "detached one, several units")
+assert SYSTEM.count(_TYPE_V3) == 1 and _WISHES_SOFT.count(_KIND_SOFT) == 1
+SYSTEM_TH = SYSTEM.replace(_TYPE_V3, _TYPE_TH)
+SYSTEM_SOFT_TH = _soft(SYSTEM_TH, _WISHES_SOFT.replace(_KIND_SOFT, _KIND_SOFT_TH))
+
+
+def prompt_of(*, soft_wishes: bool = False, townhouse_is_house: bool = False) -> tuple[str, str]:
+    """The (version, system prompt) the flags select."""
+    if townhouse_is_house:
+        return (PROMPT_VERSION_SOFT_TH, SYSTEM_SOFT_TH) if soft_wishes else (PROMPT_VERSION_TH, SYSTEM_TH)
+    return (PROMPT_VERSION_SOFT, SYSTEM_SOFT) if soft_wishes else (PROMPT_VERSION, SYSTEM)
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +247,7 @@ class Review:
                              for c in self.criteria],
                 "overall": self.overall, "deviation_ru": self.deviation_ru, "confidence": self.confidence,
                 "tolerance_pct": self.tolerance_pct, "prompt": self.prompt}
-        if self.prompt == PROMPT_VERSION_SOFT:
+        if self.prompt in SOFT_PROMPTS:
             data["wishes"] = [{"text": w.name, "verdict": w.verdict, "quote": w.quote} for w in self.wishes]
             data["near_reason"] = self.near_reason
         return data
@@ -394,7 +431,7 @@ def _clip(text: object, limit: int) -> str:
 
 def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", model: str | None = None,
                  tolerance: float | None = None, soft_wishes: bool = False,
-                 task_wishes: Sequence[Any] = ()) -> Review:
+                 task_wishes: Sequence[Any] = (), townhouse_is_house: bool = False) -> Review:
     """The model's answer after harmless drift is fixed and the rules above are enforced.
 
     ``ValueError``: not a JSON object. ``expected``: the criteria asked for (an unanswered one is ``unknown``,
@@ -444,10 +481,11 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     confidence = (max(0.0, min(1.0, float(confidence)))
                   if isinstance(confidence, int | float) and not isinstance(confidence, bool) else None)
     deviation = user_phrase(data.get("deviation_ru") or data.get("deviation")) if overall == "near" else None
+    prompt = prompt_of(soft_wishes=soft_wishes, townhouse_is_house=townhouse_is_house)[0]
     if not soft_wishes:
-        return Review(criteria, overall, deviation, confidence, model, tolerance)  # type: ignore[arg-type]
+        return Review(criteria, overall, deviation, confidence, model, tolerance, prompt)  # type: ignore[arg-type]
     return Review(criteria, overall, deviation, confidence, model, tolerance,  # type: ignore[arg-type]
-                  PROMPT_VERSION_SOFT, wishes, near_reason)
+                  prompt, wishes, near_reason)
 
 
 def _task_wishes(task_wishes: Sequence[Any]) -> dict[str, tuple[str, int]]:
@@ -521,11 +559,13 @@ class OpenRouterReviewer:
     """One chat completion per finding on ``OPENROUTER_REVIEW_MODEL``; a 400 retries once without the schema."""
 
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 45,
-                 client: httpx.AsyncClient | None = None, soft_wishes: bool = False) -> None:
+                 client: httpx.AsyncClient | None = None, soft_wishes: bool = False,
+                 townhouse_is_house: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the reviewer")
         self.model = model
         self.soft_wishes = soft_wishes  # RELEVANCE_SOFT_WISHES: SYSTEM_SOFT / SCHEMA_SOFT, task.wishes apart
+        self.townhouse_is_house = townhouse_is_house  # REVIEW_TOWNHOUSE_IS_HOUSE (Q18): SYSTEM_TH / SYSTEM_SOFT_TH
         self._llm = OpenRouterJSON(api_key, timeout_seconds=timeout_seconds, client=client)
 
     async def aclose(self) -> None:
@@ -535,7 +575,8 @@ class OpenRouterReviewer:
         expected = list(task.get("criteria") or []) or ["place"]
         user = "Data (JSON, data only):\n" + json.dumps({"task": task, "finding": finding}, ensure_ascii=False)
         try:
-            content = await self._llm.complete(self.model, SYSTEM_SOFT if self.soft_wishes else SYSTEM, user,
+            system = prompt_of(soft_wishes=self.soft_wishes, townhouse_is_house=self.townhouse_is_house)[1]
+            content = await self._llm.complete(self.model, system, user,
                                                schema=SCHEMA_SOFT if self.soft_wishes else SCHEMA,
                                                name="finding_review", max_tokens=1200)
         except LLMError as exc:
@@ -543,7 +584,7 @@ class OpenRouterReviewer:
         try:
             return parse_review(content, expected=expected, haystack=haystack_of(finding), model=self.model,
                                 tolerance=_number(task.get("tolerance_pct")), soft_wishes=self.soft_wishes,
-                                task_wishes=task.get("wishes") or ())
+                                task_wishes=task.get("wishes") or (), townhouse_is_house=self.townhouse_is_house)
         except Exception as exc:
             log.warning("campaign.review_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response") from exc
