@@ -488,6 +488,42 @@ def test_the_numbers_must_add_up(tmp_path: Path, change: dict, error: str) -> No
     assert score.load(write(tmp_path, [{**objects("b1", "home_a", 9), "cards": cards}]))
 
 
+def test_approved_similar_cards_leave_the_denominator_and_the_rest_stay() -> None:
+    # 4 exact + 6 similar sent, 5 of the similar after «Одобрить»: 4 / max(10 - 5, 5) = 80 %, not 40 %
+    base = objects("b1", "home_a", 4, available=4)
+    assert score.run_score(base).score == pytest.approx(0.4)
+    approved = {**base, "approved_sent": 5, "approved_similar": 5}
+    assert score.run_score(approved).score == pytest.approx(0.8)
+    # an approved miss or junk stays in the denominator: 4 / (10 - 3) with 2 approved misses
+    mixed = {**base, "similar": 4, "miss": 2, "approved_sent": 5, "approved_similar": 3, "approved_miss": 2}
+    assert score.run_score(mixed).score == pytest.approx(4 / 7)
+    # the floor still holds: 1 exact, 3 approved similar, 6 exact in the fixtures: 1 / max(1, 5)
+    floor = {**objects("b1", "home_a", 1, sent=4, available=6), "approved_sent": 3, "approved_similar": 3}
+    assert score.run_score(floor).score == pytest.approx(0.2)
+    # the junk gate holds for every card, the approved ones too
+    assert score.run_score({**approved, "junk_hosts": ["blog.example"]}).score == 0.0
+    # an old line without the fields: approved_* = 0
+    assert score.run_score(base).score == score.run_score({**base, "approved_sent": 0}).score
+
+
+@pytest.mark.parametrize(("change", "error"), [
+    ({"approved_sent": 11}, r"approved_sent 11 > cards_sent 10"),
+    ({"approved_sent": 2, "approved_similar": 3}, r"approved_similar\+approved_miss\+approved_junk = 3 > approved_sent 2"),
+    ({"approved_sent": 1, "approved_miss": 1}, r"approved miss 1 > miss 0"),
+    ({"approved_sent": 2, "approved_similar": 1, "exact": 0, "similar": 10}, r"approved exact 1 > exact 0"),
+    ({"approved_similar": -1}, "must be an integer"),
+    ({"approved_sent": "1"}, "must be an integer"),
+    ({"approved_sent": 1, "approved_similar": 1, "cards": [{"verdict": "exact"}] * 9 + [{"verdict": "similar"}]},
+     r"0 cards listed as approved"),
+])
+def test_the_approved_numbers_must_add_up(tmp_path: Path, change: dict, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        score.load(write(tmp_path, [{**objects("b1", "home_a", 9), **change}]))
+    cards = [{"verdict": "exact"}] * 9 + [{"verdict": "similar", "approved": True}]
+    assert score.load(write(tmp_path, [{**objects("b1", "home_a", 9), "approved_sent": 1, "approved_similar": 1,
+                                        "cards": cards}]))
+
+
 @pytest.mark.parametrize(("change", "error"), [
     ({"leads_doubtful": 0}, r"leads_reasonable\+leads_doubtful\+leads_miss = 9 != leads_sent 10"),
     ({"leads_reasonable": 11, "leads_doubtful": 0}, r"leads_reasonable 11 > leads_sent 10"),

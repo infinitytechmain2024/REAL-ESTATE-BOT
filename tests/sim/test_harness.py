@@ -450,7 +450,12 @@ async def test_a_land_search_in_madrid_reaches_a_card_and_a_replay_gives_the_sam
     assert "1 550 000 €" in card["card"] and "habitaclia.com/i15441000024727" in card["card"]
     assert first["check_card"].startswith("Проверьте задачу:") and "от 2000 м²" in first["check_card"]
     assert first["campaign"]["state"] == "completed" and any("Отчёт по поиску" in r for r in first["report"])
-    assert [q["answer"] for q in first["questions"]][-2:] == ["до 3 млн евро", "[task:launch]"]
+    answers = [q["answer"] for q in first["questions"]]
+    start = answers.index("до 3 млн евро")
+    assert answers[start:start + 2] == ["до 3 млн евро", "[task:launch]"]
+    # «Показать?» after the card (similar, then the farther ones), if the run held any: the fixture says «Нет»
+    assert all(a.startswith("[near:no:") for a in answers[start + 2:]) and len(first["offers"]) <= 2
+    assert [o["press"] for o in first["offers"]] == [a.strip("[]") for a in answers[start + 2:]]
     assert {c["provider"] for c in first["campaign_costs"] if c["stage"] == "llm" and c["kind"] == "cost"} == \
         {"claude_cassette"} and first["costs_total_usd"] == 0
     assert first["pending"] == {"llm": [], "apify": [], "apify_blocked": []}
@@ -479,7 +484,8 @@ async def test_without_answers_the_run_waits_with_pending_files_and_no_secret_in
 async def test_the_card_is_launched_from_the_bottom_keyboard(tmp_path: Path) -> None:
     root = sim_root(tmp_path)
     (root / "answers" / "land.json").write_text(json.dumps(
-        {"answers": [{"text": "до 3 млн евро"}, {"press": "▶️ Запустить"}]}, ensure_ascii=False), encoding="utf-8")
+        {"answers": [{"text": "до 3 млн евро"}, {"press": "▶️ Запустить"}, {"press": "Нет"}, {"press": "Нет"}]},
+        ensure_ascii=False), encoding="utf-8")
     code, result = await run(root, responder=model.answer)
     assert code == 0 and result["status"] == "done", result["stop_reason"]
     shown = next(d for d in result["dialogue"] if d["from"] == "bot" and d["text"].startswith("Проверьте задачу:"))
