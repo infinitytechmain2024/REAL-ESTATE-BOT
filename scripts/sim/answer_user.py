@@ -68,6 +68,9 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
 # answers it), whatever the floor, the price or the state it names.
 EXCLUDE = r"исключ|виключ|skip|exclude|excluir|без цен|без ціни|sin precio"
 CARD = "card"  # «Проверьте задачу»: the pending has ``card: true``
+# «Есть ещё похожие варианты (…). Показать?» after the cards (bot/campaign/offers.py, ``near:yes|no:<bucket>:<id>``
+# buttons «Одобрить» / «Нет»): the pending has ``offer: true``. No reply in the persona: «Нет», logged ``default``.
+NEAR, NEAR_PREFIX, NEAR_DEFAULT = "near", "near:", "Нет"
 REPEAT_SKIP_TAGS = frozenset({"any", "contradiction", "low_budget", "edit"})  # asked again: only a straight answer
 EXIT_ANSWERED, EXIT_NOTHING, EXIT_DEFERRED = 0, 1, 2
 
@@ -84,6 +87,9 @@ def slot_of(pending: dict[str, Any], extra: dict[str, list[str]] | None = None) 
     """The slot of a pending question: the card, a persona's own pattern, then ``SLOT_PATTERNS``."""
     if pending.get("card"):
         return CARD
+    if pending.get("offer") or any(str(b.get("data") or "").startswith(NEAR_PREFIX)
+                                   for b in pending.get("buttons", [])):
+        return NEAR
     question = str(pending.get("question", ""))
     # «Понял: …» repeats the task; the question is what follows it.
     if question.startswith("Понял:") and "\n\n" in question:
@@ -127,6 +133,11 @@ def choose(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str
     if slot is None:
         return Pick(None, None, reason="no slot matches the question")
     options = [o for o in persona.get("replies", {}).get(slot, []) if _button_ok(o, pending)]
+    if not options and slot == NEAR:  # the user who was not asked about it would not look further
+        decline = next((b.get("text") for b in pending.get("buttons", [])
+                        if str(b.get("data") or "").startswith(f"{NEAR_PREFIX}no:")), None)
+        return Pick(slot, {"press": decline or NEAR_DEFAULT}, "default",
+                    reason=f"the persona has no reply for slot {slot!r}: {NEAR_DEFAULT!r}")
     if not options:
         return Pick(slot, None, reason=f"the persona has no reply for slot {slot!r}")
     asked_before = any(h.get("slot") == slot for h in history or [])

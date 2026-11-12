@@ -15,7 +15,7 @@ from scripts.sim.harness import Persona
 PERSONAS = Path(__file__).resolve().parents[2] / "scripts" / "sim" / "personas"
 FILES = sorted(PERSONAS.glob("*.json"))
 ROLES = set(score.KINDS)
-SLOTS = {slot for slot, _ in answer_user.SLOT_PATTERNS} | {answer_user.CARD}
+SLOTS = {slot for slot, _ in answer_user.SLOT_PATTERNS} | {answer_user.CARD, answer_user.NEAR}
 
 
 def load(path: Path) -> dict:
@@ -250,6 +250,49 @@ def test_the_card_and_what_is_left_pending(tmp_path: Path) -> None:
     assert answer_user.answer_pending(tmp_path, "r", persona, 1)[0] == answer_user.EXIT_NOTHING
 
 
+CAMPAIGN = "00000000-0000-4000-8000-000000000008"
+NEAR = (("Одобрить", f"near:yes:similar:{CAMPAIGN}"), ("Нет", f"near:no:similar:{CAMPAIGN}"))
+SHOW_SIMILAR = "Есть ещё похожие варианты (таунхаус с общим бассейном). Показать?"
+
+
+def test_the_show_similar_question_is_the_near_slot() -> None:
+    assert answer_user.slot_of({"question": SHOW_SIMILAR, "buttons": [{"text": t, "data": d} for t, d in NEAR]}) == \
+        answer_user.NEAR
+    # by the pending's mark too, whatever the text names (here: «бассейн», «площадь» would be other slots)
+    assert answer_user.slot_of({"question": "Площадь не указана. Показать?", "offer": True}) == answer_user.NEAR
+
+
+def test_every_persona_answers_the_show_similar_question_by_its_role() -> None:
+    shares = {}
+    for path in FILES:
+        options = load(path)["replies"]["near"]
+        assert {o["press"] for o in options} == {"Одобрить", "Нет"}, path.stem
+        weight = {o["press"]: o["weight"] for o in options}
+        shares[path.stem] = weight["Одобрить"] / (weight["Одобрить"] + weight["Нет"])
+    assert shares["g7_coinvest_malaga"] > 0.5 and shares["n2_agent_buyers_estepona"] > 0.5  # investors: more «да»
+    assert shares["g2_flat_valencia"] < 0.5 and shares["g3_house_marbella"] < 0.5  # strict buyers: more «нет»
+
+
+def test_the_show_similar_answer_by_weight_and_the_default_no(tmp_path: Path) -> None:
+    persona = load(PERSONAS / "g7_coinvest_malaga.json")
+    picks = set()
+    for seed in range(30):
+        root = tmp_path / str(seed)
+        pending(root, "r", SHOW_SIMILAR, buttons=NEAR)
+        assert answer_user.answer_pending(root, "r", persona, seed)[0] == answer_user.EXIT_ANSWERED
+        data = load(root / "answers" / "r.json")
+        assert data["log"][0]["slot"] == "near" and data["log"][0]["tag"] is None
+        picks.add(data["answers"][0]["press"])
+    assert picks == {"Одобрить", "Нет"}
+    # no ``near`` in the persona: «Нет», and the log says it was not the persona's choice
+    pending(tmp_path, "d", SHOW_SIMILAR, buttons=NEAR)
+    code, message = answer_user.answer_pending(tmp_path, "d", {"replies": {}}, 0)
+    assert code == answer_user.EXIT_ANSWERED and "default" in message
+    data = load(tmp_path / "answers" / "d.json")
+    assert data["answers"] == [{"press": "Нет"}]
+    assert data["log"] == [{"index": 0, "slot": "near", "tag": "default", "seed": 0}]
+
+
 def test_the_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     pending(tmp_path, "g1", "Какой бюджет?", buttons=SKIP)
     code = answer_user.main(["--run", "g1", "--persona", str(PERSONAS / "g1_land_madrid.json"), "--seed", "7",
@@ -443,6 +486,53 @@ def test_the_numbers_must_add_up(tmp_path: Path, change: dict, error: str) -> No
         score.load(write(tmp_path, [{**objects("b1", "home_a", 9), **change}]))
     cards = [{"verdict": "exact"}] * 9 + [{"verdict": "similar"}]
     assert score.load(write(tmp_path, [{**objects("b1", "home_a", 9), "cards": cards}]))
+
+
+def test_approved_similar_cards_leave_the_denominator_and_the_rest_stay() -> None:
+    # 4 exact + 6 similar sent, 5 of the similar after «Одобрить»: 4 / max(10 - 5, 5) = 80 %, not 40 %
+    base = objects("b1", "home_a", 4, available=4)
+    assert score.run_score(base).score == pytest.approx(0.4)
+    approved = {**base, "near_yes": 1, "approved_sent": 5, "approved_similar": 5}
+    assert score.run_score(approved).score == pytest.approx(0.8)
+    # an approved miss or junk stays in the denominator: 4 / (10 - 3) with 2 approved misses
+    mixed = {**base, "similar": 4, "miss": 2, "near_yes": 2, "approved_sent": 5, "approved_similar": 3, "approved_miss": 2}
+    assert score.run_score(mixed).score == pytest.approx(4 / 7)
+    # the floor still holds: 1 exact, 3 approved similar, 6 exact in the fixtures: 1 / max(1, 5)
+    floor = {**objects("b1", "home_a", 1, sent=4, available=6), "near_yes": 1, "approved_sent": 3, "approved_similar": 3}
+    assert score.run_score(floor).score == pytest.approx(0.2)
+    # the junk gate holds for every card, the approved ones too
+    assert score.run_score({**approved, "junk_hosts": ["blog.example"]}).score == 0.0
+    # an old line without the fields: approved_* = 0
+    assert score.run_score(base).score == score.run_score({**base, "approved_sent": 0}).score
+
+
+@pytest.mark.parametrize(("change", "error"), [
+    ({"approved_sent": 11}, r"approved_sent 11 > cards_sent 10"),
+    ({"approved_sent": 2, "approved_similar": 3}, r"approved_similar\+approved_miss\+approved_junk = 3 > approved_sent 2"),
+    ({"approved_sent": 1, "approved_miss": 1}, r"approved miss 1 > miss 0"),
+    ({"approved_sent": 2, "approved_similar": 1, "exact": 0, "similar": 10}, r"approved exact 1 > exact 0"),
+    ({"approved_similar": -1}, "must be an integer"),
+    ({"approved_sent": "1"}, "must be an integer"),
+    ({"approved_sent": 1, "approved_similar": 1, "cards": [{"verdict": "exact"}] * 9 + [{"verdict": "similar"}]},
+     r"0 cards listed as approved"),
+])
+def test_the_approved_numbers_must_add_up(tmp_path: Path, change: dict, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        score.load(write(tmp_path, [{**objects("b1", "home_a", 9), "near_yes": 1, **change}]))
+    cards = [{"verdict": "exact"}] * 9 + [{"verdict": "similar", "approved": True}]
+    assert score.load(write(tmp_path, [{**objects("b1", "home_a", 9), "near_yes": 1, "approved_sent": 1,
+                                        "approved_similar": 1, "cards": cards}]))
+
+
+@pytest.mark.parametrize("change", [{"near_yes": 0}, {}], ids=["zero", "missing"])
+def test_approved_cards_need_an_approval(tmp_path: Path, change: dict) -> None:
+    # no «Одобрить» in offers (or no near_yes in the line): no card can be an approved one
+    line_ = {**objects("b1", "home_a", 4, available=4), "approved_sent": 1, "approved_similar": 1, **change}
+    with pytest.raises(ValueError, match=r"approved_sent 1 but near_yes 0"):
+        score.load(write(tmp_path, [line_]))
+    assert score.load(write(tmp_path, [{**line_, "approved_sent": 0, "approved_similar": 0}]))
+    with pytest.raises(ValueError, match="must be an integer"):
+        score.load(write(tmp_path, [{**line_, "near_yes": -1}]))
 
 
 @pytest.mark.parametrize(("change", "error"), [

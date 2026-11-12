@@ -138,6 +138,16 @@
         "weight": 1,
         "tag": "edit"
       }
+    ],
+    "near": [
+      {
+        "press": "Одобрить",
+        "weight": 1
+      },
+      {
+        "press": "Нет",
+        "weight": 3
+      }
     ]
   },
   "truth": {

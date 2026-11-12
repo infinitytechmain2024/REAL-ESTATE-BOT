@@ -62,6 +62,15 @@
 
 Дубль (тот же объект под другой ссылкой или повтор номера): второй и дальше — `junk` с причиной `duplicate`.
 
+**Одобренные похожие.** После карточек бот может спросить «Есть ещё похожие варианты (…). Показать?» или «Показать
+более далёкие варианты?». Ответ пользователя записан в `result.json` → `offers` (`press` `near:yes:<bucket>:…` —
+«Одобрить», `bucket` — `similar` или `other`). Одобренные — **только карточки того `bucket`, по которому нажато
+`near:yes`** (`findings[].bucket`), отправленные после ответа; карточка другого `bucket` (точная, или похожая при
+«Нет» на её вопрос) одобренной не считается. Они размечаются по тем же правилам, вердикт не смягчается. Судья отмечает их `"approved": true` в `cards` и считает
+отдельно: `approved_sent`, `approved_similar`, `approved_miss`, `approved_junk`. Одобренная карточка с вердиктом
+`exact` в этих полях не отдельна: это `approved_sent` минус три остальных. `near_yes` — сколько раз в `offers`
+нажато «Одобрить» (`near:yes:…`); `0` — одобренных карточек нет (`approved_sent: 0`).
+
 ## 2. Лид (инвесторы, агент ищет покупателей, пост по ссылке, both)
 
 Что оценивается: `leads` с непустым `card` (лиды из комментариев) и `reach_contacts` с непустым `card`
@@ -114,13 +123,17 @@
 
 Для прогона (`score.run_score`):
 
-- объекты: `score = exact / max(cards_sent, min(5, exact_available))`; если `junk_hosts` не пуст — `0`;
-  знаменатель 0 — `n/a`.
+- объекты: `score = exact / max(cards_sent − approved_similar, min(5, exact_available))`; если `junk_hosts` не пуст —
+  `0` (ворота — для всех карточек, одобренных тоже); знаменатель 0 — `n/a`. Из знаменателя уходят только
+  одобренные карточки, которые действительно похожи (пользователь сам их попросил); одобренные «мимо» и «мусор»
+  остаются. Нет полей `approved_*` (старые строки) — они `0`.
 - лиды: `score = leads_reasonable / max(leads_sent, min(5, reasonable_available))`; знаменатель 0 — `n/a`;
   `junk_hosts` не влияет.
 - `both`: среднее двух частей; любая часть `n/a` — прогон `n/a`; мусорный хост — `0`.
 - «похоже» и «сомнительный» в числитель не входят (0, не 0.5).
 - Пример: 1 точная карточка из 1 при 7 точных в фикстурах — `1 / max(1, 5) = 20 %`, а не 100 %.
+- Пример: 4 точных и 6 похожих, из них 5 похожих после «Одобрить» и 4 точных в фикстурах —
+  `4 / max(10 − 5, 4) = 80 %`; без одобрения было бы `4 / 10 = 40 %`.
 
 Для партии (`score.Batch`):
 
@@ -152,13 +165,14 @@
 {"batch": "b003", "run": "b003-g1_land_madrid", "persona": "g1_land_madrid", "persona_id": "G1",
  "role": "buyer_land", "seed": 3, "status": "done", "judge": "claude-opus", "rubric": "T2",
  "cards_sent": 2, "exact": 1, "similar": 1, "miss": 0, "junk": 0, "exact_available": 3,
+ "near_yes": 1, "approved_sent": 1, "approved_similar": 1, "approved_miss": 0, "approved_junk": 0,
  "available_refs": ["https://www.idealista.com/inmueble/<id1>/", "finding:<uuid2>", "finding:<uuid3>"],
  "junk_hosts": [], "junk_hosts_funnel": ["blog.example"],
  "contradiction": {"said": 1, "clarified": 1},
  "cards": [{"n": 1, "host": "www.idealista.com", "verdict": "exact",
             "criteria": {"property_type": "match", "deal": "match", "place": "match", "area_min_m2": "match",
                          "price_max_eur": "n/a"}, "why": "solar en Madrid, venta, 'parcela de 2.519 m²'"},
-           {"n": 2, "host": "www.milanuncios.com", "verdict": "similar",
+           {"n": 2, "host": "www.milanuncios.com", "verdict": "similar", "approved": true,
             "criteria": {"property_type": "match", "deal": "match", "place": "match", "area_min_m2": "unknown",
                          "price_max_eur": "n/a"}, "why": "площадь не указана"}],
  "costs_usd": 0.0, "notes": ""}
@@ -178,14 +192,19 @@
 `reasonable_refs`; `junk_hosts` (список, пустой — `[]`); `seed`. `score.py` отвергает строку (`ValueError`), если
 `exact > cards_sent`, `exact + similar + miss + junk != cards_sent`, `exact > exact_available`, длина
 `available_refs` (без повторов) не равна `exact_available`, массив `cards` есть, а его длина или вердикты не
-сходятся с числами, `seed` не целое, `checked_by_hand` не `true`/`false`, вторая строка той же персоны в партии
+сходятся с числами, `seed` не целое; `approved_*`, `near_yes` не целые ≥ 0, `approved_sent > 0` при
+`near_yes` `0` или без него, `approved_sent > cards_sent`,
+`approved_similar + approved_miss + approved_junk > approved_sent`, одобренных с вердиктом больше, чем карточек
+с ним (`approved_miss > miss`, одобренных точных `approved_sent − …` больше `exact`), в `cards` число
+`"approved": true` или их вердикты не сходятся с `approved_*`, `checked_by_hand` не `true`/`false`, вторая строка той же персоны в партии
 (без `--latest` — любая, с `--latest` — после строки `done`); так же для лидов. Тексты объявлений, имена и контакты в строку не копируются:
 только хост, номер карточки, короткая цитата факта без ПДн.
 
 `contradiction`: `said` — сколько ответов с тегом `contradiction` дал пользователь (`log` в `sim/answers/<run>.json`),
 `clarified` — сколько раз бот после него переспросил или показал оба значения на карточке. На оценку не влияет; бот,
 который молча принял противоречие, — находка для T3. Ответы с `tag: "manual"` в `log` (вопрос, которого не было в
-персоне) перечислить в `notes`.
+персоне) и с `tag: "default"` (у персоны нет слота `near`, на «Показать?» нажато «Нет»; видно и в `offers`)
+перечислить в `notes`.
 
 ## 7. Инструкция судье (Opus)
 
@@ -195,7 +214,8 @@
    деле сказал: какие критерии `from: "<слот>"` действуют, спросил ли бот слоты с `ask: "required"`, какой допуск
    разрешён, были ли `contradiction` / `low_budget` / `manual` и уточнил ли бот.
 3. `cards` — каждую: `card` (что видел пользователь) и `payload` (факты с цитатами). Сверять по тексту и цитате, а
-   не по `bucket` / `why` бота: бот не судья самому себе.
+   не по `bucket` / `why` бота: бот не судья самому себе. `offers` — был ли «Показать?» и что нажато: карточки после
+   «Одобрить» — `"approved": true` и `approved_*` (§1); вердикт по тексту, как у остальных.
 4. `leads[].card`, `reach_contacts[].card` — отправленные лиды; текст комментария / профиля.
 5. `user_saw`, `report` — ссылки, показанные пользователю вне карточек (мусорные хосты).
 6. `findings` (все) и записи фикстур прогона — для `junk_hosts_funnel` и для `exact_available` /
