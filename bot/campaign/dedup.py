@@ -42,9 +42,9 @@ within 2 % (both known; ``plot_m2`` when there is no ``area_m2``), the same city
 shared district token (generic words such as «urbanización», «costa», «residencial» and regions dropped). The texts'
 small numbers (zone codes aside, the zones are compared on their own) must be the same list. Never merged: a new development («obra nueva»,
 «promoción», «Residencial X»), the same agency or phone on one portal (one advertiser lists several plots there), two
-plots with a round area (a multiple of 50 m², typical plots of one estate) unless both texts state the same zone or
-the same cadastral reference. A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a cadastral reference
-stated in both texts must agree.
+plots with a round area (a multiple of 50 m², typical plots of one estate) unless both texts state the same
+cadastral reference (one zone covers a whole estate). A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a
+cadastral reference stated in both texts must agree.
 
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
@@ -476,9 +476,9 @@ def _same_bare_facts(a: Listing, b: Listing) -> bool:
     area_a, area_b = _bare_area(a), _bare_area(b)
     if _close(area_a, area_b, BARE_AREA_TOLERANCE) is not True:
         return False
-    marked = bool(a.zones and b.zones and _zones_agree(a.zones, b.zones)) or bool(a.cadastre & b.cadastre)
+    marked = bool(a.cadastre & b.cadastre)  # a zone covers a whole estate: only the parcel tells its plots apart
     if not marked and any(area % BARE_ROUND_AREA == 0 for area in (area_a, area_b) if area is not None):
-        return False  # typical plots of one estate: only a zone or a parcel stated on both sides tells them apart
+        return False  # typical plots of one estate: only one cadastral reference stated on both sides is one plot
     if a.zones and b.zones and not _zones_agree(a.zones, b.zones):
         return False  # another planning zone: another plot
     if a.cadastre and b.cadastre and not a.cadastre & b.cadastre:

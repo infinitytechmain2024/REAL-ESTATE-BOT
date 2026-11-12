@@ -41,7 +41,7 @@ def merged(*args, **kw) -> bool:
 def test_two_copies_without_an_address_merge() -> None:
     head, copy = pair(plot(address="Calle Gobelas"), plot())
     assert same_object(head, copy, without_address=True) and same_object(copy, head, without_address=True)
-    both_bare = pair(plot(), plot(price=1_545_000, area=2500))  # within 1 % and 2 %
+    both_bare = pair(plot(), plot(price=1_545_000, area=2490))  # within 1 % and 2 %
     assert same_object(*both_bare, without_address=True)
 
 
@@ -136,9 +136,10 @@ def test_review_5_typical_plots_of_one_estate() -> None:
     big = {"district": "Urbanización Los Pinos", "city": "Valencia", "price": 400_000}
     for area in (750, 1250, 2250, 2500, 9000, 12000):
         assert not merged(plot(area=area, **big), plot(area=area, **big), body, body), area
-    # the same zone stated in both texts: the area may be round; a zone in one text only is not enough
+    # one zone covers a whole estate: the same zone in both texts does not tell two round plots apart
     zoned = "Parcela urbana, N.Z. 8.1.A."
-    assert merged(plot(area=1000, **estate), plot(area=1000, **estate), zoned, zoned)
+    assert not merged(plot(area=2500, **big), plot(area=2500, **big), zoned, zoned)
+    assert not merged(plot(area=1000, **estate), plot(area=1000, **estate), zoned, zoned)
     assert not merged(plot(area=1000, **estate), plot(area=1000, **estate), zoned, "Parcela urbana.")
     assert not merged(plot(area=1000, **estate), plot(area=1000, **estate), zoned, "Parcela urbana, N.Z. 5.2.B.")
     cadastre = "Parcela urbana. Ref. Catastral: 1111111AA1111A0001AA"
