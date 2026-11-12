@@ -71,6 +71,7 @@ BASE_ENV: dict[str, str] = {
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",
     "ANALYSIS_LOCATION_FROM_TEXT": "true",
+    "PORTAL_DEFAULT_POINT_GUARD": "true",  # Q12
     "SEARCH_PLACE_LEVEL_FROM_SPEC": "true",  # Q11
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).

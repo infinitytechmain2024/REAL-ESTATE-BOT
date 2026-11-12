@@ -66,6 +66,9 @@ class WebSearchSettings(BaseSettings):
     apify_fotocasa_actor: str = Field(default="igolaizola/fotocasa-scraper", validation_alias="APIFY_FOTOCASA_ACTOR")
     apify_fotocasa_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_FOTOCASA_MAX_RESULTS")
     apify_fotocasa_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_FOTOCASA_MAX_CHARGE_USD")
+    # Q12: true = a Fotocasa row at the portal's fallback point of its district (sources/portals.py ``default_point``)
+    # passes no district/town as its place and is marked ``place_unverified``; campaign/tolerance.py files it as similar.
+    portal_default_point_guard: bool = Field(default=False, validation_alias="PORTAL_DEFAULT_POINT_GUARD")
     apify_yaencontre_enabled: bool = Field(default=False, validation_alias="APIFY_YAENCONTRE_ENABLED")
     apify_yaencontre_actor: str = Field(default="igolaizola/yaencontre-scraper", validation_alias="APIFY_YAENCONTRE_ACTOR")
     apify_yaencontre_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_YAENCONTRE_MAX_RESULTS")
@@ -255,7 +258,8 @@ class WebSearchSettings(BaseSettings):
             found.append(ApifyFotocasaSource(self.apify_token, actor_id=self.apify_fotocasa_actor,
                                              max_items=self.apify_fotocasa_max_results,
                                              timeout_seconds=self.apify_portals_timeout_seconds,
-                                             max_charge_usd=self.apify_fotocasa_max_charge_usd, geocoder=geocoder()))
+                                             max_charge_usd=self.apify_fotocasa_max_charge_usd, geocoder=geocoder(),
+                                             default_point_guard=self.portal_default_point_guard))
         if self.apify_yaencontre_enabled:
             from .sources.portals import ApifyYaencontreSource
 

@@ -28,6 +28,8 @@ def source_line_facts(text: str) -> dict[str, Any]:
         v = data.get(key)
         if isinstance(v, str) and v.strip():
             out[key] = v.strip()
+    if data.get("place_unverified") is True:  # Q12: written only with PORTAL_DEFAULT_POINT_GUARD
+        out["place_unverified"] = True
     return out
 
 
@@ -36,6 +38,8 @@ def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any
     payload = _base_payload(result, evidence)
     if result.source_place_conflict:  # Q4: only with ANALYSIS_LOCATION_FROM_TEXT; read by campaign/tolerance.py
         payload["source_place_conflict"] = result.source_place_conflict
+    if evidence.platform == "website" and source_line_facts(evidence.text).get("place_unverified"):
+        payload["place_unverified"] = True  # Q12: read by campaign/tolerance.py only with PORTAL_DEFAULT_POINT_GUARD
     if card_extra_fields_enabled() and evidence.platform == "website":
         facts = source_line_facts(evidence.text)
         for key in ("plot_m2", "phone", "advertiser"):
