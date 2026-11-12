@@ -65,12 +65,14 @@ BASE_ENV: dict[str, str] = {
     "CAMPAIGN_INVESTOR_REPORT": "true",
     "CARD_EXTRA_FIELDS": "true",  # on in prod (docs/v2/CLIENT_DECISIONS.md:76): «Площадь», «Телефон», «Агентство»
     "CAMPAIGN_BUDGET_USD": "0.8",
-    # Flags of Q4, Q5, Q8, Q9, Q10 (their own branches): ignored by the bot until those branches are merged.
+    # Flags of Q4, Q5, Q8, Q9, Q10, Q11 (their own branches): ignored by the bot until those branches are merged.
     "DEDUP_WITHOUT_ADDRESS": "true",
     "IDEALISTA_SORT_BIGGEST": "true",
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",
     "ANALYSIS_LOCATION_FROM_TEXT": "true",
+    "PORTAL_DEFAULT_POINT_GUARD": "true",  # Q12
+    "SEARCH_PLACE_LEVEL_FROM_SPEC": "true",  # Q11
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")

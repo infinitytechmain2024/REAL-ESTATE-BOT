@@ -810,8 +810,9 @@ class CampaignRunner:
             return None, UNVERIFIED_CAP, False
         try:
             review = bool(getattr(self.relevance, "reviews", False))  # the reviewer also gets the hard criteria
+            soft = review and bool(getattr(self.relevance, "soft_wishes", False))  # RELEVANCE_SOFT_WISHES
             verdict = await self.relevance.judge(
-                task_data(campaign, review=review),
+                task_data(campaign, review=review, soft_wishes=soft),
                 finding_data(finding.payload, fallback_text=finding.text, original=finding.original, review=review,
                              vertical=finding.vertical))
         except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules (or closed, see ``_judge``)
@@ -840,6 +841,8 @@ class CampaignRunner:
             return offers.Deviation("area", area_text(match.area), requested, land=land)
         if match.why == "area_unknown":
             return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
+        if match.why == "location_unknown":  # Q12: the portal's place is its fallback point
+            return offers.Deviation("unverified", land=land, unknown=("место",))
         kind = self._deal_kind(request, closest)
         if kind is not None:
             return offers.Deviation("deal_kind", phrase=kind, land=land)

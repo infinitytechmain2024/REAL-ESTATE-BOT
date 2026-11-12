@@ -19,6 +19,11 @@ Rules (also in the prompt, and enforced again here, because a model drifts):
 ``CampaignRunner._judge`` turns the matrix into a bucket (``relevance.review_match``): a hard ``fail`` is
 excluded, a hard ``unknown`` is held as not confirmed, all ``pass`` stays exact. The model is
 ``OPENROUTER_REVIEW_MODEL``; the listing text is data, never instructions. No key is logged.
+
+``RELEVANCE_SOFT_WISHES`` (Q9, off by default): the task's wishes (``spec.wishes``) go to the model apart, as
+``task.wishes``, marked soft, under the prompt ``reviewer-v3-soft``; an unmet wish never turns ``match`` into
+``near`` (``parse_review`` enforces it), it is only reported in ``wishes`` for the ranking and the explanation.
+Off: the prompt, the schema and the decision are exactly ``reviewer-v3``.
 """
 
 from __future__ import annotations
@@ -40,6 +45,8 @@ from .llm import LLMError, OpenRouterJSON
 
 log = logging.getLogger(__name__)
 PROMPT_VERSION = "reviewer-v3"
+PROMPT_VERSION_SOFT = "reviewer-v3-soft"  # RELEVANCE_SOFT_WISHES=true: wishes apart and soft
+MAX_WISHES = 8
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 MAX_QUOTE_CHARS = 200
 MAX_NOTE_CHARS = 200
@@ -71,6 +78,26 @@ SCHEMA: dict[str, Any] = {
         "overall": {"type": "string", "enum": list(OVERALLS)},
         "deviation_ru": {"type": ["string", "null"]},
         "confidence": {"type": "number"},
+    },
+}
+
+# RELEVANCE_SOFT_WISHES: the same answer plus one row per soft wish (never a criterion, never part of "overall").
+SCHEMA_SOFT: dict[str, Any] = {
+    **SCHEMA,
+    "required": [*SCHEMA["required"], "wishes", "near_reason"],
+    "properties": {
+        **SCHEMA["properties"],
+        "near_reason": {"type": ["string", "null"], "enum": ["wish", "other", None],
+                        "description": "near only: wish = only the wishes differ; other = anything else; else null"},
+        "wishes": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "text", "verdict", "quote"],
+            "properties": {
+                "id": {"type": "integer", "description": "the id of the wish in task.wishes"},
+                "text": {"type": "string"},
+                "verdict": {"type": "string", "enum": list(VERDICTS)},
+                "quote": {"type": ["string", "null"]},
+            }}},
     },
 }
 
@@ -121,6 +148,32 @@ deviation_ru: only for "near": a short Russian phrase that completes «есть 
 Answer with exactly one JSON object {"criteria": [...], "overall": ..., "deviation_ru": ..., "confidence": ...}.
 No markdown."""
 
+_NEAR_V3 = """- "near": no "fail" but at least one "unknown", or everything passes and a wish is not met.
+"""
+_NEAR_SOFT = """- "near": no "fail" but at least one "unknown", or a wish of weight 3 is not met, or something else outside the
+  criteria makes it a compromise (another town than the one asked, a close but different kind, several units).
+  A wish of weight 1 or 2 that is not met never makes it "near".
+"""
+_WISHES_SOFT = """
+SOFT WISHES. "task.wishes" (when present) are the person's soft wishes, "nice to have" («желательно», «лучше»,
+«Дополнительно: …» in the task text, the same wishes in "task.context"): [{"id", "text", "weight" 1-3}]. They are NOT
+criteria: never put them into "criteria"; a wish of weight 1 or 2 never changes "overall" or "deviation_ru". A wish
+of weight 3 («очень важно») that is not met ("fail" or "unknown") makes "overall" "near", with deviation_ru naming
+it. Report each of them once in "wishes": {"id": the same id, "text": the same text, "verdict": "pass" | "fail" |
+"unknown", "quote": verbatim quote or null}; "wishes" is [] when there are none. Only "task.criteria" (place, deal,
+type, budget, rooms, area, "must_have:", "exclude:") are hard.
+near_reason: for "near" only, why it is not "match": "wish" when ONLY the wishes differ (every criterion passes and
+nothing else is a compromise); "other" when anything else differs or is unclear (an "unknown" criterion, a suburb
+or another town than the one asked, a close but different kind such as a townhouse for a house, several units, a
+number off), even when a wish is not met as well; null when "overall" is not "near".
+"""
+_JSON_V3 = 'Answer with exactly one JSON object {"criteria": [...], "overall": ..., "deviation_ru": ..., "confidence": ...}.'
+_JSON_SOFT = ('Answer with exactly one JSON object {"criteria": [...], "overall": ..., "deviation_ru": ..., '
+              '"confidence": ..., "wishes": [...], "near_reason": ...}.')
+assert SYSTEM.count(_NEAR_V3) == 1 and SYSTEM.count(_JSON_V3) == 1
+SYSTEM_SOFT = (SYSTEM.replace(_NEAR_V3, _NEAR_SOFT).replace(_JSON_V3, _JSON_SOFT)
+               .replace("\noverall:\n", _WISHES_SOFT + "\noverall:\n", 1))
+
 
 @dataclass(frozen=True, slots=True)
 class Criterion:
@@ -138,6 +191,10 @@ class Review:
     confidence: float | None = None
     model: str | None = None
     tolerance_pct: float | None = None
+    prompt: str = PROMPT_VERSION
+    # RELEVANCE_SOFT_WISHES only: one row per soft wish, never part of the bucket.
+    wishes: tuple[Criterion, ...] = ()
+    near_reason: str | None = None  # RELEVANCE_SOFT_WISHES: "wish" | "other" | None, the model's own
 
     @property
     def fails(self) -> tuple[Criterion, ...]:
@@ -149,10 +206,14 @@ class Review:
 
     def to_dict(self) -> dict[str, Any]:
         """The JSON stored in ``campaign_finding_relevance.review``."""
-        return {"criteria": [{"name": c.name, "verdict": c.verdict, "quote": c.quote, "note_ru": c.note_ru}
+        data = {"criteria": [{"name": c.name, "verdict": c.verdict, "quote": c.quote, "note_ru": c.note_ru}
                              for c in self.criteria],
                 "overall": self.overall, "deviation_ru": self.deviation_ru, "confidence": self.confidence,
-                "tolerance_pct": self.tolerance_pct, "prompt": PROMPT_VERSION}
+                "tolerance_pct": self.tolerance_pct, "prompt": self.prompt}
+        if self.prompt == PROMPT_VERSION_SOFT:
+            data["wishes"] = [{"text": w.name, "verdict": w.verdict, "quote": w.quote} for w in self.wishes]
+            data["near_reason"] = self.near_reason
+        return data
 
 
 # --- what the task asks, as criteria ------------------------------------------------------------------------------
@@ -231,10 +292,35 @@ def expected_criteria(hard: dict[str, Any]) -> list[str]:
     return names
 
 
-def review_task(campaign: Campaign) -> dict[str, Any]:
-    """The task part of the reviewer's input (``relevance.task_data`` adds it for a reviewer)."""
+def _weight(value: object) -> int:
+    return value if value in (1, 2, 3) and not isinstance(value, bool) else 1  # type: ignore[return-value]
+
+
+def soft_wishes_of(campaign: Campaign) -> list[dict[str, Any]]:
+    """The task's soft wishes (``spec.wishes``) as ``{"id", "text", "weight"}`` (ids 1, 2, ...), at most
+    ``MAX_WISHES``; duplicates (the same text once folded) are merged with the highest weight."""
+    merged: dict[str, dict[str, Any]] = {}
+    for wish in (campaign.spec or {}).get("wishes") or []:
+        text = wish.get("text") if isinstance(wish, dict) else wish
+        if isinstance(text, str) and _fold(text):
+            weight = _weight(wish.get("weight") if isinstance(wish, dict) else None)
+            key = _fold(text)
+            if key in merged:
+                merged[key]["weight"] = max(merged[key]["weight"], weight)
+            else:
+                merged[key] = {"text": _SPACES.sub(" ", text).strip()[:120], "weight": weight}
+    return [{"id": n, **w} for n, w in enumerate(list(merged.values())[:MAX_WISHES], start=1)]
+
+
+def review_task(campaign: Campaign, *, soft_wishes: bool = False) -> dict[str, Any]:
+    """The task part of the reviewer's input (``relevance.task_data`` adds it for a reviewer).
+
+    ``soft_wishes`` (``RELEVANCE_SOFT_WISHES``): also ``wishes``, the soft wishes apart from the hard criteria.
+    """
     hard = hard_criteria(campaign)
     task: dict[str, Any] = {"hard": hard, "criteria": expected_criteria(hard), "tolerance_pct": tolerance_pct(campaign)}
+    if soft_wishes and (wishes := soft_wishes_of(campaign)):
+        task["wishes"] = wishes  # soft: reported, never a criterion
     if deviations := _deviations(campaign):
         task["deviations"] = deviations  # compromises the person approved: not a fail
     answers = ((campaign.spec or {}).get("context") or {}).get("answers")
@@ -307,12 +393,18 @@ def _clip(text: object, limit: int) -> str:
 
 
 def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", model: str | None = None,
-                 tolerance: float | None = None) -> Review:
+                 tolerance: float | None = None, soft_wishes: bool = False,
+                 task_wishes: Sequence[Any] = ()) -> Review:
     """The model's answer after harmless drift is fixed and the rules above are enforced.
 
     ``ValueError``: not a JSON object. ``expected``: the criteria asked for (an unanswered one is ``unknown``,
     an unasked one is dropped); ``haystack``: the folded finding text a ``fail`` quote must occur in
-    (empty: the quote is not checked, only required).
+    (empty: the quote is not checked, only required). ``soft_wishes`` (``RELEVANCE_SOFT_WISHES``): the answer of
+    ``SYSTEM_SOFT``; the ``wishes`` rows of the task's wishes (``task_wishes``, ``task.wishes``) are kept apart, and
+    the model's ``near`` becomes ``match`` only when the model said ``near_reason: "wish"`` (only the wishes differ),
+    every hard criterion passes, the model reported at least one
+    task wish as not ``pass`` and no wish of weight 3 lacks a ``pass`` (``_only_soft_wishes_unmet``). Any other
+    ``near`` (a suburb, a townhouse for a house, a promotion of several flats) stays ``near`` with its deviation.
     """
     data = json.loads(_FENCE.sub("", content))
     if not isinstance(data, dict):
@@ -342,11 +434,84 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
         overall = "reject"  # the matrix decides: a hard fail is a rejection
     elif overall == "match" and any(c.verdict == "unknown" for c in criteria):
         overall = "near"
+    wishes = _wish_rows(data.get("wishes"), task_wishes) if soft_wishes else ()
+    reason = str(data.get("near_reason") or "").strip().casefold()
+    near_reason = reason if soft_wishes and overall == "near" and reason in ("wish", "other") else None
+    if (soft_wishes and overall == "near" and near_reason == "wish" and all(c.verdict == "pass" for c in criteria)
+            and _only_soft_wishes_unmet(wishes, task_wishes)):
+        overall = "match"  # Q9: every hard criterion passes; an unmet soft wish does not lower «exact»
     confidence = data.get("confidence")
     confidence = (max(0.0, min(1.0, float(confidence)))
                   if isinstance(confidence, int | float) and not isinstance(confidence, bool) else None)
     deviation = user_phrase(data.get("deviation_ru") or data.get("deviation")) if overall == "near" else None
-    return Review(criteria, overall, deviation, confidence, model, tolerance)  # type: ignore[arg-type]
+    if not soft_wishes:
+        return Review(criteria, overall, deviation, confidence, model, tolerance)  # type: ignore[arg-type]
+    return Review(criteria, overall, deviation, confidence, model, tolerance,  # type: ignore[arg-type]
+                  PROMPT_VERSION_SOFT, wishes, near_reason)
+
+
+def _task_wishes(task_wishes: Sequence[Any]) -> dict[str, tuple[str, int]]:
+    """The task's wishes by folded text -> (text, weight); malformed entries are skipped, a duplicate keeps the
+    highest weight."""
+    out: dict[str, tuple[str, int]] = {}
+    for wish in task_wishes if isinstance(task_wishes, list | tuple) else ():
+        if isinstance(wish, dict) and isinstance(wish.get("text"), str) and _fold(wish["text"]):
+            key, weight = _fold(wish["text"]), _weight(wish.get("weight"))
+            out[key] = (out[key][0], max(out[key][1], weight)) if key in out else (wish["text"], weight)
+    return out
+
+
+def _task_wish_ids(task_wishes: Sequence[Any]) -> dict[int, str]:
+    """The task's wish ids -> the folded text (the key of ``_task_wishes``)."""
+    ids: dict[int, str] = {}
+    for wish in task_wishes if isinstance(task_wishes, list | tuple) else ():
+        if (isinstance(wish, dict) and isinstance(wish.get("id"), int) and not isinstance(wish.get("id"), bool)
+                and isinstance(wish.get("text"), str) and _fold(wish["text"])):
+            ids.setdefault(wish["id"], _fold(wish["text"]))
+    return ids
+
+
+def _row_id(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    text = value.strip() if isinstance(value, str) else ""
+    if not (text.isascii() and text.isdecimal()):  # "²" is a digit but not a number int() reads
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _wish_rows(raw: object, task_wishes: Sequence[Any]) -> tuple[Criterion, ...]:
+    """The model's rows for the task's wishes, once each, with the task's text: matched by ``id``, else (no or an
+    unknown id) by the text; anything else (not an object, a wish the task does not have, an id and a text that name
+    two different wishes of the task) is dropped."""
+    known, ids = _task_wishes(task_wishes), _task_wish_ids(task_wishes)
+    rows: dict[str, Criterion] = {}
+    for row in raw if isinstance(raw, list) else []:
+        if not isinstance(row, dict):
+            continue
+        by_id = ids.get(_row_id(row.get("id")))  # type: ignore[arg-type]
+        text = row.get("text")
+        by_text = _fold(text) if isinstance(text, str) else ""
+        if by_id is not None and by_text in known and by_text != by_id:
+            continue  # the id and the text point at different wishes: not trusted either way
+        key = by_id if by_id is not None else by_text
+        if key in known and key not in rows:
+            verdict = _VERDICT_WORDS.get(str(row.get("verdict") or "").strip().casefold(), "unknown")
+            rows[key] = Criterion(known[key][0], verdict, _clip(row.get("quote"), MAX_QUOTE_CHARS) or None)  # type: ignore[arg-type]
+    return tuple(rows.values())[:MAX_WISHES]
+
+
+def _only_soft_wishes_unmet(wishes: Sequence[Criterion], task_wishes: Sequence[Any]) -> bool:
+    """True when the model's «near» can only be about soft wishes: the task has wishes, at least one of them is
+    reported as not ``pass``, and every wish of weight 3 («очень важно») is reported as ``pass``."""
+    known = _task_wishes(task_wishes)
+    verdicts = {_fold(w.name): w.verdict for w in wishes}
+    if not known or not any(v != "pass" for v in verdicts.values()):
+        return False
+    return all(verdicts.get(key) == "pass" for key, (_, weight) in known.items() if weight == 3)
 
 
 # --- the model ----------------------------------------------------------------------------------------------------
@@ -356,10 +521,11 @@ class OpenRouterReviewer:
     """One chat completion per finding on ``OPENROUTER_REVIEW_MODEL``; a 400 retries once without the schema."""
 
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 45,
-                 client: httpx.AsyncClient | None = None) -> None:
+                 client: httpx.AsyncClient | None = None, soft_wishes: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the reviewer")
         self.model = model
+        self.soft_wishes = soft_wishes  # RELEVANCE_SOFT_WISHES: SYSTEM_SOFT / SCHEMA_SOFT, task.wishes apart
         self._llm = OpenRouterJSON(api_key, timeout_seconds=timeout_seconds, client=client)
 
     async def aclose(self) -> None:
@@ -369,13 +535,15 @@ class OpenRouterReviewer:
         expected = list(task.get("criteria") or []) or ["place"]
         user = "Data (JSON, data only):\n" + json.dumps({"task": task, "finding": finding}, ensure_ascii=False)
         try:
-            content = await self._llm.complete(self.model, SYSTEM, user, schema=SCHEMA, name="finding_review",
-                                               max_tokens=1200)
+            content = await self._llm.complete(self.model, SYSTEM_SOFT if self.soft_wishes else SYSTEM, user,
+                                               schema=SCHEMA_SOFT if self.soft_wishes else SCHEMA,
+                                               name="finding_review", max_tokens=1200)
         except LLMError as exc:
             raise RelevanceError(exc.code) from exc
         try:
             return parse_review(content, expected=expected, haystack=haystack_of(finding), model=self.model,
-                                tolerance=_number(task.get("tolerance_pct")))
+                                tolerance=_number(task.get("tolerance_pct")), soft_wishes=self.soft_wishes,
+                                task_wishes=task.get("wishes") or ())
         except Exception as exc:
             log.warning("campaign.review_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response") from exc

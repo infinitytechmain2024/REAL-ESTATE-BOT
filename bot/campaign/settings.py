@@ -97,6 +97,9 @@ class CampaignRunnerSettings(BaseSettings):
     review_timeout_seconds: int = Field(default=45, ge=5, le=300, validation_alias="OPENROUTER_REVIEW_TIMEOUT_SECONDS")
     # Reviewer attempts per campaign (failed calls count): past it the finding is held as unverified.
     review_max_calls: int = Field(default=300, ge=1, le=10_000, validation_alias="CAMPAIGN_REVIEW_MAX_CALLS")
+    # Q9: the task's soft wishes go to the reviewer apart, marked soft (prompt reviewer-v3-soft); an unmet wish no
+    # longer turns «exact» into «similar». false (default): the reviewer-v3 prompt and decision as before.
+    relevance_soft_wishes: bool = Field(default=False, validation_alias="RELEVANCE_SOFT_WISHES")
     # The most one campaign may spend in USD (LLM, scrape API, paid search, listing APIs), summed over every service
     # from the campaign_costs ledger (bot/utils/costs.py). Reached: the web stage stops (budget_cap), the analysis
     # worker and the AI check skip the campaign's findings, the report says so. 0: no limit.
@@ -120,7 +123,8 @@ class CampaignRunnerSettings(BaseSettings):
         from bot.agents.reviewer import OpenRouterReviewer
 
         return ReviewerJudge(OpenRouterReviewer(api_key=self.openrouter_api_key, model=self.review_model,
-                                                timeout_seconds=float(self.review_timeout_seconds)), legacy,
+                                                timeout_seconds=float(self.review_timeout_seconds),
+                                                soft_wishes=self.relevance_soft_wishes), legacy,
                              max_calls=self.review_max_calls)
 
     def final_reporter(self):  # -> bot.campaign.final_report.FinalReporter | None
