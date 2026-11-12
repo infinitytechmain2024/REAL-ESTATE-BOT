@@ -6,7 +6,15 @@ from __future__ import annotations
 import pytest
 
 from bot.campaign import MemoryCampaignStore, plan_campaign
-from bot.campaign.dedup import has_street, listing_of, ref_key, same_object
+from bot.campaign.dedup import (
+    _DISTRICT_STOP,
+    _PLACE_STOP,
+    has_street,
+    listing_of,
+    ref_key,
+    same_object,
+    strong_ref,
+)
 from bot.campaign.runner import CampaignRunner, RunnerConfig
 from bot.campaign.runs import MemoryRunStore
 from bot.campaign.settings import CampaignRunnerSettings
@@ -51,11 +59,13 @@ def merged(a: dict, b: dict, *, flag: bool, url_a: str = FOTO, url_b: str = HAB,
 FEATURES = {"features": ["ascensor", "balcon", "exterior"]}
 
 
-def test_same_facts_in_two_districts_merge_only_with_the_flag() -> None:
+def test_same_facts_in_two_districts_merge_only_by_reference_or_text() -> None:
     a = flat("L'Amistat", **FEATURES)
     b = flat("Algirós", city="Valencia Capital", **FEATURES)
-    assert not merged(a, b, flag=False)
-    assert merged(a, b, flag=True)
+    assert not merged(a, b, flag=False) and not merged(a, b, flag=True)  # two shared features are not enough
+    refs = {"body_a": body(TEXT, "LCV-45579-1"), "body_b": body(OTHER_TEXT, "LCV-45579-1")}
+    assert not merged(a, b, flag=False, **refs)
+    assert merged(a, b, flag=True, **refs)
 
 
 def test_the_same_text_in_two_districts_merges_only_with_the_flag() -> None:
@@ -81,7 +91,7 @@ def test_the_same_agency_reference_with_price_and_area_merges() -> None:
 def test_one_agency_two_flats_in_neighbouring_districts_stay_two() -> None:
     a = flat("Benicalap", agency="Inmobiliaria Ejemplo", **FEATURES)
     b = flat("Torrefiel", city="Valencia Capital", agency="Inmobiliaria Ejemplo", **FEATURES)
-    assert merged(a, b, flag=True)  # without references the facts rule merges them (same agency, same facts)
+    assert not merged(a, b, flag=True)  # another district, no street: the facts rule does not apply
     kw = {"body_a": body(TEXT, "REF-0001"), "body_b": body(TEXT, "REF-0002")}
     assert not merged(a, b, flag=True, **kw)  # another reference: another flat, even with the same text
     # streets known and shared, one advertiser, two references: two flats of one building
@@ -109,6 +119,81 @@ def test_capital_is_no_shared_place() -> None:
     # «Valencia Capital» on both sides: "capital" is a district stop word, the districts are not shared
     a, b = flat("Benimaclet", city="Valencia Capital"), flat("Patraix", city="Valencia Capital")
     assert not merged(a, b, flag=True, url_b="https://www.pisos.com/comprar/piso-valencia-100000001/")
+
+
+IDE = "https://www.idealista.com/inmueble/100000001/"
+TWO = {"features": ["ascensor", "exterior"]}
+
+
+def test_review_1_other_agencies_other_districts_same_facts_stay_two() -> None:
+    a, b = flat("Benicalap", agency="Agencia A", **TWO), flat("Torrefiel", agency="Agencia B", **TWO)
+    assert not merged(a, b, flag=True, url_a=IDE, url_b=FOTO, body_a=TEXT, body_b=OTHER_TEXT)
+    # a street on one side, another district on the other: never, not even by the text
+    street = flat("Benicalap", address="Calle Uno, Benicalap, Valencia", agency="Agencia A", **TWO)
+    assert not merged(street, b, flag=True, url_a=IDE, url_b=FOTO, body_a=TEXT, body_b=OTHER_TEXT)
+    assert not merged(street, b, flag=True, url_a=IDE, url_b=FOTO, body_a=TEXT, body_b=TEXT)
+
+
+def test_review_2_a_reference_on_one_side_only_is_no_reference() -> None:
+    a, b = flat("Benicalap", agency="Agencia A"), flat("Torrefiel", agency="Agencia A")
+    assert not merged(a, b, flag=True, url_a=IDE, url_b=FOTO, body_a=TEXT, body_b=body(OTHER_TEXT, "REF-1"))
+    assert not merged(a, b, flag=True, url_a=FOTO, url_b=HAB, body_a=body(TEXT), body_b=body(OTHER_TEXT, "ABC-123"))
+
+
+@pytest.mark.parametrize("ref", ["2011", "1999", "TORREFIEL", "1234"])
+def test_review_3_4_weak_references_do_not_merge(ref: str) -> None:
+    a, b = flat("Benicalap", agency="A"), flat("Torrefiel", agency="B")
+    assert not merged(a, b, flag=True, body_a=body(TEXT, ref), body_b=body(OTHER_TEXT, ref))
+    assert not strong_ref(ref_key(ref))
+
+
+def test_strong_references() -> None:
+    for ref in ("LCV45579-1", "REO-111-860", "12345", "46-3501588", "Fran1111", "PIS2087"):
+        assert strong_ref(ref_key(ref)), ref
+
+
+def test_review_5_a_new_development_never_merges_by_reference() -> None:
+    promo = "Obra nueva, promoción de viviendas. "
+    a, b = flat("Malilla", agency="Promotora"), flat("La Fonteta", agency="Promotora")
+    kw = {"body_a": body(promo + TEXT, "PROMO-77"), "body_b": body(promo + OTHER_TEXT, "PROMO-77")}
+    assert not merged(a, b, flag=True, **kw)
+    assert merged(a, b, flag=True, body_a=body(TEXT, "PROMO-77"), body_b=body(OTHER_TEXT, "PROMO-77"))
+
+
+def test_review_7_one_street_one_district_same_agency_stay_two() -> None:
+    a = flat("Benicalap", address="Calle Uno, Benicalap, Valencia", agency="A")
+    assert not merged(a, flat("Torrefiel", agency="A"), flag=True, url_a=IDE, url_b=FOTO, body_a=TEXT,
+                      body_b=OTHER_TEXT)
+
+
+def test_rooms_known_on_one_side_only_do_not_merge_by_reference() -> None:
+    a, b = flat("Benicalap", rooms=None, agency="A"), flat("Torrefiel", agency="B")
+    assert not merged(a, b, flag=True, body_a=body(TEXT, "12345"), body_b=body(OTHER_TEXT, "12345"))
+
+
+def test_a_district_named_like_a_street_is_a_district() -> None:
+    # «Camí Fondo» is a district of Valencia: Fotocasa's address is the district, not a street
+    a = flat("Camí Fondo", price=180_000, area=64, rooms=3, floor=0)
+    b = flat("Camins al Grau", city="Valencia Capital", price=180_000, area=64, rooms=3, floor=0)
+    assert merged(a, b, flag=True, body_a=body(TEXT, "LCV45436-1"), body_b=body(OTHER_TEXT, "LCV45436-1"))
+    street = flat("Benicalap", address="Camí de Moncada, Benicalap, Valencia")
+    assert not merged(street, b, flag=True, body_a=body(TEXT, "LCV45436-1"), body_b=body(OTHER_TEXT, "LCV45436-1"))
+
+
+LAND = {"price_amount": 100000, "price_currency": "EUR", "deal_type": "sale", "property_type": "land",
+        "plot_m2": 733, "district": "", "address": ""}
+
+
+@pytest.mark.parametrize(("one", "two", "before_q15"), [
+    ("Valencia Capital", "Benimaclet, Valencia", False),
+    ("Benimaclet, Valencia Capital", "Patraix, Valencia Capital", True),  # "capital" is shared on main
+])
+def test_q8_without_q15_is_as_on_main(one: str, two: str, before_q15: bool) -> None:
+    x, y = listing_of({**LAND, "location": one}, url=FOTO), listing_of({**LAND, "location": two}, url=HAB)
+    assert same_object(x, y, without_address=True) is before_q15
+    assert "capital" not in _PLACE_STOP and "capital" in _DISTRICT_STOP
+    if before_q15:  # with Q15 «capital» is no district: Benimaclet and Patraix are two plots
+        assert not same_object(x, y, without_address=True, district_not_street=True)
 
 
 def test_has_street_and_ref_key() -> None:
