@@ -210,7 +210,7 @@ async def test_a_task_that_says_everything_is_still_asked_task_questions_and_the
     assert card.text.startswith("Проверьте задачу:\nРежим: 🏡 Участки и объекты\nГород: Мадрид\n")
     for line in ("Сделка: аренда", "Тип: квартира", "Бюджет: до 1200 €", "Комнаты: от 2", "Обязательно: лифт",
                  "Пожелания: рядом с метро (очень важно)",
-                 "Допустимые отступления: бюджет ±10 %; соседние районы: Чамартин",
+                 "Допустимые отступления: бюджет до +10 %; соседние районы: Чамартин",
                  "• Какой этаж и нужен ли лифт? — не ниже 3 этажа"):
         assert line in card.text, line
     assert "?" not in card.text.replace("Всё верно?", "").replace("Какой этаж и нужен ли лифт?", "")
@@ -431,7 +431,7 @@ async def test_the_rules_ask_the_same_ordered_fields_one_at_a_time() -> None:
     assert [b.text for b in deviation.buttons[:3]] == ["±10 %", "±20 %", "Только точные"]
     card = await say(control, USER, "±20 %")
     assert card.text.startswith("Проверьте задачу:")
-    for line in ("Допустимые отступления: бюджет ±20 %; площадь −20 %", "Город: Валенсия", "Районы: Руссафа", "Тип: дом", "Бюджет: до 2000 €", "Комнаты: от 3",
+    for line in ("Допустимые отступления: бюджет до +20 %; площадь −20 %", "Город: Валенсия", "Районы: Руссафа", "Тип: дом", "Бюджет: до 2000 €", "Комнаты: от 3",
                  "Обязательно: бассейн, гараж"):
         assert line in card.text, line
 
@@ -731,7 +731,7 @@ def test_deviations_and_context_are_parsed_into_the_spec_and_context_is_appended
     assert (dev.budget_pct, dev.area_pct, dev.nearby_areas, dev.other, dev.asked) == (
         10, 15, ["Eixample", "Quatre Carreres"], ["без лифта ок до 2 этажа"], True)
     assert [(a.question, a.answer) for a in turn.spec.context.answers] == [("Q1?", "A1"), ("Q2?", "A2")]  # appended
-    assert turn.spec.summary_ru().count("Допустимые отступления: бюджет ±10 %; площадь −15 %; соседние районы: Eixample") == 1
+    assert turn.spec.summary_ru().count("Допустимые отступления: бюджет до +10 %; площадь −15 %; соседние районы: Eixample") == 1
     # «Только точные» is asked-with-zeros; a later message never un-asks the question.
     strict = turn.spec.merged({"deviations": {"budget_pct": 0, "area_pct": 0, "asked": False}})
     assert strict.deviations.asked and strict.deviations.budget_pct == 0
@@ -796,7 +796,7 @@ async def test_the_rules_fallback_asks_the_deviation_question_and_reads_the_butt
     assert "Если точных вариантов не найду" in generic.text and "бюджет +10 % (до 220 000 €)" in generic.text
     assert [b.text for b in generic.buttons[:3]] == ["±10 %", "±20 %", "Только точные"]
     card = await press(control, USER, "task:dev:10")
-    assert "Допустимые отступления: бюджет ±10 %; площадь −10 %" in card.text
+    assert "Допустимые отступления: бюджет до +10 %; площадь −10 %" in card.text
     # «Только точные» sets zeros: the card says so and nothing is approved.
     control, _, _ = plane()
     await press(control, USER, "mode:real_estate")

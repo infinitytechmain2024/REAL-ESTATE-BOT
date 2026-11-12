@@ -103,6 +103,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q18: a terraced / semi-detached house (adosado, pareado, townhouse) is a house for the reviewer unless the task
     # asks for a detached one (prompts reviewer-v3-th / reviewer-v3-soft-th). false (default): the prompts as before.
     review_townhouse_is_house: bool = Field(default=False, validation_alias="REVIEW_TOWNHOUSE_IS_HOUSE")
+    # Q22: for a home a listing with signs of a non-residential unit («IVA incluido» in a rent, «uso profesional»,
+    # «sin cédula de habitabilidad» ...) gets type fail, an indirect sign unknown (prompts «-nr»). false: as before.
+    review_non_residential: bool = Field(default=False, validation_alias="REVIEW_NON_RESIDENTIAL")
     # Q18, the same variable as bot/web_search/settings.py: the reviewer also gets «hits», windows of the whole
     # listing text around the must-have words, and may quote them (prompt «-hits»). Off: as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")
@@ -132,7 +135,8 @@ class CampaignRunnerSettings(BaseSettings):
                                                 timeout_seconds=float(self.review_timeout_seconds),
                                                 soft_wishes=self.relevance_soft_wishes,
                                                 townhouse_is_house=self.review_townhouse_is_house,
-                                                quote_hits=self.portal_description_full), legacy,
+                                                quote_hits=self.portal_description_full,
+                                                non_residential=self.review_non_residential), legacy,
                              max_calls=self.review_max_calls)
 
     def final_reporter(self):  # -> bot.campaign.final_report.FinalReporter | None

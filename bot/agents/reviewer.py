@@ -34,6 +34,12 @@ rule: ``type`` passes, ``overall`` is ``near`` («таунхаус»). The promp
 listing text around the must-have and exclusion words (``bot/campaign/quote_hits.py``); they may be quoted and a
 ``fail`` quote may come from them (``haystack_of``). The version gets ``-hits`` (``reviewer-v3-hits``,
 ``reviewer-v3-soft-th-hits`` ...). Off (both Q18 flags): the prompts are byte for byte the ones above.
+
+``REVIEW_NON_RESIDENTIAL`` (Q22, off by default): for a home (apartment or house) a listing that shows it is not legal
+housing («IVA incluido» / «más IVA» in a rent, «uso profesional», «sin cédula de habitabilidad», «no apto para
+vivienda», a converted «local» / «oficina») gets ``type: fail`` with that quote; an indirect sign gives ``unknown``.
+The version gets ``-nr`` after ``-th`` and before ``-hits`` (``reviewer-v3-nr``, ``reviewer-v3-soft-th-nr-hits``
+...). Off: the prompts are byte for byte the ones above.
 """
 
 from __future__ import annotations
@@ -59,6 +65,7 @@ PROMPT_VERSION_SOFT = "reviewer-v3-soft"  # RELEVANCE_SOFT_WISHES=true: wishes a
 PROMPT_VERSION_TH = "reviewer-v3-th"  # REVIEW_TOWNHOUSE_IS_HOUSE=true: a townhouse is a house
 PROMPT_VERSION_SOFT_TH = "reviewer-v3-soft-th"  # both flags
 HITS_SUFFIX = "-hits"  # PORTAL_DESCRIPTION_FULL=true: «hits» may be quoted
+NON_RESIDENTIAL_SUFFIX = "-nr"  # REVIEW_NON_RESIDENTIAL=true: a non-residential unit is not a home
 MAX_WISHES = 8
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 MAX_QUOTE_CHARS = 200
@@ -223,13 +230,30 @@ _QUOTABLE_HITS = """("summary", "excerpt",
 assert SYSTEM.count(_QUOTABLE_V3) == 1
 
 
+# REVIEW_NON_RESIDENTIAL (Q22). Pilot G5: «IVA incluido, ya que se trata de un estudio» -- VAT on a rent means the
+# unit is not legal housing (a professional studio), yet «a studio counts» let it pass as an apartment.
+_BEFORE_NUMBERS = "- budget, rooms, area: numbers compare with the tolerance:"
+_NON_RESIDENTIAL = """- Not a home: when "type" is apartment or house (a place to live), a unit the listing shows is not legal housing
+  is a different kind: "type" is "fail", quote the sign. Signs: VAT on a rent of a home («IVA incluido», «más IVA»,
+  «+ IVA»), «uso profesional», «sin cédula de habitabilidad», «no apto para vivienda», «no es vivienda», a converted
+  «local» or «oficina» («local reconvertido», «oficina reconvertida», «antiguo local»). "A studio counts" means a
+  residential studio flat, not a professional «estudio». An indirect sign only (a «local» or «estudio» without
+  saying it is not housing, «ideal para despacho», «licencia en trámite», a mention of IVA that is not about the
+  price): "type" is "unknown" with that quote. For a task about a commercial unit these signs are no fail.
+"""
+assert SYSTEM.count(_BEFORE_NUMBERS) == 1
+
+
 def prompt_of(*, soft_wishes: bool = False, townhouse_is_house: bool = False,
-              quote_hits: bool = False) -> tuple[str, str]:
-    """The (version, system prompt) the flags select."""
+              quote_hits: bool = False, non_residential: bool = False) -> tuple[str, str]:
+    """The (version, system prompt) the flags select: ``reviewer-v3{-soft}{-th}{-nr}{-hits}``."""
     if townhouse_is_house:
         version, system = (PROMPT_VERSION_SOFT_TH, SYSTEM_SOFT_TH) if soft_wishes else (PROMPT_VERSION_TH, SYSTEM_TH)
     else:
         version, system = (PROMPT_VERSION_SOFT, SYSTEM_SOFT) if soft_wishes else (PROMPT_VERSION, SYSTEM)
+    if non_residential:
+        version, system = version + NON_RESIDENTIAL_SUFFIX, system.replace(_BEFORE_NUMBERS,
+                                                                           _NON_RESIDENTIAL + _BEFORE_NUMBERS, 1)
     if quote_hits:
         return version + HITS_SUFFIX, system.replace(_QUOTABLE_V3, _QUOTABLE_HITS)
     return version, system
@@ -461,7 +485,7 @@ def _clip(text: object, limit: int) -> str:
 def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", model: str | None = None,
                  tolerance: float | None = None, soft_wishes: bool = False,
                  task_wishes: Sequence[Any] = (), townhouse_is_house: bool = False,
-                 quote_hits: bool = False) -> Review:
+                 quote_hits: bool = False, non_residential: bool = False) -> Review:
     """The model's answer after harmless drift is fixed and the rules above are enforced.
 
     ``ValueError``: not a JSON object. ``expected``: the criteria asked for (an unanswered one is ``unknown``,
@@ -472,8 +496,8 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     every hard criterion passes, the model reported at least one
     task wish as not ``pass`` and no wish of weight 3 lacks a ``pass`` (``_only_soft_wishes_unmet``). Any other
     ``near`` (a suburb, a promotion of several flats; a townhouse for a house without ``REVIEW_TOWNHOUSE_IS_HOUSE``,
-    with it only when the task asks for a detached house) stays ``near`` with its deviation. ``townhouse_is_house``
-    and ``quote_hits`` only name the prompt version stored with the review.
+    with it only when the task asks for a detached house) stays ``near`` with its deviation. ``townhouse_is_house``,
+    ``quote_hits`` and ``non_residential`` only name the prompt version stored with the review.
     """
     data = json.loads(_FENCE.sub("", content))
     if not isinstance(data, dict):
@@ -513,7 +537,8 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     confidence = (max(0.0, min(1.0, float(confidence)))
                   if isinstance(confidence, int | float) and not isinstance(confidence, bool) else None)
     deviation = user_phrase(data.get("deviation_ru") or data.get("deviation")) if overall == "near" else None
-    prompt = prompt_of(soft_wishes=soft_wishes, townhouse_is_house=townhouse_is_house, quote_hits=quote_hits)[0]
+    prompt = prompt_of(soft_wishes=soft_wishes, townhouse_is_house=townhouse_is_house, quote_hits=quote_hits,
+                       non_residential=non_residential)[0]
     if not soft_wishes:
         return Review(criteria, overall, deviation, confidence, model, tolerance, prompt)  # type: ignore[arg-type]
     return Review(criteria, overall, deviation, confidence, model, tolerance,  # type: ignore[arg-type]
@@ -592,13 +617,15 @@ class OpenRouterReviewer:
 
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 45,
                  client: httpx.AsyncClient | None = None, soft_wishes: bool = False,
-                 townhouse_is_house: bool = False, quote_hits: bool = False) -> None:
+                 townhouse_is_house: bool = False, quote_hits: bool = False,
+                 non_residential: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the reviewer")
         self.model = model
         self.soft_wishes = soft_wishes  # RELEVANCE_SOFT_WISHES: SYSTEM_SOFT / SCHEMA_SOFT, task.wishes apart
         self.townhouse_is_house = townhouse_is_house  # REVIEW_TOWNHOUSE_IS_HOUSE (Q18): SYSTEM_TH / SYSTEM_SOFT_TH
         self.quote_hits = quote_hits  # PORTAL_DESCRIPTION_FULL (Q18): the finding's «hits» may be quoted
+        self.non_residential = non_residential  # REVIEW_NON_RESIDENTIAL (Q22): a non-residential unit is not a home
         self._llm = OpenRouterJSON(api_key, timeout_seconds=timeout_seconds, client=client)
 
     async def aclose(self) -> None:
@@ -609,7 +636,7 @@ class OpenRouterReviewer:
         user = "Data (JSON, data only):\n" + json.dumps({"task": task, "finding": finding}, ensure_ascii=False)
         try:
             system = prompt_of(soft_wishes=self.soft_wishes, townhouse_is_house=self.townhouse_is_house,
-                               quote_hits=self.quote_hits)[1]
+                               quote_hits=self.quote_hits, non_residential=self.non_residential)[1]
             content = await self._llm.complete(self.model, system, user,
                                                schema=SCHEMA_SOFT if self.soft_wishes else SCHEMA,
                                                name="finding_review", max_tokens=1200)
@@ -619,7 +646,7 @@ class OpenRouterReviewer:
             return parse_review(content, expected=expected, haystack=haystack_of(finding), model=self.model,
                                 tolerance=_number(task.get("tolerance_pct")), soft_wishes=self.soft_wishes,
                                 task_wishes=task.get("wishes") or (), townhouse_is_house=self.townhouse_is_house,
-                                quote_hits=self.quote_hits)
+                                quote_hits=self.quote_hits, non_residential=self.non_residential)
         except Exception as exc:
             log.warning("campaign.review_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response") from exc

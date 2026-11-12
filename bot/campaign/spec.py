@@ -356,7 +356,8 @@ class Deviations(_Model):
     def line_ru(self) -> str:
         parts: list[str] = []
         if self.budget_pct:
-            parts.append(f"бюджет ±{_num(self.budget_pct)} %")
+            # Q22: the band is only upward (tolerance.budget_match: a price under the maximum is always exact)
+            parts.append(f"бюджет до +{_num(self.budget_pct)} %")
         if self.area_pct:
             parts.append(f"площадь −{_num(self.area_pct)} %")
         if self.rooms_delta:
