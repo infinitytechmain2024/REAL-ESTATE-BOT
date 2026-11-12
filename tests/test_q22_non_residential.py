@@ -74,11 +74,33 @@ def test_flag_on_prompt_has_its_own_version_and_the_rule(flags) -> None:
     assert version in final_report._LEGAL_RULE_PROMPTS  # the legal-buildability rule is still in it
     assert rv.is_soft(version) is soft
     rule = system.split("- Not a home:", 1)[1].split("- budget, rooms, area:", 1)[0]
-    for word in ("«IVA incluido»", "«más IVA»", "«uso profesional»", "«sin cédula de habitabilidad»",
-                 "«no apto para vivienda»", "«local reconvertido»", "«oficina reconvertida»",
-                 '"type" is "fail"', '"type" is "unknown"', "residential studio flat"):
+    for word in ("«alquiler 900 € + IVA»", "«IVA\n    incluido, ya que se trata de un estudio»", "«uso profesional»",
+                 "«sin cédula de habitabilidad»", "«no apto para vivienda»", "«local reconvertido»",
+                 "«oficina reconvertida»", '"type" is "fail"', '"type" is "unknown"', "residential studio flat"):
         assert word in rule, word
     assert rule.index('"fail"') < rule.index("indirect sign") < rule.index('"unknown"')
+
+
+def test_flag_on_rule_keeps_ordinary_homes_out() -> None:
+    rule = rv._NON_RESIDENTIAL
+    # 1: VAT counts in a rent only on the monthly rent itself, not on the agency fee, a garage, utilities, services
+    rent = rule.split("in a RENT only:", 1)[1].split("* In a SALE", 1)[0]
+    assert "VAT charged on the monthly rent itself" in rent
+    for word in ("agency fee", "«honorarios + IVA»", "garage", "storage room", "utilities", "services"):
+        assert word in rent.split("Not a sign:", 1)[1], word
+    # 2: a sale, obra nueva / promoción: VAT is normal
+    sale = rule.split("* In a SALE", 1)[1].split("\n  *", 1)[0]
+    for word in ("obra nueva / promoción", "«+ IVA»", "«IVA incluido»", "never a sign"):
+        assert word in sale, word
+    # 3: professional use or a conversion only when the listing says it is not housing
+    use = rule.split("* «uso profesional»", 1)[1].split("\n  * A tourist", 1)[0]
+    for word in ("only when the listing says", "plainly that it is not housing", "Housing, no sign:",
+                 "«vivienda o uso profesional»", "«reconvertido en vivienda con cédula»"):
+        assert word in use, word
+    # 4: a tourist flat is housing
+    tourist = rule.split("* A tourist flat is housing, no sign:", 1)[1].split("\n", 1)[0]
+    for word in ("VUT", "«uso turístico»", "«licencia turística»"):
+        assert word in tourist, word
 
 
 def test_all_sixteen_versions_are_distinct_and_trusted_by_the_report() -> None:
