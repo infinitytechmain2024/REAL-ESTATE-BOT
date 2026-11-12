@@ -115,7 +115,8 @@ class PostgresAnalysisStore:
                 json.dumps(payload),
                 outcome.result.confidence,
                 json.dumps(metadata(outcome.language, model,
-                                    location_from_text=getattr(outcome, "location_from_text", False) is True)),
+                                    location_from_text=getattr(outcome, "location_from_text", False) is True,
+                                    agency_rule=getattr(outcome, "agency_rule", False) is True)),
             )
             return str(row["id"])
 

@@ -16,7 +16,7 @@ from bot.analysis_pipeline import source_place
 from bot.analysis_pipeline.openrouter import OpenRouterAnalyzer
 from bot.analysis_pipeline.settings import AnalysisSettings
 from bot.campaign import final_report, plan_campaign
-from bot.campaign.quote_hits import WINDOW, needles, quote_hits
+from bot.campaign.quote_hits import HITS_PER_TERM, MAX_HITS, WINDOW, needles, quote_hits
 from bot.campaign.relevance import MAX_REVIEW_TEXT_CHARS, ReviewerJudge, finding_data
 from bot.campaign.runner import CampaignRunner, RunnerConfig
 from bot.campaign.runs import MemoryRunStore
@@ -194,7 +194,7 @@ def test_quote_hits_find_spanish_words_for_russian_terms() -> None:
     assert len(hits) == 1 and "Piscina privada climatizada" in hits[0] and len(hits[0]) <= 2 * WINDOW + 7
     assert hits[0] in " ".join(POOL_TEXT.split())  # verbatim, whitespace collapsed like the excerpt
     for term, word in (("лифт", "ascensor"), ("терраса", "terraza"), ("гараж", "garaje"), ("парковка", "parking"),
-                       ("сад", "jardin"), ("кондиционер", "aire acondicionado"), ("мебель", "amueblad"),
+                       ("сад", "jardin"), ("кондиционер", "aire acondicionado"), ("мебель", "amueblado"),
                        ("можно с животными", "mascota")):
         assert word in needles(term), term
     assert quote_hits("Ático amueblado con ascensor y TERRAZA.", ["меблированная", "лифт", "терраса"]) == [
@@ -355,3 +355,58 @@ async def test_the_analyzer_hands_the_limit_to_the_place_check(monkeypatch: pyte
         await analyzer.analyze(Evidence(post_id="p", source_id="s", canonical_url="https://x.es/1",
                                         text=_post(AGENCY_TAIL)), "real_estate")
     assert seen == {"description_chars": chars}
+
+
+# --- hits per term, word ends, more synonyms, the «sin» line, the agency sentence -----------------------------------
+
+
+def test_hits_are_shared_round_robin_between_terms() -> None:
+    gardens = " ".join(f"Jardín número {n} " + "x " * 150 for n in range(6))  # six windows of «сад» apart
+    text = gardens + "Al final, una piscina privada."
+    hits = quote_hits(text, ["сад", "бассейн"])
+    assert any("piscina privada" in hit for hit in hits)
+    assert sum("Jardín número" in hit for hit in hits) == HITS_PER_TERM
+    many = " ".join(f"{word} " + "x " * 150 for word in ("jardín", "piscina", "terraza", "ascensor", "garaje")
+                    for _ in range(3))
+    assert len(quote_hits(many, ["сад", "бассейн", "терраса", "лифт", "гараж"])) == MAX_HITS == 8
+
+
+def test_latin_words_match_to_the_word_end_cyrillic_from_the_start() -> None:
+    assert quote_hits("Tratamiento de lifting facial incluido.", ["лифт"]) == []
+    assert quote_hits("Edificio con dos lifts.", ["лифт"]) == ["Edificio con dos lifts."]
+    assert quote_hits("Dos piscinas comunitarias.", ["бассейн"]) == ["Dos piscinas comunitarias."]
+    assert quote_hits("Дом с бассейном и садом.", ["бассейн"]) == ["Дом с бассейном и садом."]
+
+
+@pytest.mark.parametrize(("term", "word"), [
+    ("балкон", "balcon"), ("вид на море", "vistas al mar"), ("пляж", "playa"), ("первая линия", "primera linea"),
+    ("камин", "chimenea"), ("кладовка", "trastero"), ("подвал", "sotano"), ("отопление", "calefaccion"),
+    ("охрана", "vigilancia"), ("консьерж", "conserje"), ("барбекю", "barbacoa"), ("солярий", "solarium"),
+])
+def test_more_synonyms(term: str, word: str) -> None:
+    assert word in needles(term)
+
+
+def test_a_hit_with_sin_is_found_and_the_prompt_says_it_does_not_meet_the_must_have() -> None:
+    hits = quote_hits("Chalet adosado, sin piscina, con jardín pequeño.", ["бассейн"])
+    assert hits == ["Chalet adosado, sin piscina, con jardín pequeño."]
+    system = rv.prompt_of(quote_hits=True)[1]
+    assert "a hit only shows where the word occurs" in system
+    assert "«sin piscina» or «piscina municipal» do not" in system
+
+
+def test_the_agency_sentence_only_with_both_flags() -> None:
+    from bot.analysis_pipeline import openrouter as orr
+    from bot.analysis_pipeline.pipeline import metadata
+
+    assert orr.instructions() == orr.INSTRUCTIONS and orr.instructions(False, True) == orr.INSTRUCTIONS
+    assert orr.instructions(True) == orr.INSTRUCTIONS_LOCATION_FROM_TEXT
+    agency = orr.instructions(True, True)
+    assert orr.AGENCY_OFFICE_SENTENCE in agency and orr.AGENCY_OFFICE_SENTENCE not in orr.instructions(True)
+    assert "an agency's office or headquarters named in the text is not the object's place" in agency.lower()
+    assert agency.replace(orr.AGENCY_OFFICE_SENTENCE, "") == orr.instructions(True)
+    assert [orr.prompt_version(*f) for f in ((False, False), (False, True), (True, False), (True, True))] == [
+        "analysis-v6", "analysis-v6", "analysis-v6-loc", "analysis-v6-loc-agency"]
+    assert metadata("es", "m", location_from_text=True, agency_rule=True)["prompt_version"] == "analysis-v6-loc-agency"
+    assert OpenRouterAnalyzer("k", "m").agency_rule is False
+    assert OpenRouterAnalyzer("k", "m", place_description_chars=1500).agency_rule is True

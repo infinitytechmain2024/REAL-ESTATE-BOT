@@ -218,7 +218,8 @@ _QUOTABLE_V3 = """("summary", "excerpt",
   "evidence" values; the other fields"""
 _QUOTABLE_HITS = """("summary", "excerpt",
   "evidence" and "hits" values; "hits" are verbatim pieces of the whole listing text around the words of the
-  must-haves and exclusions, from beyond the excerpt; the other fields"""
+  must-haves and exclusions, from beyond the excerpt (a hit only shows where the word occurs: it meets a
+  must-have only when the text says the listing has it, «sin piscina» or «piscina municipal» do not); the other fields"""
 assert SYSTEM.count(_QUOTABLE_V3) == 1
 
 
