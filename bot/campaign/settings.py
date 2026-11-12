@@ -141,6 +141,9 @@ class CampaignRunnerSettings(BaseSettings):
     join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
     # One card for one plot for sale listed without a street address (district and city, price ±1 %, area ±2 %).
     dedup_without_address: bool = Field(default=False, validation_alias="DEDUP_WITHOUT_ADDRESS")
+    # Q15: an address that is only a district does not need a shared street across two portals; the agency's reference
+    # of the ad (Fotocasa, Habitaclia) with the price and area merges, two references never do.
+    dedup_district_not_street: bool = Field(default=False, validation_alias="DEDUP_DISTRICT_NOT_STREET")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -428,7 +431,8 @@ class CampaignRunnerSettings(BaseSettings):
                             max_people=self.lead_people_max, lead_days=self.lead_days,
                             investor_report=self.investor_report,
                             join_notices=self.join_notices,
-                            dedup_without_address=self.dedup_without_address)
+                            dedup_without_address=self.dedup_without_address,
+                            dedup_district_not_street=self.dedup_district_not_street)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

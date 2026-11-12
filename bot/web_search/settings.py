@@ -72,6 +72,8 @@ class WebSearchSettings(BaseSettings):
     # Q12: true = a Fotocasa row at the portal's fallback point of its district (sources/portals.py ``default_point``)
     # passes no district/town as its place and is marked ``place_unverified``; campaign/tolerance.py files it as similar.
     portal_default_point_guard: bool = Field(default=False, validation_alias="PORTAL_DEFAULT_POINT_GUARD")
+    # Q15: Fotocasa and Habitaclia pass the agency's reference of the ad (``agency_ref``) for the dedup (campaign/dedup.py).
+    portal_agency_ref: bool = Field(default=False, validation_alias="DEDUP_DISTRICT_NOT_STREET")
     # Q16: true = a portal row's facts line carries the row's own type and deal (none when the row has none), never
     # the task's, and ``auction: true`` when the row names a «subasta»; campaign/tolerance.py files such a purchase
     # as similar. Off: the type and the deal of the line are the task's, as before.
@@ -269,7 +271,8 @@ class WebSearchSettings(BaseSettings):
                                              timeout_seconds=self.apify_portals_timeout_seconds,
                                              max_charge_usd=self.apify_fotocasa_max_charge_usd, geocoder=geocoder(),
                                              default_point_guard=self.portal_default_point_guard,
-                                             facts_from_row=self.portal_facts_from_row))
+                                             facts_from_row=self.portal_facts_from_row,
+                                             agency_ref=self.portal_agency_ref))
         if self.apify_yaencontre_enabled:
             from .sources.portals import ApifyYaencontreSource
 
@@ -294,7 +297,8 @@ class WebSearchSettings(BaseSettings):
                                     max_items=self.apify_habitaclia_max_results,
                                                timeout_seconds=self.apify_portals_timeout_seconds,
                                                max_charge_usd=self.apify_habitaclia_max_charge_usd, geocoder=geocoder(),
-                                               facts_from_row=self.portal_facts_from_row))
+                                               facts_from_row=self.portal_facts_from_row,
+                                               agency_ref=self.portal_agency_ref))
         if self.apify_milanuncios_enabled:
             from .sources.portals import ApifyMilanunciosSource
 

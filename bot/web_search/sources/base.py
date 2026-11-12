@@ -31,6 +31,9 @@ class SourceListing:
     # PORTAL_FACTS_FROM_ROW (Q16): True when the row's title or description names an auction («subasta»,
     # «puja», «cesión de remate», not negated); None otherwise, so the «JSON-LD» line is unchanged.
     auction: bool | None = None
+    # DEDUP_DISTRICT_NOT_STREET (Q15): the agency's own reference of the ad (Fotocasa ``agencyReference``, Habitaclia
+    # ``agencyRef``) for campaign/dedup.py; None otherwise, so the «JSON-LD» line is unchanged.
+    agency_ref: str | None = None
 
 
 class ListingSource(Protocol):

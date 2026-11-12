@@ -35,6 +35,19 @@ phone, the agency or at least two features are shared too, even if the districts
 
 Two ads of one portal are not merged by text (only Facebook, where one flat is posted in many groups, is).
 
+A district for a street (``same_object(..., district_not_street=True)``, ``DEDUP_DISTRICT_NOT_STREET``, Q15): portals
+fill the «address» of an ad without a street with the district, and two portals name it differently («L'Amistat» and
+«Algirós»). When one side's address has no street (no street word such as «calle», «C/», «avenida», «plaza»,
+«carrer» and no house number), the shared street is not required,
+but such a pair (no shared street token) merges only by the agency reference or by the text rules, never by the
+facts rule; a street on one side and no shared district token is never the same object. The street and place tokens
+drop the district stop words (``_DISTRICT_STOP``: ``_PLACE_STOP`` and «capital» of «Valencia Capital», with the flag
+only). The agency's own reference of the ad (``agency_ref``: «agencyReference» of Fotocasa, «agencyRef» of Habitaclia,
+in the post's «JSON-LD» line) is strong when it has letters and digits or at least 5 digits (no year, no word): across
+two sites the same strong reference on both sides with the price, area, rooms and city matching is the same object
+(never for a new development); two different references are two objects when a street is missing or the advertiser is
+the same (one agency, two flats in neighbouring districts at one price).
+
 Without an address (``same_object(..., without_address=True)``, ``DEDUP_WITHOUT_ADDRESS``; at least one side has no
 street address, so the rules above never merge two ads of one portal): only plots of land for sale, one plot listed
 by several agencies. Both are ``land`` and ``sale``, the same rooms (or none on both), the price within 1 %, the area
@@ -108,6 +121,18 @@ _PLACE_STOP = frozenset({
     "canarias", "castilla", "mancha", "leon", "murcia", "region", "provincia", "blanca", "brava", "dorada", "calida",
     "tropical", "azahar", "luz", "maresme", "garraf",
 })
+# Q15 (``DEDUP_DISTRICT_NOT_STREET``): the district stop words also drop «capital» («Valencia Capital»).
+_DISTRICT_STOP = _PLACE_STOP | {"capital"}
+# A street in an address: a street word (Spanish, Catalan, Valencian, abbreviations) or a house number.
+_STREET_WORD = re.compile(
+    r"(?<![^\W_])(?:calle|c|cl|cll|avenida|avinguda|avda|av|plaza|placa|pza|pl|carrer|paseo|passeig|pg|pso|camino|cami"
+    r"|ronda|travesia|carretera|ctra|glorieta|callejon|via|rambla|bulevar|boulevard|street|road|avenue|square|улица"
+    r"|ул|проспект)(?![^\W_])")
+# The agency's reference in the post's «JSON-LD» line (``SourceListing.agency_ref``, Q15).
+# Street words that also name districts («Camí Fondo», «Gran Vía», «La Rambla»): a street only when the address is
+# more than the listing's district (``_named_street``); the other street words are always a street.
+_DISTRICT_STREET_WORD = re.compile(r"(?<![^\W_])(?:camino|cami|via|ronda|rambla|bulevar|boulevard|glorieta)(?![^\W_])")
+_AGENCY_REF_FIELD = re.compile(r',?\s*"agency_ref":\s*"((?:[^"\\]|\\.)*)"')
 _SOCIAL_HOSTS = frozenset({"facebook.com", "web.facebook.com", "fb.com", "fb.watch", "instagram.com"})
 _STOP = frozenset({
     "calle", "carrer", "avenida", "avda", "plaza", "paseo", "camino", "barrio", "zona", "centro", "street", "road",
@@ -146,6 +171,7 @@ class Listing:
     bare_numbers: tuple[int, ...] = ()  # ``numbers`` without the zone codes (the rule without an address)
     cadastre: frozenset[str] = frozenset()  # cadastral references of the body (the 14-character parcel part)
     new_build: bool = False  # the body, title or location names a new development («obra nueva», «promoción» ...)
+    agency_ref: str = ""  # the agency's own reference of the ad (``ref_key``), "" when unknown (Q15)
 
 
 def _positive(value: object) -> float | None:
@@ -161,6 +187,10 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
     card / summary ``text`` is never a stand-in (it would be another text source on one side), it only titles."""
     payload = payload or {}
     excerpt = (body or "")[:TEXT_LIMIT]
+    first_line = excerpt.lstrip().split("\n", 1)[0]
+    found_ref = _AGENCY_REF_FIELD.search(first_line) if first_line.startswith("JSON-LD:") else None
+    if found_ref:  # its digits are no detail of the flat (``numbers``) and no phone
+        excerpt = excerpt.replace(found_ref.group(0), "", 1)
     shingles, words = fingerprint(excerpt)
     price = _positive(payload.get("price_amount"))
     if price is None:
@@ -201,7 +231,20 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         bare_numbers=numbers_of(_ZONE.sub(" ", excerpt)),
         cadastre=frozenset(found.upper() for found in _CADASTRE.findall(excerpt)),
         new_build=is_new_build(" ".join((excerpt, title, place))),
+        agency_ref=ref_key(found_ref.group(1)) if found_ref else "",
     )
+
+
+def ref_key(value: str | None) -> str:
+    """An agency reference for comparison: lower case letters and digits only («REO-111-860» -> "reo111860"); "" when
+    shorter than 3 characters (no identifier)."""
+    key = "".join(_WORD.findall(_fold(value or "")))
+    return key if len(key) >= 3 else ""
+
+
+def has_street(address: str) -> bool:
+    """The address names a street (a street word or a house number), not only a district or a city."""
+    return bool(_STREET_WORD.search(_fold(address or "")) or _house_number(address or ""))
 
 
 def is_new_build(text: str) -> bool:
@@ -384,9 +427,11 @@ def _host(url: str | None) -> str:
     return site_of(url)
 
 
-def same_object(a: Listing, b: Listing, *, without_address: bool = False) -> bool:
+def same_object(a: Listing, b: Listing, *, without_address: bool = False, district_not_street: bool = False) -> bool:
     """True only when the two listings are almost surely one property (see the module notes); ``without_address``
-    (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``)."""
+    (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``);
+    ``district_not_street`` (``DEDUP_DISTRICT_NOT_STREET``, Q15) does not require a shared street when an address is
+    only a district and compares the agency references."""
     if a.deal and b.deal and a.deal != b.deal:
         return False
     if a.currency and b.currency and a.currency != b.currency:
@@ -404,17 +449,31 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False) -> boo
         return False
     street_a, street_b = tokens(a.address), tokens(b.address)
     both_addressed = bool(a.address.strip() and b.address.strip())
+    stop = _DISTRICT_STOP if district_not_street else _PLACE_STOP
+    place_a, place_b = tokens(a.location), tokens(b.location)
+    both_streets = False
+    if district_not_street:
+        street_a, street_b, place_a, place_b = (t - _DISTRICT_STOP for t in (street_a, street_b, place_a, place_b))
+        both_streets = _named_street(a) and _named_street(b)
+        if a.agency_ref and b.agency_ref and a.agency_ref != b.agency_ref and (
+                not both_streets or a.phones & b.phones or (a.agency and a.agency == b.agency)):
+            return False  # another reference of the agency: another flat
     if both_addressed and not (street_a & street_b):
-        return False  # a district alone does not identify a flat: the street must be shared (every rule, text included)
+        if not district_not_street or both_streets:
+            return False  # a district alone does not identify a flat: the street must be shared (every rule, text included)
+        # Q15: an address is only a district, named differently by two portals: the agency reference or the text only
+        if _named_street(a) != _named_street(b) and not (place_a & place_b):
+            return False  # a street on one side, another district on the other
+        return _same_reference(a, b, price, area) or (
+            not a.new_build and not b.new_build and _same_text(a, b, price, area))  # a template of a development
     if _same_facts(a, b):
         return True
-    if without_address and not both_addressed and _same_bare_facts(a, b):
+    if without_address and not both_addressed and _same_bare_facts(a, b, stop):
         return True
     if _same_text(a, b, price, area):
         return True
     if price is None and area is None:
         return False
-    place_a, place_b = tokens(a.location), tokens(b.location)
     shared_place = True if both_addressed else bool(place_a & place_b)
     full = price is not None and area is not None
     host_a, host_b = _host(a.url), _host(b.url)
@@ -435,8 +494,44 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False) -> boo
     return True
 
 
+def _named_street(listing: Listing) -> bool:
+    """Q15: the address names a street (``has_street``). Only a street word that also names districts
+    (``_DISTRICT_STREET_WORD``) in an address that is just the listing's district names none («Camí Fondo» is a
+    district of Valencia: «Camí Fondo, Valencia» with that district); «Calle Colón» is a street, district Colón or not."""
+    if not has_street(listing.address):
+        return False
+    folded = _fold(listing.address)
+    if _house_number(listing.address) or _STREET_WORD.sub(" ", _DISTRICT_STREET_WORD.sub(" ", folded)) != \
+            _DISTRICT_STREET_WORD.sub(" ", folded):
+        return True  # a house number or another street word («calle», «C/», «plaza» ...)
+    own = tokens(listing.address) - _DISTRICT_STOP
+    return not own or not own <= tokens(listing.district)
+
+
 def _cities(listing: Listing) -> frozenset[str]:
     return frozenset(find_places(" ".join((listing.location, listing.address, listing.district))))
+
+
+def strong_ref(key: str) -> bool:
+    """An agency reference (``ref_key``) that identifies an ad: letters and digits, or at least 5 digits; a year
+    (1900-2099) or a word («torrefiel») does not."""
+    digits = sum(c.isdigit() for c in key)
+    if re.fullmatch(r"(?:19|20)\d\d", key):
+        return False
+    return digits >= 5 or (digits > 0 and digits < len(key))
+
+
+def _same_reference(a: Listing, b: Listing, price: bool | None, area: bool | None) -> bool:
+    """Q15: across two sites the same strong agency reference (on both sides), the price and the area matching (both
+    known), the same rooms (or none on both) and one city; never for a new development (one reference per project) or two
+    agencies named on both sides."""
+    host_a, host_b = _host(a.url), _host(b.url)
+    if not host_a or not host_b or host_a == host_b or a.new_build or b.new_build:
+        return False
+    if a.agency and b.agency and a.agency != b.agency:
+        return False  # two agencies: one reference by chance
+    return bool(a.agency_ref and a.agency_ref == b.agency_ref and strong_ref(a.agency_ref) and price is True
+                and area is True and a.rooms == b.rooms and _cities(a) == _cities(b))
 
 
 def _same_facts(a: Listing, b: Listing) -> bool:
@@ -460,7 +555,7 @@ def _bare_area(listing: Listing) -> float | None:
     return listing.plot if listing.area is None and listing.kind == "land" else listing.area
 
 
-def _same_bare_facts(a: Listing, b: Listing) -> bool:
+def _same_bare_facts(a: Listing, b: Listing, stop: frozenset[str] = _PLACE_STOP) -> bool:
     """The rule without an address (see the module notes): every negative rule of ``same_object`` has passed and at
     least one side has no street address. Plots for sale only; works on two ads of one portal (one plot listed by
     several agencies), so an advertiser shared on one portal means two of its plots, not one."""
@@ -486,13 +581,14 @@ def _same_bare_facts(a: Listing, b: Listing) -> bool:
     cities = _cities(a)
     if not cities or cities != _cities(b):
         return False
-    place_a, place_b = _district_tokens(a), _district_tokens(b)
+    place_a, place_b = _district_tokens(a, stop), _district_tokens(b, stop)
     return bool(place_a & place_b) if place_a and place_b else True
 
 
-def _district_tokens(listing: Listing) -> frozenset[str]:
-    """The district / neighbourhood tokens of a listing: no street words, no estate / coast words, no regions."""
-    return frozenset(tokens(listing.location) - tokens(listing.address) - _PLACE_STOP)
+def _district_tokens(listing: Listing, stop: frozenset[str] = _PLACE_STOP) -> frozenset[str]:
+    """The district / neighbourhood tokens of a listing: no street words, no estate / coast words, no regions (and
+    with Q15 no «capital», ``_DISTRICT_STOP``)."""
+    return frozenset(tokens(listing.location) - tokens(listing.address) - stop)
 
 
 def _same_text(a: Listing, b: Listing, price: bool | None, area: bool | None) -> bool:
