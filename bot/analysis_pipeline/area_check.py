@@ -10,11 +10,15 @@ Only a clear signal counts (review of Q13): a text area counts only when the wor
 («N m² de parcela») says whose it is -- the plot (parcela, terreno, solar, finca, suelo) or the building (piso, casa,
 chalet, nave, vivienda, construidos, útiles ...). A part of the object or of its surroundings (terraza, balcón,
 jardín, garaje, trastero, salón, cocina, dormitorio, oficinas, piscina, urbanización, zonas comunes ...) and the
-buildable area (edificabilidad, m² de techo) never count. «mts» / «metros» are read only next to such a word and
+buildable area (edificabilidad, m² de techo) never count, nor a counted part's word («2 baños con 90 m²» is the
+flat's). A label is read through its «:» or «·» («Parcela: 3.208 m²», «Terreno · 3.208 m²»). «Superficie» is the plot
+next to a plot word or in a ``landparcel``, the building in a flat, else the listing's own area of any kind. «mts» / «metros» are read only next to such a word and
 never as a distance («a 200 mts de», «playa 200 mts»).
 
 Kinds: ``plot_m2`` (and ``area_m2`` of a ``landparcel``) is the plot and meets only the text's plots. ``area_m2`` of
-another listing is the building when the line also has ``plot_m2``, else of unknown kind: it may be the house (it
+another listing is the building when the line also has ``plot_m2`` or the listing is a flat (JSON-LD
+``property_type`` apartment/flat/piso..., or the text calls it piso/apartamento/ático: a flat is never a plot), else
+of unknown kind: it may be the house (it
 agrees with any larger plot) or the plot (with any smaller building). Nothing of a kind to compare with: the area
 stays.
 
@@ -38,7 +42,8 @@ from .models import AnalysisResult
 PREFIX = "JSON-LD:"
 LINK_PREFIX = "Ссылка:"
 RATIO = 2.0  # more than twice apart: not the same area
-WINDOW = 40  # characters before a number searched for whose area it is (up to the clause's start)
+WINDOW = 60  # characters before a number searched for whose area it is (up to the clause's start)
+CONTEXT = 80  # characters around «superficie» searched for a plot word
 
 _NUMBER = r"\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?"
 _SQUARE = r"m²|m2|mts?2|mts?\.?\s*cuadrados|metros?\s+cuadrados|sq\.?\s*m|sqm"
@@ -46,18 +51,27 @@ _HECTARE = r"hectareas?|hectares?|ha|has"
 _LOOSE = r"mts|mtrs|mt|metros"  # «3.208mts», «2000 metros»: an area only next to a plot or a building word
 _AREA = re.compile(rf"(?<![\d.,])({_NUMBER})\s*({_SQUARE}|{_HECTARE}|{_LOOSE})\.?(?![\w²])")
 _PLOT = r"parcelas?|terrenos?|solar(?:es)?|fincas?|suelos?|plot|land"
-_BUILT = (r"construid\w*|utiles?|vivienda\w*|edificad[oa]s?|habitables?|superficie\s+construida|piso\w*|casas?|"
-          r"chalets?|atico\w*|naves?|locales?|apartamentos?|duplex|villas?|adosados?|pareados?|estudios?|lofts?|"
-          r"bungalows?|built|house|home")
+_FLAT = r"piso\w*|atico\w*|apartamentos?|duplex|estudios?|lofts?|flat|apartment"
+_BUILT = (r"superficie\s+construida|construid\w*|utiles?|vivienda\w*|edificad[oa]s?|habitables?|casas?|"
+          rf"chalets?|naves?|locales?|villas?|adosados?|pareados?|bungalows?|built|house|home|{_FLAT}")
 _PART = (r"terrazas?|balcon\w*|jardin\w*|garaje\w*|parking|trasteros?|salon\w*|cocinas?|dormitorios?|"
          r"habitacion\w*|banos?|aseos?|patios?|porche\w*|solarium|piscinas?|oficinas?|almacen\w*|altillo\w*|"
          r"urbanizacion\w*|zonas?\s+comun\w*|comunes|edificabilidad|edificables?|techo|fachadas?|sotano\w*|"
          r"buhardilla\w*|vestidor\w*|lavadero\w*")
-_WORD = re.compile(rf"(?<!\w)(?:({_PART})|({_PLOT})|({_BUILT}))(?!\w)")
-_AFTER = re.compile(rf"^\s*(?:de\s+|del\s+)?(?:(?:la|el|los|las)\s+)?(?:({_PART})|({_PLOT})|({_BUILT}))(?!\w)")
-_CLAUSE = re.compile(r"[.;:,·|\n(]\s")
+_SURFACE = r"superficies?"  # the listing's own area: its kind from the context (Q13 review)
+_KINDS = rf"(?:({_PART})|({_PLOT})|({_BUILT})|({_SURFACE}))"
+_WORD = re.compile(rf"(?<!\w){_KINDS}(?!\w)")
+_AFTER = re.compile(rf"^\s*(?:de\s+|del\s+)?(?:(?:la|el|los|las)\s+)?{_KINDS}(?!\w)")
+_IS_FLAT = re.compile(rf"(?:{_FLAT})$")
+_PLOT_WORD = re.compile(rf"(?<!\w)(?:{_PLOT})(?!\w)")
+# A clause ends at «. », «, », «; »... but not at the «:» or «·» of a label («Parcela: 3.208 m²», «Terreno · 3.208 m²»).
+_CLAUSE = re.compile(r"[.;,|\n(]\s")
+_SENTENCE = re.compile(r"[.;!?\n]\s")
+_COUNTED = re.compile(r"\d+\s*$")  # «3 dormitorios», «2 baños»: a count, not the owner of the next area
 _DISTANCE_BEFORE = re.compile(r"(?<!\w)a\s+(?:unos\s+|solo\s+|menos\s+de\s+|mas\s+de\s+)?$")
 _DISTANCE_AFTER = re.compile(r"^\s*(?:de|del|al|hasta|hacia)(?!\w)")
+# JSON-LD ``property_type`` of a flat: its area is never a plot.
+FLAT_TYPES = frozenset({"apartment", "flat", "piso", "studio", "duplex", "penthouse", "room", "loft"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,11 +92,25 @@ def fold(text: str) -> str:
 def _kind(match: re.Match[str] | None) -> str | None:
     if match is None:
         return None
-    return "part" if match.group(1) else "plot" if match.group(2) else "built"
+    return ("part" if match.group(1) else "plot" if match.group(2) else
+            ("flat" if _IS_FLAT.match(match.group(3)) else "built") if match.group(3) else "surface")
 
 
-def stated(text: str) -> list[tuple[float, str]]:
-    """(m², plot | built) of every area the text gives a kind; parts, buildable areas and distances are left out."""
+def _owner(before: str) -> str | None:
+    """The kind of the nearest word before a number that may own it (a counted part «2 baños» does not)."""
+    for word in reversed(list(_WORD.finditer(before))):
+        if word.group(1) and _COUNTED.search(before[:word.start()]):
+            continue
+        return _kind(word)
+    return None
+
+
+def stated(text: str, *, land: bool = False, flat: bool = False) -> list[tuple[float, str]]:
+    """(m², kind) of every area the text gives a kind: plot, built, flat (a built flat) or surface.
+
+    Parts, buildable areas and distances are left out. «Superficie» is the plot next to a plot word or in a
+    ``land`` listing, built in a ``flat`` one, else «surface»: the listing's own area of whatever kind.
+    """
     folded = fold(text)
     out = []
     for m in _AREA.finditer(folded):
@@ -96,17 +124,20 @@ def stated(text: str) -> list[tuple[float, str]]:
         after = folded[m.end():m.end() + 30]
         if _DISTANCE_BEFORE.search(before) or (loose and _DISTANCE_AFTER.match(after)):
             continue
-        kind = _kind(_AFTER.match(after)) or _kind(next(reversed(list(_WORD.finditer(before))), None))
-        if kind is None or kind == "part":
+        kind = _kind(_AFTER.match(after)) or _owner(before)
+        if kind is None or kind == "part" or (loose and kind == "surface"):
             continue
+        if kind == "surface":
+            context = _SENTENCE.split(folded[max(0, m.start() - CONTEXT):m.start()])[-1] + " " + after
+            kind = "plot" if land or _PLOT_WORD.search(context) else "built" if flat else "surface"
         m2 = value * 10_000 if re.fullmatch(_HECTARE, unit) else value
         if 1 <= m2 <= 100_000_000:
             out.append((round(m2, 1), kind))
     return out
 
 
-def _source(text: str) -> tuple[list[tuple[float, str | None]], str] | None:
-    """(the JSON-LD areas with their kind, the rest of the text) of a post that starts with a JSON-LD line."""
+def _source(text: str) -> tuple[list[tuple[float, str | None]], str, str] | None:
+    """(the JSON-LD areas with their kind, its property type, the rest) of a post that starts with a JSON-LD line."""
     first, _, rest = (text or "").lstrip().partition("\n")
     if not first.startswith(PREFIX):
         return None
@@ -122,14 +153,15 @@ def _source(text: str) -> tuple[list[tuple[float, str | None]], str] | None:
         ok = isinstance(value, int | float) and not isinstance(value, bool) and value > 0
         return float(value) if ok else None
 
-    land = str(data.get("property_type") or "").lower() == "landparcel"
+    kind = str(data.get("property_type") or "").strip().lower()
+    land = kind in ("landparcel", "land")
     plot = positive("plot_m2")
     values: list[tuple[float, str | None]] = [(plot, "plot")] if plot else []
     for key in ("area_m2", "surface"):
         value = positive(key)
         if value is not None:
-            values.append((value, "plot" if land else "built" if plot else None))
-    return values, rest
+            values.append((value, "plot" if land else "built" if plot or kind in FLAT_TYPES else None))
+    return values, kind, rest
 
 
 def _near(value: float, others: list[float]) -> bool:
@@ -154,19 +186,28 @@ def conflict(text: str, title: str = "") -> AreaConflict | None:
     parsed = _source(text)
     if parsed is None:
         return None
-    source, rest = parsed
+    source, kind, rest = parsed
     if not source:
         return None
     body = "\n".join(line for line in rest.split("\n") if not line.startswith(LINK_PREFIX))
     if title and title not in body:
         body = f"{title}\n{body}"
-    found = stated(body)
+    flat = kind in FLAT_TYPES
+    found = stated(body, land=kind in ("landparcel", "land"), flat=flat)
+    if not flat and any(k == "flat" for _, k in found):
+        flat = True  # the text says it is a flat: its area is not a plot
+        found = stated(body, land=kind in ("landparcel", "land"), flat=True)
     plots = [m2 for m2, k in found if k == "plot"]
-    built = [m2 for m2, k in found if k == "built"]
-    for value, kind in source:
-        same = plots if kind == "plot" else built if kind == "built" else plots + built
-        if same and not _fits(value, kind, plots, built):
+    built = [m2 for m2, k in found if k in ("built", "flat")]
+    surface = [m2 for m2, k in found if k == "surface"]
+    for value, source_kind in source:
+        source_kind = "built" if source_kind is None and flat else source_kind
+        same = plots if source_kind == "plot" else built if source_kind == "built" else plots + built
+        if same and not _fits(value, source_kind, plots, built):
             return AreaConflict(tuple(v for v, _ in source), tuple(dict.fromkeys(same)))
+        # «Superficie: 3.208 m²» with no kind around it: the listing's own area, of whatever kind but the plot_m2
+        if source_kind != "plot" and surface and not _near(value, surface):
+            return AreaConflict(tuple(v for v, _ in source), tuple(dict.fromkeys(surface)))
     return None
 
 

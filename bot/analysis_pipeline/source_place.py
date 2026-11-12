@@ -99,11 +99,14 @@ _PLACE_PHRASE = re.compile(
 # vivo en Valencia», «más pisos en Valencia», «cocina diseñada en Barcelona», «trabaja en», «como en Barcelona».
 _WEAK_STOP = re.compile(
     r"(?<!\w)(?:residente?s?|reside|resido|vivo|vive|viven|vivimos|vivia|trabaj\w*|disenad\w*|fabricad\w*|hech[oa]s?|"
-    r"como|mas|tambien|otr[oa]s|oficinas?|sede|sucursal\w*|nacid[oa]|estudi\w*|igual|"
-    # Q13 review: a comparison, the owners, a swap, holidays, a builder, a garage or the transport elsewhere
-    r"que|residen|permuta|veranear|mejor|superior|hizo|mud\w*|invertir|comprar|garajes?|comunicaci\w*|"
-    r"promoci\w*)"
+    r"como|mas|tambien|otr[oa]s|oficinas?|sede|sucursal\w*|nacid[oa]|estudi\w*|igual)"
     r"(?:\s+\S+){0,2}\s+$")
+# Q13: what else, before the «en» of a property noun, makes a town someone else's place (only in ``_town_hits``; the
+# window is the clause, so it ends at a full stop): a comparison («mejor que en»), the owners («residen en»), a swap,
+# holidays, a builder («que hizo los chalets en»), an investment, a garage or the transport there.
+_TOWN_STOP = re.compile(
+    r"(?<!\w)(?:que|residen|permuta|veranear|mejor|superior|hizo|mud\w*|invertir|comprar|garajes?|"
+    r"comunicaci\w*|promoci\w*)(?:\s+\S+){0,2}\s+$")
 # The X itself, or the part after its first comma: «en Mijas, Costa del Sol», «en la Costa del Sol».
 _PHRASE_START = re.compile(r"(?:(?:la|las|el|los)\s+)?|[^,]{1,40},\s*(?:(?:la|las|el|los)\s+)?(?:provincia\s+de\s+)?")
 # The titles the portal sources build from the actor's place when the row has none (portals.py: Fotocasa, Habitaclia).
@@ -301,7 +304,7 @@ def _town_hits(own_title: str, description: str) -> list[tuple[int, int, str, st
                 title_en = _TITLE_EN.search(clause) if part == 0 else None
                 noun_en = None if title_en else _NOUN_EN.search(clause)
                 en_at = title_en.start() if title_en else noun_en.start(1) if noun_en else None
-                if en_at is None or _WEAK_STOP.search(clause[:en_at]):
+                if en_at is None or _WEAK_STOP.search(clause[:en_at]) or _TOWN_STOP.search(clause[:en_at]):
                     continue  # a bare «en» of a description, or one about someone else («como en Móstoles»)
             if _is_the_place(folded, m.start(), m.end()):
                 area = _TOWNS[" ".join(m.group(0).split())][1]

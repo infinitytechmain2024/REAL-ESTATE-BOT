@@ -137,8 +137,6 @@ def test_another_town_named_by_a_strong_signal_is_a_conflict(address, title, des
     ("Chamberí, Madrid", "Piso", "Piso; el vendedor acepta permuta por casa en Estepona"),
     ("Chamberí, Madrid", "Piso", "Piso ideal para veranear luego en Sitges"),
     ("Chamberí, Madrid", "Piso", "Piso reformado por la empresa que hizo los chalets en Sitges"),
-    ("Chamberí, Madrid", "Piso", "Piso, la mitad de precio que en Marbella"),
-    ("Chamberí, Madrid", "Piso", "Vendemos piso para invertir en Marbella"),
     ("Chamberí, Madrid", "Piso", "Piso con plaza de garaje en Getafe"),
     ("Chamberí, Madrid", "Piso", "Piso con trastero, plaza de garaje opcional en Getafe"),
     ("Ciudad Universitaria, Madrid", "Piso en Madrid", "Piso con buena comunicación en Getafe y Leganés"),
@@ -154,6 +152,27 @@ def test_another_town_named_by_a_strong_signal_is_a_conflict(address, title, des
 ])
 def test_no_town_conflict_without_a_clear_signal(address, title, description):
     assert source_place.conflict(portal_post({"price": 1, "address": address}, title, description), title) is None
+
+
+# The Q4 weak signal (a bare «en» before an area's city) stays as on b4f684e: the town stop list is not the Q4 one.
+@pytest.mark.parametrize(("description", "phrase"), [
+    ("Plaza de garaje incluida. Vivienda en Valencia", "Valencia"),
+    ("Nueva promoción en Marbella", "Marbella"),
+    ("Ideal para invertir en Marbella", "Marbella"),
+    ("Piso, la mitad de precio que en Marbella", "Marbella"),
+    ("Excelente comunicación en Barcelona", "Barcelona"),
+])
+def test_q4_weak_conflicts_are_kept(description, phrase):
+    found = source_place.conflict(portal_post({"price": 1, "address": "Chamberí, Madrid"}, "Vivienda", description),
+                                  "Vivienda")
+    assert found is not None and not found.strong and not found.municipality and found.phrase == phrase
+
+
+def test_the_town_window_ends_at_a_full_stop():
+    text = portal_post({"price": 1, "address": "Chamberí, Madrid"}, "Vivienda",
+                       "Plaza de garaje incluida. Vivienda en Getafe")
+    found = source_place.conflict(text, "Vivienda")
+    assert found is not None and found.municipality and found.city == "Getafe"
 
 
 # -- 3. agency brands and street numbers (review Q4b, T6) --
@@ -249,6 +268,10 @@ def test_an_unconfirmed_plot_is_not_shown_from_the_jsonld_either(monkeypatch):
     ({"area_m2": 32088}, "Finca, playa 200 mts"),
     ({"area_m2": 32088}, "Finca con 500 mts de fachada"),
     ({"area_m2": 32088, "plot_m2": 3208}, "Parcela de 3.208 m²"),  # the JSON-LD plot itself agrees
+    ({"area_m2": 3208}, "Superficie: 3.208 m²"),
+    ({"area_m2": 90, "property_type": "apartment"}, "Superficie: 85 m²"),
+    ({"plot_m2": 1000, "area_m2": 150}, "Superficie: 150 m². Parcela de 1.000 m²"),
+    ({"area_m2": 1000}, "Superficie construida: 150 m²"),  # an area of unknown kind may be the plot of a house
 ])
 def test_areas_that_agree_or_are_missing_are_no_conflict(facts, description):
     assert area_check.conflict(portal_post(facts, "Finca", description), "Finca") is None
@@ -264,6 +287,25 @@ def test_areas_that_agree_or_are_missing_are_no_conflict(facts, description):
     ({"area_m2": 3}, "Piso de 85 m²"),
 ])
 def test_areas_more_than_twice_apart_are_a_conflict(facts, description):
+    assert area_check.conflict(portal_post(facts, "Finca", description), "Finca") is not None
+
+
+# Labels («Parcela: 3.208 m²») and «superficie» read by their context; a flat's area is never a plot (Q13 review).
+@pytest.mark.parametrize(("facts", "description"), [
+    ({"area_m2": 32088}, "Parcela: 3.208 m²"),
+    ({"area_m2": 32088}, "Finca. Superficie: 3.208 m²"),
+    ({"area_m2": 32088}, "Superficie de la parcela: 3.208 m²"),
+    ({"area_m2": 32088}, "Terreno · 3.208 m²"),
+    ({"area_m2": 32088}, "Finca rústica en Móstoles con una superficie total de 3.208 m2"),
+    ({"area_m2": 32088}, "3.208 m² de superficie"),
+    ({"area_m2": 32088, "property_type": "landparcel"}, "Superficie: 3.208 m²"),
+    ({"area_m2": 900}, "Piso de 90 m²"),
+    ({"area_m2": 900}, "Piso: 90 m²"),
+    ({"area_m2": 900}, "Superficie 90 m²"),
+    ({"area_m2": 900, "property_type": "apartment"}, "Superficie construida: 90 m²"),
+    ({"area_m2": 900}, "Piso exterior de 3 dormitorios y 2 baños con 90 m²"),
+])
+def test_labels_superficie_and_flats_are_read(facts, description):
     assert area_check.conflict(portal_post(facts, "Finca", description), "Finca") is not None
 
 
