@@ -103,7 +103,7 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 и `INTAKE_BOTH_MODE` (д), `CARD_EXTRA_FIELDS=true` (з), `ARCHITECT_PROVIDER=openrouter` (е пропущен),
 `CAMPAIGN_BUDGET_USD=0.8` (на время прогона G1–G9, п. 6). Расходятся (стенд не менялся, кроме `CARD_EXTRA_FIELDS`):
 
-Флаги Q4, Q5, Q8, Q9, Q10 (`DEDUP_WITHOUT_ADDRESS`, `IDEALISTA_SORT_BIGGEST`, `RELEVANCE_SOFT_WISHES`, `SEARCH_QUERY_HYGIENE`, `ANALYSIS_LOCATION_FROM_TEXT`) в `BASE_ENV` включены заранее: пока их ветки не смержены в `main`, бот их игнорирует.
+Флаги Q4, Q5, Q8, Q9, Q10, Q11 (`DEDUP_WITHOUT_ADDRESS`, `IDEALISTA_SORT_BIGGEST`, `RELEVANCE_SOFT_WISHES`, `SEARCH_QUERY_HYGIENE`, `ANALYSIS_LOCATION_FROM_TEXT`, `SEARCH_PLACE_LEVEL_FROM_SPEC`) в `BASE_ENV` включены заранее: пока их ветки не смержены в `main`, бот их игнорирует.
 
 | Ключ | Стенд | Прод по P0 | Следствие |
 |---|---|---|---|

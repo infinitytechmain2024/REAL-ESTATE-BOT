@@ -168,6 +168,82 @@ def place_level_of(task_text: str, location: str) -> PlaceLevel:
     return "city"
 
 
+# SEARCH_PLACE_LEVEL_FROM_SPEC: the 50 provinces of Spain, each with its names (folded Latin: whole words; Cyrillic:
+# word stems), and the communities that are one province each (Comunidad de Madrid is the province of Madrid).
+_ES_PROVINCES: dict[str, tuple[str, ...]] = {
+    "a coruna": ("a coruna", "la coruna", "coruna", "корун"), "alava": ("alava", "araba", "алав"),
+    "albacete": ("albacete", "альбасет"), "alicante": ("alicante", "alacant", "аликант"),
+    "almeria": ("almeria", "альмери"), "asturias": ("asturias", "астури"), "avila": ("avila", "авила", "авиль"),
+    "badajoz": ("badajoz", "бадахос"), "barcelona": ("barcelona", "барселон"), "bizkaia": ("bizkaia", "vizcaya", "бискай"),
+    "burgos": ("burgos", "бургос"), "caceres": ("caceres", "касерес"), "cadiz": ("cadiz", "кадис"),
+    "cantabria": ("cantabria", "кантабри"), "castellon": ("castellon", "castello", "кастельон"),
+    "ciudad real": ("ciudad real", "сьюдад-реал", "сьюдад реал"), "cordoba": ("cordoba", "кордов"),
+    "cuenca": ("cuenca", "куэнк"), "gipuzkoa": ("gipuzkoa", "guipuzcoa", "гипускоа"),
+    "girona": ("girona", "gerona", "жирон", "херон"), "granada": ("granada", "гранад"),
+    "guadalajara": ("guadalajara", "гвадалахар"), "huelva": ("huelva", "уэльв"), "huesca": ("huesca", "уэск"),
+    "illes balears": ("illes balears", "islas baleares", "baleares", "balearic islands", "балеар"),
+    "jaen": ("jaen", "хаэн"), "la rioja": ("la rioja", "риох"), "las palmas": ("las palmas", "лас-пальмас", "лас пальмас"),
+    "leon": ("leon",), "lleida": ("lleida", "lerida", "льейд", "лерид"), "lugo": ("lugo",),
+    "madrid": ("madrid", "мадрид"), "malaga": ("malaga", "малаг", "малаз"), "murcia": ("murcia", "мурси"),
+    "navarra": ("navarra", "navarre", "наварр"), "ourense": ("ourense", "orense", "оренсе"),
+    "palencia": ("palencia", "паленси"), "pontevedra": ("pontevedra", "понтеведр"),
+    "salamanca": ("salamanca", "саламанк"), "santa cruz de tenerife": ("santa cruz de tenerife", "tenerife", "тенериф"),
+    "segovia": ("segovia", "сегови"), "sevilla": ("sevilla", "seville", "севиль"), "soria": ("soria",),
+    "tarragona": ("tarragona", "таррагон"), "teruel": ("teruel", "теруэл"), "toledo": ("toledo", "толедо"),
+    "valencia": ("valencia", "валенси"), "valladolid": ("valladolid", "вальядолид"),
+    "zamora": ("zamora", "самор"), "zaragoza": ("zaragoza", "сарагос"),
+}
+_ES_ONE_PROVINCE_REGIONS = frozenset({"madrid", "asturias", "cantabria", "la rioja", "murcia", "navarra",
+                                      "illes balears"})
+_PROVINCE_WORD = r"(?:provincias?|provincie|province|провинц\w*)"
+
+
+def _province_key(location: str) -> str | None:
+    place = _fold(location.strip())
+    return next((key for key, names in _ES_PROVINCES.items() if place in names), None)
+
+
+def _name_body(name: str) -> str:
+    """A whole Latin word, or a Cyrillic stem with any ending (without the leading word boundary)."""
+    return re.escape(name) + (r"\w*" if re.search(r"[а-я]", name) else r"(?!\w)")
+
+
+def _name_pattern(name: str) -> str:
+    return rf"(?<!\w){_name_body(name)}"
+
+
+def _provinces_named(text: str) -> set[str]:
+    return {key for key, names in _ES_PROVINCES.items() if any(re.search(_name_pattern(n), text) for n in names)}
+
+
+def portal_place_level(level: PlaceLevel, location: str, country: str | None, task_text: str = "") -> PlaceLevel:
+    """SEARCH_PLACE_LEVEL_FROM_SPEC: a non-city level of a Spanish province as the portals take it.
+
+    A province of Spain is ``province``, a place that is no province is ``region``. A ``region`` is ``province`` only
+    when it is that one province: a community of one province (Madrid, Asturias, Murcia ...) or a province word right
+    next to the place («provincia de Málaga», «Малагская провинция»), and the text names no other province («Madrid y
+    Toledo», «Alicante o Valencia» stay ``region``). Any other region (Andalucía around Málaga) stays ``region``.
+    """
+    if level == "city" or country != "ES":
+        return level
+    key = _province_key(location)
+    if key is None:  # «Costa del Sol» is no province: never sent to a portal as one
+        return "region"
+    if level == "province":
+        return "province"
+    text = _fold(task_text)
+    if _provinces_named(text) - {key}:
+        return "region"
+    if key in _ES_ONE_PROVINCE_REGIONS:
+        return "province"
+    names = {*_ES_PROVINCES[key], *geo.place_names(location, regions=False)}
+    for name in names:
+        n = _name_body(name)
+        if re.search(rf"(?<!\w){_PROVINCE_WORD}\s+(?:de\s+|of\s+|в\s+)?{n}|(?<!\w){n}\s+{_PROVINCE_WORD}", text):
+            return "province"
+    return "region"
+
+
 @dataclass(frozen=True, slots=True)
 class QueryTask:
     goal: str

@@ -287,6 +287,8 @@ class RunnerConfig:
     metrics_seconds: float = 30
     # Tell the chat once about each closed Facebook group (Apify ``group_private``) with a «Вступил» button.
     join_notices: bool = False
+    # Dedup of listings without a street address (``dedup.same_object(without_address=True)``, Q8).
+    dedup_without_address: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -687,7 +689,8 @@ class CampaignRunner:
                 index.loaded = True
                 index.heads = [_head_of(h) for h in await self.store.recent_sent_findings(campaign.id)]
             for position, head in enumerate(index.heads):
-                if head.sent.finding.id == finding.id or not same_object(mine, head.listing):
+                if head.sent.finding.id == finding.id or not same_object(
+                        mine, head.listing, without_address=self.config.dedup_without_address):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -838,6 +841,8 @@ class CampaignRunner:
             return offers.Deviation("area", area_text(match.area), requested, land=land)
         if match.why == "area_unknown":
             return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
+        if match.why == "location_unknown":  # Q12: the portal's place is its fallback point
+            return offers.Deviation("unverified", land=land, unknown=("место",))
         kind = self._deal_kind(request, closest)
         if kind is not None:
             return offers.Deviation("deal_kind", phrase=kind, land=land)

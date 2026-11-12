@@ -47,6 +47,10 @@ Other constraints
 * Moved by its own text (Q4, ``source_place_conflict``) -> excluded by location: the portal filed the listing
   under one area but its title or «situado en ...» names another (``bot/analysis_pipeline/source_place.py``,
   written only with ``ANALYSIS_LOCATION_FROM_TEXT=true``), and that area is not the requested city's.
+* Place not verified (Q12, ``PORTAL_DEFAULT_POINT_GUARD``; ``Request.place_guard``) -> similar
+  (``location_unknown``), never exact: the portal filed the listing at its fallback point of a district
+  (``place_unverified`` in the payload, ``bot/web_search/sources/portals.py`` ``default_point``), so its place is
+  unknown. A location naming another city still makes it other.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
   (Москва, Минск ...), its link is under another country's TLD (``.ru``,
@@ -75,6 +79,7 @@ Other constraints
 from __future__ import annotations
 
 import math
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -94,7 +99,7 @@ Bucket = Literal["exact", "similar", "other", "excluded"]
 _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
 Why = Literal["price", "area", "area_max", "rooms", "location", "deal", "kind", "type", "foreign", "currency", "ai",
-              "unverified", "area_unknown", "approved_deviation", "ai_failed", "cost_cap"]
+              "unverified", "area_unknown", "location_unknown", "approved_deviation", "ai_failed", "cost_cap"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -127,6 +132,7 @@ class Request:
     rooms_delta: int | None = None
     nearby: tuple[str, ...] = ()  # neighbouring districts / towns accepted as the place
     districts: tuple[str, ...] = ()  # the districts that were asked for
+    place_guard: bool = False  # PORTAL_DEFAULT_POINT_GUARD (Q12): a payload's ``place_unverified`` is never exact
 
     @property
     def country_code(self) -> str | None:
@@ -286,6 +292,11 @@ def _names(value: Any) -> tuple[str, ...]:
     return tuple(str(v).strip() for v in value if isinstance(v, str) and v.strip()) if isinstance(value, list) else ()
 
 
+def default_point_guard_enabled() -> bool:
+    """PORTAL_DEFAULT_POINT_GUARD (default off): a listing at a portal's fallback point is not exact (Q12)."""
+    return os.environ.get("PORTAL_DEFAULT_POINT_GUARD", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
                 text: str | None = None, country: str | None = None,
                 deviations: dict[str, Any] | None = None) -> Request:
@@ -316,6 +327,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         and not isinstance(dev.get("rooms_delta"), bool) and dev["rooms_delta"] > 0 else None,
         nearby=_names(dev.get("nearby_areas")),
         districts=tuple(d.strip() for d in str(constraints.get("districts") or "").split(",") if d.strip()),
+        place_guard=default_point_guard_enabled(),
     )
 
 
@@ -397,6 +409,8 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
             covers.append("place")
         elif places and request.location not in places:
             return worse(result, Match("other", math.inf, "location"))
+    if request.place_guard and payload.get("place_unverified") is True:
+        result = worse(result, Match("similar", 0.0, "location_unknown"))  # Q12: the portal's place is a fallback
     if request.amount is not None:
         price = price_of(payload)
         currency = currency_code(payload.get("price_currency")) or request.currency

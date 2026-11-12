@@ -66,6 +66,9 @@ class WebSearchSettings(BaseSettings):
     apify_fotocasa_actor: str = Field(default="igolaizola/fotocasa-scraper", validation_alias="APIFY_FOTOCASA_ACTOR")
     apify_fotocasa_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_FOTOCASA_MAX_RESULTS")
     apify_fotocasa_max_charge_usd: float = Field(default=0.10, gt=0, le=10, validation_alias="APIFY_FOTOCASA_MAX_CHARGE_USD")
+    # Q12: true = a Fotocasa row at the portal's fallback point of its district (sources/portals.py ``default_point``)
+    # passes no district/town as its place and is marked ``place_unverified``; campaign/tolerance.py files it as similar.
+    portal_default_point_guard: bool = Field(default=False, validation_alias="PORTAL_DEFAULT_POINT_GUARD")
     apify_yaencontre_enabled: bool = Field(default=False, validation_alias="APIFY_YAENCONTRE_ENABLED")
     apify_yaencontre_actor: str = Field(default="igolaizola/yaencontre-scraper", validation_alias="APIFY_YAENCONTRE_ACTOR")
     apify_yaencontre_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_YAENCONTRE_MAX_RESULTS")
@@ -112,6 +115,8 @@ class WebSearchSettings(BaseSettings):
     cover_portals: bool = Field(default=True, validation_alias="WEB_SEARCH_COVER_PORTALS")
     # Query rounds only in the languages plan_languages allows, neutral Spanish land terms (off: as before).
     query_hygiene: bool = Field(default=False, validation_alias="SEARCH_QUERY_HYGIENE")
+    # The place level from the campaign's TaskSpec before its text; a Spanish province goes to the portals as one.
+    place_level_from_spec: bool = Field(default=False, validation_alias="SEARCH_PLACE_LEVEL_FROM_SPEC")
     # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
     # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or
     # an area), off (the old rule: a property word and a deal word). A country without a portal list is soft.
@@ -188,6 +193,7 @@ class WebSearchSettings(BaseSettings):
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
             cover_portals=self.cover_portals, query_hygiene=self.query_hygiene, render_on_refusal=self.render_on_refusal,
+            place_level_from_spec=self.place_level_from_spec,
             render_index_on_refusal=self.render_index_on_refusal,
             human_verification=self.human_verification and self.render_enabled,
             verified_host_interval_seconds=self.verified_host_interval_seconds,
@@ -252,7 +258,8 @@ class WebSearchSettings(BaseSettings):
             found.append(ApifyFotocasaSource(self.apify_token, actor_id=self.apify_fotocasa_actor,
                                              max_items=self.apify_fotocasa_max_results,
                                              timeout_seconds=self.apify_portals_timeout_seconds,
-                                             max_charge_usd=self.apify_fotocasa_max_charge_usd, geocoder=geocoder()))
+                                             max_charge_usd=self.apify_fotocasa_max_charge_usd, geocoder=geocoder(),
+                                             default_point_guard=self.portal_default_point_guard))
         if self.apify_yaencontre_enabled:
             from .sources.portals import ApifyYaencontreSource
 
