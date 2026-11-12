@@ -12,8 +12,15 @@ import httpx
 import pytest
 
 from bot.agents import reviewer as rv
-from bot.campaign import final_report
-from bot.campaign.relevance import ReviewerJudge
+from bot.analysis_pipeline import source_place
+from bot.analysis_pipeline.openrouter import OpenRouterAnalyzer
+from bot.analysis_pipeline.settings import AnalysisSettings
+from bot.campaign import final_report, plan_campaign
+from bot.campaign.quote_hits import WINDOW, needles, quote_hits
+from bot.campaign.relevance import MAX_REVIEW_TEXT_CHARS, ReviewerJudge, finding_data
+from bot.campaign.runner import CampaignRunner, RunnerConfig
+from bot.campaign.runs import MemoryRunStore
+from bot.campaign.store import MemoryCampaignStore
 from bot.web_search.queries import QueryTask
 from bot.web_search.settings import WebSearchSettings
 from bot.web_search.sources import portals
@@ -23,6 +30,8 @@ from bot.web_search.sources.portals import (
     ApifyIdealistaPortalSource,
 )
 from bot.web_search.worker import WebSearchConfig, WebSearchWorker
+from tests.test_campaign_relevance import CHAT, USER
+from tests.test_campaign_runner import ButtonMessenger
 from tests.test_reviewer import settings
 
 # sha256 of the prompts before Q18 (main at 0a8cc38): the flag off sends them byte for byte.
@@ -64,8 +73,13 @@ def test_flag_on_prompts_carry_the_rule_under_their_own_version() -> None:
         rule = system.split("Different kind is a fail.\n", 1)[1].split("- budget", 1)[0]
         for word in ("casa adosada", "adosado", "pareado", "townhouse", '"pass" and no compromise'):
             assert word in rule
-        for word in ("«отдельный»", "«independiente»", "detached house only", '"near"'):  # said: the old rule
-            assert word in rule
+        detached, _, counter = rule.partition("Not a detached-only request:")
+        for word in ("«отдельный дом»", "«casa independiente»", "detached house only",  # said: type pass, near
+                     'still "pass" on "type"', '"overall" is "near"', "deviation_ru «таунхаус»"):
+            assert word in detached
+        for word in ("«можно таунхаус»", "«не обязательно отдельный»", "«cocina independiente»",
+                     "«entrada independiente»", '"pass",\n  no compromise'):  # counterexamples: a plain pass
+            assert word in counter
     # Only the rule is added; the rest of each prompt is the old one.
     assert rv.SYSTEM_TH.replace(rv._TYPE_TH, rv._TYPE_V3) == rv.SYSTEM
     assert rv.SYSTEM_SOFT_TH.replace(rv._TYPE_TH, rv._TYPE_V3).replace(rv._KIND_SOFT_TH, rv._KIND_SOFT) == rv.SYSTEM_SOFT
@@ -166,3 +180,178 @@ async def test_settings_pass_the_portal_flag_to_every_portal() -> None:
     finally:
         for source in sources:
             await source.aclose()
+
+
+# --- PORTAL_DESCRIPTION_FULL: «hits» for the reviewer ------------------------------------------------------------------
+
+POOL_TEXT = ("Casa adosada luminosa con jardín y vistas. " * 60)[:2000] + "Piscina privada climatizada de 8 metros. " + (
+    "Cerca de la playa y del golf. " * 40)
+
+
+def test_quote_hits_find_spanish_words_for_russian_terms() -> None:
+    assert POOL_TEXT.index("Piscina") == 2000
+    hits = quote_hits(POOL_TEXT, ["бассейн"], skip_before=MAX_REVIEW_TEXT_CHARS)
+    assert len(hits) == 1 and "Piscina privada climatizada" in hits[0] and len(hits[0]) <= 2 * WINDOW + 7
+    assert hits[0] in " ".join(POOL_TEXT.split())  # verbatim, whitespace collapsed like the excerpt
+    for term, word in (("лифт", "ascensor"), ("терраса", "terraza"), ("гараж", "garaje"), ("парковка", "parking"),
+                       ("сад", "jardin"), ("кондиционер", "aire acondicionado"), ("мебель", "amueblad"),
+                       ("можно с животными", "mascota")):
+        assert word in needles(term), term
+    assert quote_hits("Ático amueblado con ascensor y TERRAZA.", ["меблированная", "лифт", "терраса"]) == [
+        "Ático amueblado con ascensor y TERRAZA."]  # accents and case ignored, overlapping windows merged
+    assert quote_hits(POOL_TEXT, ["бассейн"], skip_before=len(POOL_TEXT)) == []  # already in the excerpt
+    assert quote_hits("Cerca de la plaza mayor.", ["парковка"]) == []  # «plaza» alone is not parking
+    assert quote_hits("Casa con jardín.", ["first line"]) == []
+
+
+def test_finding_data_carries_hits_only_with_terms() -> None:
+    off = finding_data({"summary_ru": "Дом"}, original=POOL_TEXT, review=True)
+    assert "hits" not in off and "Piscina" not in rv.haystack_of(off)
+    on = finding_data({"summary_ru": "Дом"}, original=POOL_TEXT, review=True, hit_terms=["бассейн"])
+    assert on["hits"] and "piscina privada climatizada" in rv.haystack_of(on)
+    assert {k: v for k, v in on.items() if k != "hits"} == off  # nothing else changes
+
+
+def test_hits_prompt_has_its_own_version_and_allows_quoting_hits() -> None:
+    for soft in (False, True):
+        for th in (False, True):
+            base_version, base = rv.prompt_of(soft_wishes=soft, townhouse_is_house=th)
+            version, system = rv.prompt_of(soft_wishes=soft, townhouse_is_house=th, quote_hits=True)
+            assert version == base_version + "-hits" and version in final_report._LEGAL_RULE_PROMPTS
+            assert '"evidence" and "hits" values' in system and '"hits"' not in base
+            assert system.replace(rv._QUOTABLE_HITS, rv._QUOTABLE_V3) == base
+    assert sha(rv.prompt_of()[1]) == SYSTEM_SHA256
+
+
+def test_portal_flag_reaches_the_reviewer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PORTAL_DESCRIPTION_FULL", raising=False)
+    assert settings().relevance_judge().quote_hits is False
+    judge = settings(PORTAL_DESCRIPTION_FULL="true").relevance_judge()
+    assert judge.quote_hits is True and judge.reviewer.quote_hits is True
+
+
+HOUSE_SPEC = {"deal": "sale", "property_type": "house", "must_have": ["бассейн"],
+              "place": {"name": "Madrid", "level": "city", "country": "ES"}, "delivery": {"show_similar": False}}
+
+
+async def _run(quote_hits_on: bool) -> tuple[MemoryRunStore, list[dict]]:
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        data = json.loads(body["messages"][1]["content"].split("\n", 1)[1])
+        hits = data["finding"].get("hits") or []
+        rows = []
+        for name in data["task"]["criteria"]:
+            if name == "must_have:бассейн":  # the model quotes the hit verbatim, or does not know
+                quote = "Piscina privada climatizada" if hits else None
+                rows.append({"name": name, "verdict": "pass" if hits else "unknown", "quote": quote, "note_ru": "ок"})
+            else:
+                rows.append({"name": name, "verdict": "pass", "quote": "Casa adosada", "note_ru": "ок"})
+        answer = {"criteria": rows, "overall": "match" if hits else "near",
+                  "deviation_ru": None if hits else "бассейн не указан", "confidence": 0.9}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
+
+    reviewer = rv.OpenRouterReviewer(api_key="k", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                                     quote_hits=quote_hits_on)
+    campaigns = MemoryCampaignStore()
+    store = MemoryRunStore(campaigns)
+    runner = CampaignRunner(campaigns, store, ButtonMessenger(), None,
+                            config=RunnerConfig(window_cooldown_seconds=0, relevance_fail_closed=True),
+                            relevance=ReviewerJudge(reviewer))
+    plan = plan_campaign(HOUSE_TASK, vertical="real_estate", location="Madrid")
+    cid = await campaigns.create(plan, chat_id=CHAT, requested_by=USER, source_text=HOUSE_TASK, actor="telegram:42",
+                                 spec=HOUSE_SPEC)
+    await campaigns.set_state(cid, "running", "campaign:test")
+    store.add_groups(cid, 5)
+    payload = {"schema_version": "analysis-v4", "summary_ru": "Таунхаус в Мадриде", "location": "Madrid",
+               "country": "ES", "price_amount": 900_000, "price_currency": "EUR", "deal_type": "sale",
+               "property_type": "house", "area_m2": 240, "listing_kind": "offer",
+               "original_post_link": "https://www.idealista.com/inmueble/12399/"}
+    store.add_finding(cid, "house", "🏠 house", payload=payload, original=POOL_TEXT, vertical="real_estate")
+    await runner.tick()
+    return store, seen
+
+
+HOUSE_TASK = "Купить дом в Мадриде с бассейном"
+
+
+async def test_runner_sends_hits_and_the_pool_at_2000_passes_with_a_verbatim_quote() -> None:
+    store, seen = await _run(False)
+    finding = json.loads(seen[0]["messages"][1]["content"].split("\n", 1)[1])["finding"]
+    assert "hits" not in finding and seen[0]["messages"][0]["content"] == rv.SYSTEM
+    assert store.buckets["house"][0] == "similar"  # the pool is past the 900 characters: not confirmed
+
+    store, seen = await _run(True)
+    finding = json.loads(seen[0]["messages"][1]["content"].split("\n", 1)[1])["finding"]
+    assert any("Piscina privada climatizada" in hit for hit in finding["hits"])
+    assert seen[0]["messages"][0]["content"] == rv.prompt_of(quote_hits=True)[1]
+    assert store.buckets["house"][0] == "exact"
+    review = rv.parse_review(json.dumps({"criteria": [{"name": "must_have:бассейн", "verdict": "fail",
+                                                       "quote": "Piscina privada climatizada", "note_ru": "x"}],
+                                         "overall": "reject", "deviation_ru": None, "confidence": 1}),
+                             expected=["must_have:бассейн"], haystack=rv.haystack_of(finding), quote_hits=True)
+    assert review.criteria[0].verdict == "fail" and review.prompt == "reviewer-v3-hits"  # the hit grounds a quote
+
+
+# --- PORTAL_DESCRIPTION_FULL: the place check reads 1500 characters --------------------------------------------------
+
+
+def _post(description: str) -> str:
+    facts = {"url": "https://www.idealista.com/inmueble/100000902/", "title": "Casa adosada",
+             "address": "Nueva Andalucía, Marbella", "property_type": "house", "deal": "sale"}
+    return f"JSON-LD: {json.dumps(facts, ensure_ascii=False)}\nCasa adosada\nСсылка: {facts['url']}\n{description}"
+
+
+AGENCY_TAIL = ("Casa adosada con piscina. " * 80)[:3000] + " Nuestra oficina central situada en Madrid le atenderá."
+
+
+def test_place_check_reads_only_the_old_1500_characters_of_a_long_description() -> None:
+    post = _post(AGENCY_TAIL)
+    whole = source_place.conflict(post)
+    assert whole is not None and whole.strong  # the false conflict the review found
+    assert source_place.conflict(post, description_chars=source_place.PLACE_DESCRIPTION_CHARS) is None
+    near = _post("Chalet situado en Madrid, junto al Retiro. " + AGENCY_TAIL)  # a real conflict early stays
+    found = source_place.conflict(near, description_chars=source_place.PLACE_DESCRIPTION_CHARS)
+    assert found is not None and found == source_place.conflict(near)
+
+
+def test_analysis_settings_pass_the_place_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PORTAL_DESCRIPTION_FULL", raising=False)
+    assert AnalysisSettings(_env_file=None, DATABASE_URL="postgresql://x").portal_description_full is False
+    assert OpenRouterAnalyzer("k", "m").place_description_chars is None
+
+
+@pytest.mark.parametrize(("flag", "chars"), [(False, None), (True, 1500)])
+async def test_the_analyzer_hands_the_limit_to_the_place_check(monkeypatch: pytest.MonkeyPatch, flag, chars) -> None:
+    from bot.analysis_pipeline import main
+    from bot.analysis_pipeline.models import Evidence
+
+    built: list[OpenRouterAnalyzer] = []
+
+    class Stop(Exception):
+        pass
+
+    def fake_analyzer(*args, **kwargs):
+        built.append(OpenRouterAnalyzer(*args, **kwargs))
+        raise Stop
+
+    monkeypatch.setattr(main, "OpenRouterAnalyzer", fake_analyzer)
+    s = AnalysisSettings(_env_file=None, DATABASE_URL="postgresql://x", OPENROUTER_API_KEY="k",
+                         ANALYSIS_LOCATION_FROM_TEXT=True, PORTAL_DESCRIPTION_FULL=flag)
+    with pytest.raises(Stop):
+        await main.run_once(store=SimpleNamespace(), settings=s)  # the analyzer is built first: no store call
+    analyzer = built[0]
+    assert analyzer.place_description_chars == chars
+    seen: dict = {}
+
+    def conflict(text, title="", **kwargs):
+        seen.update(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(source_place, "conflict", conflict)
+    with pytest.raises(Stop):
+        await analyzer.analyze(Evidence(post_id="p", source_id="s", canonical_url="https://x.es/1",
+                                        text=_post(AGENCY_TAIL)), "real_estate")
+    assert seen == {"description_chars": chars}

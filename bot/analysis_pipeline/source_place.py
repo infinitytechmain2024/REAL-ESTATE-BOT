@@ -51,6 +51,9 @@ from .municipalities import MUNICIPALITIES, SAME_TOWN
 PREFIX = "JSON-LD: "
 PLACE_KEYS = ("address", "location")
 LINK_PREFIX = "Ссылка:"
+# PORTAL_DESCRIPTION_FULL (Q18): the description the place check reads, the 1500 characters of a portal description
+# before Q18 (bot/web_search/sources/portals.py ``_DESCRIPTION_CHARS``).
+PLACE_DESCRIPTION_CHARS = 1500
 # area -> (its cities, as bot/campaign/architect.py find_places knows them; its regions, bot/campaign/geo.py REGIONS),
 # accent- and case-folded, Latin script only.
 AREAS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
@@ -225,7 +228,7 @@ def _source_parts(source: str) -> tuple[str, ...]:
     return tuple(p for p in parts if len(p) >= 4 and p not in area_names and not areas_of(p))
 
 
-def _parts(rest: str, title: str) -> tuple[str, str]:
+def _parts(rest: str, title: str, description_chars: int | None = None) -> tuple[str, str]:
     """(title, description) of the text after the JSON-LD line.
 
     A post built from a source listing is «title / Ссылка: url / description» (web_search/worker.py ``_source_text``);
@@ -233,12 +236,19 @@ def _parts(rest: str, title: str) -> tuple[str, str]:
     """
     lines = rest.split("\n")
     if len(lines) >= 2 and lines[1].startswith(LINK_PREFIX):
-        return lines[0], "\n".join(lines[2:])
+        description = "\n".join(lines[2:])
+        return lines[0], description[:description_chars] if description_chars is not None else description
     return title, "\n".join(line for line in lines if not line.startswith(LINK_PREFIX))
 
 
-def conflict(text: str, title: str = "") -> PlaceConflict | None:
-    """The other area the title/description name when the JSON-LD place is clearly not the object's; else None."""
+def conflict(text: str, title: str = "", *, description_chars: int | None = None) -> PlaceConflict | None:
+    """The other area the title/description name when the JSON-LD place is clearly not the object's; else None.
+
+    ``description_chars`` (``PORTAL_DESCRIPTION_FULL``, Q18): of a post built from a source listing
+    («title / Ссылка: url / description») only that many characters of the description are read, the size a portal
+    description had before Q18: the tail of a long one names the agency's offices («oficina central situada en
+    Madrid»), not the object. Other posts are read whole, as before.
+    """
     parsed = _jsonld(text)
     if parsed is None:
         return None
@@ -247,7 +257,7 @@ def conflict(text: str, title: str = "") -> PlaceConflict | None:
     source_areas = areas_of(source)
     if not source_areas and not _source_towns(source):
         return None  # a place the list does not know is never a conflict (a known town «Getafe» is: Q13)
-    own_title, description = _parts(rest, title)
+    own_title, description = _parts(rest, title, description_chars)
     # a title we built from the actor's place repeats the source: it neither confirms nor contradicts it
     own = f"{'' if _SYNTHETIC_TITLE.match(fold(own_title).strip()) else own_title}\n{description}"
     if _hits(fold(own), _source_parts(source)):

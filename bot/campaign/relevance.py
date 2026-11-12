@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -149,10 +150,13 @@ def task_data(campaign: Campaign, *, review: bool = False, soft_wishes: bool = F
 
 
 def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", original: str = "",
-                 review: bool = False, vertical: str | None = None) -> dict[str, Any]:
+                 review: bool = False, vertical: str | None = None,
+                 hit_terms: Sequence[str] = ()) -> dict[str, Any]:
     """A bounded summary of a finding's payload plus the start of the original post; never the whole post.
 
     ``review``: for the reviewer, also the extracted evidence quotes and details, and 900 characters of the text.
+    ``hit_terms`` (``PORTAL_DESCRIPTION_FULL``, Q18, reviewer only): the task's must-have and exclusion words; the
+    windows of the whole original around them go as ``hits`` (``quote_hits``), past the 900 characters of the excerpt.
     """
     payload = payload or {}
     summary = payload.get("summary_ru") or payload.get("summary") or fallback_text
@@ -165,6 +169,10 @@ def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", ori
             if payload.get(key) not in (None, "", []):
                 data[key] = payload[key]
         data["vertical"] = vertical
+        if hit_terms:
+            from .quote_hits import quote_hits
+
+            data["hits"] = quote_hits(original, hit_terms, skip_before=MAX_REVIEW_TEXT_CHARS)
     return data
 
 
@@ -319,6 +327,11 @@ class ReviewerJudge:
     @property
     def model(self) -> str:
         return self.reviewer.model
+
+    @property
+    def quote_hits(self) -> bool:
+        """``PORTAL_DESCRIPTION_FULL`` (Q18): the runner hands over ``hits``, windows of the whole text."""
+        return bool(getattr(self.reviewer, "quote_hits", False))
 
     @property
     def soft_wishes(self) -> bool:

@@ -522,8 +522,10 @@ _CRITERION_LABELS = {"place": "местоположение", "deal": "тип с
 _LEGAL = re.compile(r"застрой|строительств|разрешен|разрешён|зонир|urbaniz|suelo|permit", re.IGNORECASE)
 # Reviewer prompts that already carry the legal-buildability rule (a «pass» of such a must-have is trusted);
 # reviewer-v3-soft is reviewer-v3 with the soft wishes apart (RELEVANCE_SOFT_WISHES); the -th ones add the townhouse
-# rule (REVIEW_TOWNHOUSE_IS_HOUSE, Q18) and keep the legal one.
-_LEGAL_RULE_PROMPTS = ("reviewer-v3", "reviewer-v3-soft", "reviewer-v3-th", "reviewer-v3-soft-th")
+# rule (REVIEW_TOWNHOUSE_IS_HOUSE, Q18), the -hits ones the quotable «hits» (PORTAL_DESCRIPTION_FULL, Q18); all keep
+# the legal one.
+_LEGAL_RULE_PROMPTS = tuple(f"reviewer-v3{soft}{th}{hits}" for soft in ("", "-soft") for th in ("", "-th")
+                            for hits in ("", "-hits"))
 
 
 def _criterion_label(name: str) -> str:

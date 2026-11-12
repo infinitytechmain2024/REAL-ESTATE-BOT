@@ -437,11 +437,14 @@ INVALID = "invalid_structured_model_response"
 
 class OpenRouterAnalyzer:
     def __init__(self, api_key: str, model: str, *, timeout_seconds: int = 30, invalid_retry: bool = False,
-                 fallback_model: str = "", location_from_text: bool = False, area_text_check: bool = False) -> None:
+                 fallback_model: str = "", location_from_text: bool = False, area_text_check: bool = False,
+                 place_description_chars: int | None = None) -> None:
         self.api_key, self.model, self.timeout_seconds = api_key, model, timeout_seconds
         self.invalid_retry, self.fallback_model = invalid_retry, fallback_model.strip()
         self.location_from_text = location_from_text  # ANALYSIS_LOCATION_FROM_TEXT (Q4)
         self.area_text_check = area_text_check  # ANALYSIS_AREA_TEXT_CHECK (Q13)
+        # PORTAL_DESCRIPTION_FULL (Q18): the place check reads this much of a source listing's description (None: all)
+        self.place_description_chars = place_description_chars
 
     async def analyze(self, evidence: Evidence, vertical: str, task_hint: dict[str, Any] | None = None) -> AnalysisResult:
         if not self.invalid_retry:
@@ -470,7 +473,8 @@ class OpenRouterAnalyzer:
                             model: str) -> AnalysisResult:
         # Limit evidence, do not accept any untrusted prompt controls or raw task instruction.
         # ANALYSIS_LOCATION_FROM_TEXT: a JSON-LD place the title/description clearly contradict is not shown to the model.
-        found = source_place.conflict(evidence.text, evidence.title) if self.location_from_text else None
+        found = (source_place.conflict(evidence.text, evidence.title, description_chars=self.place_description_chars)
+                 if self.location_from_text else None)
         if found is not None:
             log.info("analysis.source_location_conflict %s", found.area)
         data = {
