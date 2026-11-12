@@ -114,3 +114,21 @@ def deal_of(text: str) -> Literal["rent", "sale"] | None:
 def _fold(text: str) -> str:
     text = unicodedata.normalize("NFKD", text.casefold())
     return "".join(ch for ch in text if not unicodedata.combining(ch))
+
+
+# The words that make a listing an auction, not an ordinary sale: one list for ``bot.campaign.tolerance.deal_kind_of``
+# (CAMPAIGN_AUCTION_DEVIATION) and ``bot.web_search.sources.portals`` (PORTAL_FACTS_FROM_ROW). Whole words on folded
+# text. «adjudicación» is not here: «procedente de adjudicación bancaria» is an ordinary bank sale and «adjudicación de
+# obras» is no sale at all.
+AUCTION_WORDS = re.compile(r"(?<!\w)(?:subastas?|puja|cesion(?:es)?\s+del?\s+remate)(?!\w)")
+# A negation right before the word: «no es subasta», «no es una subasta», «sin subasta», «no procede de subasta».
+_AUCTION_NEGATION = re.compile(
+    r"(?<!\w)(?:sin|no\s+(?:es|son|hay|se\s+trata\s+de|procede|proceden|viene|vienen)(?:\s+(?:de|del|una?|la|el))*)\s+$")
+
+
+def auction_named(*texts: object) -> bool:
+    """True when the texts name an auction («subasta», «en proceso de subasta», «puja», «cesión de remate») that
+    is not negated just before («no es subasta», «sin subasta», «no procede de subasta»)."""
+    folded = _fold(" ".join(str(t or "") for t in texts))
+    return any(not _AUCTION_NEGATION.search(folded[max(0, hit.start() - 40):hit.start()])
+               for hit in AUCTION_WORDS.finditer(folded))

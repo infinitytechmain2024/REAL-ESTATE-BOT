@@ -22,9 +22,11 @@ from bot.campaign.tolerance import (
     AUCTION_NOTE,
     Request,
     classify,
+    deal_kind_of,
     facts_from_row_enabled,
     request_for,
 )
+from bot.utils.listing_text import auction_named
 from bot.web_search.queries import QueryTask
 from bot.web_search.settings import WebSearchSettings
 from bot.web_search.sources.portals import (
@@ -34,7 +36,6 @@ from bot.web_search.sources.portals import (
     ApifyMilanunciosSource,
     ApifyPisosSource,
     ApifyYaencontreSource,
-    auction_named,
 )
 from bot.web_search.worker import WebSearchConfig, WebSearchWorker
 
@@ -224,15 +225,49 @@ def test_the_existing_row_filters_stay():
     ("PROPIEDAD EN PROCESO DE SUBASTA", True),
     ("Piso en subasta judicial", True),
     ("Subastas de inmuebles", True),
-    ("Vivienda procedente de adjudicación bancaria", True),
+    ("Vivienda procedente de adjudicación bancaria", False),  # an ordinary bank sale
+    ("Adjudicación de obras de reforma", False),
     ("Cesión de remate disponible", True),
     ("cesion del remate", True),
+    ("Puja mínima 50.000 €", True),
+    ("Piso de banco, no es subasta", False),
+    ("No es una subasta: venta directa", False),
+    ("Venta directa sin subasta", False),
+    ("Vivienda que no procede de subasta", False),
+    ("No es subasta. Hay otra en subasta en el mismo edificio", True),  # one auction not negated is enough
     ("Piso reformado, subastado no", False),  # «subastado» is another word
     ("Piso luminoso en Ruzafa", False),
     ("", False),
 ])
 def test_auction_words(text, hit):
     assert auction_named(text) is hit
+    # one list of words with CAMPAIGN_AUCTION_DEVIATION (``deal_kind_of``)
+    assert (deal_kind_of(text) == "аукцион") is hit
+
+
+def test_flag_on_land_words_of_pisos_and_habitaclia_are_a_plot():
+    pisos = pisos_row(detailUrl="https://www.pisos.com/comprar/terreno-madrid_capital-100000502_100500/",
+                      city="Madrid Capital", province="Madrid", propertyType="ruralEstate", areaSqm=3000,
+                      shortDescription="Finca rústica de 3.000 m2.")
+    listing = adapter("pisos", True)._normalize(pisos, LAND, None)
+    assert listing.property_type == "landparcel" and listing.plot_m2 == 3000
+    assert adapter("pisos", True)._normalize(pisos_row(propertyType="ruralEstate"), FLAT, None).property_type == "ruralestate"
+    for subtype in ("Terreno urbano", "Terreno rústico", "Solar"):
+        row = habitaclia_row(detailUrl="https://www.habitaclia.com/comprar-terreno-madrid-i500009990004.htm",
+                             title="Terreno en Madrid", city="Madrid Capital", province="Madrid", location="Barajas",
+                             propertyType=None, propertySubtype=subtype, areaSqm=1500,
+                             description="Parcela de 1.500 m2.", shortDescription="Parcela de 1.500 m2.")
+        assert adapter("habitaclia", True)._normalize(row, LAND, None).property_type == "landparcel"
+
+
+@pytest.mark.parametrize("code", ["4", 4])
+def test_flag_on_fotocasa_code_as_number_or_text(code):
+    plot = fotocasa_row(url="https://www.fotocasa.es/es/comprar/terreno/madrid-capital/rejas/100000103/d",
+                        propertyType=code, rooms=None, surface=2500,
+                        location={"level2Name": "Madrid", "level5Name": "Madrid", "level8Name": "Rejas",
+                                  "latitude": "40.44", "longitude": "-3.58"}, description="Parcela urbana.")
+    assert adapter("fotocasa", True)._normalize(plot, LAND, None).property_type == "landparcel"
+    assert adapter("fotocasa", True)._normalize(fotocasa_row(propertyType=2), FLAT, None).property_type == "vivienda"
 
 
 def test_flag_off_by_default_everywhere(monkeypatch):

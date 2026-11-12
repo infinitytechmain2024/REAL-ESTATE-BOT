@@ -53,7 +53,7 @@ Other constraints
   unknown. A location naming another city still makes it other.
 * Auction in a purchase (Q16, ``PORTAL_FACTS_FROM_ROW``; ``Request.auction_guard``) -> similar (``deal_kind``,
   «аукцион, не обычная продажа»), never exact: the portal row's title or description names a «subasta»,
-  «adjudicación» or «cesión de remate» (``auction`` in the payload, ``bot/web_search/sources/portals.py``
+  «puja» or «cesión de remate», not negated (``auction`` in the payload; ``bot/utils/listing_text.py``
   ``auction_named``). Only when the request's deal is a sale.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
@@ -88,6 +88,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
+
+from bot.utils.listing_text import auction_named
 
 from . import geo
 from .architect import find_places
@@ -214,18 +216,20 @@ _CATALOG = re.compile(
 )
 
 
-_DEAL_KINDS = (("аукцион", re.compile(r"\b(?:subastas?|puja)\b")),
-               ("nuda propiedad", re.compile(r"\b(?:nuda propiedad|usufructo)\b")))
+_NUDA = re.compile(r"\b(?:nuda propiedad|usufructo)\b")
 
 
 def deal_kind_of(*texts: object) -> str | None:
     """«аукцион» / «nuda propiedad» when the listing's text names an auction or a bare-ownership sale, else None.
 
     A different kind of deal from an ordinary purchase: such a finding is never exact (``CAMPAIGN_AUCTION_DEVIATION``).
+    The auction words are ``bot.utils.listing_text.AUCTION_WORDS``, shared with PORTAL_FACTS_FROM_ROW (Q16).
     """
+    if auction_named(*texts):
+        return "аукцион"
     folded = "".join(ch for ch in unicodedata.normalize("NFD", " ".join(str(t or "") for t in texts).casefold())
                      if not unicodedata.combining(ch))
-    return next((label for label, pattern in _DEAL_KINDS if pattern.search(folded)), None)
+    return "nuda propiedad" if _NUDA.search(folded) else None
 
 
 def not_an_offer(payload: dict[str, Any], *, vertical: str | None = None) -> bool:

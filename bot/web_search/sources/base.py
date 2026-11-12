@@ -29,7 +29,7 @@ class SourceListing:
     # address then carries no district or town of the portal); None otherwise, so the «JSON-LD» line is unchanged.
     place_unverified: bool | None = None
     # PORTAL_FACTS_FROM_ROW (Q16): True when the row's title or description names an auction («subasta»,
-    # «adjudicación», «cesión de remate»); None otherwise, so the «JSON-LD» line is unchanged.
+    # «puja», «cesión de remate», not negated); None otherwise, so the «JSON-LD» line is unchanged.
     auction: bool | None = None
 
 

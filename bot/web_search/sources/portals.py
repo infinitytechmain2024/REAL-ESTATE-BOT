@@ -17,7 +17,7 @@ import re
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
-from bot.utils.listing_text import _AREA, _to_m2, areas, number
+from bot.utils.listing_text import _AREA, _to_m2, areas, auction_named, number
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.apify import ApifyListingSource, _distance_km, _fold, _number, _text
 from bot.web_search.sources.base import SourceListing
@@ -113,27 +113,28 @@ _MILANUNCIOS_ROW: dict[str, tuple[str, str | None]] = {
 # ``/comprar/terreno/`` URL, ``2`` on every ``/comprar/vivienda/`` one (flats and houses alike: «vivienda», no more).
 # ``propertySubtype`` codes and ``transactionType`` ``1`` are not mapped (their meaning is not in the output).
 _FOTOCASA_TYPES: dict[str, str] = {"4": "landparcel", "2": "vivienda"}
-# The words that make a listing an auction, not an ordinary sale (whole words, accents folded).
-_AUCTION = re.compile(r"(?<!\w)(?:subastas?|adjudicacion(?:es)?|cesion(?:es)?\s+de(?:l)?\s+remate)(?!\w)")
 
 
-def _row_type(*values: Any) -> str | None:
+def _row_type(*values: Any, land: bool = False) -> str | None:
     """The first of the row's own type values: our word for a known one, the portal's word for another, None for
-    a missing value or a bare code."""
+    a missing value or a bare code. ``land``: the row passed a land task's filter (``_landish``), so a word naming
+    land (Pisos ``ruralEstate``, Habitaclia «Terreno urbano» / «Terreno rústico») is ``landparcel``."""
     for value in values:
         word = _fold(_text(value))
         if word and not word.isdigit():
-            return _ROW_TYPES.get(word, word[:40])
+            return "landparcel" if land and _landish(word) else _ROW_TYPES.get(word, word[:40])
     return None
+
+
+def _code(value: Any) -> str:
+    """A portal code as text: the number ``4`` and the string ``"4"`` alike."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return _text(value)
 
 
 def _row_deal(value: Any) -> str | None:
     return _ROW_DEALS.get(_fold(_text(value)))
-
-
-def auction_named(*texts: str) -> bool:
-    """True when the texts name an auction: «subasta», «en proceso de subasta», «adjudicación», «cesión de remate»."""
-    return bool(_AUCTION.search(_fold(" ".join(texts))))
 
 
 class _PortalSource(ApifyListingSource):
@@ -295,7 +296,7 @@ class ApifyFotocasaSource(_PortalSource):
             address=[_text(item.get("street")), *place],
             description=description, phone=item.get("phone"), advertiser=agency.get("name"),
             property_type=self._TYPES.get(kind), place_unverified=unverified,
-            row_type=_FOTOCASA_TYPES.get(_text(item.get("propertyType"))), row_deal=_row_deal(transaction.get("type")))
+            row_type=_FOTOCASA_TYPES.get(_code(item.get("propertyType"))), row_deal=_row_deal(transaction.get("type")))
 
 
 _YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,
@@ -650,7 +651,8 @@ class ApifyPisosSource(_SchemaPortal):
             rooms=row.get("rooms"),
             address=[_text(row.get("fullAddress"))] if row.get("fullAddress") else [city, province],
             description=_text(row.get("shortDescription")), phone=None, advertiser=row.get("advertiserName"),
-            property_type=self._TYPES.get(task_kind(task)), row_type=_row_type(row.get("propertyType")),
+            property_type=self._TYPES.get(task_kind(task)),
+            row_type=_row_type(row.get("propertyType"), land=task_kind(task) == "land"),
             row_deal=_row_deal(row.get("transactionType")))
 
 
@@ -697,7 +699,7 @@ class ApifyHabitacliaSource(_SchemaPortal):
             address=[place := _text(row.get("location")), *(p for p in (city, province) if _fold(p) not in _fold(place))],
             description=_text(row.get("description")) or _text(row.get("shortDescription")), phone=None,
             advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)),
-            row_type=_row_type(row.get("propertyType"), row.get("propertySubtype")),
+            row_type=_row_type(row.get("propertyType"), row.get("propertySubtype"), land=task_kind(task) == "land"),
             row_deal=_row_deal(row.get("transactionType")))
 
 
