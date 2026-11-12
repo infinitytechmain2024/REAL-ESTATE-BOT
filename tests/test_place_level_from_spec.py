@@ -17,13 +17,13 @@ from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.spec import TaskSpec
 from bot.web_search.queries import portal_place_level
 from bot.web_search.settings import WebSearchSettings
-from bot.web_search.sources.apify import SourceRunContext, source_run_scope
+from bot.web_search.sources.apify import ApifyIdealistaSource, SourceRunContext, source_run_scope
 from bot.web_search.sources.portals import (
     ApifyFotocasaSource,
     ApifyIdealistaPortalSource,
     ApifyMilanunciosSource,
 )
-from bot.web_search.worker import query_task
+from bot.web_search.worker import WebSearchConfig, WebSearchWorker, query_task
 from tests.test_apify_portals import fotocasa_row, idealista_row, live_rows
 
 GOAL = "покупка Тип: участок. Задача: участок от 2000 м² в Мадриде"
@@ -93,7 +93,18 @@ async def test_spec_level_wins_over_the_text_only_with_the_flag():
 @pytest.mark.parametrize(("level", "location", "country", "text", "expected"), [
     ("region", "Madrid", "ES", "", "province"),  # Comunidad de Madrid is one province
     ("region", "Málaga", "ES", "вся провинция Малага", "province"),
+    ("region", "Málaga", "ES", "участок в провинции Малаги", "province"),
+    ("region", "Málaga", "ES", "Малагская провинция", "province"),
+    ("region", "Málaga", "ES", "parcela en la provincia de Málaga", "province"),
     ("region", "Málaga", "ES", "Andalucía, Costa del Sol", "region"),  # more than the province: not guessed
+    # «provincia» away from the place says nothing about it
+    ("region", "Málaga", "ES", "участок у моря в Малаге, провинция не важна", "region"),
+    ("region", "Málaga", "ES", "Costa del Sol, cualquier provincia", "region"),
+    # two provinces named: neither of them alone
+    ("region", "Valencia", "ES", "provincia de Alicante o Valencia", "region"),
+    ("region", "Barcelona", "ES", "provincia de Barcelona y Girona", "region"),
+    ("region", "Madrid", "ES", "Мадрид и Толедо", "region"),
+    ("region", "Madrid", "ES", "вся провинция Мадрид", "province"),
     ("province", "Alicante", "ES", "", "province"),
     ("province", "Costa del Sol", "ES", "", "region"),  # no province of Spain
     ("city", "Madrid", "ES", "provincia de Madrid", "city"),
@@ -137,3 +148,39 @@ async def test_flag_on_province_reaches_fotocasa_milanuncios_and_idealista():
 async def test_flag_on_a_region_of_one_province_is_a_province():
     task = query_task(await _campaign("region"), spec_level=True)
     assert task.place_level == "province"
+
+
+def _axlymxp(rows, requests):
+    return ApifyIdealistaSource("secret-token", location_id="configured-exact-city-id",
+                                client=_api(rows, requests), sleep=AsyncMock())
+
+
+async def test_flag_on_keeps_idealista_axlymxp_with_the_task_it_had_before():
+    """axlymxp serves only a city: with a province from the spec it searches the city, as without the flag."""
+    campaign = await _campaign("province")
+    on = WebSearchWorker(None, None, None, None, None, config=WebSearchConfig(place_level_from_spec=True))
+    off = WebSearchWorker(None, None, None, None, None, config=WebSearchConfig())
+    requests: list[httpx.Request] = []
+    source = _axlymxp([], requests)
+    assert not source.supports(query_task(campaign, spec_level=True))
+    task = on._source_task(campaign, source)
+    assert task.place_level == "city" and task == off._source_task(campaign, source)
+    fotocasa = ApifyFotocasaSource("secret-token", client=_api([], []), sleep=AsyncMock())
+    assert on._source_task(campaign, fotocasa).place_level == "province"
+
+    class Store:
+        async def claim_source(self, cid, name):
+            return object(), True
+
+    on.store, on.sources = Store(), (source,)
+    on._source_limit = AsyncMock(return_value=5)
+    on._source_charge = AsyncMock(return_value=.05)
+    on._search_source = AsyncMock()
+    await on._from_sources(campaign)
+    on._search_source.assert_awaited_once()  # the Idealista run is launched, not dropped
+
+    with source_run_scope(_context(source.name)):
+        await source.search(task, limit=5)
+    await source.aclose()
+    body = json.loads(next(r for r in requests if r.method == "POST").content)
+    assert body["locationName"] == "Madrid" and body["locationId"] == "configured-exact-city-id"

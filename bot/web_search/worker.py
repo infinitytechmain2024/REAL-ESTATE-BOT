@@ -462,10 +462,21 @@ class WebSearchWorker:
         remaining = costs.budget() - spent if costs.budget() > 0 else charge
         return min(charge, remaining) if remaining > 0 else None
 
+    def _source_task(self, campaign: Campaign, source: ListingSource) -> QueryTask:
+        """The task a listing source searches. SEARCH_PLACE_LEVEL_FROM_SPEC: a source that does not take the spec's
+        place level (Idealista ``axlymxp`` serves only a city) keeps the task it had without the flag, so turning the
+        flag on never drops a source that searched before."""
+        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
+        if self.config.place_level_from_spec and not source.supports(task):
+            legacy = query_task(campaign)
+            if source.supports(legacy):
+                return legacy
+        return task
+
     async def _from_sources(self, campaign: Campaign) -> None:
         """Claim new provider work only in the first round; persisted claims prevent repeated POSTs."""
-        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
         for source in self.sources:
+            task = self._source_task(campaign, source)
             blocked = task.blocked_hosts | self.config.blocked_hosts
             if not source.supports(task) or any(not fetchable(f"https://{host}/", blocked) for host in source.hosts):
                 continue
@@ -483,8 +494,6 @@ class WebSearchWorker:
     async def _resume_sources(self, campaign: Campaign) -> bool:
         """Resume cached imports or the known run, even after query generation has been committed."""
         sources = {s.name: s for s in self.sources}
-        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
-        blocked = task.blocked_hosts | self.config.blocked_hosts
         for run in await self.store.source_runs(campaign.id):
             source = sources.get(run.name)
             if run.state in ("completed", "failed"):
@@ -493,6 +502,8 @@ class WebSearchWorker:
                 await self.store.finish_source(campaign.id, run.name, error_code="apify_disabled_during_run")
                 await costs.error("api", "apify_disabled_during_run", item=run.name, campaign_id=campaign.id)
                 continue
+            task = self._source_task(campaign, source)
+            blocked = task.blocked_hosts | self.config.blocked_hosts
             if not source.supports(task) or any(not fetchable(f"https://{host}/", blocked) for host in source.hosts):
                 await self._fail_source(campaign.id, source, "apify_task_changed")
                 continue
@@ -546,7 +557,7 @@ class WebSearchWorker:
         try:
             with source_run_scope(context):
                 timeout = min(getattr(source, "timeout_seconds", 120) + 75, self.config.lease_seconds - 30)
-                listings = await asyncio.wait_for(source.search(query_task(campaign, spec_level=self.config.place_level_from_spec), limit=limit), timeout=timeout)
+                listings = await asyncio.wait_for(source.search(self._source_task(campaign, source), limit=limit), timeout=timeout)
             if len(listings) > min(limit, 50):
                 await costs.record("api", kind="skip", code="apify_result_limit", item=source.name,
                                    units=len(listings) - min(limit, 50), campaign_id=cid)
