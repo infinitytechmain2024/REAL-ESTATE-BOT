@@ -51,6 +51,10 @@ Other constraints
   (``location_unknown``), never exact: the portal filed the listing at its fallback point of a district
   (``place_unverified`` in the payload, ``bot/web_search/sources/portals.py`` ``default_point``), so its place is
   unknown. A location naming another city still makes it other.
+* Auction in a purchase (Q16, ``PORTAL_FACTS_FROM_ROW``; ``Request.auction_guard``) -> similar (``deal_kind``,
+  «аукцион, не обычная продажа»), never exact: the portal row's title or description names a «subasta»,
+  «puja» or «cesión de remate», not negated (``auction`` in the payload; ``bot/utils/listing_text.py``
+  ``auction_named``). Only when the request's deal is a sale.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
   (Москва, Минск ...), its link is under another country's TLD (``.ru``,
@@ -85,6 +89,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from bot.utils.listing_text import auction_named
+
 from . import geo
 from .architect import find_places
 
@@ -99,7 +105,8 @@ Bucket = Literal["exact", "similar", "other", "excluded"]
 _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
 Why = Literal["price", "area", "area_max", "rooms", "location", "deal", "kind", "type", "foreign", "currency", "ai",
-              "unverified", "area_unknown", "location_unknown", "approved_deviation", "ai_failed", "cost_cap"]
+              "unverified", "area_unknown", "location_unknown", "approved_deviation", "ai_failed", "cost_cap",
+              "deal_kind"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -133,6 +140,7 @@ class Request:
     nearby: tuple[str, ...] = ()  # neighbouring districts / towns accepted as the place
     districts: tuple[str, ...] = ()  # the districts that were asked for
     place_guard: bool = False  # PORTAL_DEFAULT_POINT_GUARD (Q12): a payload's ``place_unverified`` is never exact
+    auction_guard: bool = False  # PORTAL_FACTS_FROM_ROW (Q16): a purchase's payload ``auction`` is never exact
 
     @property
     def country_code(self) -> str | None:
@@ -216,9 +224,15 @@ def deal_kind_of(*texts: object) -> str | None:
     """«аукцион» / «nuda propiedad» when the listing's text names an auction or a bare-ownership sale, else None.
 
     A different kind of deal from an ordinary purchase: such a finding is never exact (``CAMPAIGN_AUCTION_DEVIATION``).
+    With PORTAL_FACTS_FROM_ROW (Q16) the auction words are ``bot.utils.listing_text.auction_named`` (the list the
+    portal rows are marked with, negations read); without it ``_DEAL_KINDS`` as before.
     """
     folded = "".join(ch for ch in unicodedata.normalize("NFD", " ".join(str(t or "") for t in texts).casefold())
                      if not unicodedata.combining(ch))
+    if facts_from_row_enabled():
+        if auction_named(*texts):
+            return "аукцион"
+        return "nuda propiedad" if _DEAL_KINDS[1][1].search(folded) else None
     return next((label for label, pattern in _DEAL_KINDS if pattern.search(folded)), None)
 
 
@@ -297,6 +311,14 @@ def default_point_guard_enabled() -> bool:
     return os.environ.get("PORTAL_DEFAULT_POINT_GUARD", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def facts_from_row_enabled() -> bool:
+    """PORTAL_FACTS_FROM_ROW (default off): a portal listing marked as an auction is not exact for a purchase (Q16)."""
+    return os.environ.get("PORTAL_FACTS_FROM_ROW", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+AUCTION_NOTE = "аукцион, не обычная продажа"
+
+
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
                 text: str | None = None, country: str | None = None,
                 deviations: dict[str, Any] | None = None) -> Request:
@@ -328,6 +350,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         nearby=_names(dev.get("nearby_areas")),
         districts=tuple(d.strip() for d in str(constraints.get("districts") or "").split(",") if d.strip()),
         place_guard=default_point_guard_enabled(),
+        auction_guard=facts_from_row_enabled(),
     )
 
 
@@ -411,6 +434,8 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
             return worse(result, Match("other", math.inf, "location"))
     if request.place_guard and payload.get("place_unverified") is True:
         result = worse(result, Match("similar", 0.0, "location_unknown"))  # Q12: the portal's place is a fallback
+    if request.auction_guard and request.deal == "sale" and payload.get("auction") is True:
+        result = worse(result, Match("similar", 0.0, "deal_kind", note=AUCTION_NOTE))  # Q16: not an ordinary sale
     if request.amount is not None:
         price = price_of(payload)
         currency = currency_code(payload.get("price_currency")) or request.currency

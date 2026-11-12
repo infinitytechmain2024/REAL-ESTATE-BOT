@@ -17,9 +17,16 @@ import re
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
-from bot.utils.listing_text import _AREA, _to_m2, areas, number
+from bot.utils.listing_text import _AREA, _to_m2, areas, auction_named, number
 from bot.web_search.queries import QueryTask, task_kind
-from bot.web_search.sources.apify import ApifyListingSource, _distance_km, _fold, _number, _text
+from bot.web_search.sources.apify import (
+    ApifyListingSource,
+    _distance_km,
+    _execution,
+    _fold,
+    _number,
+    _text,
+)
 from bot.web_search.sources.base import SourceListing
 from bot.web_search.urls import classify_url, deal_conflict, fetchable, host_of
 
@@ -94,12 +101,66 @@ def _reference(value: Any) -> str | None:
     return _text(value)[:80] or None
 
 
+# PORTAL_FACTS_FROM_ROW (Q16). With the flag the facts line carries the portal's own type and deal, never the task's:
+# a value the row does not give leaves the field out. The words are the rows' (recorded output of the portal actors,
+# 2026-10/11): Habitaclia ``propertyType`` flat/house/land (+ ``propertySubtype`` groundfloor, terracedhouse,
+# pairedhouse, chalet, industrialland, residentialland), Idealista ``propertyType`` land/flat/studio/chalet/duplex/
+# penthouse, Yaencontre ``family`` LAND/FLAT/HOUSE, Milanuncios ``categorySlug``. A word not listed here is passed as
+# the portal wrote it (folded); a bare code is not (``_row_type``).
+_ROW_TYPES: dict[str, str] = {
+    "land": "landparcel", "lands": "landparcel", "industrialland": "landparcel", "residentialland": "landparcel",
+    "flat": "apartment", "apartment": "apartment", "studio": "apartment", "duplex": "apartment",
+    "penthouse": "apartment", "groundfloor": "apartment",
+    "house": "house", "chalet": "house", "terracedhouse": "house", "pairedhouse": "house",
+    "independanthouse": "house", "premises": "commercial", "commercial": "commercial",
+}
+_ROW_DEALS: dict[str, str] = {"sale": "sale", "venta": "sale", "buy": "sale", "rent": "rent", "alquiler": "rent"}
+# Milanuncios ``categorySlug`` -> (type, deal); «solares» names no deal. The input slugs of ``_CATEGORIES`` and the
+# output slug of premises (``venta-de-locales-comerciales``, live 2026-10-16).
+_MILANUNCIOS_ROW: dict[str, tuple[str, str | None]] = {
+    "solares": ("landparcel", None), "venta-de-fincas": ("landparcel", "sale"),
+    "venta-de-pisos": ("apartment", "sale"), "alquiler-de-pisos": ("apartment", "rent"),
+    "venta-de-casas": ("house", "sale"), "alquiler-de-casas": ("house", "rent"),
+    "venta-de-locales-comerciales": ("commercial", "sale"),
+}
+# Fotocasa's ``propertyType`` is a code. Only the two seen in the recorded output (80 rows): ``4`` on every
+# ``/comprar/terreno/`` URL, ``2`` on every ``/comprar/vivienda/`` one (flats and houses alike: «vivienda», no more).
+# ``propertySubtype`` codes and ``transactionType`` ``1`` are not mapped (their meaning is not in the output).
+_FOTOCASA_TYPES: dict[str, str] = {"4": "landparcel", "2": "vivienda"}
+
+
+def _row_type(*values: Any, land: bool = False) -> str | None:
+    """The first of the row's own type values: our word for a known one, the portal's word for another, None for
+    a missing value or a bare code. ``land``: the row passed a land task's filter (``_landish``), so a word naming
+    land (Pisos ``ruralEstate``, Habitaclia «Terreno urbano» / «Terreno rústico») is ``landparcel``."""
+    for value in values:
+        word = _fold(_text(value))
+        if word and not word.isdigit():
+            return "landparcel" if land and _landish(word) else _ROW_TYPES.get(word, word[:40])
+    return None
+
+
+def _code(value: Any) -> str:
+    """A portal code as text: the number ``4`` and the string ``"4"`` alike."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return _text(value)
+
+
+def _row_deal(value: Any) -> str | None:
+    return _ROW_DEALS.get(_fold(_text(value)))
+
+
 class _PortalSource(ApifyListingSource):
     """Shared task rules: Spain, real estate, a sale or a rent, a city (or a province) or an explicit radius."""
 
     kinds: ClassVar[dict[str, str]] = {}  # task kind -> the actor's propertyType
     deals: ClassVar[dict[str, str]] = {"sale": "sale", "rent": "rent"}  # campaign deal -> the actor's operation
     agency_ref = False  # DEDUP_DISTRICT_NOT_STREET (Q15): pass the row's agency reference on
+
+    def __init__(self, token: str, *, facts_from_row: bool = False, **kwargs: Any) -> None:
+        super().__init__(token, **kwargs)
+        self.facts_from_row = facts_from_row  # PORTAL_FACTS_FROM_ROW (Q16)
 
     def supports(self, task: QueryTask) -> bool:
         return bool(self._token and task.location.strip() and task.country == "ES"
@@ -120,6 +181,14 @@ class _PortalSource(ApifyListingSource):
         found = _fold(province) if task.place_level == "province" else _fold(municipality)
         return found in wanted
 
+    def _place_wrong(self, task: QueryTask, center: tuple[float, float] | None, point: tuple[float, float] | None,
+                     municipality: str, province: str) -> bool:
+        """The row says it is elsewhere (``_place_ok`` fails on a fact the row gives, not on a missing one)."""
+        if task.radius_km is not None:
+            return center is not None and point is not None and _distance_km(center, point) > task.radius_km
+        found = province if task.place_level == "province" else municipality
+        return bool(_fold(found)) and not self._place_ok(task, center, point, municipality, province)
+
     def _url(self, value: Any, task: QueryTask) -> str | None:
         url = _text(value)
         if url.startswith("/"):
@@ -131,7 +200,16 @@ class _PortalSource(ApifyListingSource):
 
     def _listing(self, task: QueryTask, *, url: str, title: str, price: Any, area: Any, rooms: Any,
                  address: list[str], description: str, phone: Any, advertiser: Any,
-                 property_type: str | None, place_unverified: bool = False, reference: Any = None) -> SourceListing:
+                 property_type: str | None, place_unverified: bool = False,
+                 row_type: str | None = None, row_deal: str | None = None, reference: Any = None
+                 ) -> SourceListing:
+        """``property_type`` and the deal are the task's; with ``facts_from_row`` (Q16) ``row_type``/``row_deal``,
+        the row's own (None: not in the row), are written instead, and an auction named in the row is marked."""
+        auction = self.facts_from_row and auction_named(title, description)
+        if self.facts_from_row:
+            property_type, deal = row_type, row_deal
+        else:
+            deal = self._deal(task)
         description = description[:_DESCRIPTION_CHARS]
         land = task_kind(task) == "land"
         reported = _number(area, positive=True)
@@ -142,10 +220,10 @@ class _PortalSource(ApifyListingSource):
             url=url, title=title[:300], price=amount, currency="EUR" if amount is not None else None,
             area_m2=None if land else reported,
             rooms=int(count) if count is not None and count.is_integer() and count <= 99 else None,
-            address=place[:300] or None, property_type=property_type, deal=self._deal(task),
+            address=place[:300] or None, property_type=property_type, deal=deal,
             description=description, plot_m2=plot_area(reported, description) if land else None,
             phone=_phone(phone), advertiser=_text(advertiser)[:200] or None,
-            place_unverified=True if place_unverified else None,
+            place_unverified=True if place_unverified else None, auction=True if auction else None,
             agency_ref=_reference(reference) if self.agency_ref else None,
         )
 
@@ -243,7 +321,9 @@ class ApifyFotocasaSource(_PortalSource):
             price=transaction.get("price"), area=item.get("surface"), rooms=item.get("rooms"),
             address=[_text(item.get("street")), *place],
             description=description, phone=item.get("phone"), advertiser=agency.get("name"),
-            property_type=self._TYPES.get(kind), place_unverified=unverified, reference=item.get("agencyReference"))
+            property_type=self._TYPES.get(kind), place_unverified=unverified,
+            row_type=_FOTOCASA_TYPES.get(_code(item.get("propertyType"))), row_deal=_row_deal(transaction.get("type")),
+            reference=item.get("agencyReference"))
 
 
 _YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,
@@ -362,7 +442,8 @@ class ApifyYaencontreSource(_PortalSource):
         return self._listing(
             task, url=url, title=_text(item.get("title")) or place, price=item.get("price"), area=item.get("area"),
             rooms=item.get("rooms"), address=[place], description=_text(item.get("description")), phone=phone,
-            advertiser=owner.get("name"), property_type=self._TYPES.get(kind))
+            advertiser=owner.get("name"), property_type=self._TYPES.get(kind),
+            row_type=_row_type(item.get("family")), row_deal=_row_deal(item.get("operation")))
 
 
 _IDEALISTA_PRICES = (500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700,
@@ -372,6 +453,20 @@ _IDEALISTA_PRICES = (500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 110
                      1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 1900000, 2000000, 2250000,
                      2500000, 2750000, 3000000, 3500000, 4000000)
 _IDEALISTA_SIZES = (60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300)
+
+
+class _CityCircle(tuple[float, float]):
+    """A city's centre (``(lat, lon)``, usable wherever a centre is) with the circle sent to the actor (Q17)."""
+
+    radius_km: float
+
+    def __new__(cls, center: tuple[float, float], radius_km: float = 15) -> _CityCircle:
+        circle = super().__new__(cls, center)
+        circle.radius_km = radius_km
+        return circle
+
+    def __getnewargs__(self) -> tuple[tuple[float, float], float]:  # copy/pickle rebuild it with its radius
+        return tuple(self), self.radius_km  # type: ignore[return-value]
 
 
 class ApifyIdealistaPortalSource(_PortalSource):
@@ -389,7 +484,13 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     A province task (SEARCH_PLACE_LEVEL_FROM_SPEC) sends the same input as a city one: the actor's schema has no place
     type, only ``location`` by name, and what the actor makes of a province name is not checked. Only the row filter
-    differs: it compares the row's ``province`` instead of its ``municipality``."""
+    differs: it compares the row's ``province`` instead of its ``municipality``.
+
+    ``unambiguous_place`` (``IDEALISTA_UNAMBIGUOUS_PLACE``, Q17): a city task whose centre the cached geocoder knows is
+    sent with ``location`` and also ``latitude``/``longitude`` + ``distanceKm`` from the municipality's size (the actor ranks coordinates above
+    the name; "Valencia" by name ran as València d'Àneu, Lleida). Rows are still kept for the city's municipality only.
+    An output whose every row is from another municipality/province (and, for a city sent with its circle, lies
+    farther than twice the radius, at most 40 km) ends the run as ``apify_wrong_place``."""
 
     name = "apify_idealista"
     hosts = frozenset({"idealista.com"})
@@ -397,10 +498,19 @@ class ApifyIdealistaPortalSource(_PortalSource):
                                        "commercial": "premises"}
     _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "commercial": "commercial"}
 
+    # IDEALISTA_UNAMBIGUOUS_PLACE: the circle around a city's centre is half the diagonal of the municipality's
+    # Nominatim ``boundingbox`` (Burjassot ~2x2 km -> 3 km; Valencia with El Palmar and El Saler, Madrid with El Pardo
+    # and Barajas -> 15-25 km), within 3-30 km; 15 km without a box (an old cache entry). A row up to twice the circle
+    # (at most 40 km) from the centre is a neighbour, never «another place».
+    _CITY_RADIUS_KM = 15
+    _CITY_RADIUS_RANGE = (3, 30)
+    _NEIGHBOUR_KM = 40
+
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
-                 **kwargs: Any) -> None:
+                 unambiguous_place: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
+        self.unambiguous_place = unambiguous_place  # IDEALISTA_UNAMBIGUOUS_PLACE (Q17)
 
     def _sort(self, min_area: int | None, max_area: int | None) -> str:
         """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
@@ -423,12 +533,58 @@ class ApifyIdealistaPortalSource(_PortalSource):
                 actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
                                 "distanceKm": max(1, min(100, round(task.radius_km)))}
         else:
+            # Q17: a bare name may be another town for the actor ("Valencia" ran as València d'Àneu, Lleida), and
+            # which names are shared is not known here (the geocoder returns one centre). So a city whose centre is
+            # known goes as its name AND its centre + a circle of the municipality's size: the actor ranks the
+            # coordinates above ``location``. The rows are still kept only for the city's municipality (``_place_ok``). No centre: the
+            # name alone, as before. A resumed run sends nothing; its centre is looked up again for ``_wrong_place``.
             actor_input["location"] = task.location.strip()[:120]
+            if self.unambiguous_place and task.place_level == "city":
+                center = await self._city_circle(task)
+            if center is not None and not run_id:
+                actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
+                                "distanceKm": max(1, min(100, round(center.radius_km)))}
         filters = {"minPrice": _floor(_whole(constraints.get("min_price")), _IDEALISTA_PRICES),
                    "maxPrice": _ceil(_whole(constraints.get("max_price")), _IDEALISTA_PRICES),
                    "minSize": _floor(min_area, _IDEALISTA_SIZES)}
         actor_input |= {key: value for key, value in filters.items() if value}
         return self.actor_id, actor_input, center
+
+    async def _city_circle(self, task: QueryTask) -> _CityCircle | None:
+        """The city's centre and circle (``_CITY_RADIUS_KM`` notes); None without a geocoder, an unknown place or a
+        geocoder failure (the name only is then sent)."""
+        try:
+            found = await self._geocoder.resolve_area(task.location) if self._geocoder is not None else None
+            center, box = found if found is not None else (None, None)
+            point = _point(*center) if center is not None else None
+        except Exception:  # noqa: BLE001 - a geocoder failure never stops the run: the name alone, as before
+            return None
+        if point is None:
+            return None
+        radius: float = self._CITY_RADIUS_KM
+        if box is not None:
+            south, north, west, east = box
+            low, high = self._CITY_RADIUS_RANGE
+            radius = max(low, min(high, _distance_km((south, west), (north, east)) / 2))
+        return _CityCircle(point, radius)
+
+    def _wrong_place(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> bool:
+        """A row of another place. For a city sent with its circle a row whose point is near the circle (twice its
+        radius, at most 40 km: the portal's points are approximate) is the circle's neighbour, not another place: it
+        stays invalid. A resumed city run whose centre the geocoder did not give now marks nothing (its input is
+        unknown)."""
+        if not self.unambiguous_place or not isinstance(item, dict):
+            return False
+        city = task.radius_km is None and task.place_level == "city"
+        execution = _execution.get()
+        if city and center is None and execution is not None and execution.run_id:
+            return False
+        point = _point(item.get("latitude"), item.get("longitude"))
+        if city and center is not None and point is not None:
+            radius = getattr(center, "radius_km", self._CITY_RADIUS_KM)
+            if _distance_km(center, point) <= min(2 * radius, self._NEIGHBOUR_KM):
+                return False
+        return self._place_wrong(task, center, point, _text(item.get("municipality")), _text(item.get("province")))
 
     def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
         if not isinstance(item, dict):
@@ -463,7 +619,8 @@ class ApifyIdealistaPortalSource(_PortalSource):
             phone=(phone.get("phoneNumberForMobileDialing") or phone.get("phoneNumber")
                    or phone.get("formattedPhone")),
             advertiser=contact.get("commercialName") or contact.get("contactName"),
-            property_type=self._TYPES.get(task_kind(task)))
+            property_type=self._TYPES.get(task_kind(task)), row_type=_row_type(item.get("propertyType")),
+            row_deal=_row_deal(item.get("operation")))
 
 
 _EURO = frozenset({"eur", "euro", "euros", "\u20ac"})
@@ -596,7 +753,9 @@ class ApifyPisosSource(_SchemaPortal):
             rooms=row.get("rooms"),
             address=[_text(row.get("fullAddress"))] if row.get("fullAddress") else [city, province],
             description=_text(row.get("shortDescription")), phone=None, advertiser=row.get("advertiserName"),
-            property_type=self._TYPES.get(task_kind(task)))
+            property_type=self._TYPES.get(task_kind(task)),
+            row_type=_row_type(row.get("propertyType"), land=task_kind(task) == "land"),
+            row_deal=_row_deal(row.get("transactionType")))
 
 
 class ApifyHabitacliaSource(_SchemaPortal):
@@ -644,6 +803,8 @@ class ApifyHabitacliaSource(_SchemaPortal):
             address=[place := _text(row.get("location")), *(p for p in (city, province) if _fold(p) not in _fold(place))],
             description=_text(row.get("description")) or _text(row.get("shortDescription")), phone=None,
             advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)),
+            row_type=_row_type(row.get("propertyType"), row.get("propertySubtype"), land=task_kind(task) == "land"),
+            row_deal=_row_deal(row.get("transactionType")),
             reference=row.get("agencyRef"))
 
 
@@ -729,4 +890,6 @@ class ApifyMilanunciosSource(_SchemaPortal):
         return self._listing(
             task, url=url, title=self._title(row, task, city), price=row.get("price"), area=row.get("tag_sqm"),
             rooms=row.get("tag_bedrooms"), address=[city, province], description=_text(row.get("description")),
-            phone=None, advertiser=None, property_type=self._TYPES.get(task_kind(task)))
+            phone=None, advertiser=None, property_type=self._TYPES.get(task_kind(task)),
+            row_type=_MILANUNCIOS_ROW.get(category, (None, None))[0],
+            row_deal=_MILANUNCIOS_ROW.get(category, (None, None))[1])
