@@ -8,6 +8,7 @@ remain available to the ordinary analysis/verification pipeline.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import re
 import time
@@ -33,6 +34,8 @@ from bot.web_search.geocoding import CachedCityCenters
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.base import SourceListing
 from bot.web_search.urls import fetchable, host_of
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,11 +241,25 @@ class ApifyListingSource:
         if task.radius_km is not None and center is None:
             center = await self._center(task)
         rows = [self._normalize(item, task, center) for item in items[:amount]]
-        invalid = sum(row is None for row in rows)
+        # IDEALISTA_UNAMBIGUOUS_PLACE (Q17): a dropped row that names another municipality/province (or lies outside
+        # the circle) is booked as ``apify_wrong_place``; the rest as before.
+        wrong = sum(row is None and self._wrong_place(item, task, center)
+                    for item, row in zip(items[:amount], rows, strict=True))
+        invalid = sum(row is None for row in rows) - wrong
         if invalid:
             await costs.record("api", kind="skip", provider="apify", item=actor,
                                code="apify_invalid_listing", units=invalid, campaign_id=context.campaign_id)
+        if wrong:
+            await costs.record("api", kind="skip", provider="apify", item=actor,
+                               code="apify_wrong_place", units=wrong, campaign_id=context.campaign_id)
+        if rows and wrong == len(rows):  # the whole output is from elsewhere: the run ends with its own code
+            log.warning("web_search.apify_wrong_place", extra={"source": self.name, "rows": wrong})
+            raise PermanentApifyError("apify_wrong_place")
         return [row for row in rows if row is not None]
+
+    def _wrong_place(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> bool:
+        """True when a row ``_normalize`` dropped is from another place; off unless a source says how to tell."""
+        return False
 
     async def _bill(self, context: SourceRunContext, run_id: str, run: dict[str, Any], cap: float) -> None:
         # The completion payload's cost may still be settling; authenticated re-read
