@@ -25,6 +25,9 @@ class SourceListing:
     plot_m2: float | None = None
     phone: str | None = None  # the advertiser's phone as the portal lists it
     advertiser: str | None = None  # agency or owner name as the portal lists it
+    # PORTAL_DEFAULT_POINT_GUARD (Q12): True when the portal's place is its fallback point, not the object's (the
+    # address then carries no district or town of the portal); None otherwise, so the «JSON-LD» line is unchanged.
+    place_unverified: bool | None = None
 
 
 class ListingSource(Protocol):

@@ -71,6 +71,7 @@ BASE_ENV: dict[str, str] = {
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",
     "ANALYSIS_LOCATION_FROM_TEXT": "true",
+    "PORTAL_DEFAULT_POINT_GUARD": "true",  # Q12
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")
