@@ -71,7 +71,7 @@ BASE_ENV: dict[str, str] = {
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",
     "ANALYSIS_LOCATION_FROM_TEXT": "true",
-    "ANALYSIS_AREA_TEXT_CHECK": "true",  # Q13
+    "ANALYSIS_AREA_TEXT_CHECK": "false",  # Q13: off until area_check review blockers (N4, N5) are fixed
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")
