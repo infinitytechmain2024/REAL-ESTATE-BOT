@@ -116,14 +116,16 @@ def _fold(text: str) -> str:
     return "".join(ch for ch in text if not unicodedata.combining(ch))
 
 
-# The words that make a listing an auction, not an ordinary sale: one list for ``bot.campaign.tolerance.deal_kind_of``
-# (CAMPAIGN_AUCTION_DEVIATION) and ``bot.web_search.sources.portals`` (PORTAL_FACTS_FROM_ROW). Whole words on folded
+# The words that make a listing an auction, not an ordinary sale (PORTAL_FACTS_FROM_ROW, Q16): the portal rows
+# (``bot.web_search.sources.portals``) and, only with that flag, ``bot.campaign.tolerance.deal_kind_of``
+# (CAMPAIGN_AUCTION_DEVIATION; without the flag it keeps its own «subasta(s)», «puja»). Whole words on folded
 # text. «adjudicación» is not here: «procedente de adjudicación bancaria» is an ordinary bank sale and «adjudicación de
 # obras» is no sale at all.
-AUCTION_WORDS = re.compile(r"(?<!\w)(?:subastas?|puja|cesion(?:es)?\s+del?\s+remate)(?!\w)")
-# A negation right before the word: «no es subasta», «no es una subasta», «sin subasta», «no procede de subasta».
+AUCTION_WORDS = re.compile(r"(?<!\w)(?:subastas?|pujas?|cesion(?:es)?\s+del?\s+remate)(?!\w)")
+# A negation right before the word: «no es subasta», «no es una subasta», «sin subasta», «ni subasta»,
+# «no procede de subasta».
 _AUCTION_NEGATION = re.compile(
-    r"(?<!\w)(?:sin|no\s+(?:es|son|hay|se\s+trata\s+de|procede|proceden|viene|vienen)(?:\s+(?:de|del|una?|la|el))*)\s+$")
+    r"(?<!\w)(?:sin|ni|no\s+(?:es|son|hay|se\s+trata\s+de|procede|proceden|viene|vienen)(?:\s+(?:de|del|una?|la|el))*)\s+$")
 
 
 def auction_named(*texts: object) -> bool:

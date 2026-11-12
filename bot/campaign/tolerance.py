@@ -216,20 +216,24 @@ _CATALOG = re.compile(
 )
 
 
-_NUDA = re.compile(r"\b(?:nuda propiedad|usufructo)\b")
+_DEAL_KINDS = (("аукцион", re.compile(r"\b(?:subastas?|puja)\b")),
+               ("nuda propiedad", re.compile(r"\b(?:nuda propiedad|usufructo)\b")))
 
 
 def deal_kind_of(*texts: object) -> str | None:
     """«аукцион» / «nuda propiedad» when the listing's text names an auction or a bare-ownership sale, else None.
 
     A different kind of deal from an ordinary purchase: such a finding is never exact (``CAMPAIGN_AUCTION_DEVIATION``).
-    The auction words are ``bot.utils.listing_text.AUCTION_WORDS``, shared with PORTAL_FACTS_FROM_ROW (Q16).
+    With PORTAL_FACTS_FROM_ROW (Q16) the auction words are ``bot.utils.listing_text.auction_named`` (the list the
+    portal rows are marked with, negations read); without it ``_DEAL_KINDS`` as before.
     """
-    if auction_named(*texts):
-        return "аукцион"
     folded = "".join(ch for ch in unicodedata.normalize("NFD", " ".join(str(t or "") for t in texts).casefold())
                      if not unicodedata.combining(ch))
-    return "nuda propiedad" if _NUDA.search(folded) else None
+    if facts_from_row_enabled():
+        if auction_named(*texts):
+            return "аукцион"
+        return "nuda propiedad" if _DEAL_KINDS[1][1].search(folded) else None
+    return next((label for label, pattern in _DEAL_KINDS if pattern.search(folded)), None)
 
 
 def not_an_offer(payload: dict[str, Any], *, vertical: str | None = None) -> bool:

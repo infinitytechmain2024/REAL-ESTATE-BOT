@@ -230,6 +230,8 @@ def test_the_existing_row_filters_stay():
     ("Cesión de remate disponible", True),
     ("cesion del remate", True),
     ("Puja mínima 50.000 €", True),
+    ("Pujas abiertas hasta el lunes", True),
+    ("Libre de cargas ni subasta", False),
     ("Piso de banco, no es subasta", False),
     ("No es una subasta: venta directa", False),
     ("Venta directa sin subasta", False),
@@ -239,10 +241,32 @@ def test_the_existing_row_filters_stay():
     ("Piso luminoso en Ruzafa", False),
     ("", False),
 ])
-def test_auction_words(text, hit):
+def test_auction_words(monkeypatch, text, hit):
     assert auction_named(text) is hit
-    # one list of words with CAMPAIGN_AUCTION_DEVIATION (``deal_kind_of``)
+    # with PORTAL_FACTS_FROM_ROW the same words for CAMPAIGN_AUCTION_DEVIATION (``deal_kind_of``)
+    monkeypatch.setenv("PORTAL_FACTS_FROM_ROW", "true")
     assert (deal_kind_of(text) == "аукцион") is hit
+
+
+def test_without_the_flag_deal_kind_keeps_the_h10_words(monkeypatch):
+    monkeypatch.delenv("PORTAL_FACTS_FROM_ROW", raising=False)
+    assert deal_kind_of("Cesión de remate disponible") is None
+    assert deal_kind_of("Piso de banco, no es subasta") == "аукцион"
+    assert deal_kind_of("Vivienda procedente de adjudicación bancaria") is None
+    assert deal_kind_of("Pujas abiertas") is None  # «pujas»: only «puja» in H10
+    assert deal_kind_of("Nuda propiedad, vivienda") == "nuda propiedad"
+
+
+@pytest.mark.asyncio
+async def test_h10_on_q16_off_buckets_as_in_main(monkeypatch):
+    from tests.test_h10_report_and_auction import _auction, _runner
+
+    monkeypatch.delenv("PORTAL_FACTS_FROM_ROW", raising=False)
+    store, _messenger, runner, cid, _control = await _runner(True)
+    _auction(store, cid, "c1", "Piso con cesión de remate, 45.000 EUR")
+    _auction(store, cid, "n1", "Piso de banco, no es subasta, 45.000 EUR")
+    await runner.tick()
+    assert [store.buckets[f][0] for f in ("c1", "n1")] == ["exact", "similar"]
 
 
 def test_flag_on_land_words_of_pisos_and_habitaclia_are_a_plot():
