@@ -87,11 +87,19 @@ def _phone(value: Any) -> str | None:
     return text[:40] if 6 <= digits <= 15 else None
 
 
+def _reference(value: Any) -> str | None:
+    """The agency's reference of the ad as the portal lists it (a string or a whole number), at most 80 characters."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = str(value)
+    return _text(value)[:80] or None
+
+
 class _PortalSource(ApifyListingSource):
     """Shared task rules: Spain, real estate, a sale or a rent, a city (or a province) or an explicit radius."""
 
     kinds: ClassVar[dict[str, str]] = {}  # task kind -> the actor's propertyType
     deals: ClassVar[dict[str, str]] = {"sale": "sale", "rent": "rent"}  # campaign deal -> the actor's operation
+    agency_ref = False  # DEDUP_DISTRICT_NOT_STREET (Q15): pass the row's agency reference on
 
     def supports(self, task: QueryTask) -> bool:
         return bool(self._token and task.location.strip() and task.country == "ES"
@@ -123,7 +131,7 @@ class _PortalSource(ApifyListingSource):
 
     def _listing(self, task: QueryTask, *, url: str, title: str, price: Any, area: Any, rooms: Any,
                  address: list[str], description: str, phone: Any, advertiser: Any,
-                 property_type: str | None, place_unverified: bool = False) -> SourceListing:
+                 property_type: str | None, place_unverified: bool = False, reference: Any = None) -> SourceListing:
         description = description[:_DESCRIPTION_CHARS]
         land = task_kind(task) == "land"
         reported = _number(area, positive=True)
@@ -138,6 +146,7 @@ class _PortalSource(ApifyListingSource):
             description=description, plot_m2=plot_area(reported, description) if land else None,
             phone=_phone(phone), advertiser=_text(advertiser)[:200] or None,
             place_unverified=True if place_unverified else None,
+            agency_ref=_reference(reference) if self.agency_ref else None,
         )
 
 
@@ -183,9 +192,10 @@ class ApifyFotocasaSource(_PortalSource):
     _TITLES: ClassVar[dict[str, str]] = {"land": "Terreno", "house": "Vivienda", "apartment": "Vivienda", "commercial": "Local"}
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/fotocasa-scraper",
-                 default_point_guard: bool = False, **kwargs: Any) -> None:
+                 default_point_guard: bool = False, agency_ref: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.default_point_guard = default_point_guard  # PORTAL_DEFAULT_POINT_GUARD (Q12)
+        self.agency_ref = agency_ref  # DEDUP_DISTRICT_NOT_STREET (Q15)
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
@@ -233,7 +243,7 @@ class ApifyFotocasaSource(_PortalSource):
             price=transaction.get("price"), area=item.get("surface"), rooms=item.get("rooms"),
             address=[_text(item.get("street")), *place],
             description=description, phone=item.get("phone"), advertiser=agency.get("name"),
-            property_type=self._TYPES.get(kind), place_unverified=unverified)
+            property_type=self._TYPES.get(kind), place_unverified=unverified, reference=item.get("agencyReference"))
 
 
 _YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,
@@ -604,8 +614,10 @@ class ApifyHabitacliaSource(_SchemaPortal):
     name = "apify_habitaclia"
     hosts = frozenset({"habitaclia.com"})
 
-    def __init__(self, token: str, *, actor_id: str = "trev0n/habitaclia-com-spain-scraper", **kwargs: Any) -> None:
+    def __init__(self, token: str, *, actor_id: str = "trev0n/habitaclia-com-spain-scraper", agency_ref: bool = False,
+                 **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
+        self.agency_ref = agency_ref  # DEDUP_DISTRICT_NOT_STREET (Q15)
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
@@ -631,7 +643,8 @@ class ApifyHabitacliaSource(_SchemaPortal):
             rooms=row.get("rooms"),
             address=[place := _text(row.get("location")), *(p for p in (city, province) if _fold(p) not in _fold(place))],
             description=_text(row.get("description")) or _text(row.get("shortDescription")), phone=None,
-            advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)))
+            advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)),
+            reference=row.get("agencyRef"))
 
 
 class ApifyMilanunciosSource(_SchemaPortal):

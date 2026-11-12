@@ -69,6 +69,8 @@ class WebSearchSettings(BaseSettings):
     # Q12: true = a Fotocasa row at the portal's fallback point of its district (sources/portals.py ``default_point``)
     # passes no district/town as its place and is marked ``place_unverified``; campaign/tolerance.py files it as similar.
     portal_default_point_guard: bool = Field(default=False, validation_alias="PORTAL_DEFAULT_POINT_GUARD")
+    # Q15: Fotocasa and Habitaclia pass the agency's reference of the ad (``agency_ref``) for the dedup (campaign/dedup.py).
+    portal_agency_ref: bool = Field(default=False, validation_alias="DEDUP_DISTRICT_NOT_STREET")
     apify_yaencontre_enabled: bool = Field(default=False, validation_alias="APIFY_YAENCONTRE_ENABLED")
     apify_yaencontre_actor: str = Field(default="igolaizola/yaencontre-scraper", validation_alias="APIFY_YAENCONTRE_ACTOR")
     apify_yaencontre_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_YAENCONTRE_MAX_RESULTS")
@@ -259,7 +261,8 @@ class WebSearchSettings(BaseSettings):
                                              max_items=self.apify_fotocasa_max_results,
                                              timeout_seconds=self.apify_portals_timeout_seconds,
                                              max_charge_usd=self.apify_fotocasa_max_charge_usd, geocoder=geocoder(),
-                                             default_point_guard=self.portal_default_point_guard))
+                                             default_point_guard=self.portal_default_point_guard,
+                                             agency_ref=self.portal_agency_ref))
         if self.apify_yaencontre_enabled:
             from .sources.portals import ApifyYaencontreSource
 
@@ -281,7 +284,8 @@ class WebSearchSettings(BaseSettings):
             found.append(ApifyHabitacliaSource(self.apify_token, actor_id=self.apify_habitaclia_actor,
                                     max_items=self.apify_habitaclia_max_results,
                                                timeout_seconds=self.apify_portals_timeout_seconds,
-                                               max_charge_usd=self.apify_habitaclia_max_charge_usd, geocoder=geocoder()))
+                                               max_charge_usd=self.apify_habitaclia_max_charge_usd, geocoder=geocoder(),
+                                               agency_ref=self.portal_agency_ref))
         if self.apify_milanuncios_enabled:
             from .sources.portals import ApifyMilanunciosSource
 

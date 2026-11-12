@@ -28,6 +28,9 @@ class SourceListing:
     # PORTAL_DEFAULT_POINT_GUARD (Q12): True when the portal's place is its fallback point, not the object's (the
     # address then carries no district or town of the portal); None otherwise, so the «JSON-LD» line is unchanged.
     place_unverified: bool | None = None
+    # DEDUP_DISTRICT_NOT_STREET (Q15): the agency's own reference of the ad (Fotocasa ``agencyReference``, Habitaclia
+    # ``agencyRef``) for campaign/dedup.py; None otherwise, so the «JSON-LD» line is unchanged.
+    agency_ref: str | None = None
 
 
 class ListingSource(Protocol):
