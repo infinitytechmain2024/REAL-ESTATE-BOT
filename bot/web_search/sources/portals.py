@@ -144,24 +144,34 @@ class _PortalSource(ApifyListingSource):
 # PORTAL_DEFAULT_POINT_GUARD (Q12). Fotocasa files an ad whose advertiser gave no usable address at a fallback point
 # of the searched city and names the district of that point (``level7/8Name``): in a live run «plots in Madrid»
 # (2026-11, pilot G1) plots in Móstoles, Torroella de Fluvià, Molina de Segura, Llubí and Vinaròs all sat within
-# 0.32 km of one of these points, each with the point's ``level8Name``. The sign is that pair: the row's ``level8Name``
-# is one of these neighbourhoods AND its point is within ``_DEFAULT_POINT_KM`` of the neighbourhood's fallback point
-# (the portal jitters the point by up to ~0.3 km, so equal coordinates are not a sign). On the recorded output (37
-# distinct rows of two Madrid land runs) it marks the 9 misplaced rows and no other; equal coordinates to 3 decimals
-# would mark 2 of them and 6 real plots of one La Florida development, to 4 decimals none. A real object at such a
-# point (a flat in Sol) is marked too: it then goes to «similar», never lost.
-_DEFAULT_POINTS: dict[str, tuple[float, float]] = {
-    "ciudad universitaria": (40.4625, -3.749),
-    "cortes - huertas": (40.417, -3.700),
-    "sol": (40.418, -3.705),
+# 0.32 km of one of these points, each with the point's ``level8Name``. The sign is three facts together:
+# * the row's ``level8Name`` is one of these neighbourhoods AND its point is within ``_DEFAULT_POINT_KM`` of the
+#   neighbourhood's fallback point (the portal jitters the point by up to ~0.3 km, so equal coordinates are no sign);
+# * the description does not name that neighbourhood (``_DEFAULT_POINTS`` synonyms, whole words; an empty
+#   description names nothing): a flat «en pleno Sol» really is in Sol, and a 0.5 km circle covers most of Sol and
+#   Cortes - Huertas;
+# * the task is for land (``ApifyFotocasaSource._normalize``): all the evidence is plots; a flat or a shop in central
+#   Madrid is ordinary, a plot there is not, so homes and premises are never marked.
+# On the recorded output (37 distinct rows of two Madrid land runs) it marks the 9 misplaced rows and no other; equal
+# coordinates to 3 decimals would mark 2 of them and 6 real plots of one La Florida development, to 4 decimals none.
+# A marked object goes to «similar» (campaign/tolerance.py), never lost. The reduction agents' gate
+# (bot/agents/gate.py, AGENT_REDUCTION_ENABLED) classifies its own extraction and does not read ``place_unverified``.
+_DEFAULT_POINTS: dict[str, tuple[tuple[float, float], tuple[str, ...]]] = {
+    "ciudad universitaria": ((40.4625, -3.749), ("ciudad universitaria",)),
+    "cortes - huertas": ((40.417, -3.700), ("cortes - huertas", "huertas", "barrio de las letras")),
+    "sol": ((40.418, -3.705), ("sol", "puerta del sol")),
 }
 _DEFAULT_POINT_KM = 0.5
 
 
-def default_point(neighbourhood: str, point: tuple[float, float] | None) -> bool:
-    """The row sits at one of Fotocasa's fallback points of its ``level8Name`` (see ``_DEFAULT_POINTS``)."""
-    fallback = _DEFAULT_POINTS.get(" ".join(_fold(neighbourhood).split()))
-    return fallback is not None and point is not None and _distance_km(fallback, point) <= _DEFAULT_POINT_KM
+def default_point(neighbourhood: str, point: tuple[float, float] | None, description: str = "") -> bool:
+    """The row sits at one of Fotocasa's fallback points of its ``level8Name`` and its description does not name
+    that neighbourhood (see ``_DEFAULT_POINTS``)."""
+    known = _DEFAULT_POINTS.get(" ".join(_fold(neighbourhood).split()))
+    if known is None or point is None or _distance_km(known[0], point) > _DEFAULT_POINT_KM:
+        return False
+    text = " ".join(_fold(description).split())
+    return not any(re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text) for name in known[1])
 
 
 class ApifyFotocasaSource(_PortalSource):
@@ -213,14 +223,16 @@ class ApifyFotocasaSource(_PortalSource):
         agency = item.get("agency") if isinstance(item.get("agency"), dict) else {}
         neighbourhood = _text(location.get("level8Name")) or _text(location.get("level7Name"))
         # Q12: at a fallback point the district, town and province are the point's, not the object's: not passed on.
-        unverified = self.default_point_guard and default_point(_text(location.get("level8Name")), point)
+        description = _text(item.get("description"))
+        unverified = (self.default_point_guard and kind == "land"
+                      and default_point(_text(location.get("level8Name")), point, description))
         place = [] if unverified else [neighbourhood, municipality, province]
         title = f"{self._TITLES[kind]} en {'venta' if self._deal(task) == 'sale' else 'alquiler'}"
         return self._listing(
             task, url=url, title=f"{title}, {'' if unverified else neighbourhood or municipality}".rstrip(", "),
             price=transaction.get("price"), area=item.get("surface"), rooms=item.get("rooms"),
             address=[_text(item.get("street")), *place],
-            description=_text(item.get("description")), phone=item.get("phone"), advertiser=agency.get("name"),
+            description=description, phone=item.get("phone"), advertiser=agency.get("name"),
             property_type=self._TYPES.get(kind), place_unverified=unverified)
 
 

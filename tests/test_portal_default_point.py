@@ -89,6 +89,43 @@ def test_default_point_is_the_fallback_point_of_the_rows_own_district(name, lat,
     assert default_point(name, None if lat is None else (lat, lon)) is hit
 
 
+@pytest.mark.parametrize(("name", "description", "hit"), [
+    ("Sol", "", True),
+    ("Sol", "Solar urbano de 5.000 m², orientación sur, mucho sol.", False),  # «sol» as a word names the district
+    ("Sol", "Solar urbano de 5.000 m² en Molina de Segura.", True),  # «solar» is not «Sol»
+    ("Sol", "Piso junto a la Puerta del Sol.", False),
+    ("Cortes - Huertas", "En el Barrio de las Letras.", False),
+    ("Cortes - Huertas", "Finca en Llubí, Mallorca.", True),
+    ("Ciudad Universitaria", "Junto a la Ciudad Universitaria.", False),
+])
+def test_a_description_naming_the_district_is_no_default_point(name, description, hit):
+    lat, lon = {"Sol": (40.418, -3.705), "Cortes - Huertas": (40.417, -3.700),
+                "Ciudad Universitaria": (40.4625, -3.749)}[name]
+    assert default_point(name, (lat, lon), description) is hit
+
+
+SOL = {"level1Name": "Madrid", "level2Name": "Madrid", "level5Name": "Madrid", "level7Name": "Centro",
+       "level8Name": "Sol", "latitude": "40.4175", "longitude": "-3.7040"}
+
+
+def test_flag_on_a_flat_in_sol_is_never_marked():
+    flat_task = QueryTask("piso", "piso", "Madrid", {}, "real_estate", constraints={"deal": "sale"}, country_code="ES")
+    adapter = ApifyFotocasaSource("secret-token", default_point_guard=True)
+    url = "https://www.fotocasa.es/es/comprar/vivienda/madrid/sol/100000003/d"
+    for description in ("Piso reformado en pleno Sol, 3 dormitorios.", ""):  # named, or a flat at all: never marked
+        listing = adapter._normalize(row(url=url, rooms=3, surface=90, location=SOL, description=description),
+                                     flat_task, None)
+        assert listing.place_unverified is None and listing.address == "Sol, Madrid"
+    plot = adapter._normalize(row(location=SOL, description="Solar en pleno Sol."), TASK, None)
+    assert plot.place_unverified is None  # a plot whose text names Sol keeps its place
+
+
+def test_flag_on_a_plot_without_description_at_the_point_is_marked():
+    listing = ApifyFotocasaSource("secret-token", default_point_guard=True)._normalize(
+        row(location=SOL, description=""), TASK, None)
+    assert listing.place_unverified is True and listing.address is None
+
+
 def test_flag_off_by_default_everywhere(monkeypatch):
     monkeypatch.delenv("PORTAL_DEFAULT_POINT_GUARD", raising=False)
     assert WebSearchSettings(_env_file=None).portal_default_point_guard is False
