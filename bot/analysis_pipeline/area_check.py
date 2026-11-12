@@ -2,15 +2,21 @@
 
 A portal row may carry a wrong area: JSON-LD ``surface`` 32088 for a listing whose description says «parcela … de
 3.208mts». The prompt makes the JSON-LD authoritative, so the card showed 32 088 m². ``conflict`` compares the
-line's areas (``area_m2``, ``plot_m2``, ``surface``) with every area the title and description state
-(``bot.utils.listing_text.areas``, plus the Spanish «mts»/«mtrs»): when no pair agrees within a factor of two, the
-area is not confirmed and ``apply`` sets ``area_m2`` (and its quote) to None. Neither number is taken: rule 9 of
-CLAUDE.md, a fact we cannot tell is not guessed.
+line's areas (``area_m2``, ``plot_m2``, ``surface``) with the areas of the same kind the title and description state;
+when they are more than twice apart, the area is not confirmed and ``apply`` sets ``area_m2`` (and its quote) to
+None. Neither number is taken: rule 9 of CLAUDE.md, a fact we cannot tell is not guessed.
 
-A built area and a plot are different facts: a house of 150 m² on a plot of 1 000 m² agrees with itself. So a pair
-also agrees when one side is the plot and the other the building and the plot is the larger, and a JSON-LD area of
-an unknown kind agrees with a larger plot of the text (it may be the house) or a smaller building (it may be the
-plot). A text with no area, or a line with none, is never a conflict.
+Only a clear signal counts (review of Q13): a text area counts only when the word just before it or right after it
+(«N m² de parcela») says whose it is -- the plot (parcela, terreno, solar, finca, suelo) or the building (piso, casa,
+chalet, nave, vivienda, construidos, útiles ...). A part of the object or of its surroundings (terraza, balcón,
+jardín, garaje, trastero, salón, cocina, dormitorio, oficinas, piscina, urbanización, zonas comunes ...) and the
+buildable area (edificabilidad, m² de techo) never count. «mts» / «metros» are read only next to such a word and
+never as a distance («a 200 mts de», «playa 200 mts»).
+
+Kinds: ``plot_m2`` (and ``area_m2`` of a ``landparcel``) is the plot and meets only the text's plots. ``area_m2`` of
+another listing is the building when the line also has ``plot_m2``, else of unknown kind: it may be the house (it
+agrees with any larger plot) or the plot (with any smaller building). Nothing of a kind to compare with: the area
+stays.
 
 Deterministic and after the model's answer, on purpose: the prompt, its version and the request stay byte for byte
 as before (no new model behaviour to re-measure on the golden set), the check reads only the evidence, never the
@@ -21,30 +27,86 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
-from bot.utils.listing_text import areas, number
+from bot.utils.listing_text import number
 
 from .models import AnalysisResult
 
 PREFIX = "JSON-LD:"
 LINK_PREFIX = "Ссылка:"
-AREA_KEYS = (("area_m2", None), ("surface", None), ("plot_m2", "plot"))
 RATIO = 2.0  # more than twice apart: not the same area
-# «3.208mts», «1.500 mtrs»: the Spanish abbreviation listing_text does not read (a bare «mts» after «a» is a distance).
-_MTS = re.compile(r"(?<![\d.,])(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?)\s*(?:mts|mtrs|mt)\.?(?![\w²2])", re.IGNORECASE)
-_DISTANCE_BEFORE = re.compile(r"(?<!\w)a\s+(?:unos\s+|menos\s+de\s+|mas\s+de\s+|más\s+de\s+)?$", re.IGNORECASE)
-_DISTANCE_AFTER = re.compile(r"^\s*(?:de|del|al|hasta|hacia)(?!\w)", re.IGNORECASE)
+WINDOW = 40  # characters before a number searched for whose area it is (up to the clause's start)
+
+_NUMBER = r"\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?"
+_SQUARE = r"m²|m2|mts?2|mts?\.?\s*cuadrados|metros?\s+cuadrados|sq\.?\s*m|sqm"
+_HECTARE = r"hectareas?|hectares?|ha|has"
+_LOOSE = r"mts|mtrs|mt|metros"  # «3.208mts», «2000 metros»: an area only next to a plot or a building word
+_AREA = re.compile(rf"(?<![\d.,])({_NUMBER})\s*({_SQUARE}|{_HECTARE}|{_LOOSE})\.?(?![\w²])")
+_PLOT = r"parcelas?|terrenos?|solar(?:es)?|fincas?|suelos?|plot|land"
+_BUILT = (r"construid\w*|utiles?|vivienda\w*|edificad[oa]s?|habitables?|superficie\s+construida|piso\w*|casas?|"
+          r"chalets?|atico\w*|naves?|locales?|apartamentos?|duplex|villas?|adosados?|pareados?|estudios?|lofts?|"
+          r"bungalows?|built|house|home")
+_PART = (r"terrazas?|balcon\w*|jardin\w*|garaje\w*|parking|trasteros?|salon\w*|cocinas?|dormitorios?|"
+         r"habitacion\w*|banos?|aseos?|patios?|porche\w*|solarium|piscinas?|oficinas?|almacen\w*|altillo\w*|"
+         r"urbanizacion\w*|zonas?\s+comun\w*|comunes|edificabilidad|edificables?|techo|fachadas?|sotano\w*|"
+         r"buhardilla\w*|vestidor\w*|lavadero\w*")
+_WORD = re.compile(rf"(?<!\w)(?:({_PART})|({_PLOT})|({_BUILT}))(?!\w)")
+_AFTER = re.compile(rf"^\s*(?:de\s+|del\s+)?(?:(?:la|el|los|las)\s+)?(?:({_PART})|({_PLOT})|({_BUILT}))(?!\w)")
+_CLAUSE = re.compile(r"[.;:,·|\n(]\s")
+_DISTANCE_BEFORE = re.compile(r"(?<!\w)a\s+(?:unos\s+|solo\s+|menos\s+de\s+|mas\s+de\s+)?$")
+_DISTANCE_AFTER = re.compile(r"^\s*(?:de|del|al|hasta|hacia)(?!\w)")
 
 
 @dataclass(frozen=True, slots=True)
 class AreaConflict:
     source: tuple[float, ...]  # the JSON-LD areas
-    text: tuple[float, ...]  # the text's areas
+    text: tuple[float, ...]  # the text's areas of the same kind
+
+
+def fold(text: str) -> str:
+    """Lower case without accents, one character for one (positions stay)."""
+    out = []
+    for char in text:
+        bare = "".join(c for c in unicodedata.normalize("NFKD", char) if not unicodedata.combining(c)).lower()
+        out.append(bare if len(bare) == 1 else char.lower() if len(char.lower()) == 1 else char)
+    return "".join(out)
+
+
+def _kind(match: re.Match[str] | None) -> str | None:
+    if match is None:
+        return None
+    return "part" if match.group(1) else "plot" if match.group(2) else "built"
+
+
+def stated(text: str) -> list[tuple[float, str]]:
+    """(m², plot | built) of every area the text gives a kind; parts, buildable areas and distances are left out."""
+    folded = fold(text)
+    out = []
+    for m in _AREA.finditer(folded):
+        value = number(m.group(1).replace(".", "") if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", m.group(1))
+                       else m.group(1))
+        if value is None:
+            continue
+        unit = m.group(2)
+        loose = bool(re.fullmatch(_LOOSE, unit))
+        before = _CLAUSE.split(folded[max(0, m.start() - WINDOW):m.start()])[-1]
+        after = folded[m.end():m.end() + 30]
+        if _DISTANCE_BEFORE.search(before) or (loose and _DISTANCE_AFTER.match(after)):
+            continue
+        kind = _kind(_AFTER.match(after)) or _kind(next(reversed(list(_WORD.finditer(before))), None))
+        if kind is None or kind == "part":
+            continue
+        m2 = value * 10_000 if re.fullmatch(_HECTARE, unit) else value
+        if 1 <= m2 <= 100_000_000:
+            out.append((round(m2, 1), kind))
+    return out
 
 
 def _source(text: str) -> tuple[list[tuple[float, str | None]], str] | None:
+    """(the JSON-LD areas with their kind, the rest of the text) of a post that starts with a JSON-LD line."""
     first, _, rest = (text or "").lstrip().partition("\n")
     if not first.startswith(PREFIX):
         return None
@@ -54,34 +116,41 @@ def _source(text: str) -> tuple[list[tuple[float, str | None]], str] | None:
         return None
     if not isinstance(data, dict):
         return None
-    values = [(float(data[k]), kind) for k, kind in AREA_KEYS
-              if isinstance(data.get(k), int | float) and not isinstance(data.get(k), bool) and data[k] > 0]
+
+    def positive(key: str) -> float | None:
+        value = data.get(key)
+        ok = isinstance(value, int | float) and not isinstance(value, bool) and value > 0
+        return float(value) if ok else None
+
+    land = str(data.get("property_type") or "").lower() == "landparcel"
+    plot = positive("plot_m2")
+    values: list[tuple[float, str | None]] = [(plot, "plot")] if plot else []
+    for key in ("area_m2", "surface"):
+        value = positive(key)
+        if value is not None:
+            values.append((value, "plot" if land else "built" if plot else None))
     return values, rest
 
 
-def _mts(text: str) -> str:
-    """«3.208mts» written as «3.208 m2» for ``listing_text.areas``, unless it is a distance («a 200 mts de»)."""
-    def one(m: re.Match[str]) -> str:
-        if _DISTANCE_BEFORE.search(text[max(0, m.start() - 16):m.start()]) or _DISTANCE_AFTER.match(text[m.end():]):
-            return m.group(0)
-        return f"{m.group(1)} m2" if number(m.group(1)) else m.group(0)
-    return _MTS.sub(one, text)
+def _near(value: float, others: list[float]) -> bool:
+    return any(max(value, o) <= RATIO * min(value, o) for o in others)
 
 
-def _agree(source: float, source_kind: str | None, text: float, text_kind: str | None) -> bool:
-    if max(source, text) <= RATIO * min(source, text):
-        return True
-    if source_kind == "plot":
-        return text_kind == "built" and text < source
-    if text_kind == "plot":
-        return source < text  # an area of unknown kind smaller than the plot: the house on it
-    if text_kind == "built":
-        return source > text  # an area of unknown kind larger than the house: its plot
-    return False
+def _fits(value: float, kind: str | None, plots: list[float], built: list[float]) -> bool:
+    """Is the JSON-LD area one of the text's areas of its kind (within twice)?"""
+    if kind == "plot":
+        return not plots or _near(value, plots)
+    if kind == "built":
+        return not built or _near(value, built)
+    # unknown: the house (as the text's building, not larger than its plot) or the plot (as the text's plot,
+    # not smaller than its building)
+    house = (not built or _near(value, built)) and (not plots or value <= RATIO * max(plots))
+    plot = (not plots or _near(value, plots)) and (not built or value * RATIO >= min(built))
+    return house or plot
 
 
 def conflict(text: str, title: str = "") -> AreaConflict | None:
-    """The JSON-LD and text areas when no pair of them agrees (see the module notes); else None."""
+    """The JSON-LD and text areas when a JSON-LD area is none of the text's areas of its kind; else None."""
     parsed = _source(text)
     if parsed is None:
         return None
@@ -91,12 +160,14 @@ def conflict(text: str, title: str = "") -> AreaConflict | None:
     body = "\n".join(line for line in rest.split("\n") if not line.startswith(LINK_PREFIX))
     if title and title not in body:
         body = f"{title}\n{body}"
-    stated = areas(_mts(body))
-    if not stated:
-        return None
-    if any(_agree(s, sk, t.m2, t.kind) for s, sk in source for t in stated):
-        return None
-    return AreaConflict(tuple(s for s, _ in source), tuple(dict.fromkeys(t.m2 for t in stated)))
+    found = stated(body)
+    plots = [m2 for m2, k in found if k == "plot"]
+    built = [m2 for m2, k in found if k == "built"]
+    for value, kind in source:
+        same = plots if kind == "plot" else built if kind == "built" else plots + built
+        if same and not _fits(value, kind, plots, built):
+            return AreaConflict(tuple(v for v, _ in source), tuple(dict.fromkeys(same)))
+    return None
 
 
 def _m2(value: float) -> str:

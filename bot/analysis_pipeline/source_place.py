@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import AnalysisResult
-from .municipalities import MUNICIPALITIES
+from .municipalities import MUNICIPALITIES, SAME_TOWN
 
 PREFIX = "JSON-LD: "
 PLACE_KEYS = ("address", "location")
@@ -99,7 +99,10 @@ _PLACE_PHRASE = re.compile(
 # vivo en Valencia», «más pisos en Valencia», «cocina diseñada en Barcelona», «trabaja en», «como en Barcelona».
 _WEAK_STOP = re.compile(
     r"(?<!\w)(?:residente?s?|reside|resido|vivo|vive|viven|vivimos|vivia|trabaj\w*|disenad\w*|fabricad\w*|hech[oa]s?|"
-    r"como|mas|tambien|otr[oa]s|oficinas?|sede|sucursal\w*|nacid[oa]|estudi\w*|igual)"
+    r"como|mas|tambien|otr[oa]s|oficinas?|sede|sucursal\w*|nacid[oa]|estudi\w*|igual|"
+    # Q13 review: a comparison, the owners, a swap, holidays, a builder, a garage or the transport elsewhere
+    r"que|residen|permuta|veranear|mejor|superior|hizo|mud\w*|invertir|comprar|garajes?|comunicaci\w*|"
+    r"promoci\w*)"
     r"(?:\s+\S+){0,2}\s+$")
 # The X itself, or the part after its first comma: «en Mijas, Costa del Sol», «en la Costa del Sol».
 _PHRASE_START = re.compile(r"(?:(?:la|las|el|los)\s+)?|[^,]{1,40},\s*(?:(?:la|las|el|los)\s+)?(?:provincia\s+de\s+)?")
@@ -109,13 +112,14 @@ _SYNTHETIC_TITLE = re.compile(r"^(?:terreno|vivienda|casa|piso|local)\s+en\s+(?:
 _TOWNS: dict[str, tuple[str, str]] = {}
 _TOWN_ARTICLE = r"(?:(?:la|las|el|los)\s+|l')?"
 # What right before a town makes it the object's place: «en» in the portal's own title; «situado/ubicado en», «se
-# encuentra en», or a property noun and then «en» in the same clause («finca rústica de 3 ha en Móstoles»).
+# encuentra en», or a property noun and then «en» close by, before any comma («finca rústica de 3 ha en Móstoles»).
+# A town of another area than the source's counts only from the title or «situado/ubicado en», «se encuentra en».
 _TITLE_EN = re.compile(rf"(?<!\w)en\s+{_TOWN_ARTICLE}$")
 _STRONG_EN = re.compile(rf"(?<!\w)(?:(?:ubicad|situad)[oa]s?\s+en|se\s+encuentra\s+en)\s+{_TOWN_ARTICLE}$")
 _NOUN_EN = re.compile(
     r"(?<!\w)(?:fincas?|parcelas?|terrenos?|solar(?:es)?|casas?|chalets?|pisos?|viviendas?|naves?|locales|local|"
     r"aticos?|duplex|villas?|masias?|adosados?|pareados?|apartamentos?|estudios?|lofts?|edificios?|suelos?|"
-    r"bungalows?|cortijos?)(?!\w)[^.;:!?¿()\n]{0,80}?"
+    r"bungalows?|cortijos?)(?!\w)[^.;:!?¿()\n,]{0,40}?"
     rf"(?<!\w)(en)\s+{_TOWN_ARTICLE}$")
 _CLAUSE_END = re.compile(r"[.;:!?¿()\n]")
 
@@ -144,6 +148,8 @@ for _area, _names_of_area in MUNICIPALITIES.items():
     for _name in _names_of_area:
         _TOWNS[" ".join(fold(_name).split())] = (_name, _area)
 _TOWNS = dict(sorted(_TOWNS.items(), key=lambda item: -len(item[0])))
+_SAME_TOWN = {" ".join(fold(alias).split()): " ".join(fold(main).split())
+              for main, *aliases in SAME_TOWN for alias in aliases}
 _TOWN = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(name) for name in _TOWNS) + r")(?!\w)")
 
 
@@ -273,14 +279,24 @@ def _source_towns(source: str) -> frozenset[str]:
     return frozenset(named) if named and (district or capital) else frozenset()
 
 
-def _town_hits(own_title: str, description: str) -> list[tuple[int, int, str, str]]:
-    """(part, position, town as written, its area) of every town a strong signal names: title first."""
+def town_key(name: str) -> str:
+    """One key for the names of one town (folded): «Elx» -> «elche», «Las Rozas» -> «las rozas de madrid»."""
+    folded = " ".join(fold(name).split())
+    return _SAME_TOWN.get(folded, folded)
+
+
+def _town_hits(own_title: str, description: str) -> list[tuple[int, int, str, str, bool]]:
+    """(part, position, town as written, its area, firm) of every town a strong signal names: title first.
+
+    ``firm``: from the portal's own title or «situado/ubicado en», «se encuentra en» (not a noun and «en»).
+    """
     found = []
     synthetic = bool(_SYNTHETIC_TITLE.match(fold(own_title).strip()))
     for part, text in ((0, "" if synthetic else own_title), (1, description)):
         folded = fold(text)
         for m in _TOWN.finditer(folded):
             clause = _CLAUSE_END.split(folded[max(0, m.start() - 120):m.start()])[-1]
+            firm = part == 0 or bool(_STRONG_EN.search(clause))
             if not _STRONG_EN.search(clause):
                 title_en = _TITLE_EN.search(clause) if part == 0 else None
                 noun_en = None if title_en else _NOUN_EN.search(clause)
@@ -289,7 +305,7 @@ def _town_hits(own_title: str, description: str) -> list[tuple[int, int, str, st
                     continue  # a bare «en» of a description, or one about someone else («como en Móstoles»)
             if _is_the_place(folded, m.start(), m.end()):
                 area = _TOWNS[" ".join(m.group(0).split())][1]
-                found.append((part, m.start(), text[m.start():m.end()], area))
+                found.append((part, m.start(), text[m.start():m.end()], area, firm))
     return sorted(found)
 
 
@@ -299,11 +315,13 @@ def _town_conflict(source: str, source_areas: frozenset[str], own_title: str,
     towns = _source_towns(source)
     if not towns:
         return None
-    other = [h for h in _town_hits(own_title, description) if " ".join(fold(h[2]).split()) not in towns]
+    areas = source_areas or frozenset(_TOWNS[t][1] for t in towns if t in _TOWNS)
+    keys = {town_key(t) for t in towns}
+    other = [h for h in _town_hits(own_title, description)
+             if town_key(h[2]) not in keys and (h[4] or h[3] in areas)]  # another area: only a firm signal
     if not other:
         return None
-    _, _, phrase, area = other[0]
-    areas = source_areas or frozenset(_TOWNS[t][1] for t in towns if t in _TOWNS)
+    _, _, phrase, area, _ = other[0]
     return PlaceConflict(source, areas, phrase, area, phrase, strong=True, municipality=True)
 
 

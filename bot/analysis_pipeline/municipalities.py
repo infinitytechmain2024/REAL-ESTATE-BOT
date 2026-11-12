@@ -63,3 +63,20 @@ MUNICIPALITIES: dict[str, tuple[str, ...]] = {
         "Valencina de la Concepción", "Salteras", "Umbrete", "La Algaba", "Arahal", "Marchena",
     ),
 }
+
+# Two names of one town (the first is the key): a source «Las Rozas de Madrid» and a text «Las Rozas» agree.
+SAME_TOWN: tuple[tuple[str, ...], ...] = (
+    ("Las Rozas de Madrid", "Las Rozas"),
+    ("Sant Cugat del Vallès", "Sant Cugat"),
+    ("L'Hospitalet de Llobregat", "Hospitalet de Llobregat"),
+    ("Elche", "Elx"),
+    ("Sagunto", "Sagunt"),
+    ("Calpe", "Calp"),
+    ("Jávea", "Xàbia"),
+    ("Alcoy", "Alcoi"),
+    ("Puçol", "Puzol"),
+    ("Alboraya", "Alboraia"),
+    ("Villajoyosa", "La Vila Joiosa"),
+    ("San Juan de Alicante", "Sant Joan d'Alacant"),
+    ("L'Alfàs del Pi", "Alfaz del Pi"),
+)

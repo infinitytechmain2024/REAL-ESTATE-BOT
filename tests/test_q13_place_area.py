@@ -102,7 +102,10 @@ async def test_a_model_location_naming_the_town_is_kept(monkeypatch):
     ("Ciudad Universitaria, Madrid", "Piso en venta, Ciudad Universitaria", "Piso en Móstoles", "Móstoles", "Madrid"),
     ("Madrid Capital, Madrid", "", "Parcela en Boadilla del Monte, cerca del Real Madrid.", "Boadilla del Monte",
      "Madrid"),
-    ("Madrid Capital, Madrid", "", "Terreno urbano en Mijas, junto al pueblo.", "Mijas", "Andalucía"),
+    ("Madrid Capital, Madrid", "", "Terreno urbano situado en Mijas, junto al pueblo.", "Mijas", "Andalucía"),
+    ("Madrid Capital, Madrid", "Terreno en Mijas", "Terreno urbano", "Mijas", "Andalucía"),  # the portal's title
+    # one town, two names: the source's town is not «another» (review of Q13)
+    ("Centro, Madrid", "Chalet en Las Rozas", "Chalet", "Las Rozas", "Madrid"),
     ("Chamberí, Madrid", "Chalet", "Chalet situado en Las Rozas de Madrid, con jardín", "Las Rozas de Madrid",
      "Madrid"),
     ("Getafe, Madrid", "Casa en Leganés", "Casa adosada", "Leganés", "Madrid"),
@@ -126,6 +129,28 @@ def test_another_town_named_by_a_strong_signal_is_a_conflict(address, title, des
     ("Chamberí, Madrid", "Piso", "Vendo, buen barrio. Disponemos de oficina en Getafe."),  # no property noun
     ("Chamberí, Madrid", "Piso reformado", "Ideal familias, metro en la puerta"),
     ("Chamberí, Madrid", "Piso en Chamberí", "Situado en Madrid, junto a Alcobendas"),  # the capital moves nothing
+    # review of Q13: a noun and «en» about something else, or a town of another area without a firm signal
+    ("Madrid Capital, Madrid", "", "Terreno urbano en Mijas, junto al pueblo."),
+    ("Chamberí, Madrid", "Piso", "Piso de inversión, rentabilidad mejor que en Torrevieja"),
+    ("Chamberí, Madrid", "Piso", "Piso de inversión, rentabilidad superior a la de pisos en Benidorm"),
+    ("Chamberí, Madrid", "Piso", "Piso heredado, los dueños residen en Mijas"),
+    ("Chamberí, Madrid", "Piso", "Piso; el vendedor acepta permuta por casa en Estepona"),
+    ("Chamberí, Madrid", "Piso", "Piso ideal para veranear luego en Sitges"),
+    ("Chamberí, Madrid", "Piso", "Piso reformado por la empresa que hizo los chalets en Sitges"),
+    ("Chamberí, Madrid", "Piso", "Piso, la mitad de precio que en Marbella"),
+    ("Chamberí, Madrid", "Piso", "Vendemos piso para invertir en Marbella"),
+    ("Chamberí, Madrid", "Piso", "Piso con plaza de garaje en Getafe"),
+    ("Chamberí, Madrid", "Piso", "Piso con trastero, plaza de garaje opcional en Getafe"),
+    ("Ciudad Universitaria, Madrid", "Piso en Madrid", "Piso con buena comunicación en Getafe y Leganés"),
+    ("Chamberí, Madrid", "Piso", "Piso reformado, como los de nuestra promoción en Majadahonda"),
+    ("Chamberí, Madrid", "Piso", "Piso exterior reformado con muchas mejoras y vistas preciosas en Getafe"),  # > 40
+    # synonyms: the source's own town under its other name
+    ("Las Rozas de Madrid, Madrid", "Chalet en Las Rozas", "Chalet"),
+    ("Sant Cugat del Vallès, Barcelona", "Casa en Sant Cugat", "Casa"),
+    ("Elche, Alicante", "Piso en Elx", "Piso"),
+    ("Sagunt, Valencia", "Piso en Sagunto", "Piso"),
+    ("Calp, Alicante", "Villa en Calpe", "Villa"),
+    ("Jávea, Alicante", "Villa en Xàbia", "Villa"),
 ])
 def test_no_town_conflict_without_a_clear_signal(address, title, description):
     assert source_place.conflict(portal_post({"price": 1, "address": address}, title, description), title) is None
@@ -200,11 +225,30 @@ def test_an_unconfirmed_plot_is_not_shown_from_the_jsonld_either(monkeypatch):
     ({"area_m2": 150}, "Casa en parcela de 1.000 m²"),  # the house on a larger plot
     ({"area_m2": 1000}, "Vivienda de 150 m² construidos"),  # the plot of a smaller house
     ({"plot_m2": 1000, "area_m2": 150}, "Chalet de 150 m2 en parcela de 1.000 m2"),
-    ({"plot_m2": 1000}, "Casa de 150 m² construidos"),
+    ({"plot_m2": 1000}, "Casa de 150 m² construidos"),  # no plot in the text: nothing to compare with
     ({"area_m2": 32088}, "Finca a 200 mts de la playa"),  # a distance, not an area
     ({"area_m2": 32088}, "Finca rústica, consulte superficie"),  # no area in the text
     ({"price": 1}, "Parcela de 3.208 m²"),  # no area in the line
     ({"area_m2": 32088}, "Finca de 3,2 ha"),  # hectares
+    # the review of Q13: parts of the object, its surroundings, the buildable area, distances
+    ({"area_m2": 90}, "Piso con terraza de 15 m²"),
+    ({"area_m2": 90}, "Piso de 90 m², terraza de 15 m²"),
+    ({"area_m2": 85}, "Piso con balcón de 4 m²"),
+    ({"area_m2": 85}, "Piso de 3 dormitorios, salón de 25 m²"),
+    ({"area_m2": 90}, "Piso con trastero de 6 m² y garaje 12 m2"),
+    ({"area_m2": 300}, "Local, salón de 40 m², cocina de 12 m²"),
+    ({"area_m2": 250}, "Chalet con 1.500 m² de parcela"),
+    ({"area_m2": 250}, "Chalet con 1.500 m² de jardín"),
+    ({"area_m2": 250}, "Chalet con jardín de 600 m²"),
+    ({"area_m2": 5000}, "Nave con oficinas de 300 m²"),
+    ({"area_m2": 80}, "Piso, urbanización de 20.000 m² con piscina"),
+    ({"area_m2": 80}, "Piso en urbanización con zonas comunes de 5.000 m2"),
+    ({"plot_m2": 3650}, "Solar, edificabilidad de 12.000 m² de techo"),
+    ({"area_m2": 3650}, "Solar urbano de 3.650 m2, edificabilidad 4.232 m² techo"),
+    ({"area_m2": 85}, "Piso, metro a 100 mts, colegio 300 mts"),
+    ({"area_m2": 32088}, "Finca, playa 200 mts"),
+    ({"area_m2": 32088}, "Finca con 500 mts de fachada"),
+    ({"area_m2": 32088, "plot_m2": 3208}, "Parcela de 3.208 m²"),  # the JSON-LD plot itself agrees
 ])
 def test_areas_that_agree_or_are_missing_are_no_conflict(facts, description):
     assert area_check.conflict(portal_post(facts, "Finca", description), "Finca") is None
@@ -212,12 +256,30 @@ def test_areas_that_agree_or_are_missing_are_no_conflict(facts, description):
 
 @pytest.mark.parametrize(("facts", "description"), [
     ({"surface": 32088}, "parcela de 3.208mts"),
+    ({"area_m2": 32088, "property_type": "landparcel"}, "La parcela es de 3.208mts"),
     ({"plot_m2": 32088}, "Parcela de 3.208 m²"),
-    ({"area_m2": 90}, "Piso de 300 m² útiles"),  # a flat ten times smaller than the house the text describes
+    ({"area_m2": 32088}, "Finca de 3.208 m², casa de 120 m²"),  # neither the plot nor the house
+    ({"area_m2": 90}, "Piso de 300 m² útiles"),
     ({"area_m2": 5000}, "Terreno de 1.200 m2"),
+    ({"area_m2": 3}, "Piso de 85 m²"),
 ])
 def test_areas_more_than_twice_apart_are_a_conflict(facts, description):
     assert area_check.conflict(portal_post(facts, "Finca", description), "Finca") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("area", "description"), [
+    (90, "Piso exterior con terraza de 15 m²"),
+    (85, "Piso con balcón de 4 m²"),
+    (250, "Chalet con 1.500 m² de parcela"),
+    (5000, "Nave industrial con oficinas de 300 m²"),
+    (80, "Piso en urbanización de 20.000 m² con piscina"),
+])
+async def test_review_cases_keep_the_area_with_the_flag(monkeypatch, area, description):
+    text = portal_post({"price": 300000, "area_m2": area, "address": "Chamberí, Madrid"}, "Anuncio", description)
+    answer = {**ANSWER, "area_m2": area, "evidence": {**ANSWER["evidence"], "area": str(area)}}
+    result, _ = await analyze(monkeypatch, text, answer=answer, area_text_check=True)
+    assert result.area_m2 == area and result.area_unconfirmed is None and "area not confirmed" not in result.reason
 
 
 def test_area_flag_is_off_by_default_and_read_from_the_environment(monkeypatch):
