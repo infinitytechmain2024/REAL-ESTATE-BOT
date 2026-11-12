@@ -375,7 +375,11 @@ class ApifyIdealistaPortalSource(_PortalSource):
     ``minSize`` stops at 300 m2 (``_IDEALISTA_SIZES``): a larger ``min_area`` is sent as 300 and the ``maxItems``
     window of the newest rows fills with smaller plots. With ``sort_biggest`` (``IDEALISTA_SORT_BIGGEST``) such a
     task without a ``max_area`` is sorted ``biggest`` instead of ``mostRecent``; the rows are still cut by ``min_area`` after the run
-    (the analysis prefilter and ``bot/campaign/tolerance.py``)."""
+    (the analysis prefilter and ``bot/campaign/tolerance.py``).
+
+    A province task (SEARCH_PLACE_LEVEL_FROM_SPEC) sends the same input as a city one: the actor's schema has no place
+    type, only ``location`` by name, and what the actor makes of a province name is not checked. Only the row filter
+    differs: it compares the row's ``province`` instead of its ``municipality``."""
 
     name = "apify_idealista"
     hosts = frozenset({"idealista.com"})
