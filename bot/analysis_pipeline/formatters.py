@@ -30,6 +30,8 @@ def source_line_facts(text: str) -> dict[str, Any]:
             out[key] = v.strip()
     if data.get("place_unverified") is True:  # Q12: written only with PORTAL_DEFAULT_POINT_GUARD
         out["place_unverified"] = True
+    if data.get("auction") is True:  # Q16: written only with PORTAL_FACTS_FROM_ROW
+        out["auction"] = True
     return out
 
 
@@ -40,6 +42,8 @@ def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any
         payload["source_place_conflict"] = result.source_place_conflict
     if evidence.platform == "website" and source_line_facts(evidence.text).get("place_unverified"):
         payload["place_unverified"] = True  # Q12: read by campaign/tolerance.py only with PORTAL_DEFAULT_POINT_GUARD
+    if evidence.platform == "website" and source_line_facts(evidence.text).get("auction"):
+        payload["auction"] = True  # Q16: read by campaign/tolerance.py only with PORTAL_FACTS_FROM_ROW
     if result.area_unconfirmed:  # Q13: only with ANALYSIS_AREA_TEXT_CHECK; the JSON-LD plot is not shown either
         payload["area_unconfirmed"] = result.area_unconfirmed
     if card_extra_fields_enabled() and evidence.platform == "website":
