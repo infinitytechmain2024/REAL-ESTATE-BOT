@@ -384,10 +384,13 @@ class _CityCircle(tuple[float, float]):
 
     radius_km: float
 
-    def __new__(cls, center: tuple[float, float], radius_km: float) -> _CityCircle:
+    def __new__(cls, center: tuple[float, float], radius_km: float = 15) -> _CityCircle:
         circle = super().__new__(cls, center)
         circle.radius_km = radius_km
         return circle
+
+    def __getnewargs__(self) -> tuple[tuple[float, float], float]:  # copy/pickle rebuild it with its radius
+        return tuple(self), self.radius_km  # type: ignore[return-value]
 
 
 class ApifyIdealistaPortalSource(_PortalSource):

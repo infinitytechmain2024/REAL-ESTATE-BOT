@@ -4,7 +4,9 @@ output wholly from another place is ``apify_wrong_place`` (mocks only, no live c
 Run G2 (Valencia): ``location: "Valencia"`` ran as València d'Àneu (Alt Àneu, Lleida) and returned 2 rows from there.
 """
 
+import copy
 import json
+import pickle
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
@@ -275,3 +277,10 @@ async def test_setting_reaches_the_source(monkeypatch):
     finally:
         await off.aclose()
         await on.aclose()
+
+
+def test_city_circle_survives_copy_and_pickle():
+    circle = _CityCircle(VALENCIA, 17.5)
+    for clone in (copy.copy(circle), copy.deepcopy(circle), pickle.loads(pickle.dumps(circle))):
+        assert type(clone) is _CityCircle and tuple(clone) == VALENCIA and clone.radius_km == 17.5
+    assert _CityCircle(VALENCIA).radius_km == 15
