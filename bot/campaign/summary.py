@@ -42,6 +42,7 @@ class Site:
     read_api: int = 0
     api_empty: bool = False    # its API source run finished and returned no listing
     api_failed: bool = False   # its API source run failed on the provider's side
+    api_wrong_place: bool = False  # its API source run returned only objects from another place (Q17)
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -78,6 +79,8 @@ def _sites(sources: Sequence[SourceCount], reports: Sequence[object], portals: S
         row["unverified"] = row.get("unverified", 0) or int(bool(getattr(report, "unverified", False)))
         row["api_empty"] = row.get("api_empty", 0) or int(getattr(report, "api_empty", False) is True)
         row["api_failed"] = row.get("api_failed", 0) or int(getattr(report, "api_failed", False) is True)
+        row["api_wrong_place"] = (row.get("api_wrong_place", 0)
+                                  or int(getattr(report, "api_wrong_place", False) is True))
     for source in sources:
         if source.platform != "website":
             continue
@@ -85,7 +88,8 @@ def _sites(sources: Sequence[SourceCount], reports: Sequence[object], portals: S
         for name, value in (("posts", source.posts), ("sent", source.sent), ("held", source.held)):
             row[name] = row.get(name, 0) + value
     return {host: Site(host, **{**row, "unverified": bool(row.get("unverified")), "api_empty": bool(row.get("api_empty")),
-                                "api_failed": bool(row.get("api_failed"))})
+                                "api_failed": bool(row.get("api_failed")),
+                                "api_wrong_place": bool(row.get("api_wrong_place"))})
             for host, row in merged.items()}
 
 
@@ -120,6 +124,8 @@ def _nothing_line(site: Site) -> str:
         why = "0 объявлений по запросу"
     elif site.api_failed:
         why = "портал вернул ошибку"
+    elif site.api_wrong_place:
+        why = "портал вернул объекты из другого места"
     elif site.queries and not site.results:
         why = f"поиск ничего не вернул ({plural(site.queries, 'запрос', 'запроса', 'запросов')})"
     elif site.queries:

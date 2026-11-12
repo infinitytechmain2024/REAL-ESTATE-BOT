@@ -41,3 +41,27 @@ async def test_ambiguous_or_uncacheable_city_fails_closed():
     cache.setex.side_effect = ConnectionError("redis down")
     assert await resolver.resolve("Madrid") is None
     await resolver.aclose()
+
+
+async def test_bounding_box_is_cached_next_to_the_centre_and_old_entries_have_none():
+    cache = AsyncMock()
+    cache.get.return_value = None
+
+    def handler(request):
+        return httpx.Response(200, json=[{"name": "València", "lat": "39.4699", "lon": "-0.3763",
+                                          "boundingbox": ["39.278", "39.567", "-0.433", "-0.272"],
+                                          "address": {"country_code": "es", "city": "València"}}])
+
+    resolver = CachedCityCenters("", cache=cache, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                                 sleep=AsyncMock())
+    assert await resolver.resolve_area("Valencia") == ((39.4699, -0.3763), (39.278, 39.567, -0.433, -0.272))
+    stored = json.loads(cache.setex.await_args.args[2])
+    assert stored == [39.4699, -0.3763, [39.278, 39.567, -0.433, -0.272]]
+    cache.get.return_value = json.dumps(stored)
+    assert await resolver.resolve("Valencia") == (39.4699, -0.3763)
+    cache.get.return_value = json.dumps([39.4699, -0.3763])  # written before the box
+    assert await resolver.resolve_area("Valencia") == ((39.4699, -0.3763), None)
+    assert await resolver.resolve("Valencia") == (39.4699, -0.3763)
+    cache.get.return_value = json.dumps([39.4699, -0.3763, ["x", 1, 2, 3]])  # a broken box: the centre, no box
+    assert await resolver.resolve_area("Valencia") == ((39.4699, -0.3763), None)
+    await resolver.aclose()

@@ -1,6 +1,6 @@
 """Bounded, cached city centres for user-requested radius searches.
 
-Only the Idealista radius path calls the public Nominatim endpoint. A shared Redis
+The portal sources (Idealista, Yaencontre, radius searches) call the public Nominatim endpoint. A shared Redis
 cache prevents repeat lookups; without that cache a lookup fails closed.
 """
 
@@ -40,6 +40,13 @@ class CachedCityCenters:
             await self._cache.aclose()
 
     async def resolve(self, city: str) -> tuple[float, float] | None:
+        found = await self.resolve_area(city)
+        return found[0] if found is not None else None
+
+    async def resolve_area(self, city: str) -> tuple[tuple[float, float], Bbox | None] | None:
+        """The city's centre and, when Nominatim gave it, its ``boundingbox`` (south, north, west, east). The cache
+        holds ``[lat, lon, [south, north, west, east]]``; an entry written before the box (``[lat, lon]``) is still
+        a centre, with no box."""
         if self._cache is None or not city.strip() or len(city) > 80:
             return None
         key = "idealista:city-center:es:" + _fold(city)
@@ -50,10 +57,11 @@ class CachedCityCenters:
                 return None
             if cached:
                 try:
-                    lat, lon = json.loads(cached)
-                    if _coordinates(lat, lon):
-                        return float(lat), float(lon)
-                except (TypeError, ValueError):
+                    value = json.loads(cached)
+                    lat, lon = value[0], value[1]
+                    if isinstance(value, list) and len(value) in (2, 3) and _coordinates(lat, lon):
+                        return (float(lat), float(lon)), (_bbox(value[2]) if len(value) == 3 else None)
+                except (TypeError, ValueError, IndexError, KeyError):
                     pass
             wait = 1.0 - (time.monotonic() - self._last_request)
             if wait > 0:
@@ -83,12 +91,29 @@ class CachedCityCenters:
                 if not _coordinates(lat, lon):
                     continue
                 center = float(lat), float(lon)
+                box = _bbox(row.get("boundingbox"))
                 try:
-                    await self._cache.setex(key, 30 * 24 * 3600, json.dumps(center))
+                    await self._cache.setex(key, 30 * 24 * 3600, json.dumps([*center, *([list(box)] if box else [])]))
                 except Exception:  # noqa: BLE001 - never use an uncacheable public result
                     return None
-                return center
+                return center, box
             return None
+
+
+Bbox = tuple[float, float, float, float]
+
+
+def _bbox(value: object) -> Bbox | None:
+    """Nominatim's ``boundingbox`` ``[south, north, west, east]`` (strings in ``jsonv2``) when it is a sane box."""
+    if not isinstance(value, list | tuple) or len(value) != 4:
+        return None
+    try:
+        south, north, west, east = (float(v) for v in value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not (_coordinates(south, west) and _coordinates(north, east)) or south > north or west > east:
+        return None
+    return south, north, west, east
 
 
 def _coordinates(lat: object, lon: object) -> bool:

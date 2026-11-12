@@ -19,7 +19,14 @@ from urllib.parse import urlsplit
 
 from bot.utils.listing_text import _AREA, _to_m2, areas, auction_named, number
 from bot.web_search.queries import QueryTask, task_kind
-from bot.web_search.sources.apify import ApifyListingSource, _distance_km, _fold, _number, _text
+from bot.web_search.sources.apify import (
+    ApifyListingSource,
+    _distance_km,
+    _execution,
+    _fold,
+    _number,
+    _text,
+)
 from bot.web_search.sources.base import SourceListing
 from bot.web_search.urls import classify_url, deal_conflict, fetchable, host_of
 
@@ -165,6 +172,14 @@ class _PortalSource(ApifyListingSource):
         wanted = {_fold(task.location), *(_fold(p) for p in task.nearby_places)}
         found = _fold(province) if task.place_level == "province" else _fold(municipality)
         return found in wanted
+
+    def _place_wrong(self, task: QueryTask, center: tuple[float, float] | None, point: tuple[float, float] | None,
+                     municipality: str, province: str) -> bool:
+        """The row says it is elsewhere (``_place_ok`` fails on a fact the row gives, not on a missing one)."""
+        if task.radius_km is not None:
+            return center is not None and point is not None and _distance_km(center, point) > task.radius_km
+        found = province if task.place_level == "province" else municipality
+        return bool(_fold(found)) and not self._place_ok(task, center, point, municipality, province)
 
     def _url(self, value: Any, task: QueryTask) -> str | None:
         url = _text(value)
@@ -428,6 +443,20 @@ _IDEALISTA_PRICES = (500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 110
 _IDEALISTA_SIZES = (60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300)
 
 
+class _CityCircle(tuple[float, float]):
+    """A city's centre (``(lat, lon)``, usable wherever a centre is) with the circle sent to the actor (Q17)."""
+
+    radius_km: float
+
+    def __new__(cls, center: tuple[float, float], radius_km: float = 15) -> _CityCircle:
+        circle = super().__new__(cls, center)
+        circle.radius_km = radius_km
+        return circle
+
+    def __getnewargs__(self) -> tuple[tuple[float, float], float]:  # copy/pickle rebuild it with its radius
+        return tuple(self), self.radius_km  # type: ignore[return-value]
+
+
 class ApifyIdealistaPortalSource(_PortalSource):
     """Idealista through ``igolaizola/idealista-scraper`` (``APIFY_IDEALISTA_PROVIDER=igolaizola``), any city or
     province by name; rows follow the output schema the Store infers from its recent runs (``url``, ``operation``,
@@ -443,7 +472,13 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     A province task (SEARCH_PLACE_LEVEL_FROM_SPEC) sends the same input as a city one: the actor's schema has no place
     type, only ``location`` by name, and what the actor makes of a province name is not checked. Only the row filter
-    differs: it compares the row's ``province`` instead of its ``municipality``."""
+    differs: it compares the row's ``province`` instead of its ``municipality``.
+
+    ``unambiguous_place`` (``IDEALISTA_UNAMBIGUOUS_PLACE``, Q17): a city task whose centre the cached geocoder knows is
+    sent with ``location`` and also ``latitude``/``longitude`` + ``distanceKm`` from the municipality's size (the actor ranks coordinates above
+    the name; "Valencia" by name ran as València d'Àneu, Lleida). Rows are still kept for the city's municipality only.
+    An output whose every row is from another municipality/province (and, for a city sent with its circle, lies
+    farther than twice the radius, at most 40 km) ends the run as ``apify_wrong_place``."""
 
     name = "apify_idealista"
     hosts = frozenset({"idealista.com"})
@@ -451,10 +486,19 @@ class ApifyIdealistaPortalSource(_PortalSource):
                                        "commercial": "premises"}
     _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "commercial": "commercial"}
 
+    # IDEALISTA_UNAMBIGUOUS_PLACE: the circle around a city's centre is half the diagonal of the municipality's
+    # Nominatim ``boundingbox`` (Burjassot ~2x2 km -> 3 km; Valencia with El Palmar and El Saler, Madrid with El Pardo
+    # and Barajas -> 15-25 km), within 3-30 km; 15 km without a box (an old cache entry). A row up to twice the circle
+    # (at most 40 km) from the centre is a neighbour, never «another place».
+    _CITY_RADIUS_KM = 15
+    _CITY_RADIUS_RANGE = (3, 30)
+    _NEIGHBOUR_KM = 40
+
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
-                 **kwargs: Any) -> None:
+                 unambiguous_place: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
+        self.unambiguous_place = unambiguous_place  # IDEALISTA_UNAMBIGUOUS_PLACE (Q17)
 
     def _sort(self, min_area: int | None, max_area: int | None) -> str:
         """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
@@ -477,12 +521,58 @@ class ApifyIdealistaPortalSource(_PortalSource):
                 actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
                                 "distanceKm": max(1, min(100, round(task.radius_km)))}
         else:
+            # Q17: a bare name may be another town for the actor ("Valencia" ran as València d'Àneu, Lleida), and
+            # which names are shared is not known here (the geocoder returns one centre). So a city whose centre is
+            # known goes as its name AND its centre + a circle of the municipality's size: the actor ranks the
+            # coordinates above ``location``. The rows are still kept only for the city's municipality (``_place_ok``). No centre: the
+            # name alone, as before. A resumed run sends nothing; its centre is looked up again for ``_wrong_place``.
             actor_input["location"] = task.location.strip()[:120]
+            if self.unambiguous_place and task.place_level == "city":
+                center = await self._city_circle(task)
+            if center is not None and not run_id:
+                actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
+                                "distanceKm": max(1, min(100, round(center.radius_km)))}
         filters = {"minPrice": _floor(_whole(constraints.get("min_price")), _IDEALISTA_PRICES),
                    "maxPrice": _ceil(_whole(constraints.get("max_price")), _IDEALISTA_PRICES),
                    "minSize": _floor(min_area, _IDEALISTA_SIZES)}
         actor_input |= {key: value for key, value in filters.items() if value}
         return self.actor_id, actor_input, center
+
+    async def _city_circle(self, task: QueryTask) -> _CityCircle | None:
+        """The city's centre and circle (``_CITY_RADIUS_KM`` notes); None without a geocoder, an unknown place or a
+        geocoder failure (the name only is then sent)."""
+        try:
+            found = await self._geocoder.resolve_area(task.location) if self._geocoder is not None else None
+            center, box = found if found is not None else (None, None)
+            point = _point(*center) if center is not None else None
+        except Exception:  # noqa: BLE001 - a geocoder failure never stops the run: the name alone, as before
+            return None
+        if point is None:
+            return None
+        radius: float = self._CITY_RADIUS_KM
+        if box is not None:
+            south, north, west, east = box
+            low, high = self._CITY_RADIUS_RANGE
+            radius = max(low, min(high, _distance_km((south, west), (north, east)) / 2))
+        return _CityCircle(point, radius)
+
+    def _wrong_place(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> bool:
+        """A row of another place. For a city sent with its circle a row whose point is near the circle (twice its
+        radius, at most 40 km: the portal's points are approximate) is the circle's neighbour, not another place: it
+        stays invalid. A resumed city run whose centre the geocoder did not give now marks nothing (its input is
+        unknown)."""
+        if not self.unambiguous_place or not isinstance(item, dict):
+            return False
+        city = task.radius_km is None and task.place_level == "city"
+        execution = _execution.get()
+        if city and center is None and execution is not None and execution.run_id:
+            return False
+        point = _point(item.get("latitude"), item.get("longitude"))
+        if city and center is not None and point is not None:
+            radius = getattr(center, "radius_km", self._CITY_RADIUS_KM)
+            if _distance_km(center, point) <= min(2 * radius, self._NEIGHBOUR_KM):
+                return False
+        return self._place_wrong(task, center, point, _text(item.get("municipality")), _text(item.get("province")))
 
     def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
         if not isinstance(item, dict):
