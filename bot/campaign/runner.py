@@ -843,6 +843,8 @@ class CampaignRunner:
             return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
         if match.why == "location_unknown":  # Q12: the portal's place is its fallback point
             return offers.Deviation("unverified", land=land, unknown=("место",))
+        if match.why == "deal_kind" and match.note:  # Q16: the portal row names an auction (PORTAL_FACTS_FROM_ROW)
+            return offers.Deviation("deal_kind", phrase=match.note, land=land)
         kind = self._deal_kind(request, closest)
         if kind is not None:
             return offers.Deviation("deal_kind", phrase=kind, land=land)

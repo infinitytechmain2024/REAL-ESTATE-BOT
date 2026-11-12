@@ -17,7 +17,7 @@ import re
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
-from bot.utils.listing_text import _AREA, _to_m2, areas, number
+from bot.utils.listing_text import _AREA, _to_m2, areas, auction_named, number
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.apify import (
     ApifyListingSource,
@@ -94,11 +94,65 @@ def _phone(value: Any) -> str | None:
     return text[:40] if 6 <= digits <= 15 else None
 
 
+# PORTAL_FACTS_FROM_ROW (Q16). With the flag the facts line carries the portal's own type and deal, never the task's:
+# a value the row does not give leaves the field out. The words are the rows' (recorded output of the portal actors,
+# 2026-10/11): Habitaclia ``propertyType`` flat/house/land (+ ``propertySubtype`` groundfloor, terracedhouse,
+# pairedhouse, chalet, industrialland, residentialland), Idealista ``propertyType`` land/flat/studio/chalet/duplex/
+# penthouse, Yaencontre ``family`` LAND/FLAT/HOUSE, Milanuncios ``categorySlug``. A word not listed here is passed as
+# the portal wrote it (folded); a bare code is not (``_row_type``).
+_ROW_TYPES: dict[str, str] = {
+    "land": "landparcel", "lands": "landparcel", "industrialland": "landparcel", "residentialland": "landparcel",
+    "flat": "apartment", "apartment": "apartment", "studio": "apartment", "duplex": "apartment",
+    "penthouse": "apartment", "groundfloor": "apartment",
+    "house": "house", "chalet": "house", "terracedhouse": "house", "pairedhouse": "house",
+    "independanthouse": "house", "premises": "commercial", "commercial": "commercial",
+}
+_ROW_DEALS: dict[str, str] = {"sale": "sale", "venta": "sale", "buy": "sale", "rent": "rent", "alquiler": "rent"}
+# Milanuncios ``categorySlug`` -> (type, deal); «solares» names no deal. The input slugs of ``_CATEGORIES`` and the
+# output slug of premises (``venta-de-locales-comerciales``, live 2026-10-16).
+_MILANUNCIOS_ROW: dict[str, tuple[str, str | None]] = {
+    "solares": ("landparcel", None), "venta-de-fincas": ("landparcel", "sale"),
+    "venta-de-pisos": ("apartment", "sale"), "alquiler-de-pisos": ("apartment", "rent"),
+    "venta-de-casas": ("house", "sale"), "alquiler-de-casas": ("house", "rent"),
+    "venta-de-locales-comerciales": ("commercial", "sale"),
+}
+# Fotocasa's ``propertyType`` is a code. Only the two seen in the recorded output (80 rows): ``4`` on every
+# ``/comprar/terreno/`` URL, ``2`` on every ``/comprar/vivienda/`` one (flats and houses alike: «vivienda», no more).
+# ``propertySubtype`` codes and ``transactionType`` ``1`` are not mapped (their meaning is not in the output).
+_FOTOCASA_TYPES: dict[str, str] = {"4": "landparcel", "2": "vivienda"}
+
+
+def _row_type(*values: Any, land: bool = False) -> str | None:
+    """The first of the row's own type values: our word for a known one, the portal's word for another, None for
+    a missing value or a bare code. ``land``: the row passed a land task's filter (``_landish``), so a word naming
+    land (Pisos ``ruralEstate``, Habitaclia «Terreno urbano» / «Terreno rústico») is ``landparcel``."""
+    for value in values:
+        word = _fold(_text(value))
+        if word and not word.isdigit():
+            return "landparcel" if land and _landish(word) else _ROW_TYPES.get(word, word[:40])
+    return None
+
+
+def _code(value: Any) -> str:
+    """A portal code as text: the number ``4`` and the string ``"4"`` alike."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return _text(value)
+
+
+def _row_deal(value: Any) -> str | None:
+    return _ROW_DEALS.get(_fold(_text(value)))
+
+
 class _PortalSource(ApifyListingSource):
     """Shared task rules: Spain, real estate, a sale or a rent, a city (or a province) or an explicit radius."""
 
     kinds: ClassVar[dict[str, str]] = {}  # task kind -> the actor's propertyType
     deals: ClassVar[dict[str, str]] = {"sale": "sale", "rent": "rent"}  # campaign deal -> the actor's operation
+
+    def __init__(self, token: str, *, facts_from_row: bool = False, **kwargs: Any) -> None:
+        super().__init__(token, **kwargs)
+        self.facts_from_row = facts_from_row  # PORTAL_FACTS_FROM_ROW (Q16)
 
     def supports(self, task: QueryTask) -> bool:
         return bool(self._token and task.location.strip() and task.country == "ES"
@@ -138,7 +192,15 @@ class _PortalSource(ApifyListingSource):
 
     def _listing(self, task: QueryTask, *, url: str, title: str, price: Any, area: Any, rooms: Any,
                  address: list[str], description: str, phone: Any, advertiser: Any,
-                 property_type: str | None, place_unverified: bool = False) -> SourceListing:
+                 property_type: str | None, place_unverified: bool = False,
+                 row_type: str | None = None, row_deal: str | None = None) -> SourceListing:
+        """``property_type`` and the deal are the task's; with ``facts_from_row`` (Q16) ``row_type``/``row_deal``,
+        the row's own (None: not in the row), are written instead, and an auction named in the row is marked."""
+        auction = self.facts_from_row and auction_named(title, description)
+        if self.facts_from_row:
+            property_type, deal = row_type, row_deal
+        else:
+            deal = self._deal(task)
         description = description[:_DESCRIPTION_CHARS]
         land = task_kind(task) == "land"
         reported = _number(area, positive=True)
@@ -149,10 +211,10 @@ class _PortalSource(ApifyListingSource):
             url=url, title=title[:300], price=amount, currency="EUR" if amount is not None else None,
             area_m2=None if land else reported,
             rooms=int(count) if count is not None and count.is_integer() and count <= 99 else None,
-            address=place[:300] or None, property_type=property_type, deal=self._deal(task),
+            address=place[:300] or None, property_type=property_type, deal=deal,
             description=description, plot_m2=plot_area(reported, description) if land else None,
             phone=_phone(phone), advertiser=_text(advertiser)[:200] or None,
-            place_unverified=True if place_unverified else None,
+            place_unverified=True if place_unverified else None, auction=True if auction else None,
         )
 
 
@@ -248,7 +310,8 @@ class ApifyFotocasaSource(_PortalSource):
             price=transaction.get("price"), area=item.get("surface"), rooms=item.get("rooms"),
             address=[_text(item.get("street")), *place],
             description=description, phone=item.get("phone"), advertiser=agency.get("name"),
-            property_type=self._TYPES.get(kind), place_unverified=unverified)
+            property_type=self._TYPES.get(kind), place_unverified=unverified,
+            row_type=_FOTOCASA_TYPES.get(_code(item.get("propertyType"))), row_deal=_row_deal(transaction.get("type")))
 
 
 _YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,
@@ -367,7 +430,8 @@ class ApifyYaencontreSource(_PortalSource):
         return self._listing(
             task, url=url, title=_text(item.get("title")) or place, price=item.get("price"), area=item.get("area"),
             rooms=item.get("rooms"), address=[place], description=_text(item.get("description")), phone=phone,
-            advertiser=owner.get("name"), property_type=self._TYPES.get(kind))
+            advertiser=owner.get("name"), property_type=self._TYPES.get(kind),
+            row_type=_row_type(item.get("family")), row_deal=_row_deal(item.get("operation")))
 
 
 _IDEALISTA_PRICES = (500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700,
@@ -543,7 +607,8 @@ class ApifyIdealistaPortalSource(_PortalSource):
             phone=(phone.get("phoneNumberForMobileDialing") or phone.get("phoneNumber")
                    or phone.get("formattedPhone")),
             advertiser=contact.get("commercialName") or contact.get("contactName"),
-            property_type=self._TYPES.get(task_kind(task)))
+            property_type=self._TYPES.get(task_kind(task)), row_type=_row_type(item.get("propertyType")),
+            row_deal=_row_deal(item.get("operation")))
 
 
 _EURO = frozenset({"eur", "euro", "euros", "\u20ac"})
@@ -676,7 +741,9 @@ class ApifyPisosSource(_SchemaPortal):
             rooms=row.get("rooms"),
             address=[_text(row.get("fullAddress"))] if row.get("fullAddress") else [city, province],
             description=_text(row.get("shortDescription")), phone=None, advertiser=row.get("advertiserName"),
-            property_type=self._TYPES.get(task_kind(task)))
+            property_type=self._TYPES.get(task_kind(task)),
+            row_type=_row_type(row.get("propertyType"), land=task_kind(task) == "land"),
+            row_deal=_row_deal(row.get("transactionType")))
 
 
 class ApifyHabitacliaSource(_SchemaPortal):
@@ -721,7 +788,9 @@ class ApifyHabitacliaSource(_SchemaPortal):
             rooms=row.get("rooms"),
             address=[place := _text(row.get("location")), *(p for p in (city, province) if _fold(p) not in _fold(place))],
             description=_text(row.get("description")) or _text(row.get("shortDescription")), phone=None,
-            advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)))
+            advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)),
+            row_type=_row_type(row.get("propertyType"), row.get("propertySubtype"), land=task_kind(task) == "land"),
+            row_deal=_row_deal(row.get("transactionType")))
 
 
 class ApifyMilanunciosSource(_SchemaPortal):
@@ -806,4 +875,6 @@ class ApifyMilanunciosSource(_SchemaPortal):
         return self._listing(
             task, url=url, title=self._title(row, task, city), price=row.get("price"), area=row.get("tag_sqm"),
             rooms=row.get("tag_bedrooms"), address=[city, province], description=_text(row.get("description")),
-            phone=None, advertiser=None, property_type=self._TYPES.get(task_kind(task)))
+            phone=None, advertiser=None, property_type=self._TYPES.get(task_kind(task)),
+            row_type=_MILANUNCIOS_ROW.get(category, (None, None))[0],
+            row_deal=_MILANUNCIOS_ROW.get(category, (None, None))[1])
