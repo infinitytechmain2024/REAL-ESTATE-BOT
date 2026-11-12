@@ -852,7 +852,7 @@ class CampaignRunner:
             return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
         if match.why == "location_unknown":  # Q12: the portal's place is its fallback point
             return offers.Deviation("unverified", land=land, unknown=("место",))
-        if match.why == "deal_kind" and match.note:  # Q16: the portal row names an auction (PORTAL_FACTS_FROM_ROW)
+        if match.why == "deal_kind" and match.note:  # Q16 auction (PORTAL_FACTS_FROM_ROW), Q20 temporary let
             return offers.Deviation("deal_kind", phrase=match.note, land=land)
         kind = self._deal_kind(request, closest)
         if kind is not None:
@@ -1429,7 +1429,7 @@ def campaign_request(campaign: Campaign) -> Request:
     """What the campaign asked for, for ``tolerance.classify``."""
     return request_for(campaign.plan.constraints, location=campaign.plan.location, vertical=campaign.plan.vertical,
                        text=f"{campaign.source_text} {campaign.plan.goal}", country=campaign.plan.country,
-                       deviations=_deviations_of(campaign))
+                       deviations=_deviations_of(campaign), spec=_spec_of(campaign))
 
 
 def _deviations_of(campaign: Campaign) -> dict[str, Any] | None:
@@ -1437,6 +1437,12 @@ def _deviations_of(campaign: Campaign) -> dict[str, Any] | None:
     if campaign.plan.vertical == "investors":
         return None
     found = (getattr(campaign, "spec", None) or {}).get("deviations")
+    return found if isinstance(found, dict) else None
+
+
+def _spec_of(campaign: Campaign) -> dict[str, Any] | None:
+    """The TaskSpec as a dict (its interview answers may name the rent term, PORTAL_RENTAL_TERM), None without one."""
+    found = getattr(campaign, "spec", None)
     return found if isinstance(found, dict) else None
 
 

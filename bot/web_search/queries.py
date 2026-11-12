@@ -262,6 +262,9 @@ class QueryTask:
     radius_km: float | None = None  # the user's explicit search radius; never inferred
     suburbs_only: bool = False
     query_hygiene: bool = False  # SEARCH_QUERY_HYGIENE: neutral land terms (``kind_terms``); off: the old ones
+    # The rental term the person asked for (``bot.utils.listing_text.task_rental_term``): «long», «short» or None.
+    # Read only by the portal sources with PORTAL_RENTAL_TERM (Q20).
+    rental_term: str | None = None
 
     @property
     def text(self) -> str:
