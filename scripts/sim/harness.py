@@ -68,6 +68,7 @@ BASE_ENV: dict[str, str] = {
     # Flags of Q4, Q5, Q8, Q9, Q10, Q11 (their own branches): ignored by the bot until those branches are merged.
     "DEDUP_WITHOUT_ADDRESS": "true",
     "IDEALISTA_SORT_BIGGEST": "true",
+    "IDEALISTA_UNAMBIGUOUS_PLACE": "true",  # Q17; REDIS_URL is empty here: no geocoder, so the input stays the name
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",
     "ANALYSIS_LOCATION_FROM_TEXT": "true",

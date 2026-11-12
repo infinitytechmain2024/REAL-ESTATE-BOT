@@ -17,6 +17,7 @@ import re
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
+from bot.acquisition.apify_client import PermanentApifyError
 from bot.utils.listing_text import _AREA, _to_m2, areas, number
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.apify import ApifyListingSource, _distance_km, _fold, _number, _text
@@ -111,6 +112,14 @@ class _PortalSource(ApifyListingSource):
         wanted = {_fold(task.location), *(_fold(p) for p in task.nearby_places)}
         found = _fold(province) if task.place_level == "province" else _fold(municipality)
         return found in wanted
+
+    def _place_wrong(self, task: QueryTask, center: tuple[float, float] | None, point: tuple[float, float] | None,
+                     municipality: str, province: str) -> bool:
+        """The row says it is elsewhere (``_place_ok`` fails on a fact the row gives, not on a missing one)."""
+        if task.radius_km is not None:
+            return center is not None and point is not None and _distance_km(center, point) > task.radius_km
+        found = province if task.place_level == "province" else municipality
+        return bool(_fold(found)) and not self._place_ok(task, center, point, municipality, province)
 
     def _url(self, value: Any, task: QueryTask) -> str | None:
         url = _text(value)
@@ -379,7 +388,12 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     A province task (SEARCH_PLACE_LEVEL_FROM_SPEC) sends the same input as a city one: the actor's schema has no place
     type, only ``location`` by name, and what the actor makes of a province name is not checked. Only the row filter
-    differs: it compares the row's ``province`` instead of its ``municipality``."""
+    differs: it compares the row's ``province`` instead of its ``municipality``.
+
+    ``unambiguous_place`` (``IDEALISTA_UNAMBIGUOUS_PLACE``, Q17): a city task whose centre the cached geocoder knows is
+    sent as ``latitude``/``longitude`` + ``distanceKm`` 15 instead of ``location`` (the actor ranks coordinates above
+    the name; "Valencia" by name ran as València d'Àneu, Lleida). Rows are still kept for the city's municipality only.
+    An output whose every row names another municipality/province ends the run as ``apify_wrong_place``."""
 
     name = "apify_idealista"
     hosts = frozenset({"idealista.com"})
@@ -387,10 +401,13 @@ class ApifyIdealistaPortalSource(_PortalSource):
                                        "commercial": "premises"}
     _TYPES: ClassVar[dict[str, str]] = {"land": "landparcel", "commercial": "commercial"}
 
+    _CITY_RADIUS_KM = 15  # IDEALISTA_UNAMBIGUOUS_PLACE: the circle around a city's centre, as Yaencontre's city circle
+
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
-                 **kwargs: Any) -> None:
+                 unambiguous_place: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
+        self.unambiguous_place = unambiguous_place  # IDEALISTA_UNAMBIGUOUS_PLACE (Q17)
 
     def _sort(self, min_area: int | None, max_area: int | None) -> str:
         """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
@@ -413,12 +430,30 @@ class ApifyIdealistaPortalSource(_PortalSource):
                 actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
                                 "distanceKm": max(1, min(100, round(task.radius_km)))}
         else:
-            actor_input["location"] = task.location.strip()[:120]
+            # Q17: a bare name is ambiguous for the actor ("Valencia" ran as València d'Àneu, Lleida); the actor's
+            # coordinates outrank ``location``, so a city whose centre is known goes as its centre + a 15 km circle.
+            # The rows are still kept only for the city's municipality (``_place_ok``). No centre: the name, as before.
+            if self.unambiguous_place and task.place_level == "city" and not run_id:
+                try:
+                    center = await self._center(task)
+                except PermanentApifyError:  # no geocoder, or the place is not known to it
+                    center = None
+            if center is not None:
+                actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
+                                "distanceKm": self._CITY_RADIUS_KM}
+            else:
+                actor_input["location"] = task.location.strip()[:120]
         filters = {"minPrice": _floor(_whole(constraints.get("min_price")), _IDEALISTA_PRICES),
                    "maxPrice": _ceil(_whole(constraints.get("max_price")), _IDEALISTA_PRICES),
                    "minSize": _floor(min_area, _IDEALISTA_SIZES)}
         actor_input |= {key: value for key, value in filters.items() if value}
         return self.actor_id, actor_input, center
+
+    def _wrong_place(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> bool:
+        if not self.unambiguous_place or not isinstance(item, dict):
+            return False
+        return self._place_wrong(task, center, _point(item.get("latitude"), item.get("longitude")),
+                                 _text(item.get("municipality")), _text(item.get("province")))
 
     def _normalize(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> SourceListing | None:
         if not isinstance(item, dict):
