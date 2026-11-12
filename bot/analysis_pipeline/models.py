@@ -42,6 +42,9 @@ class AnalysisResult(BaseModel):
     # Q4 (ANALYSIS_LOCATION_FROM_TEXT): never the model's -- set by source_place.apply on a strong conflict between
     # the JSON-LD place and the text: the area the text names (e.g. «Andalucía»). Not in the model's schema.
     source_place_conflict: str | None = Field(default=None, max_length=40)
+    # Q13 (ANALYSIS_AREA_TEXT_CHECK): never the model's -- set by area_check.apply when the JSON-LD area and the text's
+    # areas are more than twice apart: why ``area_m2`` is None. Not in the model's schema.
+    area_unconfirmed: str | None = Field(default=None, max_length=120)
 
 
 class Evidence(BaseModel):

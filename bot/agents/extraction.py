@@ -82,7 +82,8 @@ def user_prompt(task: dict[str, Any], post: RawPost, *, notes: str = "") -> str:
 
 def parse_extraction(content: str) -> dict[str, Any]:
     """The analysis-v4 payload (normalised by ``parse_result``) plus the reduction fields, leniently."""
-    base = parse_result(content).model_dump()
+    # source_place_conflict / area_unconfirmed are never the model's (Q4, Q13): not in the stored reduction.
+    base = parse_result(content).model_dump(exclude={"source_place_conflict", "area_unconfirmed"})
     data = json.loads(_FENCE.sub("", content))
     flags = data.get("red_flags")
     base["red_flags"] = [str(f)[:120] for f in (flags if isinstance(flags, list) else [])
