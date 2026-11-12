@@ -137,6 +137,16 @@
         "press": "task:launch",
         "weight": 8
       }
+    ],
+    "near": [
+      {
+        "press": "Одобрить",
+        "weight": 1
+      },
+      {
+        "press": "Нет",
+        "weight": 3
+      }
     ]
   },
   "truth": {

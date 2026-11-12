@@ -25,6 +25,10 @@ KINDS = {"buyer_home": "objects", "buyer_land": "objects", "renter": "objects", 
          "agent_buyers": "leads", "post_link": "leads", "both": "both"}
 OBJECT_VERDICTS = ("exact", "similar", "miss", "junk")
 LEAD_VERDICTS = ("reasonable", "doubtful", "miss")
+# The cards sent after the user's «Одобрить» on «Показать?» (``result.json`` → ``offers``), counted apart too
+# (``SIM_RUBRIC.md`` §5): ``approved_<verdict>`` of ``approved_sent``, the rest of them exact; ``near_yes`` — how many
+# «Одобрить» were pressed (none: no approved card). A line without them: 0.
+APPROVED_VERDICTS = ("similar", "miss", "junk")
 
 
 @dataclass
@@ -74,6 +78,33 @@ def _check_part(line: dict[str, Any], where: str, sent_key: str, keys: dict[str,
             raise ValueError(f"{where}: the verdicts of {listed_key} {listed} != the counts {counts}")
 
 
+def _approved(line: dict[str, Any], key: str, where: str) -> int:
+    return _int(line, key, where) if key in line else 0
+
+
+def _check_approved(line: dict[str, Any], where: str) -> None:
+    """The approved cards are some of the sent ones, and their verdicts some of the line's."""
+    sent = _approved(line, "approved_sent", where)
+    counts = {verdict: _approved(line, f"approved_{verdict}", where) for verdict in APPROVED_VERDICTS}
+    near_yes = _approved(line, "near_yes", where)  # the «Одобрить» presses of ``offers``
+    if near_yes == 0 and sent:
+        raise ValueError(f"{where}: approved_sent {sent} but near_yes 0 (no «Одобрить» in offers)")
+    if sent > line["cards_sent"]:
+        raise ValueError(f"{where}: approved_sent {sent} > cards_sent {line['cards_sent']}")
+    if sum(counts.values()) > sent:
+        raise ValueError(f"{where}: approved_similar+approved_miss+approved_junk = {sum(counts.values())} > "
+                         f"approved_sent {sent}")
+    for verdict, count in {**counts, "exact": sent - sum(counts.values())}.items():
+        if count > line[verdict]:
+            raise ValueError(f"{where}: approved {verdict} {count} > {verdict} {line[verdict]}")
+    if "cards" in line:
+        approved = [c for c in line["cards"] if c.get("approved") is True]
+        listed = {verdict: sum(1 for c in approved if c.get("verdict") == verdict) for verdict in APPROVED_VERDICTS}
+        if len(approved) != sent or listed != counts:
+            raise ValueError(f"{where}: {len(approved)} cards listed as approved {listed} != approved_sent {sent} "
+                             f"{counts}")
+
+
 def check_numbers(line: dict[str, Any], where: str) -> None:
     """The judge's numbers must add up (``SIM_RUBRIC.md`` §6); a run that is not ``done`` has none to check."""
     if line.get("status") != "done":
@@ -82,6 +113,7 @@ def check_numbers(line: dict[str, Any], where: str) -> None:
     if kind in ("objects", "both"):
         _check_part(line, where, "cards_sent", {v: v for v in OBJECT_VERDICTS}, "exact", "exact_available", "cards",
                     "available_refs")
+        _check_approved(line, where)
     if kind in ("leads", "both"):
         _check_part(line, where, "leads_sent", {v: f"leads_{v}" for v in LEAD_VERDICTS}, "reasonable",
                     "reasonable_available", "leads", "reasonable_refs")
@@ -103,7 +135,13 @@ def _objects(line: dict[str, Any], why: list[str]) -> float | None:
     if junk_hosts:  # the owner's gate: 0 junk sites, whatever the cards (objects and both; leads: diagnosis only)
         why.append(f"junk hosts: {', '.join(map(str, junk_hosts))}")
         return 0.0
-    return _share(line["exact"], line["cards_sent"], line["exact_available"], why, "cards")
+    return _share(line["exact"], _judged(line), line["exact_available"], why, "cards")
+
+
+def _judged(line: dict[str, Any]) -> int:
+    """The cards in the denominator: all sent but the approved ones that are really similar (the user asked for
+    them); an approved miss or junk stays."""
+    return line["cards_sent"] - line.get("approved_similar", 0)
 
 
 def _leads(line: dict[str, Any], why: list[str]) -> float | None:
@@ -133,8 +171,8 @@ def run_score(line: dict[str, Any]) -> RunScore:
         else:
             score = (objects + leads) / 2
     review = []
-    if kind in ("objects", "both") and line["cards_sent"] < MIN_CARDS and line["exact_available"] == line["exact"]:
-        review.append(f"{line['cards_sent']} cards sent and exact_available = exact = {line['exact']}")
+    if kind in ("objects", "both") and _judged(line) < MIN_CARDS and line["exact_available"] == line["exact"]:
+        review.append(f"{_judged(line)} cards sent and exact_available = exact = {line['exact']}")
     if kind in ("leads", "both") and line["leads_sent"] < MIN_CARDS and (
             line["reasonable_available"] == line["leads_reasonable"]):
         review.append(f"{line['leads_sent']} leads sent and reasonable_available = reasonable = "

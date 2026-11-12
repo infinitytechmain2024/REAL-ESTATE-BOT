@@ -99,6 +99,13 @@ def _phone(value: Any) -> str | None:
     return text[:40] if 6 <= digits <= 15 else None
 
 
+def _reference(value: Any) -> str | None:
+    """The agency's reference of the ad as the portal lists it (a string or a whole number), at most 80 characters."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = str(value)
+    return _text(value)[:80] or None
+
+
 # PORTAL_FACTS_FROM_ROW (Q16). With the flag the facts line carries the portal's own type and deal, never the task's:
 # a value the row does not give leaves the field out. The words are the rows' (recorded output of the portal actors,
 # 2026-10/11): Habitaclia ``propertyType`` flat/house/land (+ ``propertySubtype`` groundfloor, terracedhouse,
@@ -154,6 +161,7 @@ class _PortalSource(ApifyListingSource):
 
     kinds: ClassVar[dict[str, str]] = {}  # task kind -> the actor's propertyType
     deals: ClassVar[dict[str, str]] = {"sale": "sale", "rent": "rent"}  # campaign deal -> the actor's operation
+    agency_ref = False  # DEDUP_DISTRICT_NOT_STREET (Q15): pass the row's agency reference on
 
     def __init__(self, token: str, *, facts_from_row: bool = False, description_full: bool = False,
                  **kwargs: Any) -> None:
@@ -200,7 +208,8 @@ class _PortalSource(ApifyListingSource):
     def _listing(self, task: QueryTask, *, url: str, title: str, price: Any, area: Any, rooms: Any,
                  address: list[str], description: str, phone: Any, advertiser: Any,
                  property_type: str | None, place_unverified: bool = False,
-                 row_type: str | None = None, row_deal: str | None = None) -> SourceListing:
+                 row_type: str | None = None, row_deal: str | None = None, reference: Any = None
+                 ) -> SourceListing:
         """``property_type`` and the deal are the task's; with ``facts_from_row`` (Q16) ``row_type``/``row_deal``,
         the row's own (None: not in the row), are written instead, and an auction named in the row is marked."""
         auction = self.facts_from_row and auction_named(title, description)
@@ -222,6 +231,7 @@ class _PortalSource(ApifyListingSource):
             description=description, plot_m2=plot_area(reported, description) if land else None,
             phone=_phone(phone), advertiser=_text(advertiser)[:200] or None,
             place_unverified=True if place_unverified else None, auction=True if auction else None,
+            agency_ref=_reference(reference) if self.agency_ref else None,
         )
 
 
@@ -267,9 +277,10 @@ class ApifyFotocasaSource(_PortalSource):
     _TITLES: ClassVar[dict[str, str]] = {"land": "Terreno", "house": "Vivienda", "apartment": "Vivienda", "commercial": "Local"}
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/fotocasa-scraper",
-                 default_point_guard: bool = False, **kwargs: Any) -> None:
+                 default_point_guard: bool = False, agency_ref: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.default_point_guard = default_point_guard  # PORTAL_DEFAULT_POINT_GUARD (Q12)
+        self.agency_ref = agency_ref  # DEDUP_DISTRICT_NOT_STREET (Q15)
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
@@ -318,7 +329,8 @@ class ApifyFotocasaSource(_PortalSource):
             address=[_text(item.get("street")), *place],
             description=description, phone=item.get("phone"), advertiser=agency.get("name"),
             property_type=self._TYPES.get(kind), place_unverified=unverified,
-            row_type=_FOTOCASA_TYPES.get(_code(item.get("propertyType"))), row_deal=_row_deal(transaction.get("type")))
+            row_type=_FOTOCASA_TYPES.get(_code(item.get("propertyType"))), row_deal=_row_deal(transaction.get("type")),
+            reference=item.get("agencyReference"))
 
 
 _YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,
@@ -768,8 +780,10 @@ class ApifyHabitacliaSource(_SchemaPortal):
     name = "apify_habitaclia"
     hosts = frozenset({"habitaclia.com"})
 
-    def __init__(self, token: str, *, actor_id: str = "trev0n/habitaclia-com-spain-scraper", **kwargs: Any) -> None:
+    def __init__(self, token: str, *, actor_id: str = "trev0n/habitaclia-com-spain-scraper", agency_ref: bool = False,
+                 **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
+        self.agency_ref = agency_ref  # DEDUP_DISTRICT_NOT_STREET (Q15)
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
@@ -797,7 +811,8 @@ class ApifyHabitacliaSource(_SchemaPortal):
             description=_text(row.get("description")) or _text(row.get("shortDescription")), phone=None,
             advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)),
             row_type=_row_type(row.get("propertyType"), row.get("propertySubtype"), land=task_kind(task) == "land"),
-            row_deal=_row_deal(row.get("transactionType")))
+            row_deal=_row_deal(row.get("transactionType")),
+            reference=row.get("agencyRef"))
 
 
 class ApifyMilanunciosSource(_SchemaPortal):
