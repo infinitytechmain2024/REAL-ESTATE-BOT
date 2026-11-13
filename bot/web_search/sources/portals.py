@@ -518,8 +518,12 @@ class _DistrictCircle(_CityCircle):
         return tuple(self), self.radius_km, self.district  # type: ignore[return-value]
 
 
-# Q26: words of district names that name no place of their own («Ciudad Lineal» is not «Ciudad Universitaria»).
-_DISTRICT_WORD_STOP = frozenset({"barrio", "distrito", "ciudad", "casco", "zona"})
+# Q26: words of district names that name no place of their own («Ciudad Lineal» is not «Ciudad Universitaria»,
+# «Sant Andreu» is not «Sant Martí»). They never make a match, and two different ones tell two districts apart
+# («Puente de Vallecas» is not «Villa de Vallecas»; ``_district_ok``).
+_DISTRICT_WORD_STOP = frozenset({"barrio", "distrito", "ciudad", "casco", "zona", "san", "sant", "santa", "santo",
+                                 "vila", "villa", "ciutat", "nou", "nova", "nueva", "nuevo", "puente", "pont", "alto",
+                                 "bajo"})
 
 
 def _district_words(value: Any) -> str:
@@ -531,15 +535,20 @@ def _district_words(value: Any) -> str:
 def _district_ok(district: str, *fields: Any) -> bool:
     """The row's own district / neighbourhood names the task's district: they share a word longer than 3 letters
     (not ``_DISTRICT_WORD_STOP``; «Fuencarral-El Pardo» and «Fuencarral», «L'Eixample» and «Eixample»), or one name
-    begins the other at a word's end («Sol» begins «Sol - Centro», not «Solana»). Folded, hyphens normalised
+    begins the other at a word's end («Sol» begins «Sol - Centro», not «Solana»). A shared word does not count when
+    both names carry ``_DISTRICT_WORD_STOP`` words and neither name's set holds the other's («Puente de Vallecas» and
+    «Villa de Vallecas»; «Villa de Vallecas» and «Vallecas» still match). Folded, hyphens normalised
     (``_district_words``). A row that gives no such field is kept: only the city filter applies to it."""
     named = [value for value in map(_district_words, fields) if value]
     wanted = _district_words(district)
     if not named or not wanted:
         return True
     words = {w for w in wanted.split() if len(w) > 3 and w not in _DISTRICT_WORD_STOP}
+    marks = set(wanted.split()) & _DISTRICT_WORD_STOP
     for value in named:
-        if words & {w for w in value.split() if w not in _DISTRICT_WORD_STOP}:
+        other = set(value.split()) & _DISTRICT_WORD_STOP
+        apart = bool(marks and other) and not (marks <= other or other <= marks)
+        if not apart and words & (set(value.split()) - _DISTRICT_WORD_STOP):
             return True
         short, long = sorted((wanted, value), key=len)
         if long == short or long.startswith(short + " "):

@@ -182,6 +182,14 @@ def test_official_name_matches_the_idealista_name(official, portal):
     assert _district_ok(official, portal, "")
 
 
+@pytest.mark.parametrize(("district", "portal", "ok"), [
+    ("Sant Andreu", "Sant Martí", False), ("Puente de Vallecas", "Villa de Vallecas", False),
+    ("Ciutat Vella", "Ciutat Meridiana", False), ("Nueva España", "Nueva España", True),
+    ("Villa de Vallecas", "Vallecas", True), ("Sant Andreu", "Sant Andreu - La Sagrera", True)])
+def test_stop_words_never_match_and_tell_districts_apart(district, portal, ok):
+    assert _district_ok(district, portal, None) is ok
+
+
 @pytest.mark.parametrize(("official", "portal"), [
     ("Moncloa-Aravaca", "Moncloa - Aravaca"), ("Moncloa - Aravaca", "Moncloa-Aravaca"),
     ("San Blas-Canillejas", "San Blas - Canillejas"), ("Moncloa–Aravaca", "Moncloa  -  Aravaca")])
