@@ -293,21 +293,23 @@ def test_a_press_found_by_meaning_is_logged_and_an_unclear_one_is_left_pending(t
 
 
 @pytest.mark.parametrize("name", [p.stem for p in FILES if "deviation" in load(p)["replies"]])
-def test_every_persona_presses_a_deviation_button_by_its_data(name: str) -> None:
+def test_every_persona_answers_the_deviation_question_without_a_human(name: str) -> None:
+    """«Только точные» is the bot's button (``task:dev:0``); «±10 %» is the user's own words, read by the bot as a
+    tolerance on the budget and the area (no AI button means it on everything, so it is never a press)."""
+    from bot.campaign.spec import TaskSpec
+    from bot.control_plane.rules import read_deviations
+
     replies = load(PERSONAS / f"{name}.json")["replies"]["deviation"]
-    presses = [o for o in replies if "press" in o]
-    assert {o["press"] for o in presses} == {"task:dev:0", "task:dev:10"}
-    question = {"question": DEVIATION_Q, "buttons": buttons_of(AI_DEVIATION)}
-    picks = {answer_user.choose({"replies": {"deviation": presses}}, question, seed, name).answer is None
-             for seed in range(20)}
-    assert picks == {True, False}  # the AI's buttons: «только точные» is pressed, «±10 %» is left for a human
-    for seed in range(20):
-        pick = answer_user.choose({"replies": {"deviation": presses}}, question, seed, name)
-        assert pick.answer in (None, {"press": "нет, только точные"})
-        assert pick.answer is not None or "a human decides" in pick.reason
-    on_all = {"question": DEVIATION_Q, "buttons": buttons_of(ALL_ROUND)}  # a button «on everything»: both pressed
-    assert {answer_user.choose({"replies": {"deviation": presses}}, on_all, seed, name).answer["press"]
-            for seed in range(40)} == {"нет, только точные", "10 % по бюджету и площади"}
+    assert [o["press"] for o in replies if "press" in o] == ["task:dev:0"]
+    [tolerance] = [o for o in replies if "±10 %" in o.get("text", "")]
+    assert tolerance["weight"] == 2 and not tolerance.get("tag")
+    deviations = read_deviations(TaskSpec(), tolerance["text"]).deviations
+    assert (deviations.budget_pct, deviations.area_pct) == (10, 10)
+    for buttons in (AI_DEVIATION, RULE_DEVIATION):
+        question = {"question": DEVIATION_Q, "buttons": buttons_of(buttons)}
+        answers = {json.dumps(answer_user.choose({"replies": {"deviation": replies}}, question, seed, name).answer,
+                              ensure_ascii=False) for seed in range(60)}
+        assert "null" not in answers and len(answers) == 3  # «только точные», «±10 %» and «на ваше усмотрение»
 
 
 def test_the_card_and_what_is_left_pending(tmp_path: Path) -> None:
