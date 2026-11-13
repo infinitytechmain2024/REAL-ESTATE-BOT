@@ -46,7 +46,8 @@ only). The agency's own reference of the ad (``agency_ref``: «agencyReference»
 in the post's «JSON-LD» line) is strong when it has letters and digits or at least 5 digits (no year, no word): across
 two sites the same strong reference on both sides with the price, area, rooms and city matching is the same object
 (never for a new development); two different references are two objects when a street is missing or the advertiser is
-the same (one agency, two flats in neighbouring districts at one price).
+the same (one agency, two flats in neighbouring districts at one price), but never for two agencies named on both
+sides without a shared phone (Q25: each agency numbers its ads, one plot listed by two agencies has two references).
 
 Without an address (``same_object(..., without_address=True)``, ``DEDUP_WITHOUT_ADDRESS``; at least one side has no
 street address, so the rules above never merge two ads of one portal): only plots of land for sale, one plot listed
@@ -455,8 +456,10 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
     if district_not_street:
         street_a, street_b, place_a, place_b = (t - _DISTRICT_STOP for t in (street_a, street_b, place_a, place_b))
         both_streets = _named_street(a) and _named_street(b)
-        if a.agency_ref and b.agency_ref and a.agency_ref != b.agency_ref and (
-                not both_streets or a.phones & b.phones or (a.agency and a.agency == b.agency)):
+        one_advertiser = bool(a.phones & b.phones or (a.agency and a.agency == b.agency))
+        other_advertisers = not one_advertiser and bool(a.agency and b.agency)  # Q25: two agencies, two numberings
+        if a.agency_ref and b.agency_ref and a.agency_ref != b.agency_ref and not other_advertisers and (
+                not both_streets or one_advertiser):
             return False  # another reference of the agency: another flat
     if both_addressed and not (street_a & street_b):
         if not district_not_street or both_streets:

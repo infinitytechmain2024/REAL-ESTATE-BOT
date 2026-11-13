@@ -291,6 +291,8 @@ class RunnerConfig:
     dedup_without_address: bool = False
     # A district in the address is no street; the agency reference counts (``same_object(district_not_street=True)``, Q15).
     dedup_district_not_street: bool = False
+    # The similar question names every distinct difference of the held listings, not only the closest one's (Q25).
+    offer_all_reasons: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -1046,6 +1048,10 @@ class CampaignRunner:
                     names.update(dict.fromkeys(offers.unknown_of(other.hold_reason)))
                 deviation = replace(deviation, unknown=tuple(names))
             text = offers.similar_question(deviation, exact_found=exact_found)
+            if self.config.offer_all_reasons:  # Q25: one «Одобрить» sends them all, so the question names them all
+                reasons = await self._reasons(campaign, request, deviation)
+                if len(reasons) > 1:
+                    text = offers.reasons_question(reasons, land=deviation.land, exact_found=exact_found)
         else:
             text = offers.OTHER_QUESTION
         try:
@@ -1057,6 +1063,17 @@ class CampaignRunner:
         await self.store.offer_sent(campaign.id, bucket, message_id)
         self._below_status.add(campaign.id)
         log.info("campaign.offer_asked", extra={"campaign_id": campaign.id, "bucket": bucket})
+
+    async def _reasons(self, campaign: Campaign, request: Request, closest: offers.Deviation) -> list[str]:
+        """Q25: the distinct differences of the held similar findings (the closest one's first), as the question names
+        them; a finding whose difference cannot be told is skipped."""
+        reasons = dict.fromkeys(offers.reasons_of(closest))
+        for other in await self.store.held_findings(campaign.id, "similar", 50, exclude_why=self._unoffered("similar")):
+            try:
+                reasons.update(dict.fromkeys(offers.reasons_of(await self._deviation(campaign, request, other))))
+            except Exception:  # noqa: BLE001 - the question still goes out with the differences known so far
+                continue
+        return list(reasons)
 
     async def _summary(self, campaign: Campaign) -> None:
         """«Итог поиска»: what each source gave, sent once to an owner's campaign when it completes or is cancelled.

@@ -129,6 +129,39 @@ def card_line(deviation: Deviation) -> str | None:
     return None
 
 
+MAX_REASONS = 5  # OFFER_ALL_REASONS (Q25): at most this many differences in the question, then «и ещё N»
+
+
+def reasons_of(deviation: Deviation) -> tuple[str, ...]:
+    """Q25: the short differences of one held listing for the question («чуть дороже», «не подтверждено: площадь»)."""
+    if deviation.kind == "price" and deviation.example and deviation.requested:
+        return ("чуть дороже",)
+    if deviation.kind == "area" and deviation.example and deviation.requested:
+        return ("меньшей площади",)
+    if deviation.kind == "area_unknown":
+        return ("площадь не указана",)
+    if deviation.kind == "unverified":
+        if deviation.unknown:
+            return tuple(f"не подтверждено: {name}" for name in deviation.unknown)
+        return ("не удалось проверить автоматически",)
+    if deviation.phrase and deviation.phrase.strip():
+        return (deviation.phrase.strip(),)
+    return ()
+
+
+def reasons_question(reasons: tuple[str, ...] | list[str], *, land: bool = False, exact_found: bool) -> str:
+    """Q25 (``OFFER_ALL_REASONS``): the similar question names every distinct difference of the held listings, at most
+    ``MAX_REASONS``, then «и ещё N»: «… есть варианты с отличиями: чуть дороже; участок занят и ещё 2. Показать?»"""
+    unique = list(dict.fromkeys(r for r in reasons if r))
+    listed = "; ".join(unique[:MAX_REASONS])
+    if len(unique) > MAX_REASONS:
+        listed += f" и ещё {len(unique) - MAX_REASONS}"
+    what = "участки" if land else "варианты"
+    if exact_found:
+        return f"Есть ещё похожие {what} с отличиями: {listed}. Показать?"
+    return f"По вашим критериям пока ничего не нашёл, но есть {what} с отличиями: {listed}. Показать?"
+
+
 OTHER_QUESTION = "Показать более далёкие варианты?"
 
 
