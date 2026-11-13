@@ -19,6 +19,7 @@ from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
 from bot.utils.listing_text import _AREA, _to_m2, areas, auction_named, number
+from bot.web_search.city_centers import static_city_area
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.apify import (
     ApifyListingSource,
@@ -577,7 +578,9 @@ class ApifyIdealistaPortalSource(_PortalSource):
     sent with ``location`` and also ``latitude``/``longitude`` + ``distanceKm`` from the municipality's size (the actor ranks coordinates above
     the name; "Valencia" by name ran as València d'Àneu, Lleida). Rows are still kept for the city's municipality only.
     An output whose every row is from another municipality/province (and, for a city sent with its circle, lies
-    farther than twice the radius, at most 40 km) ends the run as ``apify_wrong_place``.
+    farther than twice the radius, at most 40 km) ends the run as ``apify_wrong_place``. ``static_centers``
+    (``IDEALISTA_STATIC_CENTERS``, Q30): with no geocoder centre a city of ``bot/web_search/city_centers.py`` gets
+    the listed centre and box instead of the name alone.
 
     ``district_search`` (``PORTAL_DISTRICT_SEARCH``, Q26): a city task that names exactly one place in
     ``spec.place.districts`` which the cached geocoder finds as a district of that city (``resolve_district``) is
@@ -607,10 +610,12 @@ class ApifyIdealistaPortalSource(_PortalSource):
     _DISTRICT_RADIUS_RANGE = (1, 6)
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
-                 unambiguous_place: bool = False, district_search: bool = False, **kwargs: Any) -> None:
+                 unambiguous_place: bool = False, district_search: bool = False, static_centers: bool = False,
+                 **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
         self.unambiguous_place = unambiguous_place  # IDEALISTA_UNAMBIGUOUS_PLACE (Q17)
+        self.static_centers = static_centers  # IDEALISTA_STATIC_CENTERS (Q30)
         self.district_search = district_search  # PORTAL_DISTRICT_SEARCH (Q26)
 
     def _sort(self, min_area: int | None, max_area: int | None) -> str:
@@ -659,13 +664,18 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     async def _city_circle(self, task: QueryTask) -> _CityCircle | None:
         """The city's centre and circle (``_CITY_RADIUS_KM`` notes); None without a geocoder, an unknown place or a
-        geocoder failure (the name only is then sent)."""
+        geocoder failure (the name only is then sent). With ``static_centers`` (IDEALISTA_STATIC_CENTERS, Q30) a city
+        of ``bot/web_search/city_centers.py`` gets its listed centre and box in those cases; a geocoder answer wins."""
         try:
             found = await self._geocoder.resolve_area(task.location) if self._geocoder is not None else None
             center, box = found if found is not None else (None, None)
             point = _point(*center) if center is not None else None
         except Exception:  # noqa: BLE001 - a geocoder failure never stops the run: the name alone, as before
-            return None
+            point, box = None, None
+        if point is None and self.static_centers:
+            listed = static_city_area(task.location)
+            if listed is not None:
+                point, box = _point(*listed[0]), listed[1]
         if point is None:
             return None
         radius: float = self._CITY_RADIUS_KM

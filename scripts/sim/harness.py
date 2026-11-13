@@ -69,6 +69,7 @@ BASE_ENV: dict[str, str] = {
     "DEDUP_WITHOUT_ADDRESS": "true",
     "IDEALISTA_SORT_BIGGEST": "true",
     "IDEALISTA_UNAMBIGUOUS_PLACE": "true",  # Q17; REDIS_URL is empty here: no geocoder, so the input stays the name
+    "IDEALISTA_STATIC_CENTERS": "true",  # Q30: ...except for a city of the static list (its centre and circle)
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",
     "ANALYSIS_LOCATION_FROM_TEXT": "true",

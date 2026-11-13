@@ -64,6 +64,9 @@ class WebSearchSettings(BaseSettings):
     # Q17, igolaizola only: a city task goes as its name plus its geocoded centre and a circle of the municipality's
     # size (the name "Valencia" ran as València d'Àneu, Lleida); an output wholly from elsewhere is ``apify_wrong_place``.
     idealista_unambiguous_place: bool = Field(default=False, validation_alias="IDEALISTA_UNAMBIGUOUS_PLACE")
+    # Q30, with Q17 only: a city of the static list (bot/web_search/city_centers.py) gets its listed centre and box
+    # when the cached geocoder is absent or gives none (no Redis, Nominatim down); a geocoder answer still wins.
+    idealista_static_centers: bool = Field(default=False, validation_alias="IDEALISTA_STATIC_CENTERS")
     # Q26, igolaizola only (the one portal with a confirmed way): a city task naming one district of the city
     # (``spec.place.districts``, found by the cached geocoder) goes with the district's centre and a circle from its box (1-6 km, else 2),
     # rows are kept for that district when they name one. Fotocasa and Habitaclia: no confirmed district input, unchanged.
@@ -264,6 +267,7 @@ class WebSearchSettings(BaseSettings):
                                                     description_full=self.portal_description_full,
                                                     rental_term=self.portal_rental_term,
                                                     unambiguous_place=self.idealista_unambiguous_place,
+                                                    static_centers=self.idealista_static_centers,
                                                     district_search=self.portal_district_search,
                                                     geocoder=geocoder()))
         elif self.apify_idealista_enabled:
