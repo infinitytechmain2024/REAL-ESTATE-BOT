@@ -500,6 +500,30 @@ class _CityCircle(tuple[float, float]):
         return tuple(self), self.radius_km  # type: ignore[return-value]
 
 
+class _DistrictCircle(_CityCircle):
+    """PORTAL_DISTRICT_SEARCH (Q26): a district's centre and circle sent to the actor; ``district`` is the name the
+    task gave, the rows are also kept for it (``_district_ok``)."""
+
+    district: str
+
+    def __new__(cls, center: tuple[float, float], radius_km: float = 2, district: str = "") -> _DistrictCircle:
+        circle = super().__new__(cls, center, radius_km)
+        circle.district = district
+        return circle
+
+    def __getnewargs__(self) -> tuple[tuple[float, float], float, str]:  # type: ignore[override]
+        return tuple(self), self.radius_km, self.district  # type: ignore[return-value]
+
+
+def _district_ok(district: str, *fields: Any) -> bool:
+    """The row's own district / neighbourhood names the task's district (folded, whole words: «Malasaña» is in
+    «Malasaña-Universidad»). A row that gives no such field is kept: only the city filter applies to it."""
+    named = [" ".join(_fold(_text(value)).split()) for value in fields]
+    named = [value for value in named if value]
+    wanted = " ".join(_fold(district).split())
+    return not named or any(re.search(rf"(?<!\w){re.escape(wanted)}(?!\w)", value) for value in named)
+
+
 class ApifyIdealistaPortalSource(_PortalSource):
     """Idealista through ``igolaizola/idealista-scraper`` (``APIFY_IDEALISTA_PROVIDER=igolaizola``), any city or
     province by name; rows follow the output schema the Store infers from its recent runs (``url``, ``operation``,
@@ -521,7 +545,15 @@ class ApifyIdealistaPortalSource(_PortalSource):
     sent with ``location`` and also ``latitude``/``longitude`` + ``distanceKm`` from the municipality's size (the actor ranks coordinates above
     the name; "Valencia" by name ran as València d'Àneu, Lleida). Rows are still kept for the city's municipality only.
     An output whose every row is from another municipality/province (and, for a city sent with its circle, lies
-    farther than twice the radius, at most 40 km) ends the run as ``apify_wrong_place``."""
+    farther than twice the radius, at most 40 km) ends the run as ``apify_wrong_place``.
+
+    ``district_search`` (``PORTAL_DISTRICT_SEARCH``, Q26): a city task that names exactly one place in
+    ``spec.place.districts`` which the cached geocoder finds as a district of that city (``resolve_district``) is
+    sent with ``location`` (the city) and the district's centre + ``distanceKm=2`` instead of the city's circle. The
+    schema's ``location`` takes a city name or a Location ID; that it takes a district name is not a known fact, and
+    the district's Location ID is not known here, so neither is sent. Rows are kept for the city and, when the row
+    gives ``district``/``neighborhood``, for the district only. Not a district of the city (a town, an unknown name),
+    several places or no geocoder: the input is as without the flag."""
 
     name = "apify_idealista"
     hosts = frozenset({"idealista.com"})
@@ -536,12 +568,15 @@ class ApifyIdealistaPortalSource(_PortalSource):
     _CITY_RADIUS_KM = 15
     _CITY_RADIUS_RANGE = (3, 30)
     _NEIGHBOUR_KM = 40
+    # PORTAL_DISTRICT_SEARCH (Q26): the circle around a district's centre (Madrid's Centro is about 2.5 x 2 km).
+    _DISTRICT_RADIUS_KM = 2
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
-                 unambiguous_place: bool = False, **kwargs: Any) -> None:
+                 unambiguous_place: bool = False, district_search: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
         self.unambiguous_place = unambiguous_place  # IDEALISTA_UNAMBIGUOUS_PLACE (Q17)
+        self.district_search = district_search  # PORTAL_DISTRICT_SEARCH (Q26)
 
     def _sort(self, min_area: int | None, max_area: int | None) -> str:
         """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
@@ -570,7 +605,9 @@ class ApifyIdealistaPortalSource(_PortalSource):
             # coordinates above ``location``. The rows are still kept only for the city's municipality (``_place_ok``). No centre: the
             # name alone, as before. A resumed run sends nothing; its centre is looked up again for ``_wrong_place``.
             actor_input["location"] = task.location.strip()[:120]
-            if self.unambiguous_place and task.place_level == "city":
+            if self.district_search:  # Q26: the district's centre comes before the city's circle
+                center = await self._district_circle(task)
+            if center is None and self.unambiguous_place and task.place_level == "city":
                 center = await self._city_circle(task)
             if center is not None and not run_id:
                 actor_input |= {"latitude": round(center[0], 6), "longitude": round(center[1], 6),
@@ -602,6 +639,19 @@ class ApifyIdealistaPortalSource(_PortalSource):
             low, high = self._CITY_RADIUS_RANGE
             radius = max(low, min(high, _distance_km((south, west), (north, east)) / 2))
         return _CityCircle(point, radius)
+
+    async def _district_circle(self, task: QueryTask) -> _DistrictCircle | None:
+        """Q26: the centre of the one district the task names, when the geocoder finds it as a district of the city;
+        None otherwise (several places, a town, no geocoder or a geocoder failure: the input stays as before)."""
+        if task.place_level != "city" or len(task.nearby_places) != 1 or self._geocoder is None:
+            return None
+        district = task.nearby_places[0]
+        try:
+            found = await self._geocoder.resolve_district(district, task.location)
+            point = _point(*found) if found is not None else None
+        except Exception:  # noqa: BLE001 - a geocoder failure never stops the run: the input stays as before
+            return None
+        return _DistrictCircle(point, self._DISTRICT_RADIUS_KM, district) if point is not None else None
 
     def _wrong_place(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> bool:
         """A row of another place. For a city sent with its circle a row whose point is near the circle (twice its
@@ -636,6 +686,9 @@ class ApifyIdealistaPortalSource(_PortalSource):
         if not self._place_ok(task, center, _point(item.get("latitude"), item.get("longitude")),
                               municipality, province):
             return None
+        if isinstance(center, _DistrictCircle) and not _district_ok(center.district, item.get("district"),
+                                                                     item.get("neighborhood")):
+            return None  # Q26: the district went to the actor, the row names another one
         contact = item.get("contactInfo") if isinstance(item.get("contactInfo"), dict) else {}
         phone = contact.get("phone1") if isinstance(contact.get("phone1"), dict) else {}
         texts = item.get("suggestedTexts") if isinstance(item.get("suggestedTexts"), dict) else {}

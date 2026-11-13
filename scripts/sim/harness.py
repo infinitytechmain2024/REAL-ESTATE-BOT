@@ -82,6 +82,7 @@ BASE_ENV: dict[str, str] = {
     "ANALYSIS_AREA_TEXT_CHECK": "false",  # Q13: off until area_check review blockers (N4, N5) are fixed
     "DEDUP_DISTRICT_NOT_STREET": "true",  # Q15
     "OFFER_ALL_REASONS": "true",  # Q25
+    "PORTAL_DISTRICT_SEARCH": "true",  # Q26; REDIS_URL is empty here: no geocoder, so the input stays as before
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")

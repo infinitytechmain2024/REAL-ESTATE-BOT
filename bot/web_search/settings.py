@@ -64,6 +64,10 @@ class WebSearchSettings(BaseSettings):
     # Q17, igolaizola only: a city task goes as its name plus its geocoded centre and a circle of the municipality's
     # size (the name "Valencia" ran as València d'Àneu, Lleida); an output wholly from elsewhere is ``apify_wrong_place``.
     idealista_unambiguous_place: bool = Field(default=False, validation_alias="IDEALISTA_UNAMBIGUOUS_PLACE")
+    # Q26, igolaizola only (the one portal with a confirmed way): a city task naming one district of the city
+    # (``spec.place.districts``, found by the cached geocoder) goes with the district's centre and a 2 km circle,
+    # rows are kept for that district when they name one. Fotocasa and Habitaclia: no confirmed district input, unchanged.
+    portal_district_search: bool = Field(default=False, validation_alias="PORTAL_DISTRICT_SEARCH")
     # Portal actors on the same Apify token (bot/web_search/sources/portals.py), each off by default.
     apify_fotocasa_enabled: bool = Field(default=False, validation_alias="APIFY_FOTOCASA_ENABLED")
     apify_fotocasa_actor: str = Field(default="igolaizola/fotocasa-scraper", validation_alias="APIFY_FOTOCASA_ACTOR")
@@ -260,6 +264,7 @@ class WebSearchSettings(BaseSettings):
                                                     description_full=self.portal_description_full,
                                                     rental_term=self.portal_rental_term,
                                                     unambiguous_place=self.idealista_unambiguous_place,
+                                                    district_search=self.portal_district_search,
                                                     geocoder=geocoder()))
         elif self.apify_idealista_enabled:
             from .sources.apify import ApifyIdealistaSource
