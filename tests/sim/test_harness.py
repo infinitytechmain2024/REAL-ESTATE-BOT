@@ -383,6 +383,64 @@ async def test_a_card_launched_as_shown_leaves_the_next_answer_to_show_similar(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wanted", ["task:dev:0", "Только точные", "нет, только точные", "task:opt:3"])
+async def test_a_persona_press_goes_as_the_callback_of_the_button_it_means(tmp_path: Path, wanted: str) -> None:
+    """Q24: the AI interviewer labels the deviation buttons itself; the persona's data (or words) is sent as the
+    callback of that button, as the user's tap in Telegram."""
+    from bot.control_plane.models import Button, Reply
+
+    (tmp_path / "answers").mkdir()
+    (tmp_path / "answers" / "near.json").write_text(json.dumps({"answers": [{"press": wanted}]}, ensure_ascii=False),
+                                                     encoding="utf-8")
+    bench = _offer_bench(tmp_path)
+    interview = _Interview()
+
+    async def press(data: str) -> Reply:
+        if data != "task:launch":  # the deviation answered: the card
+            interview.said.append(f"[{data}]")
+            interview.step = "summary"
+            return Reply("Проверьте задачу:\nквартира в Мадриде")
+        return await interview.press(data)
+
+    question = Reply("Если точных вариантов не будет, что допустимо?",
+                     (Button("бюджет до +10 % (до 1320 €)", callback_data="task:opt:0"),
+                      Button("нет, только точные", callback_data="task:opt:3"),
+                      Button("Не важно", callback_data="task:skip")))
+    assert await bench._talk(interview, question, interview.text, press, press)
+    assert interview.said == ["[task:opt:3]", "[task:launch]"]
+
+
+def test_a_manual_meaning_press_goes_through_the_callback_or_is_the_runs_error(tmp_path: Path) -> None:
+    from bot.control_plane.models import Button, Reply
+    from scripts.sim import answer_user
+    from scripts.sim.harness import PressError, _callback
+
+    (tmp_path / "pending_answers").mkdir()
+    (tmp_path / "pending_answers" / "r.json").write_text(json.dumps({"index": 0, "question": "Что допустимо?"}),
+                                                          encoding="utf-8")
+    assert answer_user.main(["--run", "r", "--persona", str(_persona_file(tmp_path)), "--sim", str(tmp_path),
+                             "--manual-press", "task:dev:10"]) == answer_user.EXIT_ANSWERED
+    [answer] = json.loads((tmp_path / "answers" / "r.json").read_text(encoding="utf-8"))["answers"]
+    assert answer == {"press": "task:dev:10"}  # as typed; the harness finds its button
+    on_all = Reply("Что допустимо?", (Button("10 % по бюджету и площади", callback_data="task:opt:0"),
+                                       Button("нет, только точные", callback_data="task:opt:1")))
+    assert _callback(on_all, answer["press"]) == "task:opt:0"
+    for buttons in ((Button("бюджет до +10 %", callback_data="task:opt:0"),),  # one tolerance only
+                    (Button("±10 %", callback_data="task:opt:0"),
+                     Button("10 % по бюджету и площади", callback_data="task:opt:1"))):  # two mean it
+        with pytest.raises(PressError, match="task:dev:10"):
+            _callback(Reply("Что допустимо?", buttons), answer["press"])
+    assert _callback(Reply("?", (Button("не только точные", callback_data="task:opt:0"),
+                                 Button("только точные", callback_data="task:opt:1"))), "task:dev:0") == "task:opt:1"
+
+
+def _persona_file(root: Path) -> Path:
+    path = root / "p.json"
+    path.write_text(json.dumps({"name": "p", "replies": {}}), encoding="utf-8")
+    return path
+
+
+@pytest.mark.asyncio
 async def test_a_press_of_no_button_on_screen_is_the_runs_error(tmp_path: Path) -> None:
     from scripts.sim.harness import PressError
 

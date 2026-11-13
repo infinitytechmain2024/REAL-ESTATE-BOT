@@ -177,6 +177,14 @@ SKIP = (("Не важно", "task:skip"), ("Хватит, ищи", "task:enough"
     ("В якому місті шукати?", "place"),
     ("Яке місто?", "place"),
     ("Що обов'язково має бути? Наприклад: «балкон».", "must_have"),
+    # Q24: the runs' «обязательные требования / условия» (N1, G5) and the same on uk/es/en
+    ("Понял: Аренда на год или дольше\n\nЕсть ли обязательные требования к квартире: лифт, мебель, можно с "
+     "животными? Например: «лифт обязателен», «с мебелью», «с собакой».", "must_have"),
+    ("Понял: Аренда на год\n\nЕсть ли обязательные условия: животные, мебель, дата заезда? Например: «можно с "
+     "собакой», «с мебелью», «заезд с 1 декабря».", "must_have"),
+    ("Чи є обов'язкові вимоги до квартири: ліфт, меблі?", "must_have"),
+    ("¿Hay requisitos obligatorios: ascensor, amueblado, mascotas?", "must_have"),
+    ("Any mandatory requirements: a lift, furniture, pets allowed?", "must_have"),
 ])
 def test_the_slot_of_a_question(question: str, slot: str | None) -> None:
     assert answer_user.slot_of({"question": question}) == slot
@@ -229,6 +237,79 @@ def test_a_press_needs_its_button_and_a_repeat_gets_a_straight_answer(tmp_path: 
     pending(tmp_path, "r", "Не понял сумму. Какой бюджет?", index=1, buttons=SKIP)
     answer_user.answer_pending(tmp_path, "r", persona, 0)
     assert load(tmp_path / "answers" / "r.json")["answers"][1] == {"text": "до 3 млн €"}
+
+
+# the AI interviewer's deviation buttons from the runs (b2-n1-s3, b1-g5-s1)
+AI_DEVIATION = (("бюджет до +10 % (до 1320 €)", "task:opt:0"), ("соседние районы: Чамбери, Ретиро", "task:opt:1"),
+                ("1 комната вместо 2", "task:opt:2"), ("нет, только точные", "task:opt:3"), *SKIP)
+RULE_DEVIATION = (("±10 %", "task:dev:10"), ("±20 %", "task:dev:20"), ("Только точные", "task:dev:0"), *SKIP)
+DEVIATION_Q = "Если точных вариантов не будет, что допустимо? Например: бюджет до +10 % (до 1320 €), или только точные."
+
+
+ALL_ROUND = (("10 % по бюджету и площади", "task:opt:0"), ("нет, только точные", "task:opt:1"), *SKIP)
+TWO_TENS = (("бюджет до +10 %", "task:opt:0"), ("площадь до −10 %", "task:opt:1"), ("±10 %", "task:opt:2"),
+            ("10 % по бюджету и площади", "task:opt:3"), *SKIP)
+NEGATED = (("не только точные", "task:opt:0"), ("no solo exactos", "task:opt:1"), ("not only exact", "task:opt:2"),
+           ("только точные варианты", "task:opt:3"), *SKIP)
+
+
+def buttons_of(pairs: tuple) -> list[dict]:
+    return [{"text": t, "data": d} for t, d in pairs]
+
+
+@pytest.mark.parametrize(("press", "buttons", "label"), [
+    ("task:dev:0", RULE_DEVIATION, "task:dev:0"),  # on screen as it is: kept
+    ("task:dev:10", RULE_DEVIATION, "task:dev:10"),
+    ("task:dev:0", AI_DEVIATION, "нет, только точные"),  # the label, never the positional ``task:opt:3``
+    ("task:dev:10", AI_DEVIATION, None),  # «бюджет до +10 %» is one tolerance, not «±10 %» on everything
+    ("task:dev:10", ALL_ROUND, "10 % по бюджету и площади"),
+    ("task:dev:10", TWO_TENS, None),  # two buttons mean it: a human decides
+    ("task:dev:0", NEGATED, "только точные варианты"),  # «не только / no solo / not only» is no «только точные»
+    ("Только точные", AI_DEVIATION, "нет, только точные"),  # the words are in the label
+    ("Только точные", RULE_DEVIATION, "Только точные"),
+    ("task:dev:20", AI_DEVIATION, None),
+    ("Нет", AI_DEVIATION, None),  # «нет, только точные» is no «Нет»
+])
+def test_a_press_finds_its_button_by_data_or_meaning(press: str, buttons: tuple, label: str | None) -> None:
+    persona = {"replies": {"deviation": [{"press": press, "weight": 1}]}}
+    pick = answer_user.choose(persona, {"question": DEVIATION_Q, "buttons": buttons_of(buttons)}, 0, "r")
+    assert pick.slot == "deviation" and (pick.answer or {}).get("press") == label
+    if label is not None and label != press:
+        assert pick.log == {"press_as": press, "label": label}
+
+
+def test_a_press_found_by_meaning_is_logged_and_an_unclear_one_is_left_pending(tmp_path: Path) -> None:
+    persona = {"replies": {"deviation": [{"press": "task:dev:10", "weight": 1}]}}
+    path = pending(tmp_path, "r", DEVIATION_Q, buttons=AI_DEVIATION)
+    code, message = answer_user.answer_pending(tmp_path, "r", persona, 0)
+    assert code == answer_user.EXIT_DEFERRED and path.exists() and "task:dev:10" in message
+    assert not (tmp_path / "answers" / "r.json").exists()
+    pending(tmp_path, "r", DEVIATION_Q, buttons=ALL_ROUND)
+    assert answer_user.answer_pending(tmp_path, "r", persona, 0)[0] == answer_user.EXIT_ANSWERED
+    data = load(tmp_path / "answers" / "r.json")
+    assert data["answers"] == [{"press": "10 % по бюджету и площади"}]
+    assert data["log"][0] == {"index": 0, "slot": "deviation", "tag": None, "seed": 0,
+                                "press_as": "task:dev:10", "label": "10 % по бюджету и площади"}
+
+
+@pytest.mark.parametrize("name", [p.stem for p in FILES if "deviation" in load(p)["replies"]])
+def test_every_persona_answers_the_deviation_question_without_a_human(name: str) -> None:
+    """«Только точные» is the bot's button (``task:dev:0``); «±10 %» is the user's own words, read by the bot as a
+    tolerance on the budget and the area (no AI button means it on everything, so it is never a press)."""
+    from bot.campaign.spec import TaskSpec
+    from bot.control_plane.rules import read_deviations
+
+    replies = load(PERSONAS / f"{name}.json")["replies"]["deviation"]
+    assert [o["press"] for o in replies if "press" in o] == ["task:dev:0"]
+    [tolerance] = [o for o in replies if "±10 %" in o.get("text", "")]
+    assert tolerance["weight"] == 2 and not tolerance.get("tag")
+    deviations = read_deviations(TaskSpec(), tolerance["text"]).deviations
+    assert (deviations.budget_pct, deviations.area_pct) == (10, 10)
+    for buttons in (AI_DEVIATION, RULE_DEVIATION):
+        question = {"question": DEVIATION_Q, "buttons": buttons_of(buttons)}
+        answers = {json.dumps(answer_user.choose({"replies": {"deviation": replies}}, question, seed, name).answer,
+                              ensure_ascii=False) for seed in range(60)}
+        assert "null" not in answers and len(answers) == 3  # «только точные», «±10 %» and «на ваше усмотрение»
 
 
 def test_the_card_and_what_is_left_pending(tmp_path: Path) -> None:

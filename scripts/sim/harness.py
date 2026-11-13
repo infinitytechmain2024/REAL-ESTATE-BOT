@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import db
-from .answer_user import NEAR_PREFIX, keyboard_label
+from .answer_user import NEAR_PREFIX, find_button, keyboard_label
 from .cassette import _DATETIME, SimNet, SimStop, mark_now, normalize, offline
 
 log = logging.getLogger("scripts.sim")
@@ -928,11 +928,16 @@ def _has_button(reply: Any, wanted: str) -> bool:
 
 
 def _callback(reply: Any, wanted: str) -> str:
-    """A button by its text or its data (the agent-user may write either). A press of no button on screen is the
-    run's error (code 4), never a callback the user could not send."""
-    for button in getattr(reply, "buttons", ()):
+    """A button by its text or its data (the agent-user may write either), or by meaning. A press of no button on
+    screen is the run's error (code 4), never a callback the user could not send."""
+    buttons = getattr(reply, "buttons", ())
+    for button in buttons:
         if wanted in (button.text, button.callback_data):
             return button.callback_data or wanted
+    # a persona's data or words for a button the AI interviewer labelled itself (``answer_user.find_button``)
+    found = find_button([{"text": b.text, "data": b.callback_data} for b in buttons], wanted)
+    if found is not None:
+        return found["data"] or wanted
     raise PressError(f"the answer presses {wanted!r}: no such button under {getattr(reply, 'text', '')[:80]!r}")
 
 

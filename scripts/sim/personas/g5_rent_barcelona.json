@@ -129,11 +129,11 @@
     ],
     "deviation": [
       {
-        "press": "Только точные",
+        "press": "task:dev:0",
         "weight": 3
       },
       {
-        "press": "±10 %",
+        "text": "можно ±10 % по бюджету и площади",
         "weight": 2
       },
       {
@@ -187,6 +187,14 @@
           "from": "task",
           "period": "month",
           "note": "месячная цена; цена без валюты — не цена"
+        },
+        "rooms": {
+          "value": {
+            "min": 1,
+            "max": null
+          },
+          "from": "rooms",
+          "note": "спальни/habitaciones, «от 1 спальни»; студия = 0 (SIM_RUBRIC): студия — no, без числа — unknown"
         }
       },
       "soft": [
