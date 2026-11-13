@@ -246,33 +246,68 @@ RULE_DEVIATION = (("±10 %", "task:dev:10"), ("±20 %", "task:dev:20"), ("Тол
 DEVIATION_Q = "Если точных вариантов не будет, что допустимо? Например: бюджет до +10 % (до 1320 €), или только точные."
 
 
-@pytest.mark.parametrize(("press", "buttons", "data"), [
-    ("task:dev:0", RULE_DEVIATION, "task:dev:0"),
+ALL_ROUND = (("10 % по бюджету и площади", "task:opt:0"), ("нет, только точные", "task:opt:1"), *SKIP)
+TWO_TENS = (("бюджет до +10 %", "task:opt:0"), ("площадь до −10 %", "task:opt:1"), ("±10 %", "task:opt:2"),
+            ("10 % по бюджету и площади", "task:opt:3"), *SKIP)
+NEGATED = (("не только точные", "task:opt:0"), ("no solo exactos", "task:opt:1"), ("not only exact", "task:opt:2"),
+           ("только точные варианты", "task:opt:3"), *SKIP)
+
+
+def buttons_of(pairs: tuple) -> list[dict]:
+    return [{"text": t, "data": d} for t, d in pairs]
+
+
+@pytest.mark.parametrize(("press", "buttons", "label"), [
+    ("task:dev:0", RULE_DEVIATION, "task:dev:0"),  # on screen as it is: kept
     ("task:dev:10", RULE_DEVIATION, "task:dev:10"),
-    ("task:dev:0", AI_DEVIATION, "task:opt:3"),
-    ("task:dev:10", AI_DEVIATION, "task:opt:0"),
-    ("Только точные", AI_DEVIATION, "task:opt:3"),  # the words are in the label
-    ("Только точные", RULE_DEVIATION, "Только точные"),  # on screen as it is: kept
-    ("task:dev:20", AI_DEVIATION, None),  # nothing means it: not pressed
+    ("task:dev:0", AI_DEVIATION, "нет, только точные"),  # the label, never the positional ``task:opt:3``
+    ("task:dev:10", AI_DEVIATION, None),  # «бюджет до +10 %» is one tolerance, not «±10 %» on everything
+    ("task:dev:10", ALL_ROUND, "10 % по бюджету и площади"),
+    ("task:dev:10", TWO_TENS, None),  # two buttons mean it: a human decides
+    ("task:dev:0", NEGATED, "только точные варианты"),  # «не только / no solo / not only» is no «только точные»
+    ("Только точные", AI_DEVIATION, "нет, только точные"),  # the words are in the label
+    ("Только точные", RULE_DEVIATION, "Только точные"),
+    ("task:dev:20", AI_DEVIATION, None),
     ("Нет", AI_DEVIATION, None),  # «нет, только точные» is no «Нет»
 ])
-def test_a_press_finds_its_button_by_data_or_meaning(press: str, buttons: tuple, data: str | None) -> None:
+def test_a_press_finds_its_button_by_data_or_meaning(press: str, buttons: tuple, label: str | None) -> None:
     persona = {"replies": {"deviation": [{"press": press, "weight": 1}]}}
-    pick = answer_user.choose(persona, {"question": DEVIATION_Q,
-                                        "buttons": [{"text": t, "data": d} for t, d in buttons]}, 0, "r")
-    assert pick.slot == "deviation" and (pick.answer or {}).get("press") == data
+    pick = answer_user.choose(persona, {"question": DEVIATION_Q, "buttons": buttons_of(buttons)}, 0, "r")
+    assert pick.slot == "deviation" and (pick.answer or {}).get("press") == label
+    if label is not None and label != press:
+        assert pick.log == {"press_as": press, "label": label}
+
+
+def test_a_press_found_by_meaning_is_logged_and_an_unclear_one_is_left_pending(tmp_path: Path) -> None:
+    persona = {"replies": {"deviation": [{"press": "task:dev:10", "weight": 1}]}}
+    path = pending(tmp_path, "r", DEVIATION_Q, buttons=AI_DEVIATION)
+    code, message = answer_user.answer_pending(tmp_path, "r", persona, 0)
+    assert code == answer_user.EXIT_DEFERRED and path.exists() and "task:dev:10" in message
+    assert not (tmp_path / "answers" / "r.json").exists()
+    pending(tmp_path, "r", DEVIATION_Q, buttons=ALL_ROUND)
+    assert answer_user.answer_pending(tmp_path, "r", persona, 0)[0] == answer_user.EXIT_ANSWERED
+    data = load(tmp_path / "answers" / "r.json")
+    assert data["answers"] == [{"press": "10 % по бюджету и площади"}]
+    assert data["log"][0] == {"index": 0, "slot": "deviation", "tag": None, "seed": 0,
+                                "press_as": "task:dev:10", "label": "10 % по бюджету и площади"}
 
 
 @pytest.mark.parametrize("name", [p.stem for p in FILES if "deviation" in load(p)["replies"]])
 def test_every_persona_presses_a_deviation_button_by_its_data(name: str) -> None:
     replies = load(PERSONAS / f"{name}.json")["replies"]["deviation"]
-    presses = {o["press"] for o in replies if "press" in o}
-    assert presses == {"task:dev:0", "task:dev:10"}
-    for seed in range(20):  # on the AI interviewer's own buttons too: no press is dropped for «на ваше усмотрение»
-        pick = answer_user.choose({"replies": {"deviation": [o for o in replies if "press" in o]}},
-                                  {"question": DEVIATION_Q, "buttons": [{"text": t, "data": d}
-                                                                        for t, d in AI_DEVIATION]}, seed, name)
-        assert pick.answer and pick.answer["press"] in ("task:opt:0", "task:opt:3")
+    presses = [o for o in replies if "press" in o]
+    assert {o["press"] for o in presses} == {"task:dev:0", "task:dev:10"}
+    question = {"question": DEVIATION_Q, "buttons": buttons_of(AI_DEVIATION)}
+    picks = {answer_user.choose({"replies": {"deviation": presses}}, question, seed, name).answer is None
+             for seed in range(20)}
+    assert picks == {True, False}  # the AI's buttons: «только точные» is pressed, «±10 %» is left for a human
+    for seed in range(20):
+        pick = answer_user.choose({"replies": {"deviation": presses}}, question, seed, name)
+        assert pick.answer in (None, {"press": "нет, только точные"})
+        assert pick.answer is not None or "a human decides" in pick.reason
+    on_all = {"question": DEVIATION_Q, "buttons": buttons_of(ALL_ROUND)}  # a button «on everything»: both pressed
+    assert {answer_user.choose({"replies": {"deviation": presses}}, on_all, seed, name).answer["press"]
+            for seed in range(40)} == {"нет, только точные", "10 % по бюджету и площади"}
 
 
 def test_the_card_and_what_is_left_pending(tmp_path: Path) -> None:
