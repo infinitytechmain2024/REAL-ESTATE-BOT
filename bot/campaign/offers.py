@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     import asyncpg
 
 OfferBucket = Literal["similar", "other"]
@@ -57,6 +59,7 @@ class Deviation:
     phrase: str | None = None
     land: bool = False  # «участки» instead of «варианты»
     unknown: tuple[str, ...] = ()  # kind == unverified: the criteria that could not be confirmed («площадь», «район»)
+    value: float | None = None  # price / area: the listing's number behind ``example`` (Q25: the worst one is named)
 
 
 UNKNOWN_PREFIX = "Не подтверждено: "
@@ -132,34 +135,57 @@ def card_line(deviation: Deviation) -> str | None:
 MAX_REASONS = 5  # OFFER_ALL_REASONS (Q25): at most this many differences in the question, then «и ещё N»
 
 
-def reasons_of(deviation: Deviation) -> tuple[str, ...]:
-    """Q25: the short differences of one held listing for the question («чуть дороже», «не подтверждено: площадь»)."""
-    if deviation.kind == "price" and deviation.example and deviation.requested:
-        return ("чуть дороже",)
-    if deviation.kind == "area" and deviation.example and deviation.requested:
-        return ("меньшей площади",)
-    if deviation.kind == "area_unknown":
-        return ("площадь не указана",)
-    if deviation.kind == "unverified":
-        if deviation.unknown:
-            return tuple(f"не подтверждено: {name}" for name in deviation.unknown)
-        return ("не удалось проверить автоматически",)
-    if deviation.phrase and deviation.phrase.strip():
-        return (deviation.phrase.strip(),)
-    return ()
+def reasons_of(deviations: Iterable[Deviation]) -> list[str]:
+    """Q25: the distinct short differences of the held listings, the substantial ones first (the AI's phrase such as
+    «участок занят», «дороже (до ~X)» and «меньше площадь (от ~Y)» by the worst value, «другой вид сделки: …»), then
+    every unconfirmed criterion in one reason «не подтверждено: a, b, c»."""
+    phrases: dict[str, None] = {}
+    kinds: dict[str, None] = {}
+    unknown: dict[str, None] = {}
+    dearest: Deviation | None = None
+    smallest: Deviation | None = None
+    unchecked = False
+    for d in deviations:
+        if d.kind == "price" and d.example:
+            if dearest is None or (d.value or 0) > (dearest.value or 0):
+                dearest = d
+        elif d.kind == "area" and d.example:
+            if smallest is None or (d.value is not None and (smallest.value is None or d.value < smallest.value)):
+                smallest = d
+        elif d.kind == "area_unknown":
+            unknown["площадь"] = None
+        elif d.kind == "unverified":
+            unknown.update(dict.fromkeys(d.unknown))
+            unchecked = unchecked or not d.unknown
+        elif d.kind == "deal_kind" and d.phrase and d.phrase.strip():
+            kinds[f"другой вид сделки: {d.phrase.strip()}"] = None
+        elif d.phrase and d.phrase.strip():
+            phrases[d.phrase.strip()] = None
+    reasons = list(phrases)
+    if dearest is not None:
+        reasons.append(f"дороже (до {dearest.example})")
+    if smallest is not None:
+        reasons.append(f"меньше площадь (от {smallest.example})")
+    reasons += list(kinds)
+    if unknown:
+        reasons.append(f"не подтверждено: {', '.join(unknown)}")
+    elif unchecked:
+        reasons.append("не удалось проверить автоматически")
+    return reasons
 
 
-def reasons_question(reasons: tuple[str, ...] | list[str], *, land: bool = False, exact_found: bool) -> str:
+def reasons_question(reasons: Iterable[str], *, land: bool = False, exact_found: bool) -> str:
     """Q25 (``OFFER_ALL_REASONS``): the similar question names every distinct difference of the held listings, at most
-    ``MAX_REASONS``, then «и ещё N»: «… есть варианты с отличиями: чуть дороже; участок занят и ещё 2. Показать?»"""
+    ``MAX_REASONS``, then «и ещё N»: «… есть участки с отличиями — участок занят; дороже (до ~60 000 €) и ещё 2.
+    Показать?» (a dash: the reasons carry their own colons)."""
     unique = list(dict.fromkeys(r for r in reasons if r))
     listed = "; ".join(unique[:MAX_REASONS])
     if len(unique) > MAX_REASONS:
         listed += f" и ещё {len(unique) - MAX_REASONS}"
     what = "участки" if land else "варианты"
     if exact_found:
-        return f"Есть ещё похожие {what} с отличиями: {listed}. Показать?"
-    return f"По вашим критериям пока ничего не нашёл, но есть {what} с отличиями: {listed}. Показать?"
+        return f"Есть ещё похожие {what} с отличиями — {listed}. Показать?"
+    return f"По вашим критериям пока ничего не нашёл, но есть {what} с отличиями — {listed}. Показать?"
 
 
 OTHER_QUESTION = "Показать более далёкие варианты?"

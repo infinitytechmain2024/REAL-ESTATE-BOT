@@ -846,10 +846,10 @@ class CampaignRunner:
         price = price_of(closest.payload)
         if match.why == "price" and price is not None and request.amount is not None and price > request.amount:
             return offers.Deviation("price", money(price, request.currency), money(request.amount, request.currency),
-                                    land=land)
+                                    land=land, value=price)
         if match.why == "area" and match.area is not None and request.min_area:
             requested = f"от {round(request.min_area):,} м²".replace(",", " ")
-            return offers.Deviation("area", area_text(match.area), requested, land=land)
+            return offers.Deviation("area", area_text(match.area), requested, land=land, value=match.area)
         if match.why == "area_unknown":
             return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
         if match.why == "location_unknown":  # Q12: the portal's place is its fallback point
@@ -1049,7 +1049,11 @@ class CampaignRunner:
                 deviation = replace(deviation, unknown=tuple(names))
             text = offers.similar_question(deviation, exact_found=exact_found)
             if self.config.offer_all_reasons:  # Q25: one «Одобрить» sends them all, so the question names them all
-                reasons = await self._reasons(campaign, request, deviation)
+                try:
+                    reasons = await self._reasons(campaign, request, deviation)
+                except Exception:  # noqa: BLE001 - the question goes out with the closest one's difference
+                    log.warning("campaign.offer_reasons_failed", extra={"campaign_id": campaign.id})
+                    reasons = []
                 if len(reasons) > 1:
                     text = offers.reasons_question(reasons, land=deviation.land, exact_found=exact_found)
         else:
@@ -1067,13 +1071,13 @@ class CampaignRunner:
     async def _reasons(self, campaign: Campaign, request: Request, closest: offers.Deviation) -> list[str]:
         """Q25: the distinct differences of the held similar findings (the closest one's first), as the question names
         them; a finding whose difference cannot be told is skipped."""
-        reasons = dict.fromkeys(offers.reasons_of(closest))
+        deviations = [closest]
         for other in await self.store.held_findings(campaign.id, "similar", 50, exclude_why=self._unoffered("similar")):
             try:
-                reasons.update(dict.fromkeys(offers.reasons_of(await self._deviation(campaign, request, other))))
+                deviations.append(await self._deviation(campaign, request, other))
             except Exception:  # noqa: BLE001 - the question still goes out with the differences known so far
                 continue
-        return list(reasons)
+        return offers.reasons_of(deviations)
 
     async def _summary(self, campaign: Campaign) -> None:
         """«Итог поиска»: what each source gave, sent once to an owner's campaign when it completes or is cancelled.

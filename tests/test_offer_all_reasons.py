@@ -3,34 +3,48 @@ every distinct difference, not only the closest one's (synthetic plots and phras
 
 from __future__ import annotations
 
-from bot.campaign import offers
+from bot.campaign import MemoryCampaignStore, offers, plan_campaign
+from bot.campaign.offers import Deviation
 from bot.campaign.relevance import Relevance
-from bot.campaign.runner import RunnerConfig
+from bot.campaign.runner import CampaignRunner, RunnerConfig
+from bot.campaign.runs import MemoryRunStore
 from bot.campaign.settings import CampaignRunnerSettings
-from tests.test_campaign_relevance import FakeJudge, add, plot, setup
+from tests.test_campaign_relevance import CHAT, USER, FakeJudge, add, plot, setup
+from tests.test_near_match import ButtonMessenger
 
 PHRASES = ("лот из нескольких участков", "участок занят", "промышленная зона", "коммерческий участок",
            "лот из нескольких участков", "дальше от метро", "без подъезда")
+LEAD = "По вашим критериям пока ничего не нашёл, но есть участки с отличиями — "
 
 
 def test_reasons_question_lists_distinct_reasons_up_to_five() -> None:
-    assert offers.reasons_question(["чуть дороже", "участок занят", "чуть дороже"], land=True, exact_found=False) == (
-        "По вашим критериям пока ничего не нашёл, но есть участки с отличиями: чуть дороже; участок занят. Показать?")
+    assert offers.reasons_question(["участок занят", "дороже (до ~60 000 €)", "участок занят"], land=True,
+                                   exact_found=False) == f"{LEAD}участок занят; дороже (до ~60 000 €). Показать?"
     many = [f"отличие {i}" for i in range(7)]
     assert offers.reasons_question(many, exact_found=True) == (
-        "Есть ещё похожие варианты с отличиями: отличие 0; отличие 1; отличие 2; отличие 3; отличие 4 и ещё 2. "
+        "Есть ещё похожие варианты с отличиями — отличие 0; отличие 1; отличие 2; отличие 3; отличие 4 и ещё 2. "
         "Показать?")
 
 
-def test_reasons_of_each_deviation_are_short() -> None:
-    assert offers.reasons_of(offers.Deviation("price", "~60 000 €", "~50 000 €")) == ("чуть дороже",)
-    assert offers.reasons_of(offers.Deviation("area", "~1 600 м²", "от 2 000 м²")) == ("меньшей площади",)
-    assert offers.reasons_of(offers.Deviation("area_unknown", phrase="площадь не указана")) == ("площадь не указана",)
-    assert offers.reasons_of(offers.Deviation("unverified", unknown=("площадь", "место"))) == (
-        "не подтверждено: площадь", "не подтверждено: место")
-    assert offers.reasons_of(offers.Deviation("deal_kind", phrase="аукцион")) == ("аукцион",)
-    assert offers.reasons_of(offers.Deviation("other", phrase="участок занят")) == ("участок занят",)
-    assert offers.reasons_of(offers.Deviation("other")) == ()
+def test_reasons_substantial_first_worst_value_one_unconfirmed_reason() -> None:
+    deviations = [
+        Deviation("unverified", unknown=("место",)),
+        Deviation("price", "~60 000 €", "~50 000 €", value=60_000),
+        Deviation("area", "~1 700 м²", "от 2 000 м²", value=1700),
+        Deviation("area_unknown", phrase="площадь не указана"),
+        Deviation("price", "~75 000 €", "~50 000 €", value=75_000),
+        Deviation("deal_kind", phrase="аукцион"),
+        Deviation("area", "~1 600 м²", "от 2 000 м²", value=1600),
+        Deviation("unverified", unknown=("район", "место")),
+        Deviation("other", phrase="участок занят"),
+        Deviation("other"),
+    ]
+    assert offers.reasons_of(deviations) == [
+        "участок занят", "дороже (до ~75 000 €)", "меньше площадь (от ~1 600 м²)", "другой вид сделки: аукцион",
+        "не подтверждено: место, площадь, район"]
+    assert offers.reasons_of([Deviation("unverified"), Deviation("other", phrase="участок занят")]) == [
+        "участок занят", "не удалось проверить автоматически"]
+    assert offers.reasons_of([Deviation("other")]) == []
 
 
 async def _question(flag: bool) -> list[str]:
@@ -48,12 +62,53 @@ async def test_the_question_names_every_difference_only_with_the_flag() -> None:
     (off,) = await _question(False)
     assert off == "По вашим критериям пока ничего не нашёл, но есть участки лот из нескольких участков. Показать?"
     (on,) = await _question(True)
-    assert on.startswith("По вашим критериям пока ничего не нашёл, но есть участки с отличиями: ")
-    listed = on.removeprefix("По вашим критериям пока ничего не нашёл, но есть участки с отличиями: ")
-    listed = listed.removesuffix(" и ещё 1. Показать?")
-    names = listed.split("; ")
+    assert on.startswith(LEAD) and on.endswith(" и ещё 1. Показать?")
+    names = on.removeprefix(LEAD).removesuffix(" и ещё 1. Показать?").split("; ")
     assert len(names) == 5 and len(set(names)) == 5 and set(names) < set(PHRASES)
     assert names[0] == "лот из нескольких участков"  # the closest one's first
+
+
+async def _mixed(**config) -> tuple[MemoryRunStore, ButtonMessenger, CampaignRunner, str]:
+    campaigns = MemoryCampaignStore()
+    store = MemoryRunStore(campaigns)
+    messenger = ButtonMessenger()
+    runner = CampaignRunner(campaigns, store, messenger, None, config=RunnerConfig(
+        window_cooldown_seconds=0, relevance_fail_closed=False, **config))
+    goal = "Купить участок в Мадриде от 2000 м² до 50 000 €"
+    cid = await campaigns.create(plan_campaign(goal, vertical="real_estate"), chat_id=CHAT, requested_by=USER,
+                                 source_text=goal, actor="t")
+    await campaigns.set_state(cid, "running", "campaign:test")
+    store.add_groups(cid, 5)
+    for fid, payload in (("dear", plot(2500, price=58_000)), ("dearer", plot(2500, price=60_000)),
+                         ("small", plot(1700, price=45_000)), ("smaller", plot(1600, price=45_000)),
+                         ("bare", plot(None, price=45_000))):
+        add(store, cid, fid, payload)
+    return store, messenger, runner, cid
+
+
+async def test_price_area_and_unconfirmed_through_the_runner() -> None:
+    store, messenger, runner, _ = await _mixed(offer_all_reasons=True)
+    await runner.tick()
+    assert {store.buckets[f][0] for f in ("dear", "dearer", "small", "smaller", "bare")} == {"similar"}
+    (text,) = [text for _, text, _ in messenger.asks]
+    assert text.startswith(LEAD) and text.endswith(". Показать?")
+    names = text.removeprefix(LEAD).removesuffix(". Показать?").split("; ")
+    assert names == ["дороже (до ~60 000 €)", "меньше площадь (от ~1 600 м²)", "не подтверждено: площадь"]
+    assert text.count(":") == 1  # no double colon
+
+
+async def test_a_failure_while_collecting_reasons_keeps_the_old_question() -> None:
+    store, messenger, runner, cid = await _mixed(offer_all_reasons=True)
+    _, old_messenger, old_runner, _ = await _mixed()
+    await old_runner.tick()
+
+    async def broken(*_args, **_kw):
+        raise RuntimeError("store down")
+
+    runner._reasons = broken  # type: ignore[method-assign]
+    await runner.tick()
+    assert [t for _, t, _ in messenger.asks] == [t for _, t, _ in old_messenger.asks] and len(messenger.asks) == 1
+    assert await store.offer_state(cid, "similar") == "asked"  # sent, not hanging unasked
 
 
 async def test_one_difference_keeps_the_old_question() -> None:

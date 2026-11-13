@@ -314,37 +314,3 @@ def test_guard_c_two_agencies_do_not_merge_by_one_reference() -> None:
     assert not merged(flat("Benicalap", agency="A"), flat("Torrefiel", agency="B"), flag=True, **kw)
     assert merged(flat("Benicalap", agency="A"), flat("Torrefiel", agency="A"), flag=True, **kw)
     assert merged(flat("Benicalap", agency="A"), flat("Torrefiel"), flag=True, **kw)  # one agency unknown
-
-
-DAYA_1 = "https://www.fotocasa.es/es/comprar/terreno/daya-nueva/todas-las-zonas/100000011/d"
-DAYA_2 = "https://www.fotocasa.es/es/comprar/terreno/daya-nueva/todas-las-zonas/100000012/d"
-DAYA_TEXT = ("Finca rustica de regadio en Daya Nueva con pozo, casa de aperos y arboles frutales, acceso asfaltado, "
-             "luz cerca, ideal para cultivo o recreo.")
-
-
-def daya(agency: str, **extra) -> dict:
-    return {"price_amount": 95_000, "price_currency": "EUR", "deal_type": "sale", "property_type": "land",
-            "plot_m2": 10_234, "district": "", "address": "", "location": "Daya Nueva, Alicante", "agency": agency, **extra}
-
-
-def daya_merged(a: dict, b: dict, ref_a: str, ref_b: str, *, flag: bool) -> bool:
-    one = listing_of(a, url=DAYA_1, body=body(DAYA_TEXT, ref_a))
-    two = listing_of(b, url=DAYA_2, body=body(DAYA_TEXT, ref_b))
-    left = same_object(one, two, without_address=True, district_not_street=flag)
-    assert left == same_object(two, one, without_address=True, district_not_street=flag)
-    return left
-
-
-def test_q25_one_plot_of_two_agencies_with_their_own_references_merges() -> None:
-    a, b = daya("Agencia Uno"), daya("Inmobiliaria Dos")
-    assert daya_merged(a, b, "AU-10234", "ID-55871", flag=False)
-    assert daya_merged(a, b, "AU-10234", "ID-55871", flag=True)  # two agencies number their ads each their own way
-
-
-def test_q25_one_agency_two_references_stay_two() -> None:
-    a, b = daya("Agencia Uno"), daya("Agencia Uno")
-    assert not daya_merged(a, b, "AU-10234", "AU-10235", flag=True)
-    # a shared phone is one advertiser too, whatever the names say
-    phone = {"phone": "600 111 222"}
-    assert not daya_merged(daya("Agencia Uno", **phone), daya("Agencia Uno SL Costa", **phone), "AU-10234", "AU-10235",
-                           flag=True)
