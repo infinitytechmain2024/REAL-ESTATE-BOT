@@ -218,22 +218,65 @@ def _verdict(value: object) -> Verdict:
     raise ValueError("unknown verdict")
 
 
-def user_phrase(text: object) -> str | None:
-    """A deviation phrase a user may read: short Russian, no Latin letters, else None."""
+# USER_PHRASE_PLACES (Q28): Latin words in a Russian phrase are allowed when they are place names -- capitalised
+# («Vista Alegre», «Carabanchel», «Calle Mayor»), with Spanish connectors between two of them («Playa de San Juan»).
+# A lowercase Latin word is still prose or a unit the model drifted into («near the center», «a 5 minutos», «m²»).
+_LATIN_WORD = re.compile(r"[a-zà-ÿ][a-zà-ÿ'’-]*", re.IGNORECASE)
+_PLACE_LINKS = frozenset({"de", "del", "la", "las", "los", "el", "y", "i", "d", "l", "dels", "les"})
+
+
+# Capitalised prose is still prose: «Near The Center», «A 5 Minutos» are not place names.
+_PROSE_WORDS = frozenset({"the", "a", "an", "near", "far", "from", "to", "of", "and", "or", "with", "without", "in",
+                          "on", "at", "outside", "inside", "center", "centre", "city", "minutes", "min", "metro",
+                          "cerca", "lejos", "fuera", "sin", "con", "en", "minutos", "metros", "zona", "no"})
+
+
+def _is_name(word: str) -> bool:
+    """A capitalised word («Alegre», «AVE», «l'Eixample»); a long all-caps word or a prose word is not a name."""
+    word = word.replace("’", "'")
+    if word[:2].casefold() in ("l'", "d'"):
+        word = word[2:]
+    return (bool(word) and word[0].isupper() and not (len(word) > 4 and word.isupper())
+            and word.casefold() not in _PROSE_WORDS)
+
+
+def _latin_is_places(phrase: str) -> bool:
+    """True when every Latin word is a place name: capitalised, or a connector between two capitalised words."""
+    words = [(m.group(), m.start()) for m in _LATIN_WORD.finditer(phrase)]
+    for i, (word, _) in enumerate(words):
+        if _is_name(word):
+            continue
+        if (word.casefold() in _PLACE_LINKS and 0 < i < len(words) - 1
+                and _is_name(words[i - 1][0]) and _is_name(words[i + 1][0])
+                and not _CYRILLIC.search(phrase[words[i - 1][1]:words[i + 1][1]])):
+            continue  # «Playa de San Juan»: a connector inside one Latin name
+        return False
+    return True
+
+
+def user_phrase(text: object, *, places: bool = False) -> str | None:
+    """A deviation phrase a user may read: short Russian, no Latin letters, else None. Users see it in the
+    «Показать?» question and on cards, so English or Spanish prose the model drifted into never reaches them.
+    ``places`` (``USER_PHRASE_PLACES``, Q28): Latin place names are allowed («не в центре (Vista Alegre)»)."""
     phrase = " ".join(str(text or "").split()).strip(" .,;:«»\"'")
-    if not 3 <= len(phrase) <= 80 or not _CYRILLIC.search(phrase) or _LATIN.search(phrase):
+    if not 3 <= len(phrase) <= 80 or not _CYRILLIC.search(phrase):
         return None
+    if _LATIN.search(phrase) and not (places and _latin_is_places(phrase)):
+        return None
+    if places and _LATIN.match(phrase):
+        return phrase  # a phrase that begins with a place name keeps its capital
     return phrase[0].lower() + phrase[1:]
 
 
-def parse_relevance(content: str, *, model: str | None = None) -> Relevance:
+def parse_relevance(content: str, *, model: str | None = None, places: bool = False) -> Relevance:
     """The model's verdict after harmless drift is fixed; ``ValueError`` without a readable verdict."""
     data = json.loads(_FENCE.sub("", content))
     if not isinstance(data, dict):
         raise ValueError("model response is not a JSON object")
     verdict = _verdict(data.get("verdict") or data.get("decision") or data.get("result"))
     reason = " ".join(str(data.get("reason") or data.get("why") or "").split())[:300]
-    deviation = user_phrase(data.get("deviation_ru") or data.get("deviation")) if verdict == "near" else None
+    deviation = (user_phrase(data.get("deviation_ru") or data.get("deviation"), places=places)
+                 if verdict == "near" else None)
     return Relevance(verdict, reason, deviation, model)
 
 
@@ -241,10 +284,12 @@ class OpenRouterRelevanceJudge:
     """One chat completion per finding; a 400 retries once without the schema; no other retries."""
 
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 15,
-                 base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None) -> None:
+                 base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None,
+                 phrase_places: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the relevance check")
         self.model, self.timeout_seconds = model, timeout_seconds
+        self.phrase_places = phrase_places  # USER_PHRASE_PLACES (Q28)
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
@@ -281,7 +326,8 @@ class OpenRouterRelevanceJudge:
             raise RelevanceError("http_error", status=response.status_code)
         await costs.llm_response(self.model, response)
         try:
-            return parse_relevance(response.json()["choices"][0]["message"]["content"], model=self.model)
+            return parse_relevance(response.json()["choices"][0]["message"]["content"], model=self.model,
+                                   places=self.phrase_places)
         except Exception as exc:
             log.warning("campaign.relevance_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response", status=response.status_code) from exc
