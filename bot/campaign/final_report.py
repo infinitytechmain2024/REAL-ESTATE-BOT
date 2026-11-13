@@ -25,6 +25,7 @@ from typing import Any, Protocol
 import httpx
 
 from bot.agents.llm import LLMError, OpenRouterJSON
+from bot.control_plane.intake import INTAKE_LABEL_RE, user_words
 from bot.utils.costs import CostSummary
 from bot.web_search.urls import PORTALS, SPAIN_BANK_PORTALS, SPAIN_PORTALS_BY_KIND, UKRAINE_PORTALS
 
@@ -199,7 +200,7 @@ def place_scope_of(spec: Mapping[str, Any] | None, task_text: str, city: str | N
     raw_districts = place.get("districts")
     districts = (tuple(" ".join(x.split())[:80] for x in raw_districts[:8] if isinstance(x, str) and x.strip())
                  if isinstance(raw_districts, list) else ())
-    return PlaceScope(city, bool(_SUBURB.search(task_text)), radius, districts)
+    return PlaceScope(city, bool(_SUBURB.search(user_words(task_text))), radius, districts)
 
 
 def _num(value: Any) -> float | None:
@@ -591,7 +592,7 @@ def held_evidence_lines(held: Sequence[HeldEvidence], *, total: int, task_text: 
         label = f"площадь от {min_area:g} м²" if name == "area" and min_area else _criterion_label(name)
         lines.append(f"• {_among(count, inspected)} по объявлению проходит условие: {label}.")
         break
-    scope = scope or PlaceScope(requested_place, bool(_SUBURB.search(task_text)))
+    scope = scope or PlaceScope(requested_place, bool(_SUBURB.search(user_words(task_text))))
     if scope.suburb or scope.radius_km:
         if scope.unresolved:
             lines.append("• Границы пригородного поиска не уточнены: нужен радиус или названия населённых пунктов.")
@@ -754,10 +755,6 @@ def investors_section(leads: LeadsSummary | None) -> list[str]:
     return lines
 
 
-# The labels ``IntakeDraft.goal_text`` writes into a campaign's ``source_text``.
-_MACHINE_TASK = re.compile(r"(?:^|\s)(?:Задача|Тип|Кого ищем|Главное|Дополнительно|Районы или пригороды|Радиус поиска):")
-
-
 def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequence[str], unreadable: Sequence[Site],
                 recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None,
                 costs: Sequence[str] = (), evidence: Sequence[str] = (), task_text: str = "", section: str = "",
@@ -768,7 +765,7 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
     head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
     # The person's own words are shown; the intake's machine-built ``source_text`` («покупка Тип: участок. Задача: …»,
     # bot/control_plane/intake.py ``goal_text``) only repeats the 🎯 line and is not.
-    if task_text and task_text.casefold() not in goal.casefold() and not _MACHINE_TASK.search(task_text):
+    if task_text and task_text.casefold() not in goal.casefold() and not INTAKE_LABEL_RE.search(task_text):
         head = f"📋 Отчёт по поиску\n🎯 {goal}\nВаш запрос: {' '.join(task_text.split())[:220]}\n\n"
     if counts.total == 0:
         summary = ["Объявлений для оценки не получено. Подтверждённых совпадений нет."]
