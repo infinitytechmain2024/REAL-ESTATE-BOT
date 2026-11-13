@@ -75,6 +75,7 @@ BASE_ENV: dict[str, str] = {
     "PORTAL_DEFAULT_POINT_GUARD": "true",  # Q12
     "PORTAL_FACTS_FROM_ROW": "true",  # Q16
     "PORTAL_DESCRIPTION_FULL": "true",  # Q18
+    "PORTAL_RENTAL_TERM": "true",  # Q20
     "REVIEW_TOWNHOUSE_IS_HOUSE": "true",  # Q18
     "REVIEW_NON_RESIDENTIAL": "true",  # Q22
     "SEARCH_PLACE_LEVEL_FROM_SPEC": "true",  # Q11

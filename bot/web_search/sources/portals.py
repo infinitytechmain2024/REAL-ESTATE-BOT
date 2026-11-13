@@ -156,6 +156,26 @@ def _row_deal(value: Any) -> str | None:
     return _ROW_DEALS.get(_fold(_text(value)))
 
 
+# PORTAL_RENTAL_TERM (Q20): the row's own rental term, never guessed from the text. Recorded output (Barcelona flat
+# rent, 2026-11): Fotocasa ``rentalType`` is LONG_TERM, TEMPORARY or null; Idealista igolaizola marks a seasonal let
+# with the label ``{"name": "seasonalRental", "text": "Alquiler de temporada"}`` and has no long-term mark (a row
+# without the label is not known to be long-term). Habitaclia ``trev0n`` and Milanuncios ``rastriq`` rows carry no
+# term field: nothing is written for them.
+_RENTAL_TERMS = frozenset({"long", "temporary"})
+_FOTOCASA_RENTAL_TERMS = {"LONG_TERM": "long", "TEMPORARY": "temporary"}
+
+
+def _fotocasa_rental_term(value: Any) -> str | None:
+    return _FOTOCASA_RENTAL_TERMS.get(_text(value).upper())
+
+
+def _idealista_rental_term(labels: Any) -> str | None:
+    if not isinstance(labels, list):
+        return None
+    names = {_text(label.get("name")) for label in labels if isinstance(label, dict)}
+    return "temporary" if "seasonalRental" in names else None
+
+
 class _PortalSource(ApifyListingSource):
     """Shared task rules: Spain, real estate, a sale or a rent, a city (or a province) or an explicit radius."""
 
@@ -164,10 +184,11 @@ class _PortalSource(ApifyListingSource):
     agency_ref = False  # DEDUP_DISTRICT_NOT_STREET (Q15): pass the row's agency reference on
 
     def __init__(self, token: str, *, facts_from_row: bool = False, description_full: bool = False,
-                 **kwargs: Any) -> None:
+                 rental_term: bool = False, **kwargs: Any) -> None:
         super().__init__(token, **kwargs)
         self.facts_from_row = facts_from_row  # PORTAL_FACTS_FROM_ROW (Q16)
         self.description_full = description_full  # PORTAL_DESCRIPTION_FULL (Q18)
+        self.rental_term = rental_term  # PORTAL_RENTAL_TERM (Q20)
 
     def supports(self, task: QueryTask) -> bool:
         return bool(self._token and task.location.strip() and task.country == "ES"
@@ -208,10 +229,11 @@ class _PortalSource(ApifyListingSource):
     def _listing(self, task: QueryTask, *, url: str, title: str, price: Any, area: Any, rooms: Any,
                  address: list[str], description: str, phone: Any, advertiser: Any,
                  property_type: str | None, place_unverified: bool = False,
-                 row_type: str | None = None, row_deal: str | None = None, reference: Any = None
-                 ) -> SourceListing:
+                 row_type: str | None = None, row_deal: str | None = None, reference: Any = None,
+                 rental_term: str | None = None) -> SourceListing:
         """``property_type`` and the deal are the task's; with ``facts_from_row`` (Q16) ``row_type``/``row_deal``,
-        the row's own (None: not in the row), are written instead, and an auction named in the row is marked."""
+        the row's own (None: not in the row), are written instead, and an auction named in the row is marked.
+        ``rental_term`` (the row's own, ``_RENTAL_TERMS``) is written only with PORTAL_RENTAL_TERM (Q20) and a rent."""
         auction = self.facts_from_row and auction_named(title, description)
         if self.facts_from_row:
             property_type, deal = row_type, row_deal
@@ -232,6 +254,8 @@ class _PortalSource(ApifyListingSource):
             phone=_phone(phone), advertiser=_text(advertiser)[:200] or None,
             place_unverified=True if place_unverified else None, auction=True if auction else None,
             agency_ref=_reference(reference) if self.agency_ref else None,
+            rental_term=(rental_term if self.rental_term and self._deal(task) == "rent" and rental_term in _RENTAL_TERMS
+                         else None),
         )
 
 
@@ -330,7 +354,7 @@ class ApifyFotocasaSource(_PortalSource):
             description=description, phone=item.get("phone"), advertiser=agency.get("name"),
             property_type=self._TYPES.get(kind), place_unverified=unverified,
             row_type=_FOTOCASA_TYPES.get(_code(item.get("propertyType"))), row_deal=_row_deal(transaction.get("type")),
-            reference=item.get("agencyReference"))
+            reference=item.get("agencyReference"), rental_term=_fotocasa_rental_term(item.get("rentalType")))
 
 
 _YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,
@@ -555,6 +579,10 @@ class ApifyIdealistaPortalSource(_PortalSource):
                    "maxPrice": _ceil(_whole(constraints.get("max_price")), _IDEALISTA_PRICES),
                    "minSize": _floor(min_area, _IDEALISTA_SIZES)}
         actor_input |= {key: value for key, value in filters.items() if value}
+        # PORTAL_RENTAL_TERM (Q20): a rent «на год» asks the actor for long-term lets only (input ``rentalTypes``,
+        # enum ``longTerm``/``seasonal``). A task without a term, or a short one, sends no ``rentalTypes``.
+        if self.rental_term and self._deal(task) == "rent" and task.rental_term == "long":
+            actor_input["rentalTypes"] = ["longTerm"]
         return self.actor_id, actor_input, center
 
     async def _city_circle(self, task: QueryTask) -> _CityCircle | None:
@@ -627,7 +655,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
                    or phone.get("formattedPhone")),
             advertiser=contact.get("commercialName") or contact.get("contactName"),
             property_type=self._TYPES.get(task_kind(task)), row_type=_row_type(item.get("propertyType")),
-            row_deal=_row_deal(item.get("operation")))
+            row_deal=_row_deal(item.get("operation")), rental_term=_idealista_rental_term(item.get("labels")))
 
 
 _EURO = frozenset({"eur", "euro", "euros", "\u20ac"})

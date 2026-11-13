@@ -39,7 +39,7 @@ from bot.campaign.search_plan import blocked_hosts_of, country_portals, plan_lan
 from bot.campaign.spec import TaskSpec
 from bot.campaign.store import CampaignStore
 from bot.utils import costs
-from bot.utils.listing_text import deal_of
+from bot.utils.listing_text import deal_of, task_rental_term
 
 from .extract import (
     MIN_INDEX_LINKS,
@@ -237,7 +237,9 @@ def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = 
                      languages=hygienic_languages(campaign) if hygiene else tuple(plan.languages),
                      country_code=plan.country, place_level=level,
                      search_plan=plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country),
-                     nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only, query_hygiene=hygiene)
+                     nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only, query_hygiene=hygiene,
+                     rental_term=task_rental_term(campaign.spec, campaign.source_text)
+                     if plan.constraints.get("deal") == "rent" else None)
 
 
 class WebSearchWorker:

@@ -55,6 +55,11 @@ Other constraints
   «аукцион, не обычная продажа»), never exact: the portal row's title or description names a «subasta»,
   «puja» or «cesión de remate», not negated (``auction`` in the payload; ``bot/utils/listing_text.py``
   ``auction_named``). Only when the request's deal is a sale.
+* Temporary let of a long-term rent (Q20, ``PORTAL_RENTAL_TERM``; ``Request.rental_term``) -> similar
+  (``deal_kind``, «временная аренда»), never exact: the person asked for a long lease («на год», «долгосрочно»,
+  «long term»; ``bot/utils/listing_text.py`` ``task_rental_term`` over the task text and the interview answers) and
+  the portal row itself says temporary (``rental_term`` in the payload: Fotocasa ``rentalType=TEMPORARY``, Idealista
+  label ``seasonalRental``). No term in the task, or none in the row: unchanged.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
   (Москва, Минск ...), its link is under another country's TLD (``.ru``,
@@ -89,7 +94,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from bot.utils.listing_text import auction_named
+from bot.utils.listing_text import auction_named, task_rental_term
 
 from . import geo
 from .architect import find_places
@@ -141,6 +146,8 @@ class Request:
     districts: tuple[str, ...] = ()  # the districts that were asked for
     place_guard: bool = False  # PORTAL_DEFAULT_POINT_GUARD (Q12): a payload's ``place_unverified`` is never exact
     auction_guard: bool = False  # PORTAL_FACTS_FROM_ROW (Q16): a purchase's payload ``auction`` is never exact
+    # PORTAL_RENTAL_TERM (Q20): the rent term the person asked for («long»/«short»); None without the flag or a term
+    rental_term: str | None = None
 
     @property
     def country_code(self) -> str | None:
@@ -317,13 +324,20 @@ def facts_from_row_enabled() -> bool:
 
 
 AUCTION_NOTE = "аукцион, не обычная продажа"
+TEMPORARY_NOTE = "временная аренда"
+
+
+def rental_term_enabled() -> bool:
+    """PORTAL_RENTAL_TERM (default off): a temporary let is not exact for a long-term rent (Q20)."""
+    return os.environ.get("PORTAL_RENTAL_TERM", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
                 text: str | None = None, country: str | None = None,
-                deviations: dict[str, Any] | None = None) -> Request:
+                deviations: dict[str, Any] | None = None, spec: dict[str, Any] | None = None) -> Request:
     """The bucketing request of a campaign plan (``plan.constraints``, ``plan.location``, ``plan.country``;
-    ``text``: the task; ``deviations``: ``TaskSpec.deviations`` as a dict, the compromises the person approved)."""
+    ``text``: the task; ``deviations``: ``TaskSpec.deviations`` as a dict, the compromises the person approved;
+    ``spec``: the TaskSpec as a dict, whose interview answers may name the rent term, read with PORTAL_RENTAL_TERM)."""
     if vertical == "investors":
         return Request(location=location, country=country)
     dev = deviations if isinstance(deviations, dict) else {}
@@ -351,6 +365,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         districts=tuple(d.strip() for d in str(constraints.get("districts") or "").split(",") if d.strip()),
         place_guard=default_point_guard_enabled(),
         auction_guard=facts_from_row_enabled(),
+        rental_term=task_rental_term(spec, text) if deal == "rent" and rental_term_enabled() else None,
     )
 
 
@@ -436,6 +451,8 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
         result = worse(result, Match("similar", 0.0, "location_unknown"))  # Q12: the portal's place is a fallback
     if request.auction_guard and request.deal == "sale" and payload.get("auction") is True:
         result = worse(result, Match("similar", 0.0, "deal_kind", note=AUCTION_NOTE))  # Q16: not an ordinary sale
+    if request.rental_term == "long" and request.deal == "rent" and payload.get("rental_term") == "temporary":
+        result = worse(result, Match("similar", 0.0, "deal_kind", note=TEMPORARY_NOTE))  # Q20: not a long lease
     if request.amount is not None:
         price = price_of(payload)
         currency = currency_code(payload.get("price_currency")) or request.currency

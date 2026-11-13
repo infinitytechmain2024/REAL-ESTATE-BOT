@@ -134,3 +134,62 @@ def auction_named(*texts: object) -> bool:
     folded = _fold(" ".join(str(t or "") for t in texts))
     return any(not _AUCTION_NEGATION.search(folded[max(0, hit.start() - 40):hit.start()])
                for hit in AUCTION_WORDS.finditer(folded))
+
+
+# PORTAL_RENTAL_TERM (Q20). The rental term a task asks for, read from the person's own words only: the task text,
+# the interview answers (``TaskSpec.context.answers[*].answer``, never the bot's questions, whose examples name every
+# term: «на год и дольше, от 6 месяцев, на 1–3 месяца»), ``must_have``, ``wishes`` and ``notes``. Folded text
+# (``_fold``: lower case, no accents; «й» -> «и»). «от 6 месяцев» names no term: neither a year nor a season.
+_LONG_TERM = re.compile(
+    r"(?<!\w)(?:на\s+(?:1\s+|один\s+|целыи\s+)?(?:год|рік)(?!\w)"
+    r"|на\s+(?:\d+\s*[-–]\s*)?(?:\d+|два|три|четыре|пять|несколько|пару)\s+(?:года|лет|роки|років)(?!\w)"
+    r"|от\s+(?:1\s+|одного\s+)?года(?!\w)|від\s+(?:1\s+|одного\s+)?року(?!\w)"
+    r"|(?:на|от|від)\s+12\s+(?:месяц|місяц)\w*"
+    r"|(?:минимум|не\s+менее|хотя\s+бы|мінімум)\s+(?:на\s+)?(?:1\s+|один\s+|одного\s+)?(?:год|года|рік|року)(?!\w)"
+    r"|год\s+и\s+(?:дольше|более|больше)|рік\s+і\s+(?:довше|більше)"
+    r"|долгосрочн\w*|довгостроков\w*|длительн(?:ыи|ого)\s+срок\w*|на\s+долгии\s+срок"
+    r"|long[\s-]?term|larga\s+duracion|largo\s+plazo|por\s+anos|un\s+ano\s+o\s+mas)")
+_SHORT_TERM = re.compile(
+    r"(?<!\w)(?:на\s+(?:лето|зиму|сезон|літо)(?!\w)"
+    r"|на\s+(?:\d+\s*[-–]\s*)?(?:(?:[1-9]|1[01])(?!\d)|один|два|три|четыре|пять|несколько|пару)\s+(?:месяц|місяц)\w*"
+    r"|на\s+(?:\d+\s*[-–]\s*)?(?:\d+|один|два|три|четыре|пять|несколько|пару)\s+(?:недел|тижн|дн|сут)\w*"
+    r"|на\s+(?:месяц|неделю|місяць|тиждень)(?!\w)"
+    r"|посуточн\w*|подобов\w*|краткосрочн\w*|короткостроков\w*|временн\w*\s+аренд\w*|временно(?!\w)"
+    r"|short[\s-]?term|temporary|temporada|temporal|vacacional)")
+# A negation among the 3 words before a term, within its clause (no «,.;:!?» between): «не обязательно на год»,
+# «без долгосрочного контракта», «not long term». «минимум ... не менее» inside a term is the term's own word.
+_TERM_NEGATIONS = frozenset({"не", "ни", "нет", "без", "not", "no", "non", "sin", "ні"})
+_CLAUSE_END = re.compile(r"[,.;:!?|()\n]")
+
+
+def _term_named(pattern: re.Pattern[str], folded: str) -> bool:
+    """A hit of ``pattern`` without a negation among the 3 words before it in its clause."""
+    for hit in pattern.finditer(folded):
+        clause = _CLAUSE_END.split(folded[:hit.start()])[-1]
+        if not _TERM_NEGATIONS.intersection(re.findall(r"\w+", clause)[-3:]):
+            return True
+    return False
+
+
+def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] | None:
+    """«long» when the person's words ask for a long lease («на год», «долгосрочно», «long term») and name no short
+    one; «short» for the reverse («на лето», «на 1–3 месяца», «посуточно»); None when neither or both are named.
+    A term with a negation among the 3 words before it («не обязательно на год», «not long term») is not named."""
+    parts = [str(t or "") for t in texts]
+    if isinstance(spec, dict):
+        context = spec.get("context")
+        answers = context.get("answers") if isinstance(context, dict) else None
+        for qa in answers if isinstance(answers, list) else ():
+            if isinstance(qa, dict):
+                parts.append(str(qa.get("answer") or ""))
+        must = spec.get("must_have")
+        if isinstance(must, list):
+            parts.extend(str(m) for m in must if isinstance(m, str))
+        wishes = spec.get("wishes")
+        for wish in wishes if isinstance(wishes, list) else ():
+            if isinstance(wish, dict):
+                parts.append(str(wish.get("text") or ""))
+        parts.append(str(spec.get("notes") or ""))
+    folded = " ".join(_fold(" | ".join(parts)).split())
+    long, short = _term_named(_LONG_TERM, folded), _term_named(_SHORT_TERM, folded)
+    return "long" if long and not short else "short" if short and not long else None

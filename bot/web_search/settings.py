@@ -81,6 +81,10 @@ class WebSearchSettings(BaseSettings):
     # Q18: true = a portal row's description is kept up to 8000 characters (the analysis post limit), not 1500; the
     # analysis model reads more of it (a «piscina» far down the text). Off: 1500 characters, as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")
+    # Q20: true = Fotocasa ``rentalType`` and the Idealista igolaizola label ``seasonalRental`` give the facts line a
+    # ``rental_term`` («long»/«temporary»; none when the row has none), and a rent «на год» asks Idealista igolaizola
+    # for ``rentalTypes: ["longTerm"]``; campaign/tolerance.py files a temporary let of a long-term task as similar.
+    portal_rental_term: bool = Field(default=False, validation_alias="PORTAL_RENTAL_TERM")
     apify_yaencontre_enabled: bool = Field(default=False, validation_alias="APIFY_YAENCONTRE_ENABLED")
     apify_yaencontre_actor: str = Field(default="igolaizola/yaencontre-scraper", validation_alias="APIFY_YAENCONTRE_ACTOR")
     apify_yaencontre_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_YAENCONTRE_MAX_RESULTS")
@@ -254,6 +258,7 @@ class WebSearchSettings(BaseSettings):
                                                     sort_biggest=self.idealista_sort_biggest,
                                                     facts_from_row=self.portal_facts_from_row,
                                                     description_full=self.portal_description_full,
+                                                    rental_term=self.portal_rental_term,
                                                     unambiguous_place=self.idealista_unambiguous_place,
                                                     geocoder=geocoder()))
         elif self.apify_idealista_enabled:
@@ -277,7 +282,8 @@ class WebSearchSettings(BaseSettings):
                                              default_point_guard=self.portal_default_point_guard,
                                              facts_from_row=self.portal_facts_from_row,
                                              agency_ref=self.portal_agency_ref,
-                                             description_full=self.portal_description_full))
+                                             description_full=self.portal_description_full,
+                                             rental_term=self.portal_rental_term))
         if self.apify_yaencontre_enabled:
             from .sources.portals import ApifyYaencontreSource
 

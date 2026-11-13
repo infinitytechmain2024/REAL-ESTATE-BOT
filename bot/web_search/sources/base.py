@@ -34,6 +34,10 @@ class SourceListing:
     # DEDUP_DISTRICT_NOT_STREET (Q15): the agency's own reference of the ad (Fotocasa ``agencyReference``, Habitaclia
     # ``agencyRef``) for campaign/dedup.py; None otherwise, so the «JSON-LD» line is unchanged.
     agency_ref: str | None = None
+    # PORTAL_RENTAL_TERM (Q20): the row's own rental term, «long» or «temporary» (Fotocasa ``rentalType``
+    # LONG_TERM / TEMPORARY, Idealista igolaizola label ``seasonalRental``); None when the row names none or without
+    # the flag, so the «JSON-LD» line is unchanged.
+    rental_term: str | None = None
 
 
 class ListingSource(Protocol):
