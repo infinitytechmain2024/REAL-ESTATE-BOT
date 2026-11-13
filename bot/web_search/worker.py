@@ -214,6 +214,16 @@ def hygienic_languages(campaign: Campaign) -> tuple[str, ...]:
     return kept or tuple(campaign.plan.languages)
 
 
+# The labels ``Draft.goal_text`` (bot/control_plane/intake.py) writes around the person's words: «Районы или
+# пригороды: Centro.» is the interviewer's, not a request for the suburbs only (Q23).
+_INTAKE_LABELS = re.compile(r"(?<!\w)(?:Кого ищем|Тип|Задача|Районы или пригороды|Радиус поиска|Главное|Дополнительно):")
+
+
+def user_words(source_text: str) -> str:
+    """The campaign text without the intake labels (their values stay)."""
+    return _INTAKE_LABELS.sub(" ", source_text)
+
+
 def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = False) -> QueryTask:
     plan = campaign.plan
     place = (campaign.spec or {}).get("place") if isinstance(campaign.spec, dict) else None
@@ -230,7 +240,7 @@ def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = 
         level = portal_place_level(level, plan.location, plan.country or geo.country_of(plan.location),
                                    campaign.source_text)
     suburbs_only = bool(re.search(r"пригород|передміст|окрестност|околиц|afueras|alrededores|suburb|outskirts",
-                                   campaign.source_text, re.IGNORECASE))
+                                   user_words(campaign.source_text), re.IGNORECASE))
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
                      constraints=dict(plan.constraints),
