@@ -38,6 +38,7 @@ from bot.campaign.models import TERMINAL_STATES, Campaign
 from bot.campaign.search_plan import blocked_hosts_of, country_portals, plan_languages, source_hosts
 from bot.campaign.spec import TaskSpec
 from bot.campaign.store import CampaignStore
+from bot.control_plane.intake import user_words
 from bot.utils import costs
 from bot.utils.listing_text import deal_of, task_rental_term
 
@@ -212,16 +213,6 @@ def hygienic_languages(campaign: Campaign) -> tuple[str, ...]:
     allowed = set(plan_languages(spec, campaign.source_text, campaign.plan.country))
     kept = tuple(lang for lang in campaign.plan.languages if lang in allowed)
     return kept or tuple(campaign.plan.languages)
-
-
-# The labels ``Draft.goal_text`` (bot/control_plane/intake.py) writes around the person's words: «Районы или
-# пригороды: Centro.» is the interviewer's, not a request for the suburbs only (Q23).
-_INTAKE_LABELS = re.compile(r"(?<!\w)(?:Кого ищем|Тип|Задача|Районы или пригороды|Радиус поиска|Главное|Дополнительно):")
-
-
-def user_words(source_text: str) -> str:
-    """The campaign text without the intake labels (their values stay)."""
-    return _INTAKE_LABELS.sub(" ", source_text)
 
 
 def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = False) -> QueryTask:

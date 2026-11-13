@@ -9,15 +9,16 @@ from __future__ import annotations
 import pytest
 
 from bot.campaign import MemoryCampaignStore, plan_campaign
+from bot.campaign.final_report import place_scope_of
 from bot.campaign.spec import TaskSpec
-from bot.control_plane.intake import Draft
+from bot.control_plane.intake import Draft, user_words
 from bot.web_search.sources.portals import (
     ApifyFotocasaSource,
     ApifyHabitacliaSource,
     ApifyIdealistaPortalSource,
     ApifyMilanunciosSource,
 )
-from bot.web_search.worker import query_task, user_words
+from bot.web_search.worker import query_task
 
 PORTALS = (ApifyIdealistaPortalSource, ApifyFotocasaSource, ApifyHabitacliaSource, ApifyMilanunciosSource)
 
@@ -64,3 +65,24 @@ def test_every_goal_text_label_is_stripped():
                   "Дополнительно:"):
         assert label in goal and label not in left
     assert "Centro" in left and "квартира" in left
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("text", "suburbs"), [
+    # Today's behaviour, pinned (a finer reading is a separate task): any suburb word counts, even beside «центр».
+    ("piso en alquiler, Madrid y alrededores", True),
+    ("квартира в аренду: пригороды или центр Мадрида", True),
+    ("piso en alquiler cerca de Madrid", False),
+])
+async def test_suburb_words_of_the_person_as_before(text, suburbs):
+    _, task = await _task(text, _spec())
+    assert task.suburbs_only is suburbs
+
+
+def test_the_report_scope_ignores_the_district_label():
+    spec = _spec(districts=["Centro"])
+    goal = Draft(1, 1, "real_estate", task="квартира в аренду в Мадриде", spec=spec).goal_text()
+    scope = place_scope_of(spec.model_dump(mode="json"), goal, "Madrid")
+    assert scope.suburb is False and scope.districts == ("Centro",)
+    asked = Draft(1, 1, "real_estate", task="квартира в пригороде Мадрида", spec=_spec()).goal_text()
+    assert place_scope_of(_spec().model_dump(mode="json"), asked, "Madrid").unresolved is True
