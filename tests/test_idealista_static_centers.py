@@ -11,7 +11,7 @@ import pytest
 from bot.utils import costs
 from bot.web_search.city_centers import _ALIASES, _CENTERS, static_city_area
 from bot.web_search.queries import QueryTask
-from bot.web_search.sources.apify import SourceRunContext, source_run_scope
+from bot.web_search.sources.apify import SourceRunContext, _distance_km, source_run_scope
 from bot.web_search.sources.portals import ApifyIdealistaPortalSource
 
 
@@ -66,7 +66,7 @@ BASE = {"maxItems": 5, "operation": "sale", "propertyType": "lands", "country": 
         "location": "Valencia", "maxPrice": "300000"}
 
 
-@pytest.mark.parametrize("found", [None, geocoder(None)])
+@pytest.mark.parametrize("found", [None, geocoder(None), geocoder(error=RuntimeError("redis down"))])
 async def test_flag_off_without_a_geocoder_centre_keeps_the_name(found):
     assert await _input(geocoder=found, unambiguous_place=True) == BASE
     assert await _input(geocoder=found, unambiguous_place=False, static_centers=True) == BASE
@@ -93,6 +93,23 @@ async def test_flag_on_leaves_an_unlisted_town_and_a_province_as_they_were():
     assert town["location"] == "Burjassot" and "latitude" not in town and "distanceKm" not in town
     province = await _input(task(place_level="province"), geocoder=None, unambiguous_place=True, static_centers=True)
     assert "latitude" not in province and "distanceKm" not in province
+
+
+@pytest.mark.parametrize(("city", "point"), [
+    ("Elche", (38.25, -0.515)),      # Arenales del Sol, beach pedanía
+    ("Elche", (38.155, -0.635)),     # La Marina
+    ("Cartagena", (37.63, -0.69)),   # Cabo de Palos
+    ("Cartagena", (37.57, -1.18)),   # Isla Plana / La Azohía
+])
+async def test_listed_circle_reaches_the_coastal_districts(city, point):
+    adapter = ApifyIdealistaPortalSource("secret-token", client=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(500))), unambiguous_place=True, static_centers=True)
+    try:
+        circle = await adapter._city_circle(task(location=city))
+    finally:
+        await adapter.aclose()
+    assert circle is not None and circle.radius_km <= 30
+    assert _distance_km((circle[0], circle[1]), point) <= circle.radius_km
 
 
 @pytest.mark.parametrize("name", ["València", "VALENCIA", " valencia "])
