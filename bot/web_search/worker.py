@@ -38,6 +38,7 @@ from bot.campaign.models import TERMINAL_STATES, Campaign
 from bot.campaign.search_plan import blocked_hosts_of, country_portals, plan_languages, source_hosts
 from bot.campaign.spec import TaskSpec
 from bot.campaign.store import CampaignStore
+from bot.control_plane.intake import user_words
 from bot.utils import costs
 from bot.utils.listing_text import deal_of, task_rental_term
 
@@ -230,7 +231,7 @@ def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = 
         level = portal_place_level(level, plan.location, plan.country or geo.country_of(plan.location),
                                    campaign.source_text)
     suburbs_only = bool(re.search(r"пригород|передміст|окрестност|околиц|afueras|alrededores|suburb|outskirts",
-                                   campaign.source_text, re.IGNORECASE))
+                                   user_words(campaign.source_text), re.IGNORECASE))
     return QueryTask(goal=plan.goal, task_text=campaign.source_text, location=plan.location,
                      location_aliases=dict(plan.location_aliases), vertical=plan.vertical,
                      constraints=dict(plan.constraints),

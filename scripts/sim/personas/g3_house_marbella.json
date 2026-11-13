@@ -109,11 +109,11 @@
     ],
     "deviation": [
       {
-        "press": "Только точные",
+        "press": "task:dev:0",
         "weight": 3
       },
       {
-        "press": "±10 %",
+        "text": "±10 % on budget and area is fine",
         "weight": 2
       },
       {

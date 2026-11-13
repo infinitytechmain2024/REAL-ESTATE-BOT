@@ -108,6 +108,15 @@ FIELDS: dict[str, dict[str, tuple[str, str]]] = {
 FIELDS["both"] = {**FIELDS["real_estate"], "who": FIELDS["investors"]["who"], "ticket": FIELDS["investors"]["ticket"],
                   "role": FIELDS["investors"]["role"], "geo": FIELDS["investors"]["geo"]}
 _WORD = re.compile(r"\w+")
+# The labels ``Draft.goal_text`` writes around the person's words (keep in step with it): what reads the campaign's
+# ``source_text`` for the person's intent strips them first (Q23: «Районы или пригороды: Centro.» is no suburb request).
+INTAKE_LABELS = ("Кого ищем", "Тип", "Задача", "Районы или пригороды", "Радиус поиска", "Главное", "Дополнительно")
+INTAKE_LABEL_RE = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, INTAKE_LABELS)) + r"):")
+
+
+def user_words(source_text: str) -> str:
+    """The campaign text without the intake labels (their values stay)."""
+    return INTAKE_LABEL_RE.sub(" ", source_text)
 
 
 @dataclass(slots=True)

@@ -13,7 +13,8 @@ import json
 import random
 import re
 import sys
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +62,11 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
                  r"neighbou?rhood|barrio|zona"),
     ("place", r"город|где искать|регион|стран|провинци|\bміст[оіау]|\bкраїн|провінці|\bcity\b|where|ciudad|d[oó]nde"),
     ("must_have", r"обязательно должно быть|что обязательно|коммуникац|подвед|подъезд|що обов.язково має бути|комунікац|"
-                  r"під.їзд|must have|imprescindible"),
+                  r"під.їзд|must have|imprescindible|"
+                  # «Есть ли обязательные требования к квартире / условия: лифт, мебель, животные?» (Q24)
+                  r"обязательн\w* (?:требовани|услови|пожелани)|обов.язков\w* (?:вимог|умов|побажан)|"
+                  r"(?:requisitos?|condicion\w*) (?:obligatori|imprescindible)|"
+                  r"(?:mandatory|required) (?:requirement|condition)|must-haves?"),
     ("sources", r"какие сайты|какие группы|які сайти|які групи|which sites|qu[eé] webs"),
 )
 # What to exclude («Что исключить? Например: без цены, агентства») has no slot: checked before every slot (a human
@@ -75,12 +80,71 @@ REPEAT_SKIP_TAGS = frozenset({"any", "contradiction", "low_budget", "edit"})  # 
 EXIT_ANSWERED, EXIT_NOTHING, EXIT_DEFERRED = 0, 1, 2
 
 
+# A persona presses the bot's own button data (``task:dev:0``, rules.py ``DEVIATION_OPTIONS``) and the bench sends the
+# callback of the button on screen, as Telegram does. The AI interviewer words the same answers itself
+# («нет, только точные», «бюджет до +10 % (до 1320 €)», data ``task:opt:<i>``): a data the screen lacks is the one
+# button whose label means it. «±10 %» is a tolerance on everything: only a bare «±10 %» or one naming both the
+# budget and the area is it, never «бюджет до +10 %» alone; none or several such buttons - nothing is pressed.
+_EXACT_ONLY = r"только\s+точн|тільки\s+точн|лише\s+точн|only exact|exact only|s[oó]lo (?:los )?exact"
+_NEGATED = r"(?<!\w)(?:не|not|no)\s+(?:только|тільки|лише|only|s[oó]lo)(?!\w)"
+_BUDGET = r"бюджет|цен|ціна|budget|price|precio|presupuesto"
+_AREA = r"площ|м²|м2|\barea\b|superficie|m²|\bm2\b"
+
+
+def _exact_only(label: str) -> bool:
+    return bool(re.search(_EXACT_ONLY, label)) and not re.search(_NEGATED, label)
+
+
+def _all_round(percent: int) -> Callable[[str], bool]:
+    number = rf"(?<![\d.,]){percent}\s*%"
+
+    def means(label: str) -> bool:
+        if not re.search(number, label):
+            return False
+        return bool(re.fullmatch(rf"[±+\-−/ ]*{number}", label)
+                    or (re.search(_BUDGET, label) and re.search(_AREA, label)))
+    return means
+
+
+PRESS_MEANINGS: dict[str, Callable[[str], bool]] = {
+    "task:dev:0": _exact_only,
+    "task:dev:10": _all_round(10),
+    "task:dev:20": _all_round(20),
+}
+
+
+def _label(text: Any) -> str:
+    return " ".join(str(text or "").replace("\xa0", " ").casefold().split())
+
+
+def find_button(buttons: list[dict[str, Any]] | None, wanted: str) -> dict[str, Any] | None:
+    """The inline button a press names: its text or data, else the one label that means the data (``PRESS_MEANINGS``),
+    else a label holding the pressed words («только точные» is «нет, только точные»); None when none is on screen."""
+    wanted = str(wanted).strip()
+    buttons = list(buttons or ())
+    if not wanted:
+        return None
+    exact = next((b for b in buttons if wanted in (b.get("text"), b.get("data"))), None)
+    if exact is not None:
+        return exact
+    meaning = PRESS_MEANINGS.get(wanted)
+    if meaning is not None:  # only one button may mean it: several or none - a human decides
+        found = [b for b in buttons if meaning(_label(b.get("text")))]
+        return found[0] if len(found) == 1 else None
+    words = _label(wanted)
+    if len(words.split()) < 2 or ":" in wanted:  # a data is never fuzzy, nor one word («Нет» is no «нет, только …»)
+        return None
+    inside = re.compile(rf"(?<!\w){re.escape(words)}(?!\w)")
+    return next((b for b in buttons if inside.search(_label(b.get("text")))), None)
+
+
 @dataclass
 class Pick:
     slot: str | None
     answer: dict[str, Any] | None
     tag: str | None = None
     reason: str = ""
+    log: dict[str, Any] = field(default_factory=dict)  # a press found by meaning: ``press_as`` and ``label``
 
 
 def slot_of(pending: dict[str, Any], extra: dict[str, list[str]] | None = None) -> str | None:
@@ -123,7 +187,23 @@ def _button_ok(option: dict[str, Any], pending: dict[str, Any]) -> bool:
     if pending.get("card") and press in ("task:launch", "Запустить"):
         return True
     return (any(press in (b.get("text"), b.get("data")) for b in pending.get("buttons", []))
-            or keyboard_label(pending.get("keyboard"), str(press)) is not None)
+            or keyboard_label(pending.get("keyboard"), str(press)) is not None
+            or find_button(pending.get("buttons"), str(press)) is not None)
+
+
+def _pressed(answer: dict[str, Any], pending: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """The answer with its press as the label of the button found by meaning (the judge reads what was pressed, the
+    harness sends that button's callback) and the log of it; (None, {}) when a meaning press finds no single button."""
+    press = answer.get("press")
+    buttons = pending.get("buttons") or []
+    if (press is None or any(press in (b.get("text"), b.get("data")) for b in buttons)
+            or keyboard_label(pending.get("keyboard"), str(press)) is not None):
+        return answer, {}
+    button = find_button(buttons, str(press))
+    if button is None:
+        return (None, {}) if press in PRESS_MEANINGS else (answer, {})
+    label = button.get("text") or button.get("data")
+    return {**answer, "press": label}, {"press_as": press, "label": label}
 
 
 def choose(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str,
@@ -132,7 +212,9 @@ def choose(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str
     slot = slot_of(pending, persona.get("slot_patterns"))
     if slot is None:
         return Pick(None, None, reason="no slot matches the question")
-    options = [o for o in persona.get("replies", {}).get(slot, []) if _button_ok(o, pending)]
+    # a meaning press stays a choice: when no single button means it, the question is left for a human
+    options = [o for o in persona.get("replies", {}).get(slot, [])
+               if _button_ok(o, pending) or o.get("press") in PRESS_MEANINGS]
     if not options and slot == NEAR:  # the user who was not asked about it would not look further
         decline = next((b.get("text") for b in pending.get("buttons", [])
                         if str(b.get("data") or "").startswith(f"{NEAR_PREFIX}no:")), None)
@@ -150,8 +232,11 @@ def choose(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str
     if not any(weights):
         return Pick(slot, None, reason=f"every reply of slot {slot!r} has weight 0")
     option = rng.choices(options, weights=weights, k=1)[0]
-    answer = {k: option[k] for k in ("text", "press") if k in option}
-    return Pick(slot, answer, option.get("tag"))
+    answer, log = _pressed({k: option[k] for k in ("text", "press") if k in option}, pending)
+    if answer is None:
+        return Pick(slot, None, option.get("tag"),
+                    reason=f"no single button means {option.get('press')!r}: a human decides")
+    return Pick(slot, answer, option.get("tag"), log=log)
 
 
 def answer_pending(root: Path, run: str, persona: dict[str, Any], seed: int) -> tuple[int, str]:
@@ -178,7 +263,7 @@ def answer_pending(root: Path, run: str, persona: dict[str, Any], seed: int) -> 
                                f"buttons={[b.get('text') for b in pending.get('buttons', [])]} "
                                f"keyboard={[k for row in pending.get('keyboard') or () for k in row]}")
     answers.append(pick.answer)
-    log.append({"index": index, "slot": pick.slot, "tag": pick.tag, "seed": seed})
+    log.append({"index": index, "slot": pick.slot, "tag": pick.tag, "seed": seed, **pick.log})
     answers_path.parent.mkdir(parents=True, exist_ok=True)
     answers_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     pending_path.unlink()
