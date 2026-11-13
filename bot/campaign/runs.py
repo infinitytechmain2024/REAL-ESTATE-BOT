@@ -241,6 +241,13 @@ class RunStore(Protocol):
     async def held_findings(self, campaign_id: str, bucket: str, limit: int,
                             exclude_why: str | None = None) -> list[StreamFinding]: ...
     async def claim_held(self, campaign_id: str, finding_id: str) -> int | None: ...
+    async def attach_to_held(self, campaign_id: str, finding_id: str, head_id: str, bucket: str,
+                             link: dict[str, str]) -> bool:
+        """Q27: store a finding as the duplicate of the held finding ``head_id`` and add ``link`` to the head."""
+        ...
+    async def head_links(self, finding_id: str) -> tuple[dict[str, str], ...]:
+        """The links attached to a finding as a cluster head (empty when none)."""
+        ...
     async def exact_count(self, campaign_id: str) -> int: ...
     async def offer_state(self, campaign_id: str, bucket: str) -> str | None: ...
     async def open_offer(self, campaign_id: str, bucket: str) -> bool: ...
@@ -825,6 +832,46 @@ class PostgresRunStore:
                 finding_id, campaign_id,
             )
             return await _number_card(conn, campaign_id, finding_id) if claimed else None
+
+    async def attach_to_held(self, campaign_id: str, finding_id: str, head_id: str, bucket: str,
+                             link: dict[str, str]) -> bool:
+        """Q27: record ``finding_id`` as a duplicate of the held finding ``head_id`` (same campaign, still held, no
+        duplicate itself) and add ``link`` to the head's ``cluster_links`` (shown in «Также на» once it is sent).
+
+        False, with nothing written, when the head is not held any more or the finding already has a row. The finding
+        is delivered like a sent one (as in ``attach_to_cluster``): nothing else must pick it up.
+        """
+        try:
+            async with self.pool.acquire() as conn, conn.transaction():
+                await _set_actor(conn, "campaign:runner")
+                head = await conn.fetchrow(
+                    """select cluster_links::text as links from campaign_findings
+                        where finding_id = $1::uuid and campaign_id = $2::uuid and state = 'held'
+                          and duplicate_of is null for update""", head_id, campaign_id)
+                if head is None:
+                    return False
+                stored = await conn.fetchval(
+                    """insert into campaign_findings (finding_id, campaign_id, bucket, state, duplicate_of, cluster_id)
+                       values ($1::uuid, $2::uuid, $3, 'duplicate', $4::uuid, $4::uuid)
+                       on conflict do nothing returning 1""",
+                    finding_id, campaign_id, bucket, head_id)
+                if not stored:
+                    raise _NotAttached
+                links = list(_links(head["links"]))
+                if link.get("url") and all(x.get("url") != link["url"] for x in links):
+                    links.append({"url": str(link["url"]), "site": str(link.get("site") or "")})
+                await conn.execute(
+                    "update campaign_findings set cluster_id = $1::uuid, cluster_links = $2::jsonb where finding_id = $1::uuid",
+                    head_id, json.dumps(links))
+                await conn.execute("update findings set state = 'delivered' where id = $1::uuid and state = 'ready'",
+                                   finding_id)
+                return True
+        except _NotAttached:
+            return False
+
+    async def head_links(self, finding_id: str) -> tuple[dict[str, str], ...]:
+        return _links(await self.pool.fetchval(
+            "select cluster_links::text from campaign_findings where finding_id = $1::uuid", finding_id))
 
     async def exact_count(self, campaign_id: str) -> int:
         return int(await self.pool.fetchval(
@@ -1427,6 +1474,23 @@ class MemoryRunStore:
         done[finding_id] = None
         self.card_numbers[finding_id] = len(done)
         return len(done)
+
+    async def attach_to_held(self, campaign_id: str, finding_id: str, head_id: str, bucket: str,
+                             link: dict[str, str]) -> bool:
+        if head_id not in self.held.get(campaign_id, {}) or head_id in self.duplicates:
+            return False
+        if finding_id in self.buckets or any(finding_id in done for done in self.streamed.values()):
+            return False
+        links = self.cluster_links.setdefault(head_id, [])
+        if link.get("url") and all(x.get("url") != link["url"] for x in links):
+            links.append({"url": str(link["url"]), "site": str(link.get("site") or "")})
+        self.duplicates[finding_id] = head_id
+        self.buckets[finding_id] = (bucket, None)
+        self.findings_state[finding_id] = "delivered"
+        return True
+
+    async def head_links(self, finding_id: str) -> tuple[dict[str, str], ...]:
+        return tuple(self.cluster_links.get(finding_id, ()))
 
     async def exact_count(self, campaign_id: str) -> int:
         return sum(1 for f in self.findings.get(campaign_id, [])
