@@ -77,6 +77,7 @@ BASE_ENV: dict[str, str] = {
     "PORTAL_DESCRIPTION_FULL": "true",  # Q18
     "PORTAL_RENTAL_TERM": "true",  # Q20
     "REVIEW_TOWNHOUSE_IS_HOUSE": "true",  # Q18
+    "REVIEW_NON_RESIDENTIAL": "true",  # Q22
     "SEARCH_PLACE_LEVEL_FROM_SPEC": "true",  # Q11
     "ANALYSIS_AREA_TEXT_CHECK": "false",  # Q13: off until area_check review blockers (N4, N5) are fixed
     "DEDUP_DISTRICT_NOT_STREET": "true",  # Q15

@@ -318,7 +318,7 @@ async def test_one_question_at_a_time_in_a_fixed_order() -> None:
     assert "Если точных вариантов не найду" in (await say(control, USER, "на год")).text
     card = await say(control, USER, "±10 %")
     assert card.text.startswith("Проверьте задачу")
-    for line in ("Допустимые отступления: бюджет ±10 %; площадь −10 %", "• На какой срок? — на год"):
+    for line in ("Допустимые отступления: бюджет до +10 %; площадь −10 %", "• На какой срок? — на год"):
         assert line in card.text, line
     for line in ("Город: Севилья", "Районы: центр", "Сделка: аренда", "Тип: квартира", "Бюджет: до 700 €", "Комнаты: от 2",
                  "Обязательно: лифт"):
