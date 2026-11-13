@@ -31,8 +31,8 @@ u as (
 f as (
     select count(*)::int as findings,
            count(*) filter (where bucket = 'exact' and state <> 'duplicate')::int as exact,
-           count(*) filter (where bucket = 'similar')::int as "similar",
-           count(*) filter (where bucket = 'other')::int as other,
+           count(*) filter (where bucket = 'similar' and state <> 'duplicate')::int as "similar",
+           count(*) filter (where bucket = 'other' and state <> 'duplicate')::int as other,
            count(*) filter (where state = 'duplicate')::int as duplicates
       from campaign_findings where campaign_id = $1::uuid),
 x as (

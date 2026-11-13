@@ -9,6 +9,7 @@ from bot.campaign.offers import MemoryOffer
 from bot.campaign.runner import CampaignRunner, RunnerConfig
 from bot.campaign.runs import MemoryRunStore
 from bot.campaign.settings import CampaignRunnerSettings
+from bot.campaign.tolerance import Match
 from tests.test_campaign_dedup import FOTOCASA, GOAL, IDEALISTA, payload
 from tests.test_near_match import ButtonMessenger
 
@@ -131,3 +132,76 @@ async def test_question_waits_until_every_finding_was_checked() -> None:
     assert len(messenger.asks) == 1
     await runner.step(cid)
     assert len(messenger.asks) == 1
+
+
+async def test_a_rejected_copy_of_a_sent_card_keeps_its_reason() -> None:
+    """Only held buckets (similar/other) are merged: a rejected copy stays rejected and adds no «Также на» link."""
+    _, store, messenger, runner, cid = await setup(dedup_held_findings=True)
+    add(store, cid, "e1", IDEALISTA, price=240_000, area=85)
+    await runner.step(cid)
+    assert len(messenger.findings()) == 1
+    judge = runner._judge
+
+    async def reject_x2(campaign, request, finding, *, final=False):
+        if finding.id == "x2":
+            return Match("excluded", 0.0, "type")
+        return await judge(campaign, request, finding, final=final)
+
+    runner._judge = reject_x2  # type: ignore[method-assign]
+    add(store, cid, "x2", FOTOCASA, price=240_000, area=85)
+    await runner.step(cid)
+    assert store.buckets["x2"][0] == "excluded" and store.duplicates == {} and "e1" not in store.cluster_links
+    assert messenger.edits == []
+    counts = tally(await store.outcome_counts(cid))
+    assert counts.excluded == {"type": 1} and counts.duplicates == 0
+
+
+def _report_after_question(messenger: ButtonMessenger) -> bool:
+    texts = [text for _, _, text in messenger.sent]
+    report = [i for i, text in enumerate(texts) if text.startswith("📋 Отчёт по поиску")]
+    return len(report) == 1 and len(messenger.asks) == 1 and texts.index(messenger.asks[0][1]) < report[0]
+
+
+async def test_a_full_batch_the_report_waits_for_the_question() -> None:
+    campaigns, store, messenger, runner, cid = await setup(offer_after_search=True, max_stream_per_step=2)
+    three_copies_and_another(store, cid)
+    await campaigns.set_state(cid, "completed", "campaign:test")
+    reports = []
+    for _ in range(4):
+        await runner.step(cid)
+        reports.append(sum(text.startswith("📋 Отчёт по поиску") for _, _, text in messenger.sent))
+    assert reports == [0, 0, 1, 1]  # two full batches, then the question and the report in one step
+    assert _report_after_question(messenger)
+
+
+async def test_a_failed_card_send_holds_the_report_back() -> None:
+    """The early ``return deferred`` (an exact card not sent): nothing is settled, so neither question nor report."""
+    campaigns, store, messenger, runner, cid = await setup(offer_after_search=True)
+    add(store, cid, "e1", IDEALISTA, price=240_000, area=85)
+    add(store, cid, "b1", OTHER, price=290_000, area=85, rooms=2)
+    await campaigns.set_state(cid, "completed", "campaign:test")
+    messenger.fail = 1
+    await runner.step(cid)
+    assert messenger.asks == [] and not any(t.startswith("📋 Отчёт по поиску") for _, _, t in messenger.sent)
+    await runner.step(cid)
+    await runner.step(cid)
+    assert len(messenger.findings()) == 1 and _report_after_question(messenger)
+
+
+async def test_a_failed_question_holds_the_report_back() -> None:
+    campaigns, store, messenger, runner, cid = await setup(offer_after_search=True)
+    add(store, cid, "b1", OTHER, price=290_000, area=85)
+    await campaigns.set_state(cid, "completed", "campaign:test")
+    messenger.ask_fail = 1
+    await runner.step(cid)
+    assert messenger.asks == [] and not any(t.startswith("📋 Отчёт по поиску") for _, _, t in messenger.sent)
+    await runner.step(cid)
+    assert _report_after_question(messenger)
+
+
+async def test_off_the_report_does_not_wait() -> None:
+    campaigns, store, messenger, runner, cid = await setup(max_stream_per_step=2)
+    three_copies_and_another(store, cid)
+    await campaigns.set_state(cid, "completed", "campaign:test")
+    await runner.step(cid)
+    assert any(t.startswith("📋 Отчёт по поиску") for _, _, t in messenger.sent)
