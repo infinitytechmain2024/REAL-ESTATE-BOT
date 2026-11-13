@@ -88,11 +88,12 @@ class CachedCityCenters:
                 return center, box
             return None
 
-    async def resolve_district(self, district: str, city: str) -> tuple[float, float] | None:
+    async def resolve_district(self, district: str, city: str) -> tuple[tuple[float, float], Bbox | None] | None:
         """PORTAL_DISTRICT_SEARCH (Q26): the centre of a district of ``city`` («Centro», «Chamberí»). Only a Nominatim
         row named ``district`` whose kind is a part of a town (``_DISTRICT_TYPES``) and whose address puts it in
         ``city`` counts: a town of its own («Getafe»), a street or a shop of that name is not a district (None).
-        Cached like a city centre (``[lat, lon]``); no cache, no public lookup."""
+        The centre and, when Nominatim gave it, the district's ``boundingbox``; cached like a city centre
+        (``[lat, lon, [south, north, west, east]]``, or ``[lat, lon]`` without a box); no cache, no public lookup."""
         if (self._cache is None or not district.strip() or not city.strip() or len(district) > 80
                 or len(city) > 80):
             return None
@@ -105,8 +106,8 @@ class CachedCityCenters:
             if cached:
                 try:
                     value = json.loads(cached)
-                    if isinstance(value, list) and len(value) == 2 and _coordinates(value[0], value[1]):
-                        return float(value[0]), float(value[1])
+                    if isinstance(value, list) and len(value) in (2, 3) and _coordinates(value[0], value[1]):
+                        return (float(value[0]), float(value[1])), (_bbox(value[2]) if len(value) == 3 else None)
                 except (TypeError, ValueError):
                     pass
             rows = await self._search({"q": f"{district}, {city}", "countrycodes": "es", "format": "jsonv2",
@@ -128,11 +129,12 @@ class CachedCityCenters:
                 if not _coordinates(lat, lon):
                     continue
                 center = float(lat), float(lon)
+                box = _bbox(row.get("boundingbox"))
                 try:
-                    await self._cache.setex(key, 30 * 24 * 3600, json.dumps(list(center)))
+                    await self._cache.setex(key, 30 * 24 * 3600, json.dumps([*center, *([list(box)] if box else [])]))
                 except Exception:  # noqa: BLE001 - never use an uncacheable public result
                     return None
-                return center
+                return center, box
             return None
 
     async def _search(self, params: dict[str, str | int]) -> list[object] | None:

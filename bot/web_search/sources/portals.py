@@ -12,6 +12,7 @@ lists euros only, a plot area only for land and only when the description does n
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import Any, ClassVar
@@ -29,6 +30,8 @@ from bot.web_search.sources.apify import (
 )
 from bot.web_search.sources.base import SourceListing
 from bot.web_search.urls import classify_url, deal_conflict, fetchable, host_of
+
+log = logging.getLogger(__name__)
 
 _DESCRIPTION_CHARS = 1500
 # PORTAL_DESCRIPTION_FULL (Q18): the description up to the analysis limit, not 1500 characters. Pilot G3 lost the
@@ -515,13 +518,33 @@ class _DistrictCircle(_CityCircle):
         return tuple(self), self.radius_km, self.district  # type: ignore[return-value]
 
 
+# Q26: words of district names that name no place of their own («Ciudad Lineal» is not «Ciudad Universitaria»).
+_DISTRICT_WORD_STOP = frozenset({"barrio", "distrito", "ciudad", "casco", "zona"})
+
+
+def _district_words(value: Any) -> str:
+    """A district name folded, hyphens, « - », apostrophes and punctuation as single spaces: «Moncloa-Aravaca» and
+    «Moncloa - Aravaca» are «moncloa aravaca», «L'Eixample» is «l eixample»."""
+    return " ".join(re.sub(r"[\W_]+", " ", _fold(_text(value))).split())
+
+
 def _district_ok(district: str, *fields: Any) -> bool:
-    """The row's own district / neighbourhood names the task's district (folded, whole words: «Malasaña» is in
-    «Malasaña-Universidad»). A row that gives no such field is kept: only the city filter applies to it."""
-    named = [" ".join(_fold(_text(value)).split()) for value in fields]
-    named = [value for value in named if value]
-    wanted = " ".join(_fold(district).split())
-    return not named or any(re.search(rf"(?<!\w){re.escape(wanted)}(?!\w)", value) for value in named)
+    """The row's own district / neighbourhood names the task's district: they share a word longer than 3 letters
+    (not ``_DISTRICT_WORD_STOP``; «Fuencarral-El Pardo» and «Fuencarral», «L'Eixample» and «Eixample»), or one name
+    begins the other at a word's end («Sol» begins «Sol - Centro», not «Solana»). Folded, hyphens normalised
+    (``_district_words``). A row that gives no such field is kept: only the city filter applies to it."""
+    named = [value for value in map(_district_words, fields) if value]
+    wanted = _district_words(district)
+    if not named or not wanted:
+        return True
+    words = {w for w in wanted.split() if len(w) > 3 and w not in _DISTRICT_WORD_STOP}
+    for value in named:
+        if words & {w for w in value.split() if w not in _DISTRICT_WORD_STOP}:
+            return True
+        short, long = sorted((wanted, value), key=len)
+        if long == short or long.startswith(short + " "):
+            return True
+    return False
 
 
 class ApifyIdealistaPortalSource(_PortalSource):
@@ -549,10 +572,11 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     ``district_search`` (``PORTAL_DISTRICT_SEARCH``, Q26): a city task that names exactly one place in
     ``spec.place.districts`` which the cached geocoder finds as a district of that city (``resolve_district``) is
-    sent with ``location`` (the city) and the district's centre + ``distanceKm=2`` instead of the city's circle. The
+    sent with ``location`` (the city) and the district's centre + a circle from its box (``_DISTRICT_RADIUS_KM``)
+    instead of the city's circle. The
     schema's ``location`` takes a city name or a Location ID; that it takes a district name is not a known fact, and
     the district's Location ID is not known here, so neither is sent. Rows are kept for the city and, when the row
-    gives ``district``/``neighborhood``, for the district only. Not a district of the city (a town, an unknown name),
+    gives ``district``/``neighborhood``, for the district only (``_refine``: all of them when none would be left). Not a district of the city (a town, an unknown name),
     several places or no geocoder: the input is as without the flag."""
 
     name = "apify_idealista"
@@ -568,8 +592,10 @@ class ApifyIdealistaPortalSource(_PortalSource):
     _CITY_RADIUS_KM = 15
     _CITY_RADIUS_RANGE = (3, 30)
     _NEIGHBOUR_KM = 40
-    # PORTAL_DISTRICT_SEARCH (Q26): the circle around a district's centre (Madrid's Centro is about 2.5 x 2 km).
+    # PORTAL_DISTRICT_SEARCH (Q26): the circle around a district's centre is half the diagonal of the district's
+    # Nominatim ``boundingbox``, within 1-6 km; 2 km without a box (Madrid's Centro is about 2.5 x 2 km).
     _DISTRICT_RADIUS_KM = 2
+    _DISTRICT_RADIUS_RANGE = (1, 6)
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
                  unambiguous_place: bool = False, district_search: bool = False, **kwargs: Any) -> None:
@@ -648,10 +674,34 @@ class ApifyIdealistaPortalSource(_PortalSource):
         district = task.nearby_places[0]
         try:
             found = await self._geocoder.resolve_district(district, task.location)
-            point = _point(*found) if found is not None else None
+            center, box = found if found is not None else (None, None)
+            point = _point(*center) if center is not None else None
         except Exception:  # noqa: BLE001 - a geocoder failure never stops the run: the input stays as before
             return None
-        return _DistrictCircle(point, self._DISTRICT_RADIUS_KM, district) if point is not None else None
+        if point is None:
+            return None
+        radius: float = self._DISTRICT_RADIUS_KM
+        if box is not None:
+            south, north, west, east = box
+            low, high = self._DISTRICT_RADIUS_RANGE
+            radius = max(low, min(high, _distance_km((south, west), (north, east)) / 2))
+        return _DistrictCircle(point, radius, district)
+
+    def _refine(self, items: list[Any], rows: list[SourceListing | None], task: QueryTask,
+                center: tuple[float, float] | None) -> list[SourceListing | None]:
+        """Q26: with the district sent to the actor, a row that names another district is dropped. When that would
+        drop every row the city filter kept, all of them stay (the names may differ more than ``_district_ok``
+        knows) and ``district_filter_empty`` is logged."""
+        if not isinstance(center, _DistrictCircle):
+            return rows
+        kept = [row if row is None or not isinstance(item, dict)
+                or _district_ok(center.district, item.get("district"), item.get("neighborhood")) else None
+                for item, row in zip(items, rows, strict=True)]
+        if any(row is not None for row in rows) and all(row is None for row in kept):
+            log.warning("web_search.district_filter_empty",
+                        extra={"source": self.name, "rows": sum(row is not None for row in rows)})
+            return rows
+        return kept
 
     def _wrong_place(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> bool:
         """A row of another place. For a city sent with its circle a row whose point is near the circle (twice its
@@ -686,9 +736,6 @@ class ApifyIdealistaPortalSource(_PortalSource):
         if not self._place_ok(task, center, _point(item.get("latitude"), item.get("longitude")),
                               municipality, province):
             return None
-        if isinstance(center, _DistrictCircle) and not _district_ok(center.district, item.get("district"),
-                                                                     item.get("neighborhood")):
-            return None  # Q26: the district went to the actor, the row names another one
         contact = item.get("contactInfo") if isinstance(item.get("contactInfo"), dict) else {}
         phone = contact.get("phone1") if isinstance(contact.get("phone1"), dict) else {}
         texts = item.get("suggestedTexts") if isinstance(item.get("suggestedTexts"), dict) else {}

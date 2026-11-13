@@ -45,11 +45,11 @@ def context(name="apify_idealista", run_id=None):
                             save_run=AsyncMock(), reconcile_usage=AsyncMock())
 
 
-def geocoder(district=CENTRO):
+def geocoder(district=CENTRO, box=None):
     found = AsyncMock()
     found.resolve.return_value = MADRID
     found.resolve_area.return_value = (MADRID, MADRID_BOX)
-    found.resolve_district.return_value = district
+    found.resolve_district.return_value = (district, box) if district is not None else None
     return found
 
 
@@ -168,9 +168,51 @@ async def test_flag_on_resumed_run_launches_nothing_and_still_filters_the_distri
     ("Centro", ("Centro", "Sol"), True), ("Sol", ("Centro", "Sol"), True),
     ("Malasaña", ("Centro", "Malasaña-Universidad"), True), ("centro", ("CENTRO", ""), True),
     ("Centro", ("Chamberí", "Trafalgar"), False), ("Sol", ("Centro", "Solana"), False),
+    ("Sol", ("Sol - Centro", ""), True), ("Ciudad Lineal", ("Ciudad Universitaria", ""), False),
     ("Centro", (None, ""), True)])
-def test_district_match_is_folded_whole_words_and_a_row_without_one_is_kept(district, fields, ok):
+def test_district_match_is_folded_and_a_row_without_one_is_kept(district, fields, ok):
     assert _district_ok(district, *fields) is ok
+
+
+@pytest.mark.parametrize(("official", "portal"), [
+    ("Fuencarral-El Pardo", "Fuencarral"), ("Fuencarral", "Fuencarral-El Pardo"),
+    ("L'Eixample", "Eixample"), ("Eixample", "L'Eixample"), ("Ciutat Vella", "Ciutat Vella - El Gòtic"),
+    ("Chamartín", "Chamartin")])
+def test_official_name_matches_the_idealista_name(official, portal):
+    assert _district_ok(official, portal, "")
+
+
+@pytest.mark.parametrize(("official", "portal"), [
+    ("Moncloa-Aravaca", "Moncloa - Aravaca"), ("Moncloa - Aravaca", "Moncloa-Aravaca"),
+    ("San Blas-Canillejas", "San Blas - Canillejas"), ("Moncloa–Aravaca", "Moncloa  -  Aravaca")])
+def test_hyphens_and_spaced_dashes_are_one_separator(official, portal):
+    assert _district_ok(official, portal, None)
+
+
+async def test_every_row_dropped_by_the_district_keeps_them_all_and_logs(caplog):
+    rows = [row("1", district="Chamberí", neighborhood="Trafalgar"), row("2", district="Salamanca", neighborhood="Goya"),
+            row("3", municipality="Getafe")]  # another city: dropped by the city filter, never brought back
+    with caplog.at_level("WARNING"):
+        _, found = await _run(ApifyIdealistaPortalSource, task(), rows, geocoder=geocoder(), district_search=True)
+    assert ids(found) == ["1", "2"]
+    assert any(r.message == "web_search.district_filter_empty" for r in caplog.records)
+
+
+async def test_an_empty_output_or_a_kept_row_logs_nothing(caplog):
+    with caplog.at_level("WARNING"):
+        await _run(ApifyIdealistaPortalSource, task(), [], geocoder=geocoder(), district_search=True)
+        _, found = await _run(ApifyIdealistaPortalSource, task(), [row("1"), row("2", district="Retiro",
+                              neighborhood="Ibiza")], geocoder=geocoder(), district_search=True)
+    assert ids(found) == ["1"]
+    assert not any(r.message == "web_search.district_filter_empty" for r in caplog.records)
+
+
+@pytest.mark.parametrize(("box", "km"), [
+    (None, 2), ((40.405, 40.426, -3.718, -3.694), 2),  # ~3.1 km diagonal -> 1.55 -> 2
+    ((40.38, 40.44, -3.75, -3.66), 5), ((40.30, 40.60, -3.90, -3.50), 6), ((40.4155, 40.4156, -3.7074, -3.7073), 1)])
+async def test_district_circle_is_half_its_box_diagonal_within_1_and_6_km(box, km):
+    sent, _ = await _run(ApifyIdealistaPortalSource, task(), geocoder=geocoder(box=box), district_search=True)
+    assert sent["distanceKm"] == km
 
 
 def test_district_circle_survives_copy_and_pickle():
@@ -217,13 +259,18 @@ async def test_geocoder_finds_a_district_of_the_city_and_caches_it():
     cache.get.side_effect = [None, json.dumps(list(CENTRO))]
     requests = []
     rows = [{"name": "Centro", "addresstype": "city_district", "lat": "40.4155", "lon": "-3.7074",
+             "boundingbox": ["40.405", "40.426", "-3.718", "-3.694"],
              "address": {"country_code": "es", "city_district": "Centro", "city": "Madrid"}}]
     resolver = CachedCityCenters("", cache=cache, client=nominatim(rows, requests), sleep=AsyncMock())
-    assert await resolver.resolve_district("Centro", "Madrid") == CENTRO
-    assert await resolver.resolve_district("Centro", "Madrid") == CENTRO
+    box = (40.405, 40.426, -3.718, -3.694)
+    assert await resolver.resolve_district("Centro", "Madrid") == (CENTRO, box)
+    assert await resolver.resolve_district("Centro", "Madrid") == (CENTRO, None)  # an entry without a box
     assert len(requests) == 1 and requests[0].url.params["q"] == "Centro, Madrid"
     assert requests[0].url.params["countrycodes"] == "es"
     assert cache.setex.await_args.args[0] == "idealista:district-center:es:madrid:centro"
+    assert json.loads(cache.setex.await_args.args[2]) == [*CENTRO, list(box)]
+    cache.get.side_effect = [json.dumps(json.loads(cache.setex.await_args.args[2]))]
+    assert await resolver.resolve_district("Centro", "Madrid") == (CENTRO, box)
     await resolver.aclose()
 
 
