@@ -23,6 +23,40 @@ PROSE = ("outside the center", "near the center", "a 5 minutos", "не в цен
 PLACES = ("ближе к Playa de San Juan", "район l'Eixample", "Calle de Alcalá, дальше от метро", "район Centro")
 
 
+# Q28 review: the phrases the reviewer may write. Spanish real-estate words and prose drop the phrase; place names
+# (articles «A»/«O», connector chains «de la», «i la», «·» and diacritics) pass with the flag.
+REVIEW_PROSE = (
+    "Close to metro, дальше", "дальше, Close to metro", "Sin ascensor, этаж 3", "этаж 3, Sin ascensor",
+    "Precio negociable, дороже", "дороже, Precio negociable", "дороже: Negociable", "без лифта (Sin ascensor)",
+    "Garaje нет", "нет: Garaje", "нет Terraza", "без Terraza и Garaje", "Exterior, дальше", "дальше от Metro",
+    "Alquiler вместо продажи", "Obra Nueva, дороже", "Piso вместо дома", "Chalet вместо квартиры", "Near центр",
+    "Very far от центра", "Without лифта", "Studio вместо квартиры", "Duplex вместо", "Ático вместо дома",
+    "Bajo, первый этаж", "Planta Baja", "Planta Baja вместо", "дороже (IVA)", "дороже + IVA", "OK, дороже",
+    "Parking нет", "Piscina нет", "этаж Bajo", "Reformar нужно", "дороже Total", "Precio Negociable дороже",
+    "район Sin", "район Y", "дороже, Is Negotiable", "дороже, A 5 Minutos", "район de la", "район Sant i Карабанчель",
+    "Amueblado, дороже", "без Balcón", "без Jardín", "Estudio вместо квартиры", "Trastero нет", "Venta вместо аренды",
+    "Interior, темнее", "Wifi нет",
+)
+REVIEW_PLACES = (
+    "Sant Martí, дальше", "район L'Hospitalet", "район Puerta del Sol", "район Ciudad Lineal", "район A Coruña",
+    "район Sant Andreu de Palomar", "район Les Corts", "район Sants-Montjuïc", "район Hospitalet de Llobregat",
+    "район El Puerto de Santa María", "район Vall d'Hebron", "район Sant Gervasi i la Bonanova", "Coruña, дальше",
+    "район La Latina", "район Fuencarral-El Pardo", "дальше от Calle Mayor", "дальше от C/ Mayor",
+    "Avda. de América рядом", "Paseo de la Castellana рядом", "район Lavapiés", "ул. Gran Vía", "район O Grove",
+    "район Puerto de la Cruz", "район Playa de las Américas", "район A Estrada", "район Paral·lel", "Ávila, дальше",
+)
+
+
+def test_every_reviewer_phrase_is_judged_right() -> None:
+    for phrase in REVIEW_PROSE:
+        assert user_phrase(phrase, places=True) is None, phrase
+    for phrase in REVIEW_PLACES:
+        assert user_phrase(phrase, places=True) == phrase, phrase
+    assert user_phrase("В районе Retiro", places=True) == "в районе Retiro"  # a Russian first word is lowercased
+    for phrase in REVIEW_PROSE + REVIEW_PLACES:
+        assert user_phrase(phrase) is None, phrase  # without the flag: as before
+
+
 def review_answer(deviation: str) -> str:
     return json.dumps({"criteria": [{"name": "place", "verdict": "pass", "quote": None, "note": ""}],
                        "overall": "near", "deviation_ru": deviation, "confidence": 0.8})

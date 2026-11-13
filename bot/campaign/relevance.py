@@ -221,14 +221,22 @@ def _verdict(value: object) -> Verdict:
 # USER_PHRASE_PLACES (Q28): Latin words in a Russian phrase are allowed when they are place names -- capitalised
 # («Vista Alegre», «Carabanchel», «Calle Mayor»), with Spanish connectors between two of them («Playa de San Juan»).
 # A lowercase Latin word is still prose or a unit the model drifted into («near the center», «a 5 minutos», «m²»).
-_LATIN_WORD = re.compile(r"[a-zà-ÿ][a-zà-ÿ'’-]*", re.IGNORECASE)
+_LATIN_WORD = re.compile(r"[a-zà-öø-ÿ][a-zà-öø-ÿ'’·-]*", re.IGNORECASE)  # «Ávila», «Sants-Montjuïc», «Paral·lel»
 _PLACE_LINKS = frozenset({"de", "del", "la", "las", "los", "el", "y", "i", "d", "l", "dels", "les"})
+_ARTICLES = frozenset({"a", "o"})  # Galician articles: «A Coruña», «O Grove»
 
-
-# Capitalised prose is still prose: «Near The Center», «A 5 Minutos» are not place names.
-_PROSE_WORDS = frozenset({"the", "a", "an", "near", "far", "from", "to", "of", "and", "or", "with", "without", "in",
-                          "on", "at", "outside", "inside", "center", "centre", "city", "minutes", "min", "metro",
-                          "cerca", "lejos", "fuera", "sin", "con", "en", "minutos", "metros", "zona", "no"})
+# Capitalised prose is still prose: «Near The Center», «A 5 Minutos», «Sin Ascensor», «Precio Negociable» are not
+# place names. Lowercase connectors are links inside a name, a capitalised lone one («район Y») is not a name.
+_PROSE_WORDS = frozenset({
+    "the", "a", "an", "near", "far", "from", "to", "of", "and", "or", "with", "without", "in", "on", "at", "is", "ok",
+    "outside", "inside", "center", "centre", "city", "minutes", "min", "metro", "wifi", "total",
+    "cerca", "lejos", "fuera", "sin", "con", "en", "minutos", "metros", "zona", "no", "y", "i", "d", "l", "de", "del",
+    "dels",
+    # real-estate words the model leaves in Spanish
+    "garaje", "terraza", "piscina", "ascensor", "trastero", "parking", "piso", "chalet", "ático", "bajo", "exterior",
+    "interior", "precio", "negociable", "obra", "nueva", "alquiler", "venta", "reformar", "amueblado", "balcón",
+    "jardín", "estudio", "studio", "duplex", "dúplex", "planta", "baja", "iva",
+})
 
 
 def _is_name(word: str) -> bool:
@@ -241,15 +249,29 @@ def _is_name(word: str) -> bool:
 
 
 def _latin_is_places(phrase: str) -> bool:
-    """True when every Latin word is a place name: capitalised, or a connector between two capitalised words."""
-    words = [(m.group(), m.start()) for m in _LATIN_WORD.finditer(phrase)]
-    for i, (word, _) in enumerate(words):
-        if _is_name(word):
+    """True when every Latin word is a place name: capitalised, a Galician article right before a name («A Coruña»),
+    or a run of connectors between two names inside one Latin name («Playa de las Américas», «Gervasi i la Bonanova»)."""
+    words = [(m.group(), m.start(), m.end()) for m in _LATIN_WORD.finditer(phrase)]
+    names = [_is_name(word) for word, _, _ in words]
+
+    def joined(a: int, b: int) -> bool:  # only spaces (or one abbreviation dot, «Avda. de») between: one Latin name
+        return not phrase[words[a][2]:words[b][1]].replace(".", "", 1).strip()
+
+    for i, (word, _, _) in enumerate(words):
+        if names[i]:
             continue
-        if (word.casefold() in _PLACE_LINKS and 0 < i < len(words) - 1
-                and _is_name(words[i - 1][0]) and _is_name(words[i + 1][0])
-                and not _CYRILLIC.search(phrase[words[i - 1][1]:words[i + 1][1]])):
-            continue  # «Playa de San Juan»: a connector inside one Latin name
+        if (word in ("A", "O") and word.casefold() in _ARTICLES and i + 1 < len(words) and names[i + 1]
+                and joined(i, i + 1)):
+            continue  # «A Coruña», «O Grove»
+        if word.casefold() in _PLACE_LINKS and word[0].islower():
+            left, right = i - 1, i + 1
+            while left >= 0 and words[left][0] in _PLACE_LINKS:
+                left -= 1
+            while right < len(words) and words[right][0] in _PLACE_LINKS:
+                right += 1
+            if (left >= 0 and right < len(words) and names[left] and names[right]
+                    and all(joined(k, k + 1) for k in range(left, right))):
+                continue  # «Paseo de la Castellana»: a connector chain inside one Latin name
         return False
     return True
 
@@ -263,7 +285,7 @@ def user_phrase(text: object, *, places: bool = False) -> str | None:
         return None
     if _LATIN.search(phrase) and not (places and _latin_is_places(phrase)):
         return None
-    if places and _LATIN.match(phrase):
+    if places and _LATIN_WORD.match(phrase):
         return phrase  # a phrase that begins with a place name keeps its capital
     return phrase[0].lower() + phrase[1:]
 
