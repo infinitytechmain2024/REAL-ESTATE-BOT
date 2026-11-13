@@ -135,6 +135,11 @@ MAX_MESSAGE_CHARS = 3900
 HELD_DEDUP_LIMIT = 200  # Q27: the held findings of a bucket a new one is compared with (closest first)
 SUMMARY_STATES = frozenset({"completed", "cancelled"})
 SUMMARY_WINDOW = timedelta(hours=2)
+# OFFER_AFTER_SEARCH (Q27): the final report waits for the checks and the similar question at most this long after the
+# campaign ended, then it goes without the question (which follows on its own). Inside SUMMARY_WINDOW, or it is lost.
+REPORT_WAIT = timedelta(minutes=10)
+if REPORT_WAIT >= SUMMARY_WINDOW:
+    raise RuntimeError("REPORT_WAIT must be shorter than SUMMARY_WINDOW")
 
 
 # --- Telegram -------------------------------------------------------------------------
@@ -370,6 +375,7 @@ class CampaignRunner:
         self._below_status: set[str] = set()
         # OFFER_AFTER_SEARCH (Q27): ended campaigns whose final report waits for the checks and the similar question.
         self._report_waits: set[str] = set()
+        self._report_forced: set[str] = set()  # ...and those whose report went without it (logged once)
         self._cards_since: dict[str, int] = {}  # campaign id -> cards sent since its status message was posted
         self._phase: dict[str, str] = {}  # campaign id -> the user line's phase now: searching | checking | done
         self._posted_phase: dict[str, str] = {}  # ... and the phase the posted status message was sent in
@@ -448,10 +454,22 @@ class CampaignRunner:
             await self._stream(campaign, final=True)
             await self._metrics(campaign, final=True)
             await self._summary(campaign)
-            if campaign.id not in self._report_waits:  # OFFER_AFTER_SEARCH (Q27): the report comes after the question
+            if not self._report_waits_for_offer(campaign):  # OFFER_AFTER_SEARCH (Q27): after the question
                 await self._final_report(campaign)
             line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
         await self._show(campaign, line)
+
+    def _report_waits_for_offer(self, campaign: Campaign) -> bool:
+        """Q27: the final report still waits for the checks or the similar question (``_report_waits``), at most
+        ``REPORT_WAIT`` after the campaign ended; past it the report goes without the question (logged once)."""
+        if campaign.id not in self._report_waits:
+            return False
+        if campaign.finished_at is not None and self.now() - campaign.finished_at < REPORT_WAIT:
+            return True
+        if campaign.id not in self._report_forced:
+            self._report_forced.add(campaign.id)
+            log.warning("campaign.final_report_without_offer", extra={"campaign_id": campaign.id})
+        return False
 
     # -- phases --
 

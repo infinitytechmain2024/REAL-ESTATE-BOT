@@ -3,10 +3,12 @@ waits for the end of the search (``OFFER_AFTER_SEARCH``). Synthetic flats, in-me
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from bot.campaign import MemoryCampaignStore, plan_campaign
 from bot.campaign.final_report import FinalReporter, tally
 from bot.campaign.offers import MemoryOffer
-from bot.campaign.runner import CampaignRunner, RunnerConfig
+from bot.campaign.runner import REPORT_WAIT, SUMMARY_WINDOW, CampaignRunner, RunnerConfig
 from bot.campaign.runs import MemoryRunStore
 from bot.campaign.settings import CampaignRunnerSettings
 from bot.campaign.tolerance import Match
@@ -205,3 +207,39 @@ async def test_off_the_report_does_not_wait() -> None:
     await campaigns.set_state(cid, "completed", "campaign:test")
     await runner.step(cid)
     assert any(t.startswith("📋 Отчёт по поиску") for _, _, t in messenger.sent)
+
+
+def _reports(messenger: ButtonMessenger) -> int:
+    return sum(text.startswith("📋 Отчёт по поиску") for _, _, text in messenger.sent)
+
+
+async def _failing_question(restart: bool) -> None:
+    campaigns, store, messenger, runner, cid = await setup(offer_after_search=True)
+    add(store, cid, "b1", OTHER, price=290_000, area=85)
+    await campaigns.set_state(cid, "completed", "campaign:test")
+    finished = (await campaigns.get(cid)).finished_at
+    messenger.ask_fail = 10**6  # Telegram never takes the question
+    runner.now = lambda: finished + timedelta(minutes=1)
+    await runner.step(cid)
+    assert _reports(messenger) == 0 and messenger.asks == []  # inside REPORT_WAIT: the report waits
+    if restart:  # a new process forgets what it waited for: the first step finds it again
+        runner = CampaignRunner(campaigns, store, messenger, None, final_report=FinalReporter(), config=RunnerConfig(
+            relevance_fail_closed=False, window_cooldown_seconds=0, offer_after_search=True))
+    runner.now = lambda: finished + timedelta(minutes=11)
+    for _ in range(3):
+        await runner.step(cid)
+    assert _reports(messenger) == 1 and messenger.asks == []  # past REPORT_WAIT: the report goes, once
+    messenger.ask_fail = 0
+    await runner.step(cid)
+    assert _reports(messenger) == 1 and len(messenger.asks) == 1  # the question follows on its own
+    texts = [text for _, _, text in messenger.sent]
+    assert texts.index(messenger.asks[0][1]) > next(i for i, t in enumerate(texts) if t.startswith("📋 Отчёт по поиску"))
+
+
+async def test_the_report_waits_at_most_report_wait_for_a_failing_question() -> None:
+    assert timedelta(minutes=10) == REPORT_WAIT < SUMMARY_WINDOW
+    await _failing_question(restart=False)
+
+
+async def test_the_report_wait_limit_holds_after_a_restart() -> None:
+    await _failing_question(restart=True)
