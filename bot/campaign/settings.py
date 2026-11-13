@@ -156,6 +156,8 @@ class CampaignRunnerSettings(BaseSettings):
     # Q15: an address that is only a district does not need a shared street across two portals; the agency's reference
     # of the ad (Fotocasa, Habitaclia) with the price and area merges, two references never do.
     dedup_district_not_street: bool = Field(default=False, validation_alias="DEDUP_DISTRICT_NOT_STREET")
+    # Q25: the «Показать?» question names every distinct difference of the held similar listings (at most 5).
+    offer_all_reasons: bool = Field(default=False, validation_alias="OFFER_ALL_REASONS")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -444,7 +446,8 @@ class CampaignRunnerSettings(BaseSettings):
                             investor_report=self.investor_report,
                             join_notices=self.join_notices,
                             dedup_without_address=self.dedup_without_address,
-                            dedup_district_not_street=self.dedup_district_not_street)
+                            dedup_district_not_street=self.dedup_district_not_street,
+                            offer_all_reasons=self.offer_all_reasons)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

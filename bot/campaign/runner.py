@@ -291,6 +291,8 @@ class RunnerConfig:
     dedup_without_address: bool = False
     # A district in the address is no street; the agency reference counts (``same_object(district_not_street=True)``, Q15).
     dedup_district_not_street: bool = False
+    # The similar question names every distinct difference of the held listings, not only the closest one's (Q25).
+    offer_all_reasons: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -844,10 +846,10 @@ class CampaignRunner:
         price = price_of(closest.payload)
         if match.why == "price" and price is not None and request.amount is not None and price > request.amount:
             return offers.Deviation("price", money(price, request.currency), money(request.amount, request.currency),
-                                    land=land)
+                                    land=land, value=price)
         if match.why == "area" and match.area is not None and request.min_area:
             requested = f"от {round(request.min_area):,} м²".replace(",", " ")
-            return offers.Deviation("area", area_text(match.area), requested, land=land)
+            return offers.Deviation("area", area_text(match.area), requested, land=land, value=match.area)
         if match.why == "area_unknown":
             return offers.Deviation("area_unknown", phrase="площадь не указана", land=land)
         if match.why == "location_unknown":  # Q12: the portal's place is its fallback point
@@ -1046,6 +1048,14 @@ class CampaignRunner:
                     names.update(dict.fromkeys(offers.unknown_of(other.hold_reason)))
                 deviation = replace(deviation, unknown=tuple(names))
             text = offers.similar_question(deviation, exact_found=exact_found)
+            if self.config.offer_all_reasons:  # Q25: one «Одобрить» sends them all, so the question names them all
+                try:
+                    reasons = await self._reasons(campaign, request, deviation)
+                except Exception:  # noqa: BLE001 - the question goes out with the closest one's difference
+                    log.warning("campaign.offer_reasons_failed", extra={"campaign_id": campaign.id})
+                    reasons = []
+                if len(reasons) > 1 or (reasons and reasons != offers.reasons_of([deviation])):  # or a worse value
+                    text = offers.reasons_question(reasons, land=deviation.land, exact_found=exact_found)
         else:
             text = offers.OTHER_QUESTION
         try:
@@ -1057,6 +1067,17 @@ class CampaignRunner:
         await self.store.offer_sent(campaign.id, bucket, message_id)
         self._below_status.add(campaign.id)
         log.info("campaign.offer_asked", extra={"campaign_id": campaign.id, "bucket": bucket})
+
+    async def _reasons(self, campaign: Campaign, request: Request, closest: offers.Deviation) -> list[str]:
+        """Q25: the distinct differences of the held similar findings (the closest one's first), as the question names
+        them; a finding whose difference cannot be told is skipped."""
+        deviations = [closest]
+        for other in await self.store.held_findings(campaign.id, "similar", 50, exclude_why=self._unoffered("similar")):
+            try:
+                deviations.append(await self._deviation(campaign, request, other))
+            except Exception:  # noqa: BLE001 - the question still goes out with the differences known so far
+                continue
+        return offers.reasons_of(deviations)
 
     async def _summary(self, campaign: Campaign) -> None:
         """«Итог поиска»: what each source gave, sent once to an owner's campaign when it completes or is cancelled.

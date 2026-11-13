@@ -751,6 +751,7 @@ services:
       CAMPAIGN_JOIN_NOTICES: ${CAMPAIGN_JOIN_NOTICES:-false}
       DEDUP_WITHOUT_ADDRESS: ${DEDUP_WITHOUT_ADDRESS:-false}
       DEDUP_DISTRICT_NOT_STREET: ${DEDUP_DISTRICT_NOT_STREET:-false}
+      OFFER_ALL_REASONS: ${OFFER_ALL_REASONS:-false}
       # Investor leads from the comments under sent objects (bot/campaign/leads.py), and dead groups.
       CAMPAIGN_COMMENT_LEADS: ${CAMPAIGN_COMMENT_LEADS:-investors}
       CAMPAIGN_COMMENT_MAX_POSTS: ${CAMPAIGN_COMMENT_MAX_POSTS:-15}
