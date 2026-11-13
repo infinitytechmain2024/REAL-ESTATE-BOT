@@ -33,6 +33,13 @@ wins) and work across platforms (group A vs group B, Facebook vs a portal):
 Across two different sites the same price (within 1 %), area (3 %), rooms (or none on both) and city merge when the
 phone, the agency or at least two features are shared too, even if the districts are named differently.
 
+Across two sites when the districts differ in the address too (``same_object(..., cross_portal_facts=True)``,
+``DEDUP_CROSS_PORTAL_FACTS``, Q32): without the flag two addresses without a shared street token never reach the rule
+above (Fotocasa «Las Lomas de Río Verde» and Habitaclia «Milla de Oro» for one villa). With it, such a pair merges by
+that rule when, in addition, the rooms are known on both sides, the city is named, neither is a new development, the
+property types agree, not both addresses name a street (two streets that differ are two objects), a street on one side
+shares a district token with the other and the agency references, when both are known, are the same.
+
 Two ads of one portal are not merged by text (only Facebook, where one flat is posted in many groups, is).
 
 A district for a street (``same_object(..., district_not_street=True)``, ``DEDUP_DISTRICT_NOT_STREET``, Q15): portals
@@ -427,11 +434,13 @@ def _host(url: str | None) -> str:
     return site_of(url)
 
 
-def same_object(a: Listing, b: Listing, *, without_address: bool = False, district_not_street: bool = False) -> bool:
+def same_object(a: Listing, b: Listing, *, without_address: bool = False, district_not_street: bool = False,
+                cross_portal_facts: bool = False) -> bool:
     """True only when the two listings are almost surely one property (see the module notes); ``without_address``
     (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``);
     ``district_not_street`` (``DEDUP_DISTRICT_NOT_STREET``, Q15) does not require a shared street when an address is
-    only a district and compares the agency references."""
+    only a district and compares the agency references; ``cross_portal_facts`` (``DEDUP_CROSS_PORTAL_FACTS``, Q32)
+    lets two portals' addresses without a shared street merge by the facts rule (``_same_cross_facts``)."""
     if a.deal and b.deal and a.deal != b.deal:
         return False
     if a.currency and b.currency and a.currency != b.currency:
@@ -459,6 +468,8 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
                 not both_streets or a.phones & b.phones or (a.agency and a.agency == b.agency)):
             return False  # another reference of the agency: another flat
     if both_addressed and not (street_a & street_b):
+        if cross_portal_facts and _same_cross_facts(a, b):
+            return True  # Q32: one object, two portals naming the district differently
         if not district_not_street or both_streets:
             return False  # a district alone does not identify a flat: the street must be shared (every rule, text included)
         # Q15: an address is only a district, named differently by two portals: the agency reference or the text only
@@ -549,6 +560,25 @@ def _same_facts(a: Listing, b: Listing) -> bool:
         return False
     return bool(a.phones & b.phones) or bool(a.agency and a.agency == b.agency) \
         or len(a.features & b.features) >= FACTS_MIN_FEATURES
+
+
+def _same_cross_facts(a: Listing, b: Listing) -> bool:
+    """Q32: ``_same_facts`` for two addresses without a shared street (the districts named differently by two portals),
+    stricter: the rooms known on both sides, a city named, no new development (units of one project share price, area
+    and rooms), the same property type when both are known, not two named streets, a street on one side only with a
+    shared district token, and the same agency reference when both are known (one agency, two units)."""
+    if a.new_build or b.new_build or not (a.rooms and b.rooms) or not _cities(a):
+        return False
+    if a.kind and b.kind and a.kind != b.kind:
+        return False
+    street_a, street_b = _named_street(a), _named_street(b)
+    if street_a and street_b:
+        return False  # two streets that differ: two objects
+    if street_a != street_b and not ((tokens(a.location) - _DISTRICT_STOP) & (tokens(b.location) - _DISTRICT_STOP)):
+        return False  # a street on one side, another district on the other
+    if a.agency_ref and b.agency_ref and a.agency_ref != b.agency_ref:
+        return False  # another reference of the agency: another unit
+    return _same_facts(a, b)
 
 
 def _bare_area(listing: Listing) -> float | None:
