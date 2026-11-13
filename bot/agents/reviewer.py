@@ -496,7 +496,7 @@ def _clip(text: object, limit: int) -> str:
 def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", model: str | None = None,
                  tolerance: float | None = None, soft_wishes: bool = False,
                  task_wishes: Sequence[Any] = (), townhouse_is_house: bool = False,
-                 quote_hits: bool = False, non_residential: bool = False) -> Review:
+                 quote_hits: bool = False, non_residential: bool = False, places: bool = False) -> Review:
     """The model's answer after harmless drift is fixed and the rules above are enforced.
 
     ``ValueError``: not a JSON object. ``expected``: the criteria asked for (an unanswered one is ``unknown``,
@@ -508,7 +508,8 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     task wish as not ``pass`` and no wish of weight 3 lacks a ``pass`` (``_only_soft_wishes_unmet``). Any other
     ``near`` (a suburb, a promotion of several flats; a townhouse for a house without ``REVIEW_TOWNHOUSE_IS_HOUSE``,
     with it only when the task asks for a detached house) stays ``near`` with its deviation. ``townhouse_is_house``,
-    ``quote_hits`` and ``non_residential`` only name the prompt version stored with the review.
+    ``quote_hits`` and ``non_residential`` only name the prompt version stored with the review; ``places``
+    (``USER_PHRASE_PLACES``, Q28) keeps Latin place names in the deviation phrase.
     """
     data = json.loads(_FENCE.sub("", content))
     if not isinstance(data, dict):
@@ -547,7 +548,8 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     confidence = data.get("confidence")
     confidence = (max(0.0, min(1.0, float(confidence)))
                   if isinstance(confidence, int | float) and not isinstance(confidence, bool) else None)
-    deviation = user_phrase(data.get("deviation_ru") or data.get("deviation")) if overall == "near" else None
+    deviation = (user_phrase(data.get("deviation_ru") or data.get("deviation"), places=places)
+                 if overall == "near" else None)
     prompt = prompt_of(soft_wishes=soft_wishes, townhouse_is_house=townhouse_is_house, quote_hits=quote_hits,
                        non_residential=non_residential)[0]
     if not soft_wishes:
@@ -629,7 +631,7 @@ class OpenRouterReviewer:
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 45,
                  client: httpx.AsyncClient | None = None, soft_wishes: bool = False,
                  townhouse_is_house: bool = False, quote_hits: bool = False,
-                 non_residential: bool = False) -> None:
+                 non_residential: bool = False, phrase_places: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the reviewer")
         self.model = model
@@ -637,6 +639,7 @@ class OpenRouterReviewer:
         self.townhouse_is_house = townhouse_is_house  # REVIEW_TOWNHOUSE_IS_HOUSE (Q18): SYSTEM_TH / SYSTEM_SOFT_TH
         self.quote_hits = quote_hits  # PORTAL_DESCRIPTION_FULL (Q18): the finding's «hits» may be quoted
         self.non_residential = non_residential  # REVIEW_NON_RESIDENTIAL (Q22): a non-residential unit is not a home
+        self.phrase_places = phrase_places  # USER_PHRASE_PLACES (Q28): Latin place names in the deviation phrase
         self._llm = OpenRouterJSON(api_key, timeout_seconds=timeout_seconds, client=client)
 
     async def aclose(self) -> None:
@@ -657,7 +660,8 @@ class OpenRouterReviewer:
             return parse_review(content, expected=expected, haystack=haystack_of(finding), model=self.model,
                                 tolerance=_number(task.get("tolerance_pct")), soft_wishes=self.soft_wishes,
                                 task_wishes=task.get("wishes") or (), townhouse_is_house=self.townhouse_is_house,
-                                quote_hits=self.quote_hits, non_residential=self.non_residential)
+                                quote_hits=self.quote_hits, non_residential=self.non_residential,
+                                places=self.phrase_places)
         except Exception as exc:
             log.warning("campaign.review_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response") from exc

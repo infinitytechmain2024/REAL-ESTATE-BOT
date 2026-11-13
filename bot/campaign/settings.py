@@ -109,6 +109,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q18, the same variable as bot/web_search/settings.py: the reviewer also gets «hits», windows of the whole
     # listing text around the must-have words, and may quote them (prompt «-hits»). Off: as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")
+    # Q28: the deviation phrase users see («Показать?», cards) may keep Latin place names («не в центре (Vista
+    # Alegre)»); English or Spanish prose is still dropped. false (default): any Latin letter drops the phrase.
+    user_phrase_places: bool = Field(default=False, validation_alias="USER_PHRASE_PLACES")
     # The most one campaign may spend in USD (LLM, scrape API, paid search, listing APIs), summed over every service
     # from the campaign_costs ledger (bot/utils/costs.py). Reached: the web stage stops (budget_cap), the analysis
     # worker and the AI check skip the campaign's findings, the report says so. 0: no limit.
@@ -126,7 +129,8 @@ class CampaignRunnerSettings(BaseSettings):
         if not self.openrouter_api_key or self.relevance_max_calls <= 0:
             return None
         legacy = OpenRouterRelevanceJudge(api_key=self.openrouter_api_key, model=self.relevance_model,
-                                          timeout_seconds=self.relevance_timeout_seconds)
+                                          timeout_seconds=self.relevance_timeout_seconds,
+                                          phrase_places=self.user_phrase_places)
         if self.judge == "legacy":
             return legacy
         from bot.agents.reviewer import OpenRouterReviewer
@@ -136,7 +140,8 @@ class CampaignRunnerSettings(BaseSettings):
                                                 soft_wishes=self.relevance_soft_wishes,
                                                 townhouse_is_house=self.review_townhouse_is_house,
                                                 quote_hits=self.portal_description_full,
-                                                non_residential=self.review_non_residential), legacy,
+                                                non_residential=self.review_non_residential,
+                                                phrase_places=self.user_phrase_places), legacy,
                              max_calls=self.review_max_calls)
 
     def final_reporter(self):  # -> bot.campaign.final_report.FinalReporter | None

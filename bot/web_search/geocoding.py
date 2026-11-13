@@ -63,20 +63,9 @@ class CachedCityCenters:
                         return (float(lat), float(lon)), (_bbox(value[2]) if len(value) == 3 else None)
                 except (TypeError, ValueError, IndexError, KeyError):
                     pass
-            wait = 1.0 - (time.monotonic() - self._last_request)
-            if wait > 0:
-                await self._sleep(wait)
-            self._last_request = time.monotonic()
-            try:
-                response = await self._client.get(
-                    NOMINATIM_URL, params={"city": city, "countrycodes": "es", "format": "jsonv2",
-                                            "addressdetails": 1, "limit": 5},
-                    headers={"User-Agent": USER_AGENT}, timeout=10)
-                response.raise_for_status()
-                rows = response.json()
-            except (httpx.HTTPError, ValueError):
-                return None
-            if not isinstance(rows, list):
+            rows = await self._search({"city": city, "countrycodes": "es", "format": "jsonv2",
+                                       "addressdetails": 1, "limit": 5})
+            if rows is None:
                 return None
             for row in rows:
                 if not isinstance(row, dict):
@@ -99,6 +88,73 @@ class CachedCityCenters:
                 return center, box
             return None
 
+    async def resolve_district(self, district: str, city: str) -> tuple[tuple[float, float], Bbox | None] | None:
+        """PORTAL_DISTRICT_SEARCH (Q26): the centre of a district of ``city`` («Centro», «Chamberí»). Only a Nominatim
+        row named ``district`` whose kind is a part of a town (``_DISTRICT_TYPES``) and whose address puts it in
+        ``city`` counts: a town of its own («Getafe»), a street or a shop of that name is not a district (None).
+        The centre and, when Nominatim gave it, the district's ``boundingbox``; cached like a city centre
+        (``[lat, lon, [south, north, west, east]]``, or ``[lat, lon]`` without a box); no cache, no public lookup."""
+        if (self._cache is None or not district.strip() or not city.strip() or len(district) > 80
+                or len(city) > 80):
+            return None
+        key = f"idealista:district-center:es:{_fold(city)}:{_fold(district)}"
+        async with self._lock:
+            try:
+                cached = await self._cache.get(key)
+            except Exception:  # noqa: BLE001 - no uncached public geocoding on Redis failure
+                return None
+            if cached:
+                try:
+                    value = json.loads(cached)
+                    if isinstance(value, list) and len(value) in (2, 3) and _coordinates(value[0], value[1]):
+                        return (float(value[0]), float(value[1])), (_bbox(value[2]) if len(value) == 3 else None)
+                except (TypeError, ValueError):
+                    pass
+            rows = await self._search({"q": f"{district}, {city}", "countrycodes": "es", "format": "jsonv2",
+                                       "addressdetails": 1, "limit": 5})
+            for row in rows or ():
+                if not isinstance(row, dict):
+                    continue
+                address = row.get("address")
+                if not isinstance(address, dict) or address.get("country_code") != "es":
+                    continue
+                kind = row.get("addresstype")
+                name = row.get("name")
+                towns = (address.get("city"), address.get("town"), address.get("municipality"))
+                if (not isinstance(kind, str) or kind not in _DISTRICT_TYPES
+                        or not isinstance(name, str) or _fold(name) != _fold(district)
+                        or not any(isinstance(town, str) and _fold(town) == _fold(city) for town in towns)):
+                    continue
+                lat, lon = row.get("lat"), row.get("lon")
+                if not _coordinates(lat, lon):
+                    continue
+                center = float(lat), float(lon)
+                box = _bbox(row.get("boundingbox"))
+                try:
+                    await self._cache.setex(key, 30 * 24 * 3600, json.dumps([*center, *([list(box)] if box else [])]))
+                except Exception:  # noqa: BLE001 - never use an uncacheable public result
+                    return None
+                return center, box
+            return None
+
+    async def _search(self, params: dict[str, str | int]) -> list[object] | None:
+        """One Nominatim search, at most one per second (the caller holds ``_lock``); None on any failure."""
+        wait = 1.0 - (time.monotonic() - self._last_request)
+        if wait > 0:
+            await self._sleep(wait)
+        self._last_request = time.monotonic()
+        try:
+            response = await self._client.get(NOMINATIM_URL, params=params, headers={"User-Agent": USER_AGENT},
+                                              timeout=10)
+            response.raise_for_status()
+            rows = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        return rows if isinstance(rows, list) else None
+
+
+# Nominatim ``addresstype`` of a part of a town (Q26): a district, a borough, a neighbourhood.
+_DISTRICT_TYPES = frozenset({"city_district", "district", "borough", "suburb", "quarter", "neighbourhood"})
 
 Bbox = tuple[float, float, float, float]
 

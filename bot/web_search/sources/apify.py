@@ -240,7 +240,8 @@ class ApifyListingSource:
                                code="apify_result_limit", units=overflow, campaign_id=context.campaign_id)
         if task.radius_km is not None and center is None:
             center = await self._center(task)
-        rows = [self._normalize(item, task, center) for item in items[:amount]]
+        rows = self._refine(items[:amount], [self._normalize(item, task, center) for item in items[:amount]],
+                            task, center)
         # IDEALISTA_UNAMBIGUOUS_PLACE (Q17): a dropped row that names another municipality/province (or lies outside
         # the circle) is booked as ``apify_wrong_place``; the rest as before.
         wrong = sum(row is None and self._wrong_place(item, task, center)
@@ -256,6 +257,12 @@ class ApifyListingSource:
             log.warning("web_search.apify_wrong_place", extra={"source": self.name, "rows": wrong})
             raise PermanentApifyError("apify_wrong_place")
         return [row for row in rows if row is not None]
+
+    def _refine(self, items: list[Any], rows: list[SourceListing | None], task: QueryTask,
+                center: tuple[float, float] | None) -> list[SourceListing | None]:
+        """A second look at the whole output (``rows[i]`` is ``items[i]`` normalised, None when dropped); a portal may
+        drop more rows here (PORTAL_DISTRICT_SEARCH, Q26). The rows as they are by default."""
+        return rows
 
     def _wrong_place(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> bool:
         """True when a row ``_normalize`` dropped is from another place; off unless a source says how to tell."""
