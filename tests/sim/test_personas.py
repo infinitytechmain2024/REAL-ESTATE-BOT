@@ -177,6 +177,14 @@ SKIP = (("Не важно", "task:skip"), ("Хватит, ищи", "task:enough"
     ("В якому місті шукати?", "place"),
     ("Яке місто?", "place"),
     ("Що обов'язково має бути? Наприклад: «балкон».", "must_have"),
+    # Q24: the runs' «обязательные требования / условия» (N1, G5) and the same on uk/es/en
+    ("Понял: Аренда на год или дольше\n\nЕсть ли обязательные требования к квартире: лифт, мебель, можно с "
+     "животными? Например: «лифт обязателен», «с мебелью», «с собакой».", "must_have"),
+    ("Понял: Аренда на год\n\nЕсть ли обязательные условия: животные, мебель, дата заезда? Например: «можно с "
+     "собакой», «с мебелью», «заезд с 1 декабря».", "must_have"),
+    ("Чи є обов'язкові вимоги до квартири: ліфт, меблі?", "must_have"),
+    ("¿Hay requisitos obligatorios: ascensor, amueblado, mascotas?", "must_have"),
+    ("Any mandatory requirements: a lift, furniture, pets allowed?", "must_have"),
 ])
 def test_the_slot_of_a_question(question: str, slot: str | None) -> None:
     assert answer_user.slot_of({"question": question}) == slot
@@ -229,6 +237,42 @@ def test_a_press_needs_its_button_and_a_repeat_gets_a_straight_answer(tmp_path: 
     pending(tmp_path, "r", "Не понял сумму. Какой бюджет?", index=1, buttons=SKIP)
     answer_user.answer_pending(tmp_path, "r", persona, 0)
     assert load(tmp_path / "answers" / "r.json")["answers"][1] == {"text": "до 3 млн €"}
+
+
+# the AI interviewer's deviation buttons from the runs (b2-n1-s3, b1-g5-s1)
+AI_DEVIATION = (("бюджет до +10 % (до 1320 €)", "task:opt:0"), ("соседние районы: Чамбери, Ретиро", "task:opt:1"),
+                ("1 комната вместо 2", "task:opt:2"), ("нет, только точные", "task:opt:3"), *SKIP)
+RULE_DEVIATION = (("±10 %", "task:dev:10"), ("±20 %", "task:dev:20"), ("Только точные", "task:dev:0"), *SKIP)
+DEVIATION_Q = "Если точных вариантов не будет, что допустимо? Например: бюджет до +10 % (до 1320 €), или только точные."
+
+
+@pytest.mark.parametrize(("press", "buttons", "data"), [
+    ("task:dev:0", RULE_DEVIATION, "task:dev:0"),
+    ("task:dev:10", RULE_DEVIATION, "task:dev:10"),
+    ("task:dev:0", AI_DEVIATION, "task:opt:3"),
+    ("task:dev:10", AI_DEVIATION, "task:opt:0"),
+    ("Только точные", AI_DEVIATION, "task:opt:3"),  # the words are in the label
+    ("Только точные", RULE_DEVIATION, "Только точные"),  # on screen as it is: kept
+    ("task:dev:20", AI_DEVIATION, None),  # nothing means it: not pressed
+    ("Нет", AI_DEVIATION, None),  # «нет, только точные» is no «Нет»
+])
+def test_a_press_finds_its_button_by_data_or_meaning(press: str, buttons: tuple, data: str | None) -> None:
+    persona = {"replies": {"deviation": [{"press": press, "weight": 1}]}}
+    pick = answer_user.choose(persona, {"question": DEVIATION_Q,
+                                        "buttons": [{"text": t, "data": d} for t, d in buttons]}, 0, "r")
+    assert pick.slot == "deviation" and (pick.answer or {}).get("press") == data
+
+
+@pytest.mark.parametrize("name", [p.stem for p in FILES if "deviation" in load(p)["replies"]])
+def test_every_persona_presses_a_deviation_button_by_its_data(name: str) -> None:
+    replies = load(PERSONAS / f"{name}.json")["replies"]["deviation"]
+    presses = {o["press"] for o in replies if "press" in o}
+    assert presses == {"task:dev:0", "task:dev:10"}
+    for seed in range(20):  # on the AI interviewer's own buttons too: no press is dropped for «на ваше усмотрение»
+        pick = answer_user.choose({"replies": {"deviation": [o for o in replies if "press" in o]}},
+                                  {"question": DEVIATION_Q, "buttons": [{"text": t, "data": d}
+                                                                        for t, d in AI_DEVIATION]}, seed, name)
+        assert pick.answer and pick.answer["press"] in ("task:opt:0", "task:opt:3")
 
 
 def test_the_card_and_what_is_left_pending(tmp_path: Path) -> None:

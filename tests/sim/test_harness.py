@@ -383,6 +383,34 @@ async def test_a_card_launched_as_shown_leaves_the_next_answer_to_show_similar(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wanted", ["task:dev:0", "Только точные", "task:opt:3"])
+async def test_a_persona_press_goes_as_the_callback_of_the_button_it_means(tmp_path: Path, wanted: str) -> None:
+    """Q24: the AI interviewer labels the deviation buttons itself; the persona's data (or words) is sent as the
+    callback of that button, as the user's tap in Telegram."""
+    from bot.control_plane.models import Button, Reply
+
+    (tmp_path / "answers").mkdir()
+    (tmp_path / "answers" / "near.json").write_text(json.dumps({"answers": [{"press": wanted}]}, ensure_ascii=False),
+                                                     encoding="utf-8")
+    bench = _offer_bench(tmp_path)
+    interview = _Interview()
+
+    async def press(data: str) -> Reply:
+        if data != "task:launch":  # the deviation answered: the card
+            interview.said.append(f"[{data}]")
+            interview.step = "summary"
+            return Reply("Проверьте задачу:\nквартира в Мадриде")
+        return await interview.press(data)
+
+    question = Reply("Если точных вариантов не будет, что допустимо?",
+                     (Button("бюджет до +10 % (до 1320 €)", callback_data="task:opt:0"),
+                      Button("нет, только точные", callback_data="task:opt:3"),
+                      Button("Не важно", callback_data="task:skip")))
+    assert await bench._talk(interview, question, interview.text, press, press)
+    assert interview.said == ["[task:opt:3]", "[task:launch]"]
+
+
+@pytest.mark.asyncio
 async def test_a_press_of_no_button_on_screen_is_the_runs_error(tmp_path: Path) -> None:
     from scripts.sim.harness import PressError
 

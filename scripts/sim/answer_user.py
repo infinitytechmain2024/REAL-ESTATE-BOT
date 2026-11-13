@@ -61,7 +61,11 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
                  r"neighbou?rhood|barrio|zona"),
     ("place", r"город|где искать|регион|стран|провинци|\bміст[оіау]|\bкраїн|провінці|\bcity\b|where|ciudad|d[oó]nde"),
     ("must_have", r"обязательно должно быть|что обязательно|коммуникац|подвед|подъезд|що обов.язково має бути|комунікац|"
-                  r"під.їзд|must have|imprescindible"),
+                  r"під.їзд|must have|imprescindible|"
+                  # «Есть ли обязательные требования к квартире / условия: лифт, мебель, животные?» (Q24)
+                  r"обязательн\w* (?:требовани|услови|пожелани)|обов.язков\w* (?:вимог|умов|побажан)|"
+                  r"(?:requisitos?|condicion\w*) (?:obligatori|imprescindible)|"
+                  r"(?:mandatory|required) (?:requirement|condition)|must-haves?"),
     ("sources", r"какие сайты|какие группы|які сайти|які групи|which sites|qu[eé] webs"),
 )
 # What to exclude («Что исключить? Например: без цены, агентства») has no slot: checked before every slot (a human
@@ -73,6 +77,41 @@ CARD = "card"  # «Проверьте задачу»: the pending has ``card: tr
 NEAR, NEAR_PREFIX, NEAR_DEFAULT = "near", "near:", "Нет"
 REPEAT_SKIP_TAGS = frozenset({"any", "contradiction", "low_budget", "edit"})  # asked again: only a straight answer
 EXIT_ANSWERED, EXIT_NOTHING, EXIT_DEFERRED = 0, 1, 2
+
+
+# A persona presses the bot's own button data (``task:dev:0``, rules.py ``DEVIATION_OPTIONS``) and the bench sends the
+# callback of the button on screen, as Telegram does. The AI interviewer words the same answers itself
+# («нет, только точные», «бюджет до +10 % (до 1320 €)», data ``task:opt:<i>``): a data the screen lacks is the first
+# button whose label means it.
+PRESS_MEANINGS: dict[str, str] = {
+    "task:dev:0": r"только\s+точн|тільки\s+точн|лише\s+точн|only exact|exact only|s[oó]lo (?:los )?exact",
+    "task:dev:10": r"(?<![\d.,])10\s*%",
+    "task:dev:20": r"(?<![\d.,])20\s*%",
+}
+
+
+def _label(text: Any) -> str:
+    return " ".join(str(text or "").replace("\xa0", " ").casefold().split())
+
+
+def find_button(buttons: list[dict[str, Any]] | None, wanted: str) -> dict[str, Any] | None:
+    """The inline button a press names: its text or data, else a label that means the data (``PRESS_MEANINGS``),
+    else a label holding the pressed words («только точные» is «нет, только точные»); None when none is on screen."""
+    wanted = str(wanted).strip()
+    buttons = list(buttons or ())
+    if not wanted:
+        return None
+    exact = next((b for b in buttons if wanted in (b.get("text"), b.get("data"))), None)
+    if exact is not None:
+        return exact
+    meaning = PRESS_MEANINGS.get(wanted)
+    if meaning is not None:
+        return next((b for b in buttons if re.search(meaning, _label(b.get("text")))), None)
+    words = _label(wanted)
+    if len(words.split()) < 2 or ":" in wanted:  # a data is never fuzzy, nor one word («Нет» is no «нет, только …»)
+        return None
+    inside = re.compile(rf"(?<!\w){re.escape(words)}(?!\w)")
+    return next((b for b in buttons if inside.search(_label(b.get("text")))), None)
 
 
 @dataclass
@@ -123,7 +162,19 @@ def _button_ok(option: dict[str, Any], pending: dict[str, Any]) -> bool:
     if pending.get("card") and press in ("task:launch", "Запустить"):
         return True
     return (any(press in (b.get("text"), b.get("data")) for b in pending.get("buttons", []))
-            or keyboard_label(pending.get("keyboard"), str(press)) is not None)
+            or keyboard_label(pending.get("keyboard"), str(press)) is not None
+            or find_button(pending.get("buttons"), str(press)) is not None)
+
+
+def _pressed(answer: dict[str, Any], pending: dict[str, Any]) -> dict[str, Any]:
+    """The answer with its press as the callback data of the button found by meaning (the harness sends it as is)."""
+    press = answer.get("press")
+    buttons = pending.get("buttons") or []
+    if (press is None or any(press in (b.get("text"), b.get("data")) for b in buttons)
+            or keyboard_label(pending.get("keyboard"), str(press)) is not None):
+        return answer
+    button = find_button(pending.get("buttons"), str(press))
+    return {**answer, "press": button.get("data") or button.get("text")} if button else answer
 
 
 def choose(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str,
@@ -150,7 +201,7 @@ def choose(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str
     if not any(weights):
         return Pick(slot, None, reason=f"every reply of slot {slot!r} has weight 0")
     option = rng.choices(options, weights=weights, k=1)[0]
-    answer = {k: option[k] for k in ("text", "press") if k in option}
+    answer = _pressed({k: option[k] for k in ("text", "press") if k in option}, pending)
     return Pick(slot, answer, option.get("tag"))
 
 

@@ -114,11 +114,11 @@
     ],
     "deviation": [
       {
-        "press": "Только точные",
+        "press": "task:dev:0",
         "weight": 3
       },
       {
-        "press": "±10 %",
+        "press": "task:dev:10",
         "weight": 2
       },
       {
