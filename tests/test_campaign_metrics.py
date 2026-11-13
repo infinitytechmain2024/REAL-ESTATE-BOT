@@ -219,6 +219,45 @@ async def test_postgres_recomputes_the_row_from_queries_pages_and_findings(pool)
 
 
 @needs_db
+async def test_postgres_attach_to_held_and_head_links(pool) -> None:
+    """Q27: a copy of a held finding is stored as its duplicate, the head keeps the link, metrics count it as a repeat."""
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+
+    campaigns = PostgresCampaignStore(pool)
+    store = PostgresRunStore(pool, SafetyLimits())
+    cid = await campaigns.create(plan_campaign(GOAL), chat_id=-100, requested_by=42, source_text=GOAL, actor="telegram:42")
+    head, copy, again, sent = await _seed(pool, cid, [
+        (IDEALISTA, payload(290_000, 85)), ("https://www.fotocasa.es/h", payload(291_000, 86)),
+        ("https://www.pisos.com/h", payload(290_000, 85)), ("https://www.pisos.com/e", payload(199_000, 60, rooms=2))])
+    link = {"url": "https://www.fotocasa.es/h", "site": "fotocasa.es"}
+    assert await store.attach_to_held(cid, copy, head, "similar", link) is False  # the head is not held yet
+    assert await store.hold_finding(cid, head, "similar", 0.1, why="budget")
+    assert await store.head_links(head) == ()
+    assert await store.attach_to_held(cid, copy, head, "similar", link) is True
+    assert await store.attach_to_held(cid, copy, head, "similar", link) is False  # already a duplicate: nothing written
+    assert await store.head_links(head) == (link,)
+    row = await pool.fetchrow(
+        "select state, bucket, duplicate_of::text as dup from campaign_findings where finding_id = $1::uuid", copy)
+    assert (row["state"], row["bucket"], row["dup"]) == ("duplicate", "similar", head)
+    assert await pool.fetchval("select state from findings where id = $1::uuid", copy) == "delivered"
+    assert [f.id for f in await store.held_findings(cid, "similar", 10)] == [head]
+    assert await store.exact_count(cid) == 0  # a held copy is no exact finding
+    # A head that is a duplicate itself, or a finding that already has a row, is never attached.
+    assert await store.attach_to_held(cid, again, copy, "similar", {}) is False
+    assert await store.claim_finding(cid, sent) == 1
+    assert await store.attach_to_held(cid, sent, head, "similar", {}) is False
+    got = await campaigns.refresh_metrics(cid)
+    assert (got.similar, got.duplicates) == (1, 1)
+    # After «Одобрить» the head is sent with its links: later copies attach to the sent card.
+    assert await store.claim_held(cid, head) is not None
+    await store.finding_sent(head, 9)
+    (sent_head,) = [h for h in await store.recent_sent_findings(cid) if h.finding.id == head]
+    assert sent_head.links == (link,)
+
+
+@needs_db
 async def test_postgres_finish_fetch_records_the_layer(pool) -> None:
     from bot.campaign.store import PostgresCampaignStore
     from bot.web_search.models import PageResult, QueuedUrl

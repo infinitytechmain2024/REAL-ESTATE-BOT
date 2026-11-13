@@ -163,6 +163,10 @@ class CampaignRunnerSettings(BaseSettings):
     dedup_district_not_street: bool = Field(default=False, validation_alias="DEDUP_DISTRICT_NOT_STREET")
     # Q25: the «Показать?» question names every distinct difference of the held similar listings (at most 5).
     offer_all_reasons: bool = Field(default=False, validation_alias="OFFER_ALL_REASONS")
+    # Q27: a held similar/other listing is merged with the same object already held or sent (one card after «Одобрить»,
+    # the other links in «Также на»); the «Показать?» question waits until the search and the checks are over.
+    dedup_held_findings: bool = Field(default=False, validation_alias="DEDUP_HELD_FINDINGS")
+    offer_after_search: bool = Field(default=False, validation_alias="OFFER_AFTER_SEARCH")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -452,7 +456,9 @@ class CampaignRunnerSettings(BaseSettings):
                             join_notices=self.join_notices,
                             dedup_without_address=self.dedup_without_address,
                             dedup_district_not_street=self.dedup_district_not_street,
-                            offer_all_reasons=self.offer_all_reasons)
+                            offer_all_reasons=self.offer_all_reasons,
+                            dedup_held_findings=self.dedup_held_findings,
+                            offer_after_search=self.offer_after_search)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

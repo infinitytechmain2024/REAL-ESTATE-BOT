@@ -132,8 +132,14 @@ NO_GROUPS = "Пауза: поиск групп не настроен: укажи
 QUEUE_BUSY = "Ожидание: Facebook занят другой кампанией"
 STOPPED = "Кампания остановлена"
 MAX_MESSAGE_CHARS = 3900
+HELD_DEDUP_LIMIT = 200  # Q27: the held findings of a bucket a new one is compared with (closest first)
 SUMMARY_STATES = frozenset({"completed", "cancelled"})
 SUMMARY_WINDOW = timedelta(hours=2)
+# OFFER_AFTER_SEARCH (Q27): the final report waits for the checks and the similar question at most this long after the
+# campaign ended, then it goes without the question (which follows on its own). Inside SUMMARY_WINDOW, or it is lost.
+REPORT_WAIT = timedelta(minutes=10)
+if REPORT_WAIT >= SUMMARY_WINDOW:
+    raise RuntimeError("REPORT_WAIT must be shorter than SUMMARY_WINDOW")
 
 
 # --- Telegram -------------------------------------------------------------------------
@@ -293,6 +299,10 @@ class RunnerConfig:
     dedup_district_not_street: bool = False
     # The similar question names every distinct difference of the held listings, not only the closest one's (Q25).
     offer_all_reasons: bool = False
+    # A held similar/other finding is merged with the same object already held or sent before it is held (Q27).
+    dedup_held_findings: bool = False
+    # The similar question is asked once the search and the checks are over, not at the first held finding (Q27).
+    offer_after_search: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -363,6 +373,9 @@ class CampaignRunner:
         self._relevance_misses: dict[str, int] = {}
         # Campaigns whose chat got a card or a question below the status message: the status moves down.
         self._below_status: set[str] = set()
+        # OFFER_AFTER_SEARCH (Q27): ended campaigns whose final report waits for the checks and the similar question.
+        self._report_waits: set[str] = set()
+        self._report_forced: set[str] = set()  # ...and those whose report went without it (logged once)
         self._cards_since: dict[str, int] = {}  # campaign id -> cards sent since its status message was posted
         self._phase: dict[str, str] = {}  # campaign id -> the user line's phase now: searching | checking | done
         self._posted_phase: dict[str, str] = {}  # ... and the phase the posted status message was sent in
@@ -441,9 +454,22 @@ class CampaignRunner:
             await self._stream(campaign, final=True)
             await self._metrics(campaign, final=True)
             await self._summary(campaign)
-            await self._final_report(campaign)
+            if not self._report_waits_for_offer(campaign):  # OFFER_AFTER_SEARCH (Q27): after the question
+                await self._final_report(campaign)
             line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
         await self._show(campaign, line)
+
+    def _report_waits_for_offer(self, campaign: Campaign) -> bool:
+        """Q27: the final report still waits for the checks or the similar question (``_report_waits``), at most
+        ``REPORT_WAIT`` after the campaign ended; past it the report goes without the question (logged once)."""
+        if campaign.id not in self._report_waits:
+            return False
+        if campaign.finished_at is not None and self.now() - campaign.finished_at < REPORT_WAIT:
+            return True
+        if campaign.id not in self._report_forced:
+            self._report_forced.add(campaign.id)
+            log.warning("campaign.final_report_without_offer", extra={"campaign_id": campaign.id})
+        return False
 
     # -- phases --
 
@@ -639,10 +665,14 @@ class CampaignRunner:
         active = campaign.state not in TERMINAL_STATES
         request = campaign_request(campaign)
         deferred = 0
+        if self.config.offer_after_search and not active:  # cleared below once every finding is checked and asked about
+            self._report_waits.add(campaign.id)
         paused = self._relevance_paused_until is not None and self.now() < self._relevance_paused_until
         skip = set(self._relevance_misses) if paused and not final and skip_misses else set()
         index = _HeadIndex()  # the dedup candidates: one query per step, not one per finding
-        for finding in await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step, skip=skip):
+        held: dict[str, list[_Head]] = {}  # Q27: the held heads per bucket, loaded on the first held finding
+        batch = await self.store.unstreamed_findings(campaign.id, self.config.max_stream_per_step, skip=skip)
+        for finding in batch:
             match = await self._judge(campaign, request, finding, final=final)
             if match is None:  # transient miss: neither held nor streamed, retried on a later step
                 deferred += 1
@@ -650,13 +680,20 @@ class CampaignRunner:
             if match.bucket == "exact" and self._deal_kind(request, finding) is not None:
                 match = Match("similar", match.distance, "deal_kind")
             if match.bucket != "exact":
+                why = reason_category(match.why)
+                if (self.config.dedup_held_findings and match.bucket in HELD_BUCKETS
+                        and why != self._unoffered(match.bucket)
+                        and await self._deduplicate_held(campaign, finding, match.bucket, active, index, held)):
+                    continue
                 reason = match.note if match.why in NOTED_WHYS else None
                 if await self.store.hold_finding(campaign.id, finding.id, match.bucket, match.distance, reason,
-                                                 why=reason_category(match.why)):
+                                                 why=why):
                     if reason:
                         log.info("campaign.finding_unverified %s", reason,
                                  extra={"campaign_id": campaign.id, "finding_id": finding.id})
                     await self._record(campaign, finding, match.bucket)
+                    if match.bucket in held and why != self._unoffered(match.bucket):  # only held buckets are loaded
+                        held[match.bucket].append(_head_of(SentFinding(finding, None, bucket=match.bucket)))
                 continue
             if await self._deduplicate(campaign, finding, active, index):
                 continue
@@ -668,9 +705,51 @@ class CampaignRunner:
                 return deferred
             if index.loaded:  # the card just sent is a head for the findings still to come in this step
                 index.heads.insert(0, _head_of(SentFinding(finding, None, count)))
-        await self._near_matches(campaign, request, active)
+        # OFFER_AFTER_SEARCH (Q27): the search is over and every finding of the campaign was checked in this step.
+        settled = not active and deferred == 0 and len(batch) < self.config.max_stream_per_step
+        unasked = await self._near_matches(campaign, request, active, settled=settled)
+        if settled and not unasked:
+            self._report_waits.discard(campaign.id)
         await self._people(campaign)
         return deferred
+
+    async def _deduplicate_held(self, campaign: Campaign, finding: StreamFinding, bucket: str, active: bool,
+                                index: _HeadIndex, held: dict[str, list[_Head]]) -> bool:
+        """Q27 (``DEDUP_HELD_FINDINGS``): a similar/other finding about to be held is the same object as a sent card
+        (``_deduplicate``) or as a finding already held in its bucket: it is stored as that one's duplicate (the head
+        keeps its link for «Также на» when it is sent after approval) and never held itself.
+
+        Conservative like ``_deduplicate``; the held heads of ``bucket`` are fetched once per step (``held``).
+        Returns True when the finding was attached.
+        """
+        if await self._deduplicate(campaign, finding, active, index):
+            return True
+        if not finding.url:
+            return False
+        mine = listing_of(finding.payload, url=finding.url, text=finding.text, body=finding.original)
+        if mine.price is None and mine.area is None and not mine.shingles:
+            return False
+        try:
+            if bucket not in held:
+                held[bucket] = [_head_of(SentFinding(f, None, bucket=bucket)) for f in await self.store.held_findings(
+                    campaign.id, bucket, HELD_DEDUP_LIMIT, exclude_why=self._unoffered(bucket))]
+            for head in held[bucket]:
+                if head.sent.finding.id == finding.id or not same_object(
+                        mine, head.listing, without_address=self.config.dedup_without_address,
+                        district_not_street=self.config.dedup_district_not_street):
+                    continue
+                link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
+                if finding.url == head.sent.finding.url:
+                    link = {}  # the same post again: nothing to add
+                if not await self.store.attach_to_held(campaign.id, finding.id, head.sent.finding.id, bucket, link):
+                    continue
+                log.info("campaign.held_finding_deduplicated", extra={
+                    "campaign_id": campaign.id, "finding_id": finding.id, "head_finding_id": head.sent.finding.id})
+                await self._record(campaign, finding, "excluded", reason=f"duplicate_of:{head.sent.finding.id}")
+                return True
+        except Exception:  # noqa: BLE001 - dedup is an optimisation: on any failure hold the finding as usual
+            log.warning("campaign.held_dedup_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
+        return False
 
     async def _deduplicate(self, campaign: Campaign, finding: StreamFinding, active: bool,
                            index: _HeadIndex | None = None) -> bool:
@@ -865,14 +944,14 @@ class CampaignRunner:
         return offers.Deviation("other", phrase=stored.deviation if stored is not None else None, land=land)
 
     async def _send_card(self, campaign: Campaign, finding: StreamFinding, count: int, active: bool, bucket: str, *,
-                         note: str | None = None) -> bool:
+                         note: str | None = None, cluster_links: Sequence[dict[str, str]] = ()) -> bool:
         tail = f"🔎 Найдено: {count} · ищу дальше" if active else f"🔎 Найдено: {count}"
         if note is None and bucket != "exact":  # a held card sent after approval says what differs from the request
             try:
                 note = offers.card_line(await self._deviation(campaign, campaign_request(campaign), finding))
             except Exception:  # noqa: BLE001 - the note is a courtesy; the card goes out without it
                 note = None
-        card = f"{finding_card(campaign, finding, note=note)}\n\n{tail}"
+        card = f"{finding_card(campaign, finding, cluster_links=cluster_links, note=note)}\n\n{tail}"
         if self.recorder is not None:
             # Stored first (outbox): if the store is down nothing is sent, the finding comes back next tick.
             try:
@@ -993,11 +1072,13 @@ class CampaignRunner:
         except Exception:  # noqa: BLE001
             log.warning("campaign.finding_record_failed")
 
-    async def _near_matches(self, campaign: Campaign, request: Request, active: bool) -> None:
+    async def _near_matches(self, campaign: Campaign, request: Request, active: bool, *, settled: bool = False) -> bool:
         """Held similar/other findings: stream an approved bucket, or ask about it once (see ``offers``).
 
         Findings inside an approved deviation are already ``exact`` (they stream at once, saying what differs); every
-        other similar one stays held and the question is asked as soon as the first one is held."""
+        other similar one stays held and the question is asked as soon as the first one is held -- with
+        ``OFFER_AFTER_SEARCH`` (Q27) only once the search is over and every finding was checked (``settled``).
+        Returns True while similar findings are held and the question about them is not asked yet (or a send failed)."""
         states: dict[str, str | None] = {}
         index = _HeadIndex()  # loaded on the first approved held card only
         for bucket in HELD_BUCKETS:
@@ -1010,10 +1091,18 @@ class CampaignRunner:
                         continue
                     if await self._deduplicate(campaign, finding, active, index):  # the same object as a sent card
                         continue
-                    if not await self._send_card(campaign, finding, count, active, bucket):
-                        return
+                    # Q27: the copies merged while it was held go to its «Также на».
+                    links: tuple[dict[str, str], ...] = ()
+                    if self.config.dedup_held_findings:
+                        try:
+                            links = tuple(await self.store.head_links(finding.id))
+                        except Exception:  # noqa: BLE001 - the card goes out without «Также на»
+                            log.warning("campaign.head_links_failed",
+                                        extra={"campaign_id": campaign.id, "finding_id": finding.id})
+                    if not await self._send_card(campaign, finding, count, active, bucket, cluster_links=links):
+                        return True
                     if index.loaded:
-                        index.heads.insert(0, _head_of(SentFinding(finding, None, count, bucket=bucket)))
+                        index.heads.insert(0, _head_of(SentFinding(finding, None, count, links=links, bucket=bucket)))
                 continue
             if state is not None:  # asked and waiting, or declined: never sent
                 continue
@@ -1022,7 +1111,8 @@ class CampaignRunner:
                 continue
             exact = await self.store.exact_count(campaign.id)
             if bucket == "similar":
-                ask = True  # as soon as the first similar finding is held, not only at the end
+                # as soon as the first similar finding is held, not only at the end (Q27: at the end, when the flag is on)
+                ask = settled if self.config.offer_after_search else True
             else:  # farther ones: after the search, once the similar question is out of the way
                 ask = not active and states["similar"] != "asked" and not (
                     states["similar"] is None and await self.store.held_findings(
@@ -1030,6 +1120,10 @@ class CampaignRunner:
             if ask:
                 await self._ask(campaign, bucket, request, held[0], exact_found=exact > 0)
                 states[bucket] = await self.store.offer_state(campaign.id, bucket)
+        if not self.config.offer_after_search:
+            return False
+        return bool(states.get("similar") is None and await self.store.held_findings(
+            campaign.id, "similar", 1, exclude_why=self._unoffered("similar")))
 
     def _unoffered(self, bucket: str) -> str | None:
         """The ``why`` of held findings that are never offered or streamed (H11), None when the flag is off."""
