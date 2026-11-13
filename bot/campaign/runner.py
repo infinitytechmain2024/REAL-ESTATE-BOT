@@ -1054,7 +1054,7 @@ class CampaignRunner:
                 except Exception:  # noqa: BLE001 - the question goes out with the closest one's difference
                     log.warning("campaign.offer_reasons_failed", extra={"campaign_id": campaign.id})
                     reasons = []
-                if len(reasons) > 1:
+                if len(reasons) > 1 or (reasons and reasons != offers.reasons_of([deviation])):  # or a worse value
                     text = offers.reasons_question(reasons, land=deviation.land, exact_found=exact_found)
         else:
             text = offers.OTHER_QUESTION

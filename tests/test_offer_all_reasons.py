@@ -40,7 +40,7 @@ def test_reasons_substantial_first_worst_value_one_unconfirmed_reason() -> None:
         Deviation("other"),
     ]
     assert offers.reasons_of(deviations) == [
-        "участок занят", "дороже (до ~75 000 €)", "меньше площадь (от ~1 600 м²)", "другой вид сделки: аукцион",
+        "участок занят", "дороже (до ~75 000 €)", "площадь меньше (от ~1 600 м²)", "другой вид сделки: аукцион",
         "не подтверждено: место, площадь, район"]
     assert offers.reasons_of([Deviation("unverified"), Deviation("other", phrase="участок занят")]) == [
         "участок занят", "не удалось проверить автоматически"]
@@ -93,8 +93,27 @@ async def test_price_area_and_unconfirmed_through_the_runner() -> None:
     (text,) = [text for _, text, _ in messenger.asks]
     assert text.startswith(LEAD) and text.endswith(". Показать?")
     names = text.removeprefix(LEAD).removesuffix(". Показать?").split("; ")
-    assert names == ["дороже (до ~60 000 €)", "меньше площадь (от ~1 600 м²)", "не подтверждено: площадь"]
+    assert names == ["дороже (до ~60 000 €)", "площадь меньше (от ~1 600 м²)", "не подтверждено: площадь"]
     assert text.count(":") == 1  # no double colon
+
+
+async def test_one_reason_with_a_worse_value_names_the_worst() -> None:
+    campaigns = MemoryCampaignStore()
+    store = MemoryRunStore(campaigns)
+    messenger = ButtonMessenger()
+    runner = CampaignRunner(campaigns, store, messenger, None, config=RunnerConfig(
+        window_cooldown_seconds=0, relevance_fail_closed=False, offer_all_reasons=True))
+    goal = "Купить участок в Мадриде до 50 000 €"
+    cid = await campaigns.create(plan_campaign(goal, vertical="real_estate"), chat_id=CHAT, requested_by=USER,
+                                 source_text=goal, actor="t")
+    await campaigns.set_state(cid, "running", "campaign:test")
+    store.add_groups(cid, 5)
+    add(store, cid, "p57", plot(None, price=57_000))
+    add(store, cid, "p60", plot(None, price=60_000))
+    await runner.tick()
+    assert store.buckets["p57"][0] == store.buckets["p60"][0] == "similar"
+    # the closest alone would say «~57 000 €»: the worst price of the batch is named
+    assert [text for _, text, _ in messenger.asks] == [f"{LEAD}дороже (до ~60 000 €). Показать?"]
 
 
 async def test_a_failure_while_collecting_reasons_keeps_the_old_question() -> None:

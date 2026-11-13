@@ -137,7 +137,7 @@ MAX_REASONS = 5  # OFFER_ALL_REASONS (Q25): at most this many differences in the
 
 def reasons_of(deviations: Iterable[Deviation]) -> list[str]:
     """Q25: the distinct short differences of the held listings, the substantial ones first (the AI's phrase such as
-    «участок занят», «дороже (до ~X)» and «меньше площадь (от ~Y)» by the worst value, «другой вид сделки: …»), then
+    «участок занят», «дороже (до ~X)» and «площадь меньше (от ~Y)» by the worst value, «другой вид сделки: …»), then
     every unconfirmed criterion in one reason «не подтверждено: a, b, c»."""
     phrases: dict[str, None] = {}
     kinds: dict[str, None] = {}
@@ -165,7 +165,7 @@ def reasons_of(deviations: Iterable[Deviation]) -> list[str]:
     if dearest is not None:
         reasons.append(f"дороже (до {dearest.example})")
     if smallest is not None:
-        reasons.append(f"меньше площадь (от {smallest.example})")
+        reasons.append(f"площадь меньше (от {smallest.example})")
     reasons += list(kinds)
     if unknown:
         reasons.append(f"не подтверждено: {', '.join(unknown)}")
