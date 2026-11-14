@@ -937,9 +937,14 @@ class ApifyHabitacliaSource(_SchemaPortal):
     hosts = frozenset({"habitaclia.com"})
 
     def __init__(self, token: str, *, actor_id: str = "trev0n/habitaclia-com-spain-scraper", agency_ref: bool = False,
-                 **kwargs: Any) -> None:
+                 no_results_empty: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.agency_ref = agency_ref  # DEDUP_DISTRICT_NOT_STREET (Q15)
+        self.no_results_empty = no_results_empty  # REPORT_EVERY_PORTAL (Q37)
+
+    def _empty_marker(self, item: Any) -> bool:
+        """The actor's row for an empty search (``{"noResults": true, "url": <the search page>, "reason": ...}``)."""
+        return self.no_results_empty and isinstance(item, dict) and item.get("noResults") is True
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
