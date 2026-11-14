@@ -617,7 +617,7 @@ class TaskSpec(_Model):
     def summary_ru(self, *, province_scope: bool = False) -> str:
         """The structured task card in Russian, one fact per line.
 
-        ``province_scope`` (``INTAKE_SKIP_WIDENS_PLACE``, Q42): a province reads «Место: Мадрид и провинция».
+        ``province_scope`` (``INTAKE_SKIP_WIDENS_PLACE``, Q42): the widened province reads «Место: Мадрид и провинция».
         """
         lines = [f"Режим: {MODE_TITLES.get(self.mode or '', self.mode or 'не выбран')}"]
         name = self.place.names.get("ru") or self.place_name()

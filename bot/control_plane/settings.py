@@ -36,7 +36,7 @@ class ControlPlaneSettings:
     apify_comments_enabled: bool = False
     # INTAKE_BOTH_MODE: the mode «Недвижимость + инвесторы» in the task intake (off: no such button).
     intake_both_mode: bool = False
-    # INTAKE_SKIP_WIDENS_PLACE (Q42): «Не важно» to «only the city or around it» widens the place (off: stays the city).
+    # INTAKE_SKIP_WIDENS_PLACE (Q42): «Не важно» to «only the city or its province» widens it (off: stays the city).
     intake_skip_widens_place: bool = False
     # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
     # OpenRouter stays its fallback. The key is never logged or echoed.

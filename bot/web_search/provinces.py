@@ -15,63 +15,11 @@ case and accents do not matter).
 
 from __future__ import annotations
 
+from bot.campaign.provinces import PROVINCES
 from bot.web_search.geocoding import _fold
 
-# INE province code -> the province's names (Spanish, co-official, short forms).
-_PROVINCES: dict[str, tuple[str, ...]] = {
-    "01": ("Álava", "Araba", "Araba/Álava", "Álava/Araba"),
-    "02": ("Albacete",),
-    "03": ("Alicante", "Alacant", "Alicante/Alacant", "Alacant/Alicante"),
-    "04": ("Almería",),
-    "05": ("Ávila",),
-    "06": ("Badajoz",),
-    "07": ("Illes Balears", "Islas Baleares", "Baleares", "Balears", "Balearic Islands"),
-    "08": ("Barcelona",),
-    "09": ("Burgos",),
-    "10": ("Cáceres",),
-    "11": ("Cádiz",),
-    "12": ("Castellón", "Castelló", "Castellón/Castelló", "Castelló/Castellón"),
-    "13": ("Ciudad Real",),
-    "14": ("Córdoba",),
-    "15": ("A Coruña", "La Coruña", "Coruña"),
-    "16": ("Cuenca",),
-    "17": ("Girona", "Gerona"),
-    "18": ("Granada",),
-    "19": ("Guadalajara",),
-    "20": ("Gipuzkoa", "Guipúzcoa"),
-    "21": ("Huelva",),
-    "22": ("Huesca",),
-    "23": ("Jaén",),
-    "24": ("León",),
-    "25": ("Lleida", "Lérida"),
-    "26": ("La Rioja", "Rioja"),
-    "27": ("Lugo",),
-    "28": ("Madrid", "Comunidad de Madrid", "Comunidad Autónoma de Madrid"),
-    "29": ("Málaga",),
-    "30": ("Murcia", "Región de Murcia"),
-    "31": ("Navarra", "Comunidad Foral de Navarra", "Nafarroa", "Navarre"),
-    "32": ("Ourense", "Orense"),
-    "33": ("Asturias", "Principado de Asturias"),
-    "34": ("Palencia",),
-    "35": ("Las Palmas",),
-    "36": ("Pontevedra",),
-    "37": ("Salamanca",),
-    "38": ("Santa Cruz de Tenerife",),
-    "39": ("Cantabria",),
-    "40": ("Segovia",),
-    "41": ("Sevilla", "Seville"),
-    "42": ("Soria",),
-    "43": ("Tarragona",),
-    "44": ("Teruel",),
-    "45": ("Toledo",),
-    "46": ("Valencia", "València", "Valencia/València"),
-    "47": ("Valladolid",),
-    "48": ("Bizkaia", "Vizcaya"),
-    "49": ("Zamora",),
-    "50": ("Zaragoza",),
-    "51": ("Ceuta",),
-    "52": ("Melilla",),
-}
+# INE province code -> the province's names: the shared table in bot/campaign/provinces.py (telegram reads it too).
+_PROVINCES: dict[str, tuple[str, ...]] = PROVINCES
 
 _BY_NAME: dict[str, str] = {_fold(name): code for code, names in _PROVINCES.items() for name in names}
 

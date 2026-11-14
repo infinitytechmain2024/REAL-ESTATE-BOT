@@ -132,7 +132,7 @@ services:
       APIFY_FACEBOOK_COMMENTS_ENABLED: ${APIFY_FACEBOOK_COMMENTS_ENABLED:-false}
       # The mode «Недвижимость + инвесторы» in the task menu (v2 C2); off: no such button.
       INTAKE_BOTH_MODE: ${INTAKE_BOTH_MODE:-false}
-      # Q42: «Не важно» to «only the city or around it» widens the place to the province (or a 30 km circle).
+      # Q42: «Не важно» to «only the city or its province» widens a province capital to its province.
       INTAKE_SKIP_WIDENS_PLACE: ${INTAKE_SKIP_WIDENS_PLACE:-false}
       # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
       ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}
