@@ -30,7 +30,7 @@ from bot.utils.costs import CostSummary
 from bot.web_search.urls import PORTALS, SPAIN_BANK_PORTALS, SPAIN_PORTALS_BY_KIND, UKRAINE_PORTALS
 
 from .relevance import MANDATORY_UNKNOWN
-from .runs import OutcomeCount, SentFinding, SourceCount, StreamFinding
+from .runs import OutcomeCount, SearchOutcome, SentFinding, SourceCount, StreamFinding
 from .summary import Site, plural, site_lines, site_name, site_stats
 from .tolerance import BUDGET_TOLERANCE, Request, classify, currency_code, price_of
 
@@ -755,6 +755,27 @@ def investors_section(leads: LeadsSummary | None) -> list[str]:
     return lines
 
 
+def _queries_line(name: str, queries: int, hits: int, failed: int) -> str:
+    if not queries:
+        return f"• {name}: запросов не было"
+    line = f"• {name}: запросов {queries}, с результатами {hits}"
+    if failed:
+        line += f", с ошибкой {failed}"
+    return line + (" — выдача пустая" if not hits else " — подходящих нет")
+
+
+def empty_reasons(outcome: SearchOutcome, *, facebook_windows: int) -> list[str]:
+    """Q33 (CAMPAIGN_EMPTY_REPORT): why an investor search that ended found nobody, from the counted queries only."""
+    lines = ["Ничего не нашёл. Что дал поиск:",
+             _queries_line("Сайты", outcome.web_queries, outcome.web_hits, outcome.web_failed),
+             _queries_line("Люди и контакты", outcome.reach_queries, outcome.reach_hits, outcome.reach_failed)]
+    if not facebook_windows:
+        lines.append("• Группы Facebook: ни одной не прочитано")
+    if outcome.errors:
+        lines.append("⚠️ Ошибки поиска: " + ", ".join(f"{code} ×{n}" for code, n in outcome.errors))
+    return lines
+
+
 def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequence[str], unreadable: Sequence[Site],
                 recommendations: Sequence[str], other_sites: int = 0, similar_note: str | None = None,
                 costs: Sequence[str] = (), evidence: Sequence[str] = (), task_text: str = "", section: str = "",
@@ -861,15 +882,18 @@ class FinalReporter:
                     tolerance_pct: float | None = None, offers: Mapping[str, str | None] | None = None,
                     costs: CostSummary | None = None, budget: float = 0.0, task_text: str = "",
                     held: Sequence[HeldEvidence] = (), scope: PlaceScope | None = None,
-                    leads: LeadsSummary | None = None, vertical: str = "real_estate") -> str:
+                    leads: LeadsSummary | None = None, vertical: str = "real_estate",
+                    empty: Sequence[str] = ()) -> str:
         """``offers``: the state of each bucket's question (``offer_state``: None, asked, approved, declined); with it
         a report that sent nothing but holds similar variants says how to get them. ``costs``: the run's ledger
         (``bot.utils.costs``) and ``budget`` its limit: the money, what was dropped before the model, its errors.
         ``vertical``: ``real_estate`` (the text above, unchanged), ``both`` (it as «🏠 Недвижимость», then «💼 Инвесторы»
-        from ``leads``, then the money by branch), ``investors`` (the investor section only)."""
+        from ``leads``, then the money by branch), ``investors`` (the investor section only, then ``empty``: why it
+        found nobody, Q33)."""
         if vertical == "investors":
             head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
-            return (head + "\n".join(investors_section(leads)) + "\n\n"
+            reasons = "\n\n" + "\n".join(empty) if empty else ""
+            return (head + "\n".join(investors_section(leads)) + reasons + "\n\n"
                     + "\n".join(cost_lines(costs, budget) + branch_cost_line(costs))).rstrip()[:MAX_REPORT_CHARS]
         counts = tally(outcomes)
         sources, reports, other_sites = real_estate_sources(sources, reports, portals)
