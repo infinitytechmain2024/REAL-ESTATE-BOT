@@ -60,6 +60,8 @@ def summary(root: Path, run: str, result: dict, out: Path) -> str:
         f"(answer: {root / 'cassette'}/<key>.json)",
         f"  pending Apify:   {len(pending.get('apify', []))}  -> {root / 'pending_apify'}/<actor>__<hash>.json "
         f"(answer: {root / 'apify'}/<actor>/<hash>.json)",
+        f"  pending web:     {len(pending.get('web', []))}  -> {root / 'pending_web'}/<key>.json "
+        f"(answer: {root / 'web'}/<key>.json)",
         f"  pending answers: {1 if waiting_answer else 0}  -> {answers} (answer: {root / 'answers'}/{run}.json)",
     ]
     if pending.get("apify_blocked"):

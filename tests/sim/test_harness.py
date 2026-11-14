@@ -17,9 +17,18 @@ import httpx
 import pytest
 
 from scripts.sim import db
-from scripts.sim.cassette import SimNet, SimStop, digest, llm_request, mark_now, offline
+from scripts.sim.cassette import (
+    SimNet,
+    SimStop,
+    digest,
+    llm_request,
+    mark_now,
+    offline,
+    web_request,
+)
 from scripts.sim.fixtures import answer as answer_apify
 from scripts.sim.harness import _questions
+from scripts.sim.web import answer as answer_web
 from tests.sim import model
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -203,6 +212,251 @@ def test_a_portal_fixture_gives_only_the_rows_the_input_filters_let_through(tmp_
     assert [(r["areaSqm"], r["price"]) for r in rows["c"]] == [(None, 1550000), (1063, 590000)]
     assert (tmp_path / "apify" / "igolaizola~idealista-scraper" / "d.json").read_bytes() == \
         (LIVE / "idealista_items.json").read_bytes()
+
+
+# --- SearXNG ----------------------------------------------------------------------------------------------------
+
+HITS = {"query": "inversores malaga", "results": [
+    {"url": "https://example.org/inversores", "title": "Inversores", "content": "Fondo en Málaga", "engine": "x"}]}
+
+
+def search_key(query: str, **params: object) -> str:
+    return digest(web_request(httpx.QueryParams({"q": query, "format": "json", **params})), 16)
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_search_answer_is_served_to_the_searxng_client(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearxngClient
+
+    key = search_key("inversores malaga", pageno=1, categories="general", language="es")
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / f"{key}.json").write_text(json.dumps(HITS), encoding="utf-8")
+    with offline(SimNet(tmp_path, run_id="r1")) as net:
+        client = SearxngClient("http://searxng:8080")
+        hits = await client.search("Inversores  Malaga", language="es")
+        await client.aclose()
+    assert [(h.url, h.title, h.snippet) for h in hits] == [("https://example.org/inversores", "Inversores",
+                                                            "Fondo en Málaga")]
+    assert net.hits["web"] == 1 and net.pending_web == [] and net.offline == []
+    assert not (tmp_path / "pending_web").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_search_without_an_answer_is_pending_and_the_strict_run_stops(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearchError, SearxngClient
+
+    with offline(SimNet(tmp_path, run_id="r1")) as net:
+        client = SearxngClient("http://searxng:8080")
+        with pytest.raises(SearchError, match="http_503"):  # the bot's search fails, the pass goes on
+            await client.search("coinversores Málaga", language="es")
+        with pytest.raises(SearchError):  # the same search again: still one pending
+            await client.search("coinversores  Málaga", language="es")
+        await client.aclose()
+    [path] = (tmp_path / "pending_web").glob("*.json")
+    pending = json.loads(path.read_text(encoding="utf-8"))
+    assert net.pending_web == [path.stem] == [pending["key"]] and net.offline == []
+    assert pending["query"] == "coinversores málaga" and pending["host"] == "searxng" and pending["run"] == "r1"
+    assert pending["params"] == {"engines": None, "language": "es", "pageno": 1, "categories": ["general"]}
+    assert pending["answer_to"] == f"sim/web/{path.stem}.json" and pending["speculative"] is False
+    with offline(SimNet(tmp_path, strict=True)), pytest.raises(SimStop) as stop:
+        client = SearxngClient("http://searxng:8080")
+        try:
+            await client.search("coinversores Málaga", language="es")
+        finally:
+            await client.aclose()
+    assert stop.value.kind == "web" and stop.value.path == path
+
+
+@pytest.mark.asyncio
+async def test_a_search_after_an_unanswered_model_call_is_speculative(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearchError, SearxngClient
+
+    with offline(SimNet(tmp_path)):
+        await post("https://openrouter.ai/api/v1/chat/completions", CHAT)
+        client = SearxngClient("http://searxng:8080")
+        with pytest.raises(SearchError):
+            await client.search("family office Madrid")
+        await client.aclose()
+    [path] = (tmp_path / "pending_web").glob("*.json")
+    assert json.loads(path.read_text(encoding="utf-8"))["speculative"] is True
+
+
+def test_the_search_key_is_stable_and_follows_the_query_and_the_page() -> None:
+    base = search_key("inversores Málaga", engines="google,bing", language="es", pageno=1)
+    assert base == search_key("  Inversores   málaga ", engines="Bing, google", language="ES", pageno="1",
+                              safesearch=0)
+    assert base == search_key("inversores Málaga", engines="google,bing", language="es")  # page 1 by default
+    assert base != search_key("inversores Málaga", engines="google,bing", language="es", pageno=2)
+    assert base != search_key("inversores Sevilla", engines="google,bing", language="es", pageno=1)
+    assert base != search_key("inversores Málaga", engines="google", language="es", pageno=1)
+
+
+def test_an_answer_on_the_same_topic_is_reused_for_another_wording(tmp_path: Path) -> None:
+    (tmp_path / "web").mkdir()
+    (tmp_path / "pending_web").mkdir()
+    params = {"engines": None, "language": "es", "pageno": 1, "categories": ["general"]}
+    (tmp_path / "web" / "old.json").write_text(json.dumps(
+        {**HITS, "request": {"query": "inversores málaga", "params": params}}), encoding="utf-8")
+    for name, query, extra in (("a", "Inversores  Malaga", {"language": "es-ES"}), ("b", "inversores malaga", {"pageno": 2}),
+                               ("c", "inversores sevilla", {}), ("d", "malaga inversores", {})):
+        (tmp_path / "pending_web" / f"{name}.json").write_text(json.dumps(
+            {"kind": "web", "key": name, "query": query, "params": {**params, **extra}}), encoding="utf-8")
+    (tmp_path / "pending_web" / "e.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "pending_web" / "f.json").write_text(json.dumps({"query": "inversores málaga"}), encoding="utf-8")
+    answered, left, broken = answer_web(tmp_path)  # a broken pending is skipped, the rest is answered
+    assert answered == ["a.json <- web/old.json"] and left == ["b.json", "c.json", "d.json"]
+    assert broken == ["e.json", "f.json"]
+    reused = json.loads((tmp_path / "web" / "a.json").read_text(encoding="utf-8"))
+    assert reused["results"] == HITS["results"] and reused["request"]["query"] == "Inversores  Malaga"
+    assert not (tmp_path / "pending_web" / "a.json").exists()
+
+
+
+@pytest.mark.parametrize(("asked", "other"), [
+    ("piso 3 dormitorios 2 baños", "piso 2 dormitorios 3 baños"),
+    ("inversores 1.5 millones", "inversores 5.1 millones"),
+    ("inversores 1,5 millones", "inversores 1.5 millones"),
+    ("inversores malaga -fondos", "inversores malaga fondos"),
+    ('"family office" malaga', "family office malaga"),
+    ("inversores site:linkedin.com", "inversores linkedin.com"),
+])
+def test_a_reuse_never_changes_the_meaning_of_the_query(asked: str, other: str) -> None:
+    from scripts.sim.web import topic
+
+    assert topic(asked, {}) != topic(other, {})
+    assert topic(asked.upper(), {}) == topic(asked, {})  # case still folds
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_failure_and_an_empty_search_are_served_as_recorded(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearchError, SearxngClient
+
+    (tmp_path / "web").mkdir()
+    for query, entry in (("caido", {"error_status": 503}), ("nada", {"results": []})):
+        key = search_key(query, pageno=1, categories="general")
+        (tmp_path / "web" / f"{key}.json").write_text(json.dumps(entry), encoding="utf-8")
+    with offline(SimNet(tmp_path)) as net:
+        client = SearxngClient("http://searxng:8080")
+        with pytest.raises(SearchError, match="http_503"):
+            await client.search("caido")
+        assert await client.search("nada") == []
+        await client.aclose()
+    assert net.hits["web"] == 2 and net.pending_web == [] and not (tmp_path / "pending_web").exists()
+
+
+@pytest.mark.asyncio
+async def test_only_the_searxng_host_is_a_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WEB_SEARCH_SEARXNG_URL", raising=False)
+    with offline(SimNet(tmp_path)) as net:
+        async with httpx.AsyncClient() as client:
+            geo = await client.get("https://nominatim.openstreetmap.org/search", params={"q": "Málaga"})
+            site = await client.get("https://www.tiktok.com/search", params={"q": "x"})
+    assert geo.status_code == site.status_code == 503 and net.pending_web == []
+    assert [o["host"] for o in net.offline] == ["nominatim.openstreetmap.org", "www.tiktok.com"]
+    assert not (tmp_path / "pending_web").exists()
+    monkeypatch.setenv("WEB_SEARCH_SEARXNG_URL", "http://search.local:8888")  # the run's own SearXNG
+    with offline(SimNet(tmp_path)) as net:
+        async with httpx.AsyncClient() as client:
+            await client.get("http://search.local:8888/search", params={"q": "x"})
+            await client.get("http://searxng:8080/search", params={"q": "x"})
+    assert len(net.pending_web) == 1 and [o["host"] for o in net.offline] == ["searxng"]
+
+
+
+@pytest.mark.asyncio
+async def test_a_served_search_and_a_recorded_failure_are_progress_of_the_pass(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearchError, SearxngClient
+
+    (tmp_path / "web").mkdir()
+    for query, entry in (("caido", {"error_status": 503}), ("algo", HITS)):
+        key = search_key(query, pageno=1, categories="general")
+        (tmp_path / "web" / f"{key}.json").write_text(json.dumps(entry), encoding="utf-8")
+    with offline(SimNet(tmp_path)) as net:
+        client = SearxngClient("http://searxng:8080")
+        with pytest.raises(SearchError):
+            await client.search("caido")
+        await client.search("algo")
+        await client.aclose()
+    assert net.calls == 2  # the loop's sign of progress (``Bench._progress``)
+
+
+class _LoopPool:
+    """The two questions ``Bench._loop`` asks the database: the campaign's state, is its web stage searching."""
+
+    def __init__(self, campaign: dict) -> None:
+        self.campaign = campaign
+        self.clock: list[float] = []
+
+    async def fetchval(self, sql: str, *_args: object) -> object:
+        return self.campaign["searching"] if "web_search_runs" in sql else self.campaign["state"]
+
+    async def execute(self, sql: str, *args: object) -> None:
+        assert "sim.clock" in sql
+        self.clock.append(float(args[0]))  # type: ignore[arg-type]
+
+
+async def _loop(tmp_path: Path, rounds_searching: int | None) -> tuple[object, _LoopPool]:
+    """``rounds_searching`` rounds of a web stage at work and no call, then the campaign ends (None: never)."""
+    from types import SimpleNamespace
+
+    from scripts.sim.harness import Bench, Persona
+
+    campaign = {"state": "running", "searching": True}
+    bench = Bench(tmp_path, "loop", Persona(name="t", task="t"))
+    bench.pool, bench.campaign_id = _LoopPool(campaign), "c1"  # type: ignore[attr-defined]
+    ticks = 0
+
+    async def web() -> None:
+        nonlocal ticks
+        ticks += 1
+        if rounds_searching is not None and ticks > rounds_searching:
+            campaign.update(state="completed", searching=False)
+
+    class Campaigns:
+        async def get(self, _id: str) -> object:
+            return SimpleNamespace(state=campaign["state"])
+
+    await bench._loop([("web", web)], Campaigns(), None)
+    return bench, bench.pool  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_searching_web_stage_is_no_idle_round_and_the_db_clock_follows(tmp_path: Path) -> None:
+    from scripts.sim.harness import MAX_JUMPS
+
+    bench, pool = await _loop(tmp_path, 3 * MAX_JUMPS)  # idle rounds would have stalled the run by now
+    assert bench.status == "running" and bench.stop_reason == ""  # ended, not «did not end»
+    assert pool.clock and pool.clock[-1] == bench.clock.offset.total_seconds()  # the DB's now() moved with it
+
+
+@pytest.mark.asyncio
+async def test_a_web_stage_that_never_ends_still_stalls_the_run(tmp_path: Path) -> None:
+    from scripts.sim.harness import IDLE_JUMP, MAX_BUSY_ROUNDS, MAX_JUMPS
+
+    bench, _ = await _loop(tmp_path, None)
+    assert bench.status == "stalled" and bench.stop_reason == "the campaign did not end"
+    assert bench.clock.offset.total_seconds() <= MAX_BUSY_ROUNDS * 10 + MAX_JUMPS * IDLE_JUMP.total_seconds()
+
+
+@postgres
+@pytest.mark.asyncio
+async def test_the_databases_now_is_the_runners_virtual_clock(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    import asyncpg
+
+    url = await db.reset(URL)
+    pool = await asyncpg.create_pool(url, min_size=1, max_size=2)
+    try:
+        await db.set_clock(pool, timedelta(hours=4))
+        campaign = await pool.fetchval("insert into campaigns(telegram_chat_id, requested_by, source_text, plan, state) "
+                                       "values (1, 1, 't', '{}'::jsonb, 'running') returning id")
+        await pool.execute("update campaigns set state = 'completed' where id = $1", campaign)
+        shift = await pool.fetchval("select finished_at - pg_catalog.now() from campaigns where id = $1", campaign)
+        assert timedelta(hours=3, minutes=59) < shift <= timedelta(hours=4, minutes=1)  # the trigger's now()
+    finally:
+        await pool.close()
+        await db.restore(URL)
 
 
 # --- the interview's screen --------------------------------------------------------------------------------------
@@ -579,7 +833,7 @@ async def test_a_land_search_in_madrid_reaches_a_card_and_a_replay_gives_the_sam
     assert [o["press"] for o in first["offers"]] == [a.strip("[]") for a in answers[start + 2:]]
     assert {c["provider"] for c in first["campaign_costs"] if c["stage"] == "llm" and c["kind"] == "cost"} == \
         {"claude_cassette"} and first["costs_total_usd"] == 0
-    assert first["pending"] == {"llm": [], "apify": [], "apify_blocked": []}
+    assert first["pending"] == {"llm": [], "apify": [], "apify_blocked": [], "web": []}
 
     code, again = await run(root)  # the cassette alone, no model: the same file
     assert code == 0 and again == first
