@@ -188,12 +188,40 @@ EXAMPLE (investors). spec is empty, message: "хочу найти инвесто
  "done": false, "understood_ru": "Ищете инвесторов в апарт-отель в Малаге, деньги нужны вам", "asking": "investor.ticket"}
 """
 
+# INVESTOR_SELLER_ROLE (Q63, sim b5-n2-s6): «have a 4 bed villa in Estepona asking 1.2M EUR, need serious buyers or
+# investors» was read as raising money and searched for business angels. With the flag the role has a third value,
+# selling, and the prompt says when it applies; off, SYSTEM is sent byte for byte.
+_ROLE_FIELD = '"user_role": "raising (the person looks for money) | deploying (the person invests) | null"}'
+SELLER_ROLE_FIELD = ('"user_role": "raising (the person looks for money for a project or company) | deploying (the '
+                     'person invests) | selling (the person has a property to sell and looks for its buyers) | null"}')
+SELLER_RULE = """
+ROLE selling (valid in every mode, whatever a skill below says about the roles): the person, an owner or an agent, has
+a CONCRETE property to sell and looks for buyers or for investors who would buy THAT property («have a 4 bed villa in
+Estepona asking 1.2M EUR, need serious buyers or investors», «продаю виллу в Марбелье, ищу покупателя», «vendo chalet
+en Estepona, busco comprador»). Then investor.user_role is "selling", never "raising" (raising is someone who seeks
+money for a project, a company or a development). For selling: property_type is the kind of the property; the asking
+price and the property's facts go into notes; investor.ticket is the budget a buyer needs: min = the asking price when
+one is named and the person says nothing else about the buyer's budget; investor.who is ["private"] unless the person
+names other kinds. Task questions (part B) for selling: the property's condition and main features, the timeline of
+the sale, which buyers fit (to live in, a holiday home, an investor for rental income, buyers from abroad); never ask
+about the stage of a project, the total raise, equity or debt.
+"""
+assert SYSTEM.count(_ROLE_FIELD) == 1
+SYSTEM_SELLER = SYSTEM.replace(_ROLE_FIELD, SELLER_ROLE_FIELD) + SELLER_RULE
+
+
+def system_text(seller_role: bool = False) -> str:
+    """The interviewer's system prompt: ``SYSTEM``, or with INVESTOR_SELLER_ROLE (Q63) the one with the selling role."""
+    return SYSTEM_SELLER if seller_role else SYSTEM
+
 
 # --- parsing -----------------------------------------------------------------------------------
 
 
-def parse_turn(content: str, current: TaskSpec) -> InterviewTurn:
-    """Validate the model's JSON after fixing harmless drift; raise ``ValueError`` on anything unusable."""
+def parse_turn(content: str, current: TaskSpec, *, seller_role: bool = False) -> InterviewTurn:
+    """Validate the model's JSON after fixing harmless drift; raise ``ValueError`` on anything unusable.
+
+    ``seller_role`` (INVESTOR_SELLER_ROLE, Q63): off, a «selling» role the model sends anyway is not taken."""
     data = json.loads(_FENCE.sub("", content))
     if not isinstance(data, dict):
         raise ValueError("not an object")
@@ -203,6 +231,8 @@ def parse_turn(content: str, current: TaskSpec) -> InterviewTurn:
     if "done" not in data and "question" not in data:
         raise ValueError("neither done nor question")
     spec = current.merged(partial or {})
+    if not seller_role and spec.investor.user_role == "selling" and current.investor.user_role != "selling":
+        spec.investor.user_role = current.investor.user_role  # without the flag the role has two values, as before
     question = _text(data.get("question"), MAX_QUESTION_CHARS)
     if question is not None and not _CYRILLIC.search(question):
         raise ValueError("question is not Russian")
@@ -273,10 +303,12 @@ class OpenRouterInterviewer:
     """POSTs one chat completion to OpenRouter; no retries (a 400 retries once without ``response_format``)."""
 
     def __init__(self, *, api_key: str, model: str, timeout_seconds: float,
-                 base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None) -> None:
+                 base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None,
+                 seller_role: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the interviewer")
         self.model = model
+        self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): the prompt with the selling role
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
@@ -293,7 +325,7 @@ class OpenRouterInterviewer:
             "max_tokens": 1800,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": SYSTEM},
+                {"role": "system", "content": system_text(self.seller_role)},
                 {"role": "user", "content": state},
             ],
         }
@@ -306,7 +338,7 @@ class OpenRouterInterviewer:
             raise InterviewError("http_error", status=response.status_code)
         try:
             content = response.json()["choices"][0]["message"]["content"]
-            return parse_turn(content, spec)
+            return parse_turn(content, spec, seller_role=self.seller_role)
         except Exception as exc:
             # The type only: the content may quote the person's words.
             log.warning("telegram.intake.interview_unreadable %s", type(exc).__name__)

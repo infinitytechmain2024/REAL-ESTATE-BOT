@@ -189,6 +189,11 @@ class WebSearchConfig:
     # round stores no query is exhausted (``round_halves``): the other one writes every later round, the stage ends
     # only when both are. Off: every round of a ``both`` campaign searches objects, as before.
     both_mode_investor_queries: bool = False
+    # INVESTOR_SELLER_ROLE (Q63): a campaign whose person sells a property (``spec.investor.user_role`` selling) gets
+    # investor rounds that look for its buyers and property investors (``QueryTask.seller_web``: seller prompt and
+    # terms, no startup or business-angel words). Needs the investor round (INVESTOR_WEB_QUERIES or the both-mode one).
+    # Off: the investor rounds as before.
+    investor_seller_role: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -235,8 +240,15 @@ def hygienic_languages(campaign: Campaign) -> tuple[str, ...]:
     return kept or tuple(campaign.plan.languages)
 
 
+def seller_campaign(campaign: Campaign) -> bool:
+    """INVESTOR_SELLER_ROLE (Q63): the person has a property to sell (``spec.investor.user_role`` is selling)."""
+    investor = (campaign.spec or {}).get("investor") if isinstance(campaign.spec, dict) else None
+    return isinstance(investor, dict) and investor.get("user_role") == "selling"
+
+
 def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = False,
-               investor_queries: bool = False) -> QueryTask:
+               investor_queries: bool = False, seller_role: bool = False) -> QueryTask:
+    """``seller_role`` (INVESTOR_SELLER_ROLE, Q63): a seller's task is marked (``QueryTask.seller``)."""
     plan = campaign.plan
     investor = investor_queries and plan.vertical == "investors"  # INVESTOR_WEB_QUERIES: no listing search plan
     place = (campaign.spec or {}).get("place") if isinstance(campaign.spec, dict) else None
@@ -262,7 +274,8 @@ def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = 
                      search_plan=None if investor else plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country),
                      nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only, query_hygiene=hygiene,
                      rental_term=task_rental_term(campaign.spec, campaign.source_text)
-                     if plan.constraints.get("deal") == "rent" else None, investor_queries=investor)
+                     if plan.constraints.get("deal") == "rent" else None, investor_queries=investor,
+                     seller=seller_role and seller_campaign(campaign))
 
 
 def object_part(task: QueryTask) -> QueryTask:
@@ -486,7 +499,7 @@ class WebSearchWorker:
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
         task = query_task(campaign, hygiene=cfg.query_hygiene, spec_level=cfg.place_level_from_spec,
-                          investor_queries=cfg.investor_web_queries)
+                          investor_queries=cfg.investor_web_queries, seller_role=cfg.investor_seller_role)
         if not self._both_investors(campaign):
             return bool(await self._write_round(campaign, task, used, want, portals_done, investors=False))
         # BOTH_MODE_INVESTOR_QUERIES: the next half writes this round; when it stores nothing, that half is exhausted

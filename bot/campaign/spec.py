@@ -30,7 +30,7 @@ Mode = Literal["real_estate", "investors", "both"]
 Deal = Literal["rent", "sale", "any"]
 PropertyType = Literal["apartment", "house", "land", "room", "commercial", "other", "any"]
 Level = Literal["city", "province", "region"]
-UserRole = Literal["raising", "deploying"]
+UserRole = Literal["raising", "deploying", "selling"]  # selling: INVESTOR_SELLER_ROLE (Q63)
 
 MODE_TITLES: dict[str, str] = {
     "real_estate": "🏡 Участки и объекты",
@@ -55,7 +55,8 @@ INVESTOR_WHO_RU = {
     "agency": "агентства",
     "network": "сообщества и нетворкинг",
 }
-ROLE_RU = {"raising": "привлекаю деньги", "deploying": "вкладываю деньги"}
+# selling (INVESTOR_SELLER_ROLE, Q63): the person has a property to sell and looks for buyers or investors for it.
+ROLE_RU = {"raising": "привлекаю деньги", "deploying": "вкладываю деньги", "selling": "продаю объект, ищу покупателя"}
 CURRENCY_SIGNS = {"EUR": "€", "USD": "$", "GBP": "£", "UAH": "₴", "RUB": "₽"}
 
 MAX_TEXT = 200
@@ -265,7 +266,8 @@ class Investor(_Model):
     yield_min: float | None = Field(default=None, ge=0, le=1000)
     geography: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)
-    user_role: UserRole | None = None  # raising: the person seeks money; deploying: the person invests
+    # raising: the person seeks money; deploying: the person invests; selling (Q63): has a property, seeks its buyers
+    user_role: UserRole | None = None
 
     @field_validator("who", "asset_class", "geography", "languages", mode="before")
     @classmethod
@@ -281,7 +283,7 @@ class Investor(_Model):
     @classmethod
     def _role(cls, value: Any) -> str | None:
         text = str(value or "").strip().casefold()
-        return text if text in ("raising", "deploying") else None
+        return text if text in ("raising", "deploying", "selling") else None
 
     @field_validator("yield_min", mode="before")
     @classmethod

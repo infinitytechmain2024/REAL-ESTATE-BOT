@@ -27,6 +27,10 @@ class AnalysisSettings(BaseSettings):
     # or blog address (/noticias/, /news/, a date) is dropped before the model; a project that seeks money is no lead
     # when the requester raises money (task_hint.user_role). false (default): the prompt and the hint as before.
     investor_lead_source_check: bool = Field(default=False, validation_alias="INVESTOR_LEAD_SOURCE_CHECK")
+    # Q63: an investor post of a person who sells a property (spec.investor.user_role selling, task_hint.user_role):
+    # the prompt («-sell») takes its buyers and property investors as leads, not agents, sellers or business angels.
+    # false (default): the prompt and the hint as before.
+    investor_seller_role: bool = Field(default=False, validation_alias="INVESTOR_SELLER_ROLE")
     # Q56: true = when the title or description explicitly state another bedroom count, area of the same kind or price
     # (same currency) than the JSON-LD line, the prompt («-fc») makes that field null with both numbers in reason, so
     # the reviewer gets «unknown». Prompt only, unlike Q13 (deterministic, area only). false (default): byte for byte.

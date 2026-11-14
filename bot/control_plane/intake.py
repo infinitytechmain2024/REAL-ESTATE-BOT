@@ -59,6 +59,7 @@ from bot.control_plane.rules import (
     AI_SKIP_WORDS,
     DEVIATION_OPTIONS,
     DEVIATION_PATH,
+    SELLER_ROLE_OPTION,
     SKIP_WORDS,
     TASK_PATH,
     RuleInterviewer,
@@ -70,6 +71,7 @@ from bot.control_plane.rules import (
     parse_deal,
     question_for,
     read_deviations,
+    selling_in_text,
 )
 
 __all__ = ["geo_ru", "parse_budget", "parse_deal"]  # re-exported: the answer parsers live in rules.py
@@ -164,6 +166,8 @@ ROLE_CONFLICT_QUESTIONS = {
     "raising": "Вы писали, что ищете инвесторов или деньги в свой проект, а сейчас — что хотите вкладывать сами. "
                "Что верно?",
     "deploying": "Вы писали, что хотите вкладывать сами, а сейчас — что ищете деньги в свой проект. Что верно?",
+    # INVESTOR_SELLER_ROLE (Q63): only with the flag a task reads as selling
+    "selling": "Вы писали, что продаёте объект и ищете покупателя, а сейчас — другое. Что верно?",
 }
 ROLE_CONFLICT_OPTIONS = (("Ищу деньги в свой проект", "role:raising"), ("Хочу вложить свои деньги", "role:deploying"))
 
@@ -455,7 +459,8 @@ class TaskIntake:
                  technical: Callable[[int], bool] = lambda _user_id: False,
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
                  post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False,
-                 role_conflict_check: bool = False, ask_city_or_province: bool = False) -> None:
+                 role_conflict_check: bool = False, ask_city_or_province: bool = False,
+                 seller_role: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -476,13 +481,19 @@ class TaskIntake:
         buttons; «Вся провинция» and «Не важно» make the place the province, «Только в городе» keeps the city (see
         ``_needs_scope``). Off, nothing is asked and the place stays the city.
 
+        ``seller_role`` (``INVESTOR_SELLER_ROLE``, Q63): the investor role has a third value, selling (the person has a
+        property to sell and seeks its buyers or investors): words like «have a villa … need buyers», «продаю, ищу
+        покупателя», «vendo …, busco comprador» in the task (or in the answer to the role question) set it, and the role
+        buttons get «Продаю объект, ищу покупателя». Off, the role is raising or deploying, as before.
+
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
         """
         self.store, self.sink = store, sink
         self.notify_owners, self.now, self.technical = notify_owners, now, technical
         self.interviewer = interviewer
-        self.rules = RuleInterviewer()
+        self.seller_role = seller_role
+        self.rules = RuleInterviewer(seller_role=seller_role)
         self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
         self.skip_widens_place = skip_widens_place
         self.role_conflict_check = role_conflict_check
@@ -615,10 +626,15 @@ class TaskIntake:
             return await self._interview(draft, f"Сделка: {DEAL_TEXT[value]}")
         if action == "scope" and value in ("city", "province") and draft.asking == SCOPE_PATH:
             return await self._scope_answer(draft, value)
-        if action == "role" and value in ("raising", "deploying") and draft.asking == "investor.user_role":
-            return await self._interview(draft, "ищу деньги для проекта" if value == "raising" else "хочу вкладывать",
-                                         role=value if draft.role_check == "asking" else None)
+        if action == "role" and value in self._roles() and draft.asking == "investor.user_role":
+            said = {"raising": "ищу деньги для проекта", "deploying": "хочу вкладывать",
+                    "selling": "продаю объект, ищу покупателя"}[value]
+            return await self._interview(draft, said, role=value if draft.role_check == "asking" else None)
         return Reply(STALE)
+
+    def _roles(self) -> tuple[str, ...]:
+        """The investor roles a button may set; selling only with INVESTOR_SELLER_ROLE (Q63)."""
+        return ("raising", "deploying", "selling") if self.seller_role else ("raising", "deploying")
 
     def _edit_menu(self, draft: Draft) -> Reply:
         fields = FIELDS[draft.mode or "real_estate"]
@@ -632,7 +648,7 @@ class TaskIntake:
         title, path = entry
         draft.step, draft.editing, draft.asking = "ask", path, path
         await self.store.save(draft)
-        hint = question_for(draft.spec or TaskSpec(), path)
+        hint = question_for(draft.spec or TaskSpec(), path, seller=self.seller_role)
         return Reply(f"{title}: напишите новое значение. {hint}", (Button("Назад", callback_data="task:back"),),
                      keyboard=DRAFT_KEYBOARD)
 
@@ -733,12 +749,19 @@ class TaskIntake:
                 turn.understood_ru = f"радиус {draft.spec.place.radius_km:g} км"
             elif draft.spec.place.districts != spec.place.districts:
                 turn.understood_ru = "пригороды: " + ", ".join(draft.spec.place.districts)
+        if (self.seller_role and mode in ("investors", "both") and not editing
+                and (message == draft.task or draft.asking == "investor.user_role") and selling_in_text(message)
+                and draft.spec.investor.user_role != "selling"):
+            # INVESTOR_SELLER_ROLE (Q63): «have a villa … need buyers» is selling whatever the model read (b5-n2-s6)
+            draft.spec.investor.user_role = "selling"
+            log.info("telegram.intake.role_selling", extra={"user_id": draft.user_id})
         draft.dialogue = [*draft.dialogue, {"role": "user", "text": message[:600]}][-MAX_DIALOGUE:]
         draft.editing = None
         if (self.role_conflict_check and mode in ("investors", "both") and not editing
                 and (task_role := self._role_conflict(draft, spec, message, role)) is not None):
+            options = (*ROLE_CONFLICT_OPTIONS, SELLER_ROLE_OPTION) if self.seller_role else ROLE_CONFLICT_OPTIONS
             return await self._ask(draft, "", ROLE_CONFLICT_QUESTIONS[task_role], "investor.user_role",
-                                   ROLE_CONFLICT_OPTIONS, only_options=True)
+                                   options, only_options=True)
         return await self._carry_on(draft, turn, editing=editing)
 
     def _role_conflict(self, draft: Draft, before: TaskSpec, message: str, pressed: str | None = None) -> str | None:
@@ -751,7 +774,7 @@ class TaskIntake:
         if draft.role_check == "asking":
             draft.role_check = "done"
             model_role = draft.spec.investor.user_role
-            if pressed in ("raising", "deploying"):
+            if pressed in self._roles():
                 draft.spec.investor.user_role = pressed  # type: ignore[assignment]
             elif (draft.asking == "investor.user_role" and not _NEGATION.search(message)
                   and (said := role_in_text(message)) is not None and model_role in (None, said)):
@@ -760,7 +783,7 @@ class TaskIntake:
         role = draft.spec.investor.user_role
         if draft.role_check or not role or role == before.investor.user_role or message == draft.task:
             return None
-        task_role = role_in_text(draft.task)
+        task_role = "selling" if self.seller_role and selling_in_text(draft.task) else role_in_text(draft.task)
         if task_role is None or task_role == role:
             return None
         draft.role_check = "asking"
@@ -827,8 +850,8 @@ class TaskIntake:
         if asking == "place.districts" and (spec.place.radius_km or spec.place.districts or (
                 draft.scope_check == "done" and draft.widened and spec.is_unspecified("place.districts"))):
             asking = next_path(spec, mode)
-            question = question_for(spec, asking) if asking else None
-            options = options_for(asking) if asking else ()
+            question = question_for(spec, asking, seller=self.seller_role) if asking else None
+            options = options_for(asking, seller=self.seller_role) if asking else ()
             choices = ()
         suburb_scope = (mode in ("real_estate", "both") and bool(_SUBURB.search(draft.task))
                         and not spec.place.radius_km and not spec.place.districts
@@ -844,8 +867,8 @@ class TaskIntake:
             question = SCOPE_QUESTION.format(city=spec.place.names.get("ru") or spec.place.name)
             options, choices = SCOPE_OPTIONS, ()
         elif question is None and missing and not capped:
-            asking, question = missing[0], question_for(spec, missing[0])
-            options = options_for(missing[0])
+            asking, question = missing[0], question_for(spec, missing[0], seller=self.seller_role)
+            options = options_for(missing[0], seller=self.seller_role)
         elif (question is None and not missing and not capped and not editing and mode in ("real_estate", "both")
               and not spec.answered(DEVIATION_PATH)):
             # Whatever the model said, the deviation question is always asked before the card.

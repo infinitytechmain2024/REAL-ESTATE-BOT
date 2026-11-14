@@ -147,7 +147,8 @@ class ControlPlane:
                                  both_mode=settings.intake_both_mode,
                                  skip_widens_place=settings.intake_skip_widens_place,
                                  role_conflict_check=settings.intake_role_conflict_check,
-                                 ask_city_or_province=settings.intake_ask_city_or_province)
+                                 ask_city_or_province=settings.intake_ask_city_or_province,
+                                 seller_role=settings.investor_seller_role)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""

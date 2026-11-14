@@ -158,6 +158,8 @@ class WebSearchSettings(BaseSettings):
     both_mode_portals: bool = Field(default=False, validation_alias="BOTH_MODE_PORTALS")
     # Q61: a both campaign's even query rounds ask for investors (the Q51 investor round), odd ones for objects.
     both_mode_investor_queries: bool = Field(default=False, validation_alias="BOTH_MODE_INVESTOR_QUERIES")
+    # Q63: the investor rounds of a person who sells a property look for its buyers and property investors.
+    investor_seller_role: bool = Field(default=False, validation_alias="INVESTOR_SELLER_ROLE")
     # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
     # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or
     # an area), off (the old rule: a property word and a deal word). A country without a portal list is soft.
@@ -236,6 +238,7 @@ class WebSearchSettings(BaseSettings):
             cover_portals=self.cover_portals, query_hygiene=self.query_hygiene, render_on_refusal=self.render_on_refusal,
             place_level_from_spec=self.place_level_from_spec, investor_web_queries=self.investor_web_queries,
             both_mode_portals=self.both_mode_portals, both_mode_investor_queries=self.both_mode_investor_queries,
+            investor_seller_role=self.investor_seller_role,
             render_index_on_refusal=self.render_index_on_refusal,
             human_verification=self.human_verification and self.render_enabled,
             verified_host_interval_seconds=self.verified_host_interval_seconds,

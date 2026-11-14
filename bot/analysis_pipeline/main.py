@@ -158,7 +158,7 @@ async def run_once(store=None, pipeline: AnalysisPipeline | None = None, send: S
     own_store = store is None
     if own_store:
         store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms,
-                                      user_role=s.investor_lead_source_check)
+                                      user_role=s.investor_lead_source_check, seller_role=s.investor_seller_role)
         await store.connect()
     try:
         p = pipeline or AnalysisPipeline(
@@ -166,7 +166,7 @@ async def run_once(store=None, pipeline: AnalysisPipeline | None = None, send: S
                                invalid_retry=s.invalid_retry, fallback_model=s.fallback_model,
                                location_from_text=s.location_from_text, area_text_check=s.area_text_check,
                                place_description_chars=PLACE_DESCRIPTION_CHARS if s.portal_description_full else None,
-                               investor_lead_check=s.investor_lead_source_check,
+                               investor_lead_check=s.investor_lead_source_check, seller_role=s.investor_seller_role,
                                fact_conflict_null=s.fact_conflict_null)
         )
         formatted, processed = await analyse_batch(store, p, batch_size=s.batch_size, claim_seconds=s.claim_seconds, model=s.openrouter_model)
@@ -193,14 +193,14 @@ async def serve() -> None:
         while True:
             await asyncio.sleep(3600)
     store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms,
-                                  user_role=s.investor_lead_source_check)
+                                  user_role=s.investor_lead_source_check, seller_role=s.investor_seller_role)
     await store.connect()
     costs.install(costs.PostgresLedger(store._pool()), s.budget_usd)
     pipeline = AnalysisPipeline(OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds,
                                invalid_retry=s.invalid_retry, fallback_model=s.fallback_model,
                                location_from_text=s.location_from_text, area_text_check=s.area_text_check,
                                place_description_chars=PLACE_DESCRIPTION_CHARS if s.portal_description_full else None,
-                               investor_lead_check=s.investor_lead_source_check,
+                               investor_lead_check=s.investor_lead_source_check, seller_role=s.investor_seller_role,
                                fact_conflict_null=s.fact_conflict_null))
     log.info("analysis.started", extra={"poll_seconds": s.poll_seconds, "digests": bool(s.telegram_chat_id)})
     try:

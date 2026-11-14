@@ -111,6 +111,7 @@ BASE_ENV: dict[str, str] = {
     "INVESTOR_LEAD_SOURCE_CHECK": "true",  # Q53
     "INTAKE_ROLE_CONFLICT_CHECK": "true",  # Q52
     "INTAKE_ASK_CITY_OR_PROVINCE": "true",  # Q62
+    "INVESTOR_SELLER_ROLE": "true",  # Q63
     "BOTH_MODE_PORTALS": "true",  # Q54
     "BOTH_MODE_INVESTOR_QUERIES": "true",  # Q61
     "HELD_OFFER_QUALITY": "true",  # Q55
@@ -398,10 +399,12 @@ class Bench:
         interviewer: Interviewer | None = None
         if settings.openrouter_api_key:
             interviewer = OpenRouterInterviewer(api_key=settings.openrouter_api_key, model=settings.interview_model,
-                                                timeout_seconds=settings.interview_timeout_seconds)
+                                                timeout_seconds=settings.interview_timeout_seconds,
+                                                seller_role=settings.investor_seller_role)
         if settings.architect_provider == "anthropic":
             claude = AnthropicInterviewer(api_key=settings.anthropic_api_key, model=settings.anthropic_interview_model,
-                                          timeout_seconds=settings.anthropic_timeout_seconds)
+                                          timeout_seconds=settings.anthropic_timeout_seconds,
+                                          seller_role=settings.investor_seller_role)
             interviewer = FallbackInterviewer(claude, interviewer) if interviewer is not None else claude
         task = self.persona.task
 
@@ -629,12 +632,13 @@ class Bench:
         _social, generator = service._social_worker(settings, pool, campaigns)
         apify_social, apify_generator = service._apify_social_worker(settings, pool, campaigns, apify_tasks)
         analysis_settings = AnalysisSettings()
-        analysis_store = PostgresAnalysisStore(self.database_url, exclude_platforms=analysis_settings.excluded_platforms)
+        analysis_store = PostgresAnalysisStore(self.database_url, exclude_platforms=analysis_settings.excluded_platforms,
+                                               seller_role=analysis_settings.investor_seller_role)
         await analysis_store.connect()
         pipeline = AnalysisPipeline(OpenRouterAnalyzer(
             analysis_settings.openrouter_api_key, analysis_settings.openrouter_model,
             timeout_seconds=analysis_settings.timeout_seconds, invalid_retry=analysis_settings.invalid_retry,
-            fallback_model=analysis_settings.fallback_model))
+            fallback_model=analysis_settings.fallback_model, seller_role=analysis_settings.investor_seller_role))
         facebook = self._facebook_runner()
         for part in (web, judge, final_reporter, comments, post_reads, apify_tasks, reach, runner, apify_social,
                      pipeline, facebook):

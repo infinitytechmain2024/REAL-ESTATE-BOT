@@ -107,6 +107,22 @@ _REASON_LINE = "reason: one short Russian sentence. deviation_ru: empty unless v
 assert SYSTEM.count(_REASON_LINE) == 1
 SYSTEM_INVESTORS = SYSTEM.replace(_REASON_LINE, INVESTOR_RULES + _REASON_LINE)
 
+# INVESTOR_SELLER_ROLE (Q63, sim b5-n2-s6): the person sells one property (task.user_role "selling") and looks for its
+# buyers; an investor finding of such a task is judged by these rules instead of INVESTOR_RULES.
+SELLER_PROMPT_VERSION = f"{PROMPT_VERSION}-sell"
+SELLER_RULES = """Investor findings of a seller (task.user_role "selling": the person has ONE property to sell, described
+in task, and looks for its buyers or investors): "match" only for a person or organisation that wants to BUY or invest
+in a property of that kind in or around the place: a buyer who says what they look for («looking to buy a villa in
+…», «busco comprar casa en …»), a buyer's agent or property finder with clients for such properties, a family office,
+fund or private investor buying such residential property there. When task.ticket or the task names a price, the
+buyer's stated budget must reach it (about 10 % less is "near"); a clearly smaller budget is "reject"; no budget
+stated is not a reason to reject. "reject": another agent, agency or developer that offers or sells property, a
+listing or a property for sale, a seller, a startup investor, business angel, venture fund or crowdfunding that
+invests in companies, someone looking for a rental or for something much cheaper, news, articles and directories.
+
+"""
+SYSTEM_SELLER = SYSTEM.replace(_REASON_LINE, SELLER_RULES + _REASON_LINE)
+
 INDEX_NOTE_PREFIX = INDEX_RESULT_NOTE.split("{")[0]
 
 
@@ -137,12 +153,14 @@ class RelevanceJudge(Protocol):
 
 
 def task_data(campaign: Campaign, *, review: bool = False, soft_wishes: bool = False,
-              user_role: bool = False) -> dict[str, Any]:
+              user_role: bool = False, seller_role: bool = False) -> dict[str, Any]:
     """What the model is told about the campaign: goal, task text, place and the numbers.
 
     ``review``: for the reviewer, also the hard criteria (from the spec or the plan) and the tolerance;
     ``soft_wishes`` (``RELEVANCE_SOFT_WISHES``, reviewer only): also the soft wishes apart, as ``wishes``;
     ``user_role`` (``INVESTOR_LEAD_SOURCE_CHECK``, Q53): an investor search also gets the person's role.
+    ``seller_role`` (``INVESTOR_SELLER_ROLE``, Q63): a seller's investor search gets ``user_role`` «selling» and the
+    buyer's budget (``ticket``) from the spec.
     """
     plan = campaign.plan
     country = plan.country or geo.country_of(plan.location)
@@ -167,6 +185,13 @@ def task_data(campaign: Campaign, *, review: bool = False, soft_wishes: bool = F
         role = investor.get("user_role") if isinstance(investor, dict) else None
         if role in ("raising", "deploying"):
             data["user_role"] = role
+    if seller_role and plan.vertical in ("investors", "both"):
+        investor = (campaign.spec or {}).get("investor")
+        if isinstance(investor, dict) and investor.get("user_role") == "selling":
+            data["user_role"] = "selling"
+            ticket = investor.get("ticket") if isinstance(investor.get("ticket"), dict) else {}
+            if sums := {k: ticket[k] for k in ("min", "max", "currency") if ticket.get(k) is not None}:
+                data["ticket"] = sums
     if review:
         from bot.agents.reviewer import review_task  # lazy: the reviewer imports this module
 
@@ -333,12 +358,13 @@ class OpenRouterRelevanceJudge:
 
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 15,
                  base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None,
-                 phrase_places: bool = False, investor_leads: bool = False) -> None:
+                 phrase_places: bool = False, investor_leads: bool = False, seller_role: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the relevance check")
         self.model, self.timeout_seconds = model, timeout_seconds
         self.phrase_places = phrase_places  # USER_PHRASE_PLACES (Q28)
         self.investor_leads = investor_leads  # INVESTOR_LEAD_SOURCE_CHECK (Q53): SYSTEM_INVESTORS for investor findings
+        self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): SYSTEM_SELLER for a seller's investor findings
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
@@ -353,7 +379,11 @@ class OpenRouterRelevanceJudge:
             raise RelevanceError("timeout") from exc
 
     def prompt(self, task: dict[str, Any], finding: dict[str, Any]) -> tuple[str, str]:
-        """The prompt version and system text for this finding (``SYSTEM_INVESTORS`` only with the Q53 flag)."""
+        """The prompt version and system text for this finding (``SYSTEM_INVESTORS`` only with the Q53 flag,
+        ``SYSTEM_SELLER`` only with the Q63 one for a seller's task)."""
+        investor = task.get("mode") == "investors" or finding.get("vertical") == "investors"
+        if self.seller_role and investor and task.get("user_role") == "selling":
+            return SELLER_PROMPT_VERSION, SYSTEM_SELLER
         if self.investor_leads and (task.get("mode") == "investors" or finding.get("vertical") == "investors"):
             return INVESTOR_PROMPT_VERSION, SYSTEM_INVESTORS
         return PROMPT_VERSION, SYSTEM
@@ -444,6 +474,11 @@ class ReviewerJudge:
     def investor_leads(self) -> bool:
         """``INVESTOR_LEAD_SOURCE_CHECK`` (Q53) of the legacy judge that takes the investor findings."""
         return bool(getattr(self.fallback, "investor_leads", False))
+
+    @property
+    def seller_role(self) -> bool:
+        """``INVESTOR_SELLER_ROLE`` (Q63) of the legacy judge that takes the investor findings."""
+        return bool(getattr(self.fallback, "seller_role", False))
 
     @property
     def soft_wishes(self) -> bool:

@@ -68,6 +68,25 @@ _ROLE_WORDS = {
                 "для проекта", "для стартапа", "для моего", "финансирован", "поднять"),
     "deploying": ("инвестир", "вложить", "вкладыва", "ищу проект", "deploy", "хочу купить бизнес", "вложу", "вкладу"),
 }
+# INVESTOR_SELLER_ROLE (Q63): the person has a property to sell and looks for its buyers or investors.
+SELLING_WORDS = re.compile(
+    r"(?<!\w)(?:продаю|продаём|продаем|продам|продаёт\w*|продает\w*|продаємо)(?!\w)|"
+    r"(?<!\w)(?:ищу|ищем|нужен|нужны|нужно|найти|шукаю|шукаємо|потрібн\w*)\s+(?:\w+\s+){0,2}(?:покупател|покупц)|"
+    r"\b(?:vendo|vendemos)\b|\bbusc\w*\s+(?:\w+\s+){0,2}compradore?s?\b|"
+    r"\b(?:i|we)(?:'m|'re| am| are)\s+selling\b|\bselling\s+(?:my|our)\b|"
+    r"\b(?:need|needs|looking for|seeking|find)\s+(?:\w+\s+){0,2}buyers?\b|\bbuyers?\s+for\s+(?:my|our|it|this)\b",
+    re.IGNORECASE)
+_SELLING_NEGATED = re.compile(r"(?<!\w)(?:не|ні|no|not|don'?t)\s+(?:\w+\s+)?$", re.IGNORECASE)
+SELLER_ROLE_QUESTION = ("Вы ищете деньги для своего проекта, сами хотите вкладывать или продаёте объект и ищете "
+                        "покупателя?")
+SELLER_ROLE_OPTION = ("Продаю объект, ищу покупателя", "role:selling")
+
+
+def selling_in_text(text: str) -> bool:
+    """INVESTOR_SELLER_ROLE (Q63): the words say the person sells a property and seeks its buyers (not negated)."""
+    return any(not _SELLING_NEGATED.search(text[:m.start()]) for m in SELLING_WORDS.finditer(text or ""))
+
+
 _TARGET_WORD = re.compile(r"\w+")
 _NUMBER = re.compile(r"(\d{1,3}(?:[ .,]\d{3})+|\d+(?:[.,]\d+)?)\s*(k|к|тыс\w*|тис\w*|млн\w*|mln|million\w*|m\b)?", re.IGNORECASE)
 _VAGUE = re.compile(r"(где-?нибудь|где угодно|любо[йме]|неважно|не важно|не знаю|без разницы|anywhere|"
@@ -169,6 +188,9 @@ def generic_question(spec: TaskSpec) -> str:
     """One generic question per kind of task, for the no-AI fallback."""
     investors = ("Какие проекты и стадии вам интересны? Например: стартапы на ранней стадии, готовый бизнес, девелопмент."
                  if spec.investor.user_role == "deploying" else
+                 "Расскажите коротко об объекте: состояние, главное для покупателя, срок продажи? Например: готовая "
+                 "вилла, бассейн, вид на море, продать за 6 месяцев."
+                 if spec.investor.user_role == "selling" else  # INVESTOR_SELLER_ROLE (Q63): set only with the flag
                  "На какой стадии проект и какая сумма нужна? Например: идея, 300 тыс. €; запущен, 1,5 млн €.")
     if spec.mode == "investors":
         return investors
@@ -211,7 +233,10 @@ def read_deviations(spec: TaskSpec, text: str) -> TaskSpec:
     return spec
 
 
-def question_for(spec: TaskSpec, path: str) -> str:
+def question_for(spec: TaskSpec, path: str, *, seller: bool = False) -> str:
+    """``seller`` (INVESTOR_SELLER_ROLE, Q63): the role question names the third role, selling."""
+    if seller and path == "investor.user_role":
+        return SELLER_ROLE_QUESTION
     if path == TASK_PATH:
         return generic_question(spec)
     if path == DEVIATION_PATH:
@@ -221,11 +246,13 @@ def question_for(spec: TaskSpec, path: str) -> str:
     return template.format(city=city) + SLOT_HINTS.get(path, "")
 
 
-def options_for(path: str) -> tuple[tuple[str, str], ...]:
+def options_for(path: str, *, seller: bool = False) -> tuple[tuple[str, str], ...]:
+    """``seller`` (INVESTOR_SELLER_ROLE, Q63): the role buttons get a third one, «Продаю объект, ищу покупателя»."""
     if path == "deal":
         return (("Аренда", "deal:rent"), ("Покупка", "deal:sale"))
     if path == "investor.user_role":
-        return (("Ищу деньги", "role:raising"), ("Хочу вкладывать", "role:deploying"))
+        roles = (("Ищу деньги", "role:raising"), ("Хочу вкладывать", "role:deploying"))
+        return (*roles, SELLER_ROLE_OPTION) if seller else roles
     if path == DEVIATION_PATH:
         return DEVIATION_OPTIONS
     return ()
@@ -253,6 +280,9 @@ class RuleInterviewer:
 
     model = "rules"
 
+    def __init__(self, *, seller_role: bool = False) -> None:
+        self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): the selling role is read and offered
+
     async def interview(self, *, mode: str, spec: TaskSpec, dialogue: list[dict[str, str]], message: str,
                         asking: str | None = None, editing: bool = False) -> InterviewTurn:
         before = spec
@@ -271,10 +301,10 @@ class RuleInterviewer:
             names = ", ".join(many)
             return InterviewTurn(after, f"Указано несколько городов ({names}). Одна задача — один город. Какой выбрать?",
                                  False, understood, path)
-        question = question_for(after, path)
+        question = question_for(after, path, seller=self.seller_role)
         if asking and not changed and path not in (TASK_PATH, DEVIATION_PATH) and not editing and text and path == asking:
             question = NOT_UNDERSTOOD.get(path, "Не понял ответ. ") + question
-        return InterviewTurn(after, question, False, understood, path, options_for(path))
+        return InterviewTurn(after, question, False, understood, path, options_for(path, seller=self.seller_role))
 
     @staticmethod
     def _read_task_answer(spec: TaskSpec, text: str, asking: str, dialogue: list[dict[str, str]]) -> list[str]:
@@ -375,6 +405,9 @@ class RuleInterviewer:
                 spec.investor.ticket = spec.investor.ticket.model_copy(update={
                     "min": low, "max": high, "currency": _currency(text) or spec.investor.ticket.currency})
         lowered = text.casefold()
+        if self.seller_role and selling_in_text(text):  # INVESTOR_SELLER_ROLE (Q63): «продаю …, ищу покупателя»
+            spec.investor.user_role = "selling"
+            return
         for role, words in _ROLE_WORDS.items():
             if any(w in lowered for w in words) and (asking == "investor.user_role" or re.search(r"(?<!\w)я\s", lowered)):
                 spec.investor.user_role = role  # type: ignore[assignment]
