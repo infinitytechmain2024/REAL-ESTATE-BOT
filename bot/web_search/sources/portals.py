@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from bot.utils.listing_text import _AREA, _to_m2, areas, auction_named, number
 from bot.web_search.city_centers import static_city_area
-from bot.web_search.provinces import province_location_id
+from bot.web_search.provinces import province_code, province_location_id
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.apify import (
     ApifyListingSource,
@@ -189,11 +189,12 @@ class _PortalSource(ApifyListingSource):
     agency_ref = False  # DEDUP_DISTRICT_NOT_STREET (Q15): pass the row's agency reference on
 
     def __init__(self, token: str, *, facts_from_row: bool = False, description_full: bool = False,
-                 rental_term: bool = False, **kwargs: Any) -> None:
+                 rental_term: bool = False, province_by_code: bool = False, **kwargs: Any) -> None:
         super().__init__(token, **kwargs)
         self.facts_from_row = facts_from_row  # PORTAL_FACTS_FROM_ROW (Q16)
         self.description_full = description_full  # PORTAL_DESCRIPTION_FULL (Q18)
         self.rental_term = rental_term  # PORTAL_RENTAL_TERM (Q20)
+        self.province_by_code = province_by_code  # PORTAL_PROVINCE_BY_CODE (Q38)
 
     def supports(self, task: QueryTask) -> bool:
         return bool(self._token and task.location.strip() and task.country == "ES"
@@ -210,6 +211,12 @@ class _PortalSource(ApifyListingSource):
                   municipality: str, province: str) -> bool:
         if task.radius_km is not None:
             return center is not None and point is not None and _distance_km(center, point) <= task.radius_km
+        if task.place_level == "province" and self.province_by_code:
+            # PORTAL_PROVINCE_BY_CODE (Q38): «Alacant» in the task, «Alicante» in the row are one province (INE 03).
+            # A name not in bot/web_search/provinces.py on either side: the name comparison below, as before.
+            code = province_code(province)
+            if code is not None and code == province_code(task.location):
+                return True
         wanted = {_fold(task.location), *(_fold(p) for p in task.nearby_places)}
         found = _fold(province) if task.place_level == "province" else _fold(municipality)
         return found in wanted
