@@ -71,6 +71,7 @@ from .final_report import (
     place_scope_of,
     task_title,
 )
+from .investor_findings import org_key, same_org
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
@@ -330,6 +331,8 @@ class RunnerConfig:
     # One long description at one exact price and area is one object whatever the addresses or a repost suffix of the
     # reference (``same_object(twin_listings=True)``, Q58).
     dedup_twin_listings: bool = False
+    # Investor findings naming one organisation, club or person (``who``) are one card, whatever the hosts (Q60).
+    investor_lead_same_org: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -338,6 +341,11 @@ class RunnerConfig:
                 or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500
                 or not 1 <= self.lead_days <= 3650 or self.metrics_seconds < 0):
             raise ValueError("unsafe campaign runner settings")
+
+
+def _same_lead_org(a: StreamFinding, b: StreamFinding) -> bool:
+    """Q60: two investor findings naming one organisation, club or person (``investor_findings.same_org``)."""
+    return a.vertical == b.vertical == "investors" and same_org(a.payload, b.payload)
 
 
 def _more_rooms(request: Request, finding: StreamFinding) -> bool:
@@ -741,7 +749,7 @@ class CampaignRunner:
                 why = reason_category(match.why)
                 if self.config.report_precise_reasons and why == "rooms" and _more_rooms(request, finding):
                     why = "rooms_more"  # Q43: rejected for more rooms than asked, not for fewer
-                if (self.config.dedup_held_findings and match.bucket in HELD_BUCKETS
+                if ((self.config.dedup_held_findings or self._org_dedup(finding)) and match.bucket in HELD_BUCKETS
                         and why != self._unoffered(match.bucket)
                         and await self._deduplicate_held(campaign, finding, match.bucket, active, index, held)):
                     continue
@@ -787,21 +795,24 @@ class CampaignRunner:
         if not finding.url:
             return False
         mine = listing_of(finding.payload, url=finding.url, text=finding.text, body=finding.original)
-        if mine.price is None and mine.area is None and not mine.shingles:
+        org = self._org_dedup(finding)  # Q60: one organisation of an investor search, whatever the hosts
+        if mine.price is None and mine.area is None and not mine.shingles and not org:
             return False
         try:
             if bucket not in held:
                 held[bucket] = [_head_of(SentFinding(f, None, bucket=bucket)) for f in await self.store.held_findings(
                     campaign.id, bucket, HELD_DEDUP_LIMIT, exclude_why=self._unoffered(bucket))]
             for head in held[bucket]:
-                if head.sent.finding.id == finding.id or not same_object(
-                        mine, head.listing, without_address=self.config.dedup_without_address,
-                        district_not_street=self.config.dedup_district_not_street,
-                        cross_portal_facts=self.config.dedup_cross_portal_facts,
-                        same_host_copy=self.config.dedup_same_host_copy,
-                        description_normalize=self.config.dedup_description_normalize,
-                        same_lot=self.config.held_offer_quality,
-                        twin_listings=self.config.dedup_twin_listings):
+                if head.sent.finding.id == finding.id or not (
+                        (self.config.dedup_held_findings and same_object(
+                            mine, head.listing, without_address=self.config.dedup_without_address,
+                            district_not_street=self.config.dedup_district_not_street,
+                            cross_portal_facts=self.config.dedup_cross_portal_facts,
+                            same_host_copy=self.config.dedup_same_host_copy,
+                            description_normalize=self.config.dedup_description_normalize,
+                            same_lot=self.config.held_offer_quality,
+                            twin_listings=self.config.dedup_twin_listings))
+                        or (org and _same_lead_org(finding, head.sent.finding))):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -829,7 +840,8 @@ class CampaignRunner:
         if not finding.url:
             return False
         mine = listing_of(finding.payload, url=finding.url, text=finding.text, body=finding.original)
-        if mine.price is None and mine.area is None and not mine.shingles:
+        org = self._org_dedup(finding)  # Q60: one organisation of an investor search, whatever the hosts
+        if mine.price is None and mine.area is None and not mine.shingles and not org:
             return False
         index = index if index is not None else _HeadIndex()
         try:
@@ -837,14 +849,15 @@ class CampaignRunner:
                 index.loaded = True
                 index.heads = [_head_of(h) for h in await self.store.recent_sent_findings(campaign.id)]
             for position, head in enumerate(index.heads):
-                if head.sent.finding.id == finding.id or not same_object(
+                if head.sent.finding.id == finding.id or not (same_object(
                         mine, head.listing, without_address=self.config.dedup_without_address,
                         district_not_street=self.config.dedup_district_not_street,
                         cross_portal_facts=self.config.dedup_cross_portal_facts,
                         same_host_copy=self.config.dedup_same_host_copy,
                         description_normalize=self.config.dedup_description_normalize,
                         same_lot=self.config.held_offer_quality,
-                        twin_listings=self.config.dedup_twin_listings):
+                        twin_listings=self.config.dedup_twin_listings)
+                        or (org and _same_lead_org(finding, head.sent.finding))):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -862,6 +875,11 @@ class CampaignRunner:
         except Exception:  # noqa: BLE001 - dedup is an optimisation: on any failure send the card as usual
             log.warning("campaign.dedup_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
         return False
+
+    def _org_dedup(self, finding: StreamFinding) -> bool:
+        """Q60 (``INVESTOR_LEAD_SAME_ORG``): an investor finding that names its organisation, club or person."""
+        return (self.config.investor_lead_same_org and finding.vertical == "investors"
+                and org_key(finding.payload) is not None)
 
     async def _site_name(self, campaign: Campaign, url: str) -> str:
         """The «Также на» name of a sighting: a Facebook post's group name when it is known, else the host."""
