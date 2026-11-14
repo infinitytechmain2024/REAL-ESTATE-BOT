@@ -49,6 +49,7 @@ REASONS: dict[str, str] = {
     "type": "другой тип объекта",
     "budget": "дороже бюджета",
     "rooms": "меньше комнат",
+    "rooms_more": "больше комнат",  # REPORT_PRECISE_REASONS (Q43): more rooms than the task allows
     "area": "не та площадь",
     "criteria": "не выполнены обязательные условия",
     "kind": "не объявление (каталог, статистика, поиск жилья)",
@@ -869,9 +870,12 @@ def similar_note(counts: Tally, offers: Mapping[str, str | None] | None) -> str 
 class FinalReporter:
     """Builds the report; ``recommender`` None (no key): the rule-based recommendations only."""
 
-    def __init__(self, recommender: Recommender | None = None, *, every_portal: bool = False) -> None:
+    def __init__(self, recommender: Recommender | None = None, *, every_portal: bool = False,
+                 precise_reasons: bool = False) -> None:
         self.recommender = recommender
         self.every_portal = every_portal  # REPORT_EVERY_PORTAL (Q37): every portal that ran in «По источникам»
+        # REPORT_PRECISE_REASONS (Q43): a portal our page/budget caps stopped says so in «По источникам»
+        self.precise_reasons = precise_reasons
 
     async def aclose(self) -> None:
         close = getattr(self.recommender, "aclose", None)
@@ -900,7 +904,8 @@ class FinalReporter:
         sources, reports, other_sites = real_estate_sources(sources, reports, portals)
         stats = site_stats(sources, reports, portals)
         unreadable = unreadable_sites(sources, reports, portals)
-        funnel, _nothing = site_lines(sources, reports, portals, every_portal=self.every_portal)
+        funnel, _nothing = site_lines(sources, reports, portals, every_portal=self.every_portal,
+                                      limited=self.precise_reasons)
         facts = facts_for_model(task_facts(request), counts, sorted(
             stats.values(), key=lambda s: (-s.sent, -s.links, s.host)), unreadable, tolerance_pct)
         note = None if facts["task"].get("only_exact") else similar_note(counts, offers)

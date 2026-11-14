@@ -113,7 +113,7 @@ from .status_text import (
     SEARCHING as USER_SEARCHING,
 )
 from .store import CampaignStore
-from .summary import summary_text
+from .summary import summary_text, without_limited
 from .tolerance import (
     HELD_BUCKETS,
     Match,
@@ -316,6 +316,8 @@ class RunnerConfig:
     empty_report: bool = False
     # The final status line counts every delivery (object cards, people, post leads, reach contacts), not objects only (Q40).
     status_counts_all_deliveries: bool = False
+    # A portal stopped by our page/budget caps has its own report reason; more rooms than asked is not «fewer» (Q43).
+    report_precise_reasons: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -324,6 +326,13 @@ class RunnerConfig:
                 or not 0 <= self.comment_max_posts <= 100 or not 0 <= self.max_people <= 500
                 or not 1 <= self.lead_days <= 3650 or self.metrics_seconds < 0):
             raise ValueError("unsafe campaign runner settings")
+
+
+def _more_rooms(request: Request, finding: StreamFinding) -> bool:
+    """The listing has more rooms than the task's number (Q43): a «rooms» rejection then means «больше комнат»."""
+    listed = (finding.payload or {}).get("rooms")
+    return (bool(request.rooms) and isinstance(listed, int | float) and not isinstance(listed, bool)
+            and listed > request.rooms)  # type: ignore[operator]
 
 
 @dataclass(slots=True)
@@ -694,6 +703,8 @@ class CampaignRunner:
                 match = Match("similar", match.distance, "deal_kind")
             if match.bucket != "exact":
                 why = reason_category(match.why)
+                if self.config.report_precise_reasons and why == "rooms" and _more_rooms(request, finding):
+                    why = "rooms_more"  # Q43: rejected for more rooms than asked, not for fewer
                 if (self.config.dedup_held_findings and match.bucket in HELD_BUCKETS
                         and why != self._unoffered(match.bucket)
                         and await self._deduplicate_held(campaign, finding, match.bucket, active, index, held)):
@@ -1203,6 +1214,8 @@ class CampaignRunner:
             sources = await self.store.source_counts(campaign.id)
             site_report = getattr(self.web, "site_report", None)
             reports = await site_report(campaign.id) if site_report is not None else []
+            if not self.config.report_precise_reasons:  # Q43 off: no row for a portal our caps stopped, as before
+                reports = without_limited(reports)
             # The known portals only when the web stage ran (it reports every site it met or searched).
             portals = campaign_portals(campaign) if reports else ()
             text = summary_text(campaign.plan.goal, sources, reports, portals=portals)
@@ -1271,6 +1284,8 @@ class CampaignRunner:
             sources = await self.store.source_counts(campaign.id)
             site_report = getattr(self.web, "site_report", None)
             reports = await site_report(campaign.id) if site_report is not None else []
+            if not self.config.report_precise_reasons:  # Q43 off: no row for a portal our caps stopped, as before
+                reports = without_limited(reports)
             portals = campaign_portals(campaign) if reports else ()
             request = campaign_request(campaign)
             scope = place_scope_of(campaign.spec, campaign.source_text, request.location)

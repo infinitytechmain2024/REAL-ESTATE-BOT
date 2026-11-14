@@ -77,6 +77,7 @@ class SiteReport:
     api_empty: bool = False  # its API source run finished and returned no listing at all
     api_failed: bool = False  # its API source run failed on the provider's side (``apify_http_400`` ...)
     api_wrong_place: bool = False  # its API source run returned only objects from another place (Q17)
+    api_limited: bool = False  # its API source run was stopped by our own page/budget caps (Q43)
 
 
 @dataclass(frozen=True, slots=True)

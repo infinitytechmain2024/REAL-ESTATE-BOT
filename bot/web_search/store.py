@@ -186,13 +186,25 @@ def _wrong_place_hosts(runs: list[SourceRun]) -> frozenset[str]:
                      and r.name in _SOURCE_HOSTS)
 
 
+# Our own caps that stop a portal's source run before its listings are read: not launched (``apify_launch_limits``)
+# or its import cut by the campaign's page/day/host or budget caps (``apify_import_limits``), Q43.
+_LIMIT_CODES = frozenset({"apify_launch_limits", "apify_import_limits"})
+
+
+def _limited_hosts(runs: list[SourceRun]) -> frozenset[str]:
+    """Portals whose source run our own page/budget caps stopped before its listings were read (Q43)."""
+    return frozenset(_SOURCE_HOSTS[r.name] for r in runs if r.state == "failed" and r.error_code in _LIMIT_CODES
+                     and r.name in _SOURCE_HOSTS)
+
+
 def _reports(queries: dict[str, tuple[int, int]], urls: dict[str, list[int]],
              unverified: frozenset[str] = frozenset(), api_reads: dict[str, int] | None = None,
              api_empty: frozenset[str] = frozenset(), api_failed: frozenset[str] = frozenset(),
-             api_wrong_place: frozenset[str] = frozenset()) -> list[SiteReport]:
-    hosts = sorted(set(queries) | set(urls) | api_empty | api_failed | api_wrong_place)
+             api_wrong_place: frozenset[str] = frozenset(), api_limited: frozenset[str] = frozenset()) -> list[SiteReport]:
+    hosts = sorted(set(queries) | set(urls) | api_empty | api_failed | api_wrong_place | api_limited)
     return [SiteReport(h, *queries.get(h, (0, 0)), *urls.get(h, [0, 0, 0, 0]), h in unverified,
-                       (api_reads or {}).get(h, 0), h in api_empty, h in api_failed, h in api_wrong_place)
+                       (api_reads or {}).get(h, 0), h in api_empty, h in api_failed, h in api_wrong_place,
+                       h in api_limited)
             for h in hosts]
 
 
@@ -679,7 +691,7 @@ class PostgresWebStore:
         runs = await self.source_runs(campaign_id)
         return _reports(_site_queries([(r["query_text"], r["results"]) for r in queries]), counts,
                         frozenset(unverified), api_reads, _empty_hosts(runs), _failed_hosts(runs),
-                        _wrong_place_hosts(runs))
+                        _wrong_place_hosts(runs), _limited_hosts(runs))
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         row = await self.pool.fetchrow(
@@ -1351,7 +1363,7 @@ class MemoryWebStore:
                 api_reads[u.host] = api_reads.get(u.host, 0) + 1
         runs = await self.source_runs(campaign_id)
         return _reports(_site_queries(queries), counts, frozenset(unverified), api_reads, _empty_hosts(runs),
-                        _failed_hosts(runs), _wrong_place_hosts(runs))
+                        _failed_hosts(runs), _wrong_place_hosts(runs), _limited_hosts(runs))
 
     async def web_status(self, campaign_id: str) -> WebStatus | None:
         state = self._campaign_state(campaign_id)

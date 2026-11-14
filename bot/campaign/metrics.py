@@ -106,6 +106,7 @@ REASONS: dict[str, str] = {
     "type": "другой тип объекта",
     "budget": "дороже бюджета",
     "rooms": "меньше комнат",
+    "rooms_more": "больше комнат",  # REPORT_PRECISE_REASONS (Q43): more rooms than the task allows
     "area": "не та площадь",
     "criteria": "не выполнены обязательные условия",
     "kind": "не объявление (каталог, статистика, поиск жилья)",
