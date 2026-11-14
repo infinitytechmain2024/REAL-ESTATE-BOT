@@ -67,6 +67,9 @@ class WebSearchSettings(BaseSettings):
     # Q30, with Q17 only: a city of the static list (bot/web_search/city_centers.py) gets its listed centre and box
     # when the cached geocoder is absent or gives none (no Redis, Nominatim down); a geocoder answer still wins.
     idealista_static_centers: bool = Field(default=False, validation_alias="IDEALISTA_STATIC_CENTERS")
+    # Q36, igolaizola only: a province task (SEARCH_PLACE_LEVEL_FROM_SPEC) goes as Idealista's Location ID
+    # 0-EU-ES-<INE code> (bot/web_search/provinces.py), not by name (the actor ran «Madrid» as the city only).
+    idealista_province_location_id: bool = Field(default=False, validation_alias="IDEALISTA_PROVINCE_LOCATION_ID")
     # Q26, igolaizola only (the one portal with a confirmed way): a city task naming one district of the city
     # (``spec.place.districts``, found by the cached geocoder) goes with the district's centre and a circle from its box (1-6 km, else 2),
     # rows are kept for that district when they name one. Fotocasa and Habitaclia: no confirmed district input, unchanged.
@@ -271,6 +274,7 @@ class WebSearchSettings(BaseSettings):
                                                     rental_term=self.portal_rental_term,
                                                     unambiguous_place=self.idealista_unambiguous_place,
                                                     static_centers=self.idealista_static_centers,
+                                                    province_location_id=self.idealista_province_location_id,
                                                     district_search=self.portal_district_search,
                                                     geocoder=geocoder()))
         elif self.apify_idealista_enabled:

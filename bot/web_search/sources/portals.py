@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from bot.utils.listing_text import _AREA, _to_m2, areas, auction_named, number
 from bot.web_search.city_centers import static_city_area
+from bot.web_search.provinces import province_location_id
 from bot.web_search.queries import QueryTask, task_kind
 from bot.web_search.sources.apify import (
     ApifyListingSource,
@@ -572,7 +573,11 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     A province task (SEARCH_PLACE_LEVEL_FROM_SPEC) sends the same input as a city one: the actor's schema has no place
     type, only ``location`` by name, and what the actor makes of a province name is not checked. Only the row filter
-    differs: it compares the row's ``province`` instead of its ``municipality``.
+    differs: it compares the row's ``province`` instead of its ``municipality``. With ``province_location_id``
+    (``IDEALISTA_PROVINCE_LOCATION_ID``, Q36) a province of ``bot/web_search/provinces.py`` (or a community of one
+    province: Comunidad de Madrid = 28) goes as the Location ID ``0-EU-ES-<INE code>`` instead: by name the actor ran
+    «Madrid» as the city only. Checked live for 28 only (run Ieo05WJB7ARinWhOB, 2026-11-14: rows from all over the
+    province); the other codes are the INE table. An unlisted name (a community of several provinces) keeps the name.
 
     ``unambiguous_place`` (``IDEALISTA_UNAMBIGUOUS_PLACE``, Q17): a city task whose centre the cached geocoder knows is
     sent with ``location`` and also ``latitude``/``longitude`` + ``distanceKm`` from the municipality's size (the actor ranks coordinates above
@@ -611,12 +616,13 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
                  unambiguous_place: bool = False, district_search: bool = False, static_centers: bool = False,
-                 **kwargs: Any) -> None:
+                 province_location_id: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
         self.unambiguous_place = unambiguous_place  # IDEALISTA_UNAMBIGUOUS_PLACE (Q17)
         self.static_centers = static_centers  # IDEALISTA_STATIC_CENTERS (Q30)
         self.district_search = district_search  # PORTAL_DISTRICT_SEARCH (Q26)
+        self.province_location_id = province_location_id  # IDEALISTA_PROVINCE_LOCATION_ID (Q36)
 
     def _sort(self, min_area: int | None, max_area: int | None) -> str:
         """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
@@ -645,6 +651,9 @@ class ApifyIdealistaPortalSource(_PortalSource):
             # coordinates above ``location``. The rows are still kept only for the city's municipality (``_place_ok``). No centre: the
             # name alone, as before. A resumed run sends nothing; its centre is looked up again for ``_wrong_place``.
             actor_input["location"] = task.location.strip()[:120]
+            if self.province_location_id and task.place_level == "province":
+                # Q36: a province name runs as the city of that name; its Location ID covers the province.
+                actor_input["location"] = province_location_id(task.location) or actor_input["location"]
             if self.district_search:  # Q26: the district's centre comes before the city's circle
                 center = await self._district_circle(task)
             if center is None and self.unambiguous_place and task.place_level == "city":

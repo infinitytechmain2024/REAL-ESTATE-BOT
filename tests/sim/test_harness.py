@@ -188,30 +188,103 @@ def test_the_live_portal_fixtures_answer_the_runs_they_match(tmp_path: Path) -> 
         (LIVE / "milanuncios_items_madrid_solares.json").read_bytes()
 
 
-def test_a_portal_fixture_gives_only_the_rows_the_input_filters_let_through(tmp_path: Path) -> None:
+def pending(tmp_path: Path, runs: tuple[tuple[str, str, dict[str, object]], ...]) -> None:
     folder = tmp_path / "pending_apify"
     folder.mkdir()
-    for name, actor, actor_input in (
-            ("a", "igolaizola/idealista-scraper",  # sizes 67, 179, 232 m2: only 232 is from 200
-             {"location": "Madrid", "operation": "sale", "propertyType": "lands", "minSize": "200"}),
-            ("b", "igolaizola/idealista-scraper",
-             {"location": "Madrid", "operation": "sale", "propertyType": "lands", "minSize": "300"}),
-            ("c", "logiover/pisos-com-property-scraper",  # areas None, 1063, 232, 860; prices up to 2.1 M
-             {"location": "madrid_capital", "transactionType": "sale", "propertyType": "land", "minArea": 800,
-              "maxPrice": 2000000}),
-            ("d", "igolaizola/idealista-scraper",  # no filter: the file as it is
-             {"location": "Madrid", "operation": "sale", "propertyType": "lands"})):
+    for name, actor, actor_input in runs:
         (folder / f"{name}.json").write_text(json.dumps({"actor": actor, "key": name, "input": actor_input}))
+
+
+def test_a_portal_fixture_answers_only_the_search_it_was_recorded_with(tmp_path: Path) -> None:
+    # Q35, run b2-n4-s3: plots in the province of Madrid, up to 600 000 EUR, from 500 m2, as the bot sends them
+    pending(tmp_path, (
+        ("a", "igolaizola/idealista-scraper",
+         {"maxItems": 20, "operation": "sale", "propertyType": "lands", "country": "es", "sortBy": "mostRecent",
+          "location": "Madrid", "maxPrice": "600000", "minSize": "300"}),
+        ("b", "trev0n/habitaclia-com-spain-scraper",
+         {"transactionType": "sale", "propertyType": "land", "location": "Madrid", "sort": "newest",
+          "maxListings": 20, "maxPages": 1, "fetchPropertyDetails": False, "maxPrice": 600000, "minArea": 500}),
+        ("c", "logiover/pisos-com-property-scraper",
+         {"transactionType": "sale", "propertyType": "land", "location": "madrid", "sortBy": "newest",
+          "maxListings": 20, "maxPages": 1, "fetchDetails": False, "maxPrice": 600000, "minArea": 500}),
+        ("d", "logiover/pisos-com-property-scraper",  # the province without filters: still another search
+         {"transactionType": "sale", "propertyType": "land", "location": "madrid", "sortBy": "newest"}),
+        ("e", "igolaizola/idealista-scraper",  # biggest first, or the city's circle: other searches
+         {"operation": "sale", "propertyType": "lands", "location": "Madrid", "sortBy": "biggest"}),
+        ("f", "igolaizola/idealista-scraper",
+         {"operation": "sale", "propertyType": "lands", "location": "Madrid", "sortBy": "mostRecent",
+          "latitude": 40.4168, "longitude": -3.7038, "distanceKm": 9}),
+        ("g", "igolaizola/yaencontre-scraper",  # a province circle (60 km) / a filter
+         {"operation": "sale", "propertyType": "land", "sortBy": "newest", "latitude": 40.4168,
+          "longitude": -3.7038, "radiusKm": 60}),
+        ("h", "igolaizola/yaencontre-scraper",
+         {"operation": "sale", "propertyType": "land", "sortBy": "newest", "latitude": 40.4168,
+          "longitude": -3.7038, "radiusKm": 15, "maxPrice": "600000"}),
+        ("i", "igolaizola/yaencontre-scraper",  # another city
+         {"operation": "sale", "propertyType": "land", "sortBy": "newest", "latitude": 41.3874,
+          "longitude": 2.1686, "radiusKm": 15})))
     answered, left = answer_apify(tmp_path)
-    assert left == [] and "1 of 3 rows" in answered[0] and "0 of 3 rows" in answered[1]
+    assert answered == [] and left == [f"{n}.json" for n in "abcdefghi"]
+    assert not (tmp_path / "apify").exists()
+
+
+def test_a_portal_fixture_answers_the_input_it_was_recorded_with(tmp_path: Path) -> None:
+    runs = {  # the bot's input for plots (flats) in the city of Madrid, no filters -> the fixture
+        "igolaizola~idealista-scraper": ("a", {"maxItems": 20, "operation": "sale", "propertyType": "lands",
+                                               "country": "es", "sortBy": "mostRecent", "location": "Madrid"},
+                                         "idealista_items.json"),
+        "trev0n~habitaclia-com-spain-scraper": ("b", {"transactionType": "sale", "propertyType": "land",
+                                                      "location": "Madrid", "sort": "newest", "maxListings": 20},
+                                                "habitaclia_items.json"),
+        "logiover~pisos-com-property-scraper": ("c", {"transactionType": "sale", "propertyType": "land",
+                                                      "location": "madrid_capital", "sortBy": "newest"},
+                                                "pisos_items.json"),
+        "igolaizola~yaencontre-scraper": ("d", {"maxItems": 20, "operation": "sale", "propertyType": "flat",
+                                                "sortBy": "newest", "latitude": 40.4168, "longitude": -3.7038,
+                                                "radiusKm": 15}, "yaencontre_flat_items.json"),
+        "rastriq~milanuncios-scraper": ("e", {"categorySlug": "alquiler-de-pisos", "province": "madrid",
+                                              "maxItems": 20}, "milanuncios_items_madrid_alquiler_pisos.json"),
+    }
+    pending(tmp_path, tuple((key, actor.replace("~", "/"), body) for actor, (key, body, _) in runs.items()))
+    answered, left = answer_apify(tmp_path)
+    assert left == [] and len(answered) == 5
+    for actor, (key, _, name) in runs.items():
+        assert (tmp_path / "apify" / actor / f"{key}.json").read_bytes() == (LIVE / name).read_bytes()
+
+
+def test_a_portal_fixture_gives_only_the_rows_the_input_filters_let_through(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.sim import fixtures
+
+    # a fixture recorded with a filter (none is today) still gets the actor's own filters applied
+    monkeypatch.setitem(fixtures.RULES, "igolaizola~idealista-scraper", lambda d: "idealista_items.json")
+    monkeypatch.setitem(fixtures.RULES, "logiover~pisos-com-property-scraper", lambda d: "pisos_items.json")
+    pending(tmp_path, (
+        ("a", "igolaizola/idealista-scraper",  # sizes 67, 179, 232 m2: only 232 is from 200
+         {"location": "Madrid", "operation": "sale", "propertyType": "lands", "minSize": "200"}),
+        ("c", "logiover/pisos-com-property-scraper",  # areas None, 1063, 232, 860; prices up to 2.1 M
+         {"location": "madrid_capital", "transactionType": "sale", "propertyType": "land", "minArea": 800,
+          "maxPrice": 2000000})))
+    answered, left = answer_apify(tmp_path)
+    assert left == [] and "1 of 3 rows" in answered[0] and "2 of 4 rows" in answered[1]
     rows = {n: json.loads((tmp_path / "apify" / a / f"{n}.json").read_text(encoding="utf-8"))
-            for n, a in (("a", "igolaizola~idealista-scraper"), ("b", "igolaizola~idealista-scraper"),
-                         ("c", "logiover~pisos-com-property-scraper"))}
-    assert [r["size"] for r in rows["a"]] == [232] and rows["b"] == []
+            for n, a in (("a", "igolaizola~idealista-scraper"), ("c", "logiover~pisos-com-property-scraper"))}
+    assert [r["size"] for r in rows["a"]] == [232]
     # a row without the area is kept (the portal's handling is unknown), 232 m2 and 2.1 M are not
     assert [(r["areaSqm"], r["price"]) for r in rows["c"]] == [(None, 1550000), (1063, 590000)]
-    assert (tmp_path / "apify" / "igolaizola~idealista-scraper" / "d.json").read_bytes() == \
-        (LIVE / "idealista_items.json").read_bytes()
+
+
+def test_a_fixture_with_no_row_left_after_the_filters_is_not_written(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.sim import fixtures
+
+    monkeypatch.setitem(fixtures.RULES, "igolaizola~idealista-scraper", lambda d: "idealista_items.json")
+    pending(tmp_path, (("b", "igolaizola/idealista-scraper",  # sizes 67, 179, 232 m2: none is from 300
+                        {"location": "Madrid", "operation": "sale", "propertyType": "lands", "minSize": "300"}),))
+    answered, left = answer_apify(tmp_path)
+    assert answered == [] and len(left) == 1
+    assert left[0].startswith("b.json (0 of 3 rows of tests/fixtures/portals_live/idealista_items.json")
+    assert not (tmp_path / "apify").exists() and (tmp_path / "pending_apify" / "b.json").is_file()
 
 
 # --- SearXNG ----------------------------------------------------------------------------------------------------
