@@ -71,7 +71,7 @@ from .final_report import (
     place_scope_of,
     task_title,
 )
-from .investor_findings import org_key, same_org
+from .investor_findings import PAST_EVENT_NOTE, org_key, past_event, same_org
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
@@ -333,6 +333,8 @@ class RunnerConfig:
     dedup_twin_listings: bool = False
     # Investor findings naming one organisation, club or person (``who``) are one card, whatever the hosts (Q60).
     investor_lead_same_org: bool = False
+    # An investor finding on the page of a one-off event whose date is before the runner's today is excluded (Q60).
+    investor_past_event_excluded: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -921,6 +923,9 @@ class CampaignRunner:
         (judge paused, one call failed): the finding is retried on a later step, up to ``relevance_retry_limit``.
         """
         match = classify(finding.payload, request, vertical=finding.vertical)
+        if (self.config.investor_past_event_excluded and finding.vertical == "investors"
+                and past_event(finding.url, finding.payload, self.now().date())):
+            match = Match("excluded", float("inf"), "past_event", note=PAST_EVENT_NOTE)  # Q60: never sent to the model
         if match.bucket == "excluded":
             log.info("campaign.finding_excluded", extra={"campaign_id": campaign.id, "finding_id": finding.id,
                                                          "why": match.why})

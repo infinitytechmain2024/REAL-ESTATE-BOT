@@ -139,7 +139,7 @@ _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
 Why = Literal["price", "area", "area_max", "rooms", "location", "deal", "kind", "type", "foreign", "currency", "ai",
               "unverified", "area_unknown", "location_unknown", "approved_deviation", "ai_failed", "cost_cap",
-              "deal_kind", "seasonal"]
+              "deal_kind", "seasonal", "past_event"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")

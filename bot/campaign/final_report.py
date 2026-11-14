@@ -55,6 +55,7 @@ REASONS: dict[str, str] = {
     "kind": "не объявление (каталог, статистика, поиск жилья)",
     "deal_kind": "аукцион или nuda propiedad (другой вид сделки)",
     "seasonal": "сезонная аренда",  # RENT_SEASONAL_EXCLUDED (Q59)
+    "past_event": "прошедшее событие",  # INVESTOR_PAST_EVENT_EXCLUDED (Q60)
     "unverified": "не удалось подтвердить",
     "area_unknown": "площадь не указана",
     "ai_failed": "ИИ-проверка не сработала",

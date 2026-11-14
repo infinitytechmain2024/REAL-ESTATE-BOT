@@ -227,6 +227,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q60: investor findings naming one organisation, club or person (the analysis fact ``who``, normalised) are one
     # card with «Также на», even on different hosts (a club's page and its ticket pages); the first sent card stays.
     investor_lead_same_org: bool = Field(default=False, validation_alias="INVESTOR_LEAD_SAME_ORG")
+    # Q60: an investor finding on the page of a one-off event (a ticket host or an event path) whose dates are all
+    # before the runner's today is excluded («прошедшее событие»), never sent to the AI check; no date: unchanged.
+    investor_past_event_excluded: bool = Field(default=False, validation_alias="INVESTOR_PAST_EVENT_EXCLUDED")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -528,7 +531,8 @@ class CampaignRunnerSettings(BaseSettings):
                             report_after_offer=self.report_after_offer,
                             held_offer_quality=self.held_offer_quality,
                             dedup_twin_listings=self.dedup_twin_listings,
-                            investor_lead_same_org=self.investor_lead_same_org)
+                            investor_lead_same_org=self.investor_lead_same_org,
+                            investor_past_event_excluded=self.investor_past_event_excluded)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")
