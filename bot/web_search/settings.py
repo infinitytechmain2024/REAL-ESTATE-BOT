@@ -70,6 +70,9 @@ class WebSearchSettings(BaseSettings):
     # Q36, igolaizola only: a province task (SEARCH_PLACE_LEVEL_FROM_SPEC) goes as Idealista's Location ID
     # 0-EU-ES-<INE code> (bot/web_search/provinces.py), not by name (the actor ran «Madrid» as the city only).
     idealista_province_location_id: bool = Field(default=False, validation_alias="IDEALISTA_PROVINCE_LOCATION_ID")
+    # Q38: a province task keeps a portal row (Idealista, Fotocasa, Pisos, Habitaclia, Milanuncios) whose province has
+    # the task's INE code (bot/web_search/provinces.py: «Alacant» = «Alicante»); unlisted names: compared by name.
+    portal_province_by_code: bool = Field(default=False, validation_alias="PORTAL_PROVINCE_BY_CODE")
     # Q26, igolaizola only (the one portal with a confirmed way): a city task naming one district of the city
     # (``spec.place.districts``, found by the cached geocoder) goes with the district's centre and a circle from its box (1-6 km, else 2),
     # rows are kept for that district when they name one. Fotocasa and Habitaclia: no confirmed district input, unchanged.
@@ -275,6 +278,7 @@ class WebSearchSettings(BaseSettings):
                                                     unambiguous_place=self.idealista_unambiguous_place,
                                                     static_centers=self.idealista_static_centers,
                                                     province_location_id=self.idealista_province_location_id,
+                                                    province_by_code=self.portal_province_by_code,
                                                     district_search=self.portal_district_search,
                                                     geocoder=geocoder()))
         elif self.apify_idealista_enabled:
@@ -299,7 +303,8 @@ class WebSearchSettings(BaseSettings):
                                              facts_from_row=self.portal_facts_from_row,
                                              agency_ref=self.portal_agency_ref,
                                              description_full=self.portal_description_full,
-                                             rental_term=self.portal_rental_term))
+                                             rental_term=self.portal_rental_term,
+                                             province_by_code=self.portal_province_by_code))
         if self.apify_yaencontre_enabled:
             from .sources.portals import ApifyYaencontreSource
 
@@ -318,7 +323,8 @@ class WebSearchSettings(BaseSettings):
                                           timeout_seconds=self.apify_portals_timeout_seconds,
                                           max_charge_usd=self.apify_pisos_max_charge_usd, geocoder=geocoder(),
                                           facts_from_row=self.portal_facts_from_row,
-                                          description_full=self.portal_description_full))
+                                          description_full=self.portal_description_full,
+                                          province_by_code=self.portal_province_by_code))
         if self.apify_habitaclia_enabled:
             from .sources.portals import ApifyHabitacliaSource
 
@@ -329,6 +335,7 @@ class WebSearchSettings(BaseSettings):
                                                facts_from_row=self.portal_facts_from_row,
                                                agency_ref=self.portal_agency_ref,
                                                description_full=self.portal_description_full,
+                                               province_by_code=self.portal_province_by_code,
                                                no_results_empty=self.report_every_portal))
         if self.apify_milanuncios_enabled:
             from .sources.portals import ApifyMilanunciosSource
@@ -338,7 +345,8 @@ class WebSearchSettings(BaseSettings):
                                                 timeout_seconds=self.apify_portals_timeout_seconds,
                                                 max_charge_usd=self.apify_milanuncios_max_charge_usd, geocoder=geocoder(),
                                                 facts_from_row=self.portal_facts_from_row,
-                                                description_full=self.portal_description_full))
+                                                description_full=self.portal_description_full,
+                                                province_by_code=self.portal_province_by_code))
         return tuple(found)
 
     def backend_names(self) -> list[str]:
