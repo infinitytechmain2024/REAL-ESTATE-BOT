@@ -117,10 +117,11 @@ municipalities by two servicer offices (Idealista «Via Sense Nom, Orxeta» and 
 object when all hold: the same long description (``_same_description`` with ``COPY_JACCARD``: at least 400 characters
 in common, the same small numbers, 5-word shingles Jaccard >= 0.90); the price exactly equal and the area exactly equal
 (both known; a plot's ``plot_m2`` when there is no ``area_m2``); the property type and the deal known on both sides and
-equal; the same rooms and floor (or unknown on both). Never: a new development; two agency references unless equal or
-one is the other with a repost suffix («R», ``_REPOST_SUFFIXES``). A round area (a multiple of 50 m², the typical
-plots of one estate under one template text) merges only with agency references on both sides (equal or a repost) or
-one cadastral reference stated in both texts. The addresses and the agencies may differ.
+equal; the same rooms and floor (or unknown on both); the shorter description at least ``TWIN_LENGTH_RATIO`` (80 %) of
+the longer one. Never: a new development; two agency references unless equal or one is the other with a repost
+suffix («R», ``_REPOST_SUFFIXES``). A round area (rounded to 1 m², a multiple of 50 m², the typical plots of one
+estate under one template text) merges only with agency references on both sides (equal or a repost) or one
+cadastral reference stated in both texts. The addresses and the agencies may differ.
 
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
@@ -159,6 +160,8 @@ COPY_JACCARD = 0.90
 COPY_AREA_TOLERANCE = 0.01
 # Q58 (``_same_twin``): a reference with this suffix is a repost of the other («E18484R» of «E18484»)
 _REPOST_SUFFIXES = ("r",)
+# Q58: the shorter description is at least this share of the longer one (a short template is a prefix of a long text)
+TWIN_LENGTH_RATIO = 0.8
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
 
@@ -761,8 +764,11 @@ def _same_twin(a: Listing, b: Listing) -> bool:
     refs = bool(a.agency_ref and b.agency_ref)
     if refs and not _repost_refs(a.agency_ref, b.agency_ref):
         return False  # another reference of the agency: another unit
-    if area_a % BARE_ROUND_AREA == 0 and not (refs or a.cadastre & b.cadastre or a.parcels & b.parcels):
+    if round(area_a) % BARE_ROUND_AREA == 0 and not (refs or a.cadastre & b.cadastre or a.parcels & b.parcels):
         return False  # typical plots of one estate under one template text
+    short, long = sorted((len(a.description), len(b.description)))
+    if short < TWIN_LENGTH_RATIO * long:
+        return False  # a short template is the prefix of a long text: the common length hides the rest
     return _same_description(a, b, COPY_JACCARD)
 
 

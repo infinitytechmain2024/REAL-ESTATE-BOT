@@ -175,3 +175,28 @@ async def _cards(flag: bool) -> tuple[int, dict]:
 async def test_runner_sends_one_card_only_with_the_flag() -> None:
     assert await _cards(False) == (2, {})
     assert await _cards(True) == (1, {"f2": "f1"})
+
+
+def test_a_short_template_prefix_of_a_long_text_is_two_objects() -> None:
+    """The common length hides the rest of the longer text: the lengths must be within ``TWIN_LENGTH_RATIO``."""
+    tail = (" Además la finca cuenta con una nave agrícola de reciente construcción, balsa de riego propia, pozo "
+            "con concesión de agua, arbolado de almendros y olivos en plena producción y un camino interior que "
+            "recorre toda la propiedad de norte a sur.")
+    assert not two_towns(text_b=SHARE + tail + tail, **ON)
+    assert not two_towns(text_a=SHARE + tail + tail, **ON)
+    assert two_towns(text_b=SHARE + " Consulte condiciones.", **ON)  # a few words more: one text
+
+
+def test_round_area_is_checked_on_the_rounded_area_both_ways() -> None:
+    """1000.0 and 1000.4 m² are one area (rounded) and both round: without references or a cadastre two objects."""
+    url_a, url_b = FOTOCASA.format(191000014), FOTOCASA.format(191000024)
+    bare = post(url_a, RUSTIC), post(url_b, RUSTIC)
+    exact, close = plot(area_m2=1000.0, plot_m2=1000.0), plot(area_m2=1000.4, plot_m2=1000.4)
+    assert not pair(exact, close, *bare, url_a, url_b, **ON)
+    assert not pair(close, exact, *bare[::-1], url_b, url_a, **ON)
+    la, lb = listing_of(exact, url=url_a, body=bare[0]), listing_of(close, url=url_b, body=bare[1])
+    assert not _same_twin(la, lb) and not _same_twin(lb, la)
+    # with the references on both sides the round area merges, in both directions
+    refs = post(url_a, RUSTIC, "X18484"), post(url_b, RUSTIC, "X18484R")
+    la, lb = listing_of(exact, url=url_a, body=refs[0]), listing_of(close, url=url_b, body=refs[1])
+    assert _same_twin(la, lb) and _same_twin(lb, la)
