@@ -9,8 +9,9 @@ the transport every client of the bot ends up on, so no production constructor c
   ``_default.json`` in that folder); the run's life is emulated (RUNNING -> SUCCEEDED, dataset pages); a miss writes
   ``sim/pending_apify/<actor>__<hash>.json``;
 * ``api.telegram.org``: every sendMessage / editMessageText / deleteMessage is kept (what the user saw);
-* any other host (SearXNG, sites): ``sim/http/<host>/<hash>.json`` if recorded, else an empty search result or a 503,
-  listed in ``offline``.
+* SearXNG (``GET .../search?q=``, any host): key = hash(query, engines, language, pageno, categories) ->
+  ``sim/web/<key>.json`` (SearXNG JSON); a miss writes ``sim/pending_web/<key>.json``, the bot gets a 503;
+* any other host (sites): ``sim/http/<host>/<hash>.json`` if recorded, else a 503, listed in ``offline``.
 
 Headers are never read or written: no key or token reaches a file. Hashes are taken after ``normalize``: UUIDs and
 the bench's «now» (a date or a timestamp of today, of the virtual clock or of the run's start, ``mark_now``) are
@@ -41,7 +42,8 @@ _UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 _DATETIME = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b")
 _DATE = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
 # The modules that only carry a call (the stage is their caller).
-_CARRIERS = ("bot.agents.llm", "bot.acquisition.apify_client", "bot.acquisition.apify_source")
+_CARRIERS = ("bot.agents.llm", "bot.acquisition.apify_client", "bot.acquisition.apify_source",
+             "bot.web_search.searxng", "bot.web_search.search_backends")
 STAGES = {"interviewer": "interview", "anthropic_interviewer": "interview", "openrouter": "analysis",
           "queries": "queries"}
 
@@ -83,6 +85,23 @@ def normalize(text: str) -> str:
 
 def digest(value: Any, size: int = 24) -> str:
     return hashlib.sha256(normalize(canonical(value)).encode()).hexdigest()[:size]
+
+
+def web_request(params: httpx.QueryParams) -> dict[str, Any]:
+    """The part of a SearXNG search that decides the answer: the query (spaces collapsed, case folded) and the
+    parameters that change the results; ``format``, ``safesearch`` and the host do not."""
+    def listed(name: str) -> list[str] | None:
+        items = sorted({part.strip().lower() for part in str(params.get(name) or "").split(",") if part.strip()})
+        return items or None
+
+    return {"query": " ".join(str(params.get("q") or "").split()).casefold(), "engines": listed("engines"),
+            "language": str(params.get("language") or "").strip().lower() or None,
+            "pageno": _int(params.get("pageno")) or 1, "categories": listed("categories")}
+
+
+def is_search(request: httpx.Request) -> bool:
+    """A SearXNG search of ``bot/web_search/searxng.py``: ``GET <base>/search?q=...``."""
+    return request.method == "GET" and request.url.path.rstrip("/").endswith("/search") and "q" in request.url.params
 
 
 def llm_request(host: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -183,8 +202,9 @@ class SimNet:
         self.telegram = Telegram()
         self.pending_llm: list[str] = []
         self.pending_apify: list[str] = []
+        self.pending_web: list[str] = []
         self.blocked_apify: list[str] = []  # misses after an unanswered LLM call: their input may be a fallback's
-        self.hits: dict[str, int] = {"llm": 0, "apify": 0, "http": 0}
+        self.hits: dict[str, int] = {"llm": 0, "apify": 0, "web": 0, "http": 0}
         self.llm_calls: list[dict[str, Any]] = []
         self.offline: list[dict[str, Any]] = []
         self.unhandled: list[str] = []
@@ -245,13 +265,17 @@ class SimNet:
             raise SimStop("llm", pending)
         return httpx.Response(503, json={"error": {"message": "sim: waiting for an answer"}})
 
+    def speculative(self) -> bool:
+        """A miss after another unanswered call of the pass: its request may come from a fallback."""
+        return bool(self.pending_llm or self.pending_apify or self.pending_web)
+
     def _question(self, asked: dict[str, Any], key: str, where: str) -> dict[str, Any]:
         """The pending file of a call: what the model of the stage gets, nothing of the request's headers."""
         messages = asked["messages"]
         return {
             "kind": "llm", "key": key, "run": self.run_id, "stage": stage_of(where), "caller": where,
             "provider": asked["provider"], "model": asked["model"],
-            "speculative": bool(self.pending_llm or self.pending_apify),
+            "speculative": self.speculative(),
             "system": "\n\n".join(_text(m.get("content")) for m in messages if m.get("role") == "system"),
             "user": "\n\n".join(_text(m.get("content")) for m in messages if m.get("role") != "system"),
             "schema": asked["schema"],
@@ -330,6 +354,33 @@ class SimNet:
         self.calls += 1
         return httpx.Response(200, json=run.items[offset:offset + limit])
 
+    # -- SearXNG --
+
+    def _web(self, host: str, request: httpx.Request) -> httpx.Response:
+        asked = web_request(request.url.params)
+        key = digest(asked, 16)
+        path = self.root / "web" / f"{key}.json"
+        if path.is_file():
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            self.hits["web"] += 1
+            self.calls += 1
+            if isinstance(entry, dict) and entry.get("error_status"):
+                return httpx.Response(int(entry["error_status"]), text="sim: recorded error")
+            return httpx.Response(200, json=entry)
+        pending = self.root / "pending_web" / f"{key}.json"
+        if key not in self.pending_web:  # one search asked twice in a pass (web stage and reach): one pending
+            _write(pending, {"kind": "web", "key": key, "run": self.run_id, "stage": stage_of(caller()),
+                             "speculative": self.speculative(), "host": host, "query": asked["query"],
+                             "params": {name: asked[name] for name in ("engines", "language", "pageno",
+                                                                       "categories")},
+                             "answer_to": f"sim/web/{key}.json",
+                             "answer_format": '{"query": "...", "results": [{"url": "...", "title": "...", '
+                                              '"content": "..."}]} (real search results only, at most 10)'})
+            self.pending_web.append(key)
+        if self.strict:
+            raise SimStop("web", pending)
+        return httpx.Response(503, text="sim: waiting for a search answer")
+
     # -- everything else --
 
     def _other(self, host: str, request: httpx.Request, raw: bytes) -> httpx.Response:
@@ -344,9 +395,9 @@ class SimNet:
                 return httpx.Response(int(entry.get("status", 200)), json=entry["json"])
             return httpx.Response(int(entry.get("status", 200)), text=str(entry.get("text", "")),
                                   headers={"content-type": entry.get("content_type", "text/html; charset=utf-8")})
+        if is_search(request):
+            return self._web(host, request)
         self.offline.append({"host": host, "method": request.method, "path": request.url.path, "key": key})
-        if request.url.path.rstrip("/").endswith("/search"):  # SearXNG: nothing found
-            return httpx.Response(200, json={"results": [], "number_of_results": 0})
         return httpx.Response(503, text="sim: offline")
 
 

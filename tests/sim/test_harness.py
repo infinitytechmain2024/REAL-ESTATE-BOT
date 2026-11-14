@@ -17,9 +17,18 @@ import httpx
 import pytest
 
 from scripts.sim import db
-from scripts.sim.cassette import SimNet, SimStop, digest, llm_request, mark_now, offline
+from scripts.sim.cassette import (
+    SimNet,
+    SimStop,
+    digest,
+    llm_request,
+    mark_now,
+    offline,
+    web_request,
+)
 from scripts.sim.fixtures import answer as answer_apify
 from scripts.sim.harness import _questions
+from scripts.sim.web import answer as answer_web
 from tests.sim import model
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -203,6 +212,100 @@ def test_a_portal_fixture_gives_only_the_rows_the_input_filters_let_through(tmp_
     assert [(r["areaSqm"], r["price"]) for r in rows["c"]] == [(None, 1550000), (1063, 590000)]
     assert (tmp_path / "apify" / "igolaizola~idealista-scraper" / "d.json").read_bytes() == \
         (LIVE / "idealista_items.json").read_bytes()
+
+
+# --- SearXNG ----------------------------------------------------------------------------------------------------
+
+HITS = {"query": "inversores malaga", "results": [
+    {"url": "https://example.org/inversores", "title": "Inversores", "content": "Fondo en Málaga", "engine": "x"}]}
+
+
+def search_key(query: str, **params: object) -> str:
+    return digest(web_request(httpx.QueryParams({"q": query, "format": "json", **params})), 16)
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_search_answer_is_served_to_the_searxng_client(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearxngClient
+
+    key = search_key("inversores malaga", pageno=1, categories="general", language="es")
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / f"{key}.json").write_text(json.dumps(HITS), encoding="utf-8")
+    with offline(SimNet(tmp_path, run_id="r1")) as net:
+        client = SearxngClient("http://searxng:8080")
+        hits = await client.search("Inversores  Malaga", language="es")
+        await client.aclose()
+    assert [(h.url, h.title, h.snippet) for h in hits] == [("https://example.org/inversores", "Inversores",
+                                                            "Fondo en Málaga")]
+    assert net.hits["web"] == 1 and net.pending_web == [] and net.offline == []
+    assert not (tmp_path / "pending_web").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_search_without_an_answer_is_pending_and_the_strict_run_stops(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearchError, SearxngClient
+
+    with offline(SimNet(tmp_path, run_id="r1")) as net:
+        client = SearxngClient("http://searxng:8080")
+        with pytest.raises(SearchError, match="http_503"):  # the bot's search fails, the pass goes on
+            await client.search("coinversores Málaga", language="es")
+        with pytest.raises(SearchError):  # the same search again: still one pending
+            await client.search("coinversores  Málaga", language="es")
+        await client.aclose()
+    [path] = (tmp_path / "pending_web").glob("*.json")
+    pending = json.loads(path.read_text(encoding="utf-8"))
+    assert net.pending_web == [path.stem] == [pending["key"]] and net.offline == []
+    assert pending["query"] == "coinversores málaga" and pending["host"] == "searxng" and pending["run"] == "r1"
+    assert pending["params"] == {"engines": None, "language": "es", "pageno": 1, "categories": ["general"]}
+    assert pending["answer_to"] == f"sim/web/{path.stem}.json" and pending["speculative"] is False
+    with offline(SimNet(tmp_path, strict=True)), pytest.raises(SimStop) as stop:
+        client = SearxngClient("http://searxng:8080")
+        try:
+            await client.search("coinversores Málaga", language="es")
+        finally:
+            await client.aclose()
+    assert stop.value.kind == "web" and stop.value.path == path
+
+
+@pytest.mark.asyncio
+async def test_a_search_after_an_unanswered_model_call_is_speculative(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearchError, SearxngClient
+
+    with offline(SimNet(tmp_path)):
+        await post("https://openrouter.ai/api/v1/chat/completions", CHAT)
+        client = SearxngClient("http://searxng:8080")
+        with pytest.raises(SearchError):
+            await client.search("family office Madrid")
+        await client.aclose()
+    [path] = (tmp_path / "pending_web").glob("*.json")
+    assert json.loads(path.read_text(encoding="utf-8"))["speculative"] is True
+
+
+def test_the_search_key_is_stable_and_follows_the_query_and_the_page() -> None:
+    base = search_key("inversores Málaga", engines="google,bing", language="es", pageno=1)
+    assert base == search_key("  Inversores   málaga ", engines="Bing, google", language="ES", pageno="1",
+                              safesearch=0)
+    assert base == search_key("inversores Málaga", engines="google,bing", language="es")  # page 1 by default
+    assert base != search_key("inversores Málaga", engines="google,bing", language="es", pageno=2)
+    assert base != search_key("inversores Sevilla", engines="google,bing", language="es", pageno=1)
+    assert base != search_key("inversores Málaga", engines="google", language="es", pageno=1)
+
+
+def test_an_answer_on_the_same_topic_is_reused_for_another_wording(tmp_path: Path) -> None:
+    (tmp_path / "web").mkdir()
+    (tmp_path / "pending_web").mkdir()
+    params = {"engines": None, "language": "es", "pageno": 1, "categories": ["general"]}
+    (tmp_path / "web" / "old.json").write_text(json.dumps(
+        {**HITS, "request": {"query": "inversores málaga", "params": params}}), encoding="utf-8")
+    for name, query, extra in (("a", "Malaga inversores", {"language": "es-ES"}), ("b", "inversores malaga", {"pageno": 2}),
+                               ("c", "inversores sevilla", {})):
+        (tmp_path / "pending_web" / f"{name}.json").write_text(json.dumps(
+            {"kind": "web", "key": name, "query": query, "params": {**params, **extra}}), encoding="utf-8")
+    answered, left = answer_web(tmp_path)
+    assert answered == ["a.json <- web/old.json"] and left == ["b.json", "c.json"]
+    reused = json.loads((tmp_path / "web" / "a.json").read_text(encoding="utf-8"))
+    assert reused["results"] == HITS["results"] and reused["request"]["query"] == "Malaga inversores"
+    assert not (tmp_path / "pending_web" / "a.json").exists()
 
 
 # --- the interview's screen --------------------------------------------------------------------------------------
@@ -579,7 +682,7 @@ async def test_a_land_search_in_madrid_reaches_a_card_and_a_replay_gives_the_sam
     assert [o["press"] for o in first["offers"]] == [a.strip("[]") for a in answers[start + 2:]]
     assert {c["provider"] for c in first["campaign_costs"] if c["stage"] == "llm" and c["kind"] == "cost"} == \
         {"claude_cassette"} and first["costs_total_usd"] == 0
-    assert first["pending"] == {"llm": [], "apify": [], "apify_blocked": []}
+    assert first["pending"] == {"llm": [], "apify": [], "apify_blocked": [], "web": []}
 
     code, again = await run(root)  # the cassette alone, no model: the same file
     assert code == 0 and again == first
