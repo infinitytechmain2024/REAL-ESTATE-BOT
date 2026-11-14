@@ -111,6 +111,7 @@ BASE_ENV: dict[str, str] = {
     "INVESTOR_LEAD_SOURCE_CHECK": "true",  # Q53
     "INTAKE_ROLE_CONFLICT_CHECK": "true",  # Q52
     "BOTH_MODE_PORTALS": "true",  # Q54
+    "BOTH_MODE_INVESTOR_QUERIES": "true",  # Q61
     "HELD_OFFER_QUALITY": "true",  # Q55
     "ANALYSIS_FACT_CONFLICT_NULL": "true",  # Q56
     "DEDUP_TWIN_LISTINGS": "true",  # Q58
