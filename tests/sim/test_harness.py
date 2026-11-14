@@ -297,15 +297,69 @@ def test_an_answer_on_the_same_topic_is_reused_for_another_wording(tmp_path: Pat
     params = {"engines": None, "language": "es", "pageno": 1, "categories": ["general"]}
     (tmp_path / "web" / "old.json").write_text(json.dumps(
         {**HITS, "request": {"query": "inversores málaga", "params": params}}), encoding="utf-8")
-    for name, query, extra in (("a", "Malaga inversores", {"language": "es-ES"}), ("b", "inversores malaga", {"pageno": 2}),
-                               ("c", "inversores sevilla", {})):
+    for name, query, extra in (("a", "Inversores  Malaga", {"language": "es-ES"}), ("b", "inversores malaga", {"pageno": 2}),
+                               ("c", "inversores sevilla", {}), ("d", "malaga inversores", {})):
         (tmp_path / "pending_web" / f"{name}.json").write_text(json.dumps(
             {"kind": "web", "key": name, "query": query, "params": {**params, **extra}}), encoding="utf-8")
-    answered, left = answer_web(tmp_path)
-    assert answered == ["a.json <- web/old.json"] and left == ["b.json", "c.json"]
+    (tmp_path / "pending_web" / "e.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "pending_web" / "f.json").write_text(json.dumps({"query": "inversores málaga"}), encoding="utf-8")
+    answered, left, broken = answer_web(tmp_path)  # a broken pending is skipped, the rest is answered
+    assert answered == ["a.json <- web/old.json"] and left == ["b.json", "c.json", "d.json"]
+    assert broken == ["e.json", "f.json"]
     reused = json.loads((tmp_path / "web" / "a.json").read_text(encoding="utf-8"))
-    assert reused["results"] == HITS["results"] and reused["request"]["query"] == "Malaga inversores"
+    assert reused["results"] == HITS["results"] and reused["request"]["query"] == "Inversores  Malaga"
     assert not (tmp_path / "pending_web" / "a.json").exists()
+
+
+
+@pytest.mark.parametrize(("asked", "other"), [
+    ("piso 3 dormitorios 2 baños", "piso 2 dormitorios 3 baños"),
+    ("inversores 1.5 millones", "inversores 5.1 millones"),
+    ("inversores 1,5 millones", "inversores 1.5 millones"),
+    ("inversores malaga -fondos", "inversores malaga fondos"),
+    ('"family office" malaga', "family office malaga"),
+    ("inversores site:linkedin.com", "inversores linkedin.com"),
+])
+def test_a_reuse_never_changes_the_meaning_of_the_query(asked: str, other: str) -> None:
+    from scripts.sim.web import topic
+
+    assert topic(asked, {}) != topic(other, {})
+    assert topic(asked.upper(), {}) == topic(asked, {})  # case still folds
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_failure_and_an_empty_search_are_served_as_recorded(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearchError, SearxngClient
+
+    (tmp_path / "web").mkdir()
+    for query, entry in (("caido", {"error_status": 503}), ("nada", {"results": []})):
+        key = search_key(query, pageno=1, categories="general")
+        (tmp_path / "web" / f"{key}.json").write_text(json.dumps(entry), encoding="utf-8")
+    with offline(SimNet(tmp_path)) as net:
+        client = SearxngClient("http://searxng:8080")
+        with pytest.raises(SearchError, match="http_503"):
+            await client.search("caido")
+        assert await client.search("nada") == []
+        await client.aclose()
+    assert net.hits["web"] == 2 and net.pending_web == [] and not (tmp_path / "pending_web").exists()
+
+
+@pytest.mark.asyncio
+async def test_only_the_searxng_host_is_a_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WEB_SEARCH_SEARXNG_URL", raising=False)
+    with offline(SimNet(tmp_path)) as net:
+        async with httpx.AsyncClient() as client:
+            geo = await client.get("https://nominatim.openstreetmap.org/search", params={"q": "Málaga"})
+            site = await client.get("https://www.tiktok.com/search", params={"q": "x"})
+    assert geo.status_code == site.status_code == 503 and net.pending_web == []
+    assert [o["host"] for o in net.offline] == ["nominatim.openstreetmap.org", "www.tiktok.com"]
+    assert not (tmp_path / "pending_web").exists()
+    monkeypatch.setenv("WEB_SEARCH_SEARXNG_URL", "http://search.local:8888")  # the run's own SearXNG
+    with offline(SimNet(tmp_path)) as net:
+        async with httpx.AsyncClient() as client:
+            await client.get("http://search.local:8888/search", params={"q": "x"})
+            await client.get("http://searxng:8080/search", params={"q": "x"})
+    assert len(net.pending_web) == 1 and [o["host"] for o in net.offline] == ["searxng"]
 
 
 # --- the interview's screen --------------------------------------------------------------------------------------

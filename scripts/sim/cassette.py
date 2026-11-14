@@ -9,8 +9,8 @@ the transport every client of the bot ends up on, so no production constructor c
   ``_default.json`` in that folder); the run's life is emulated (RUNNING -> SUCCEEDED, dataset pages); a miss writes
   ``sim/pending_apify/<actor>__<hash>.json``;
 * ``api.telegram.org``: every sendMessage / editMessageText / deleteMessage is kept (what the user saw);
-* SearXNG (``GET .../search?q=``, any host): key = hash(query, engines, language, pageno, categories) ->
-  ``sim/web/<key>.json`` (SearXNG JSON); a miss writes ``sim/pending_web/<key>.json``, the bot gets a 503;
+* SearXNG (``GET .../search?q=`` on the host of ``WEB_SEARCH_SEARXNG_URL``): key = hash(query, engines,
+  language, pageno, categories) -> ``sim/web/<key>.json`` (SearXNG JSON); a miss writes ``sim/pending_web/<key>.json``, the bot gets a 503;
 * any other host (sites): ``sim/http/<host>/<hash>.json`` if recorded, else a 503, listed in ``offline``.
 
 Headers are never read or written: no key or token reaches a file. Hashes are taken after ``normalize``: UUIDs and
@@ -24,6 +24,7 @@ import contextlib
 import hashlib
 import itertools
 import json
+import os
 import re
 import socket
 import sys
@@ -99,9 +100,19 @@ def web_request(params: httpx.QueryParams) -> dict[str, Any]:
             "pageno": _int(params.get("pageno")) or 1, "categories": listed("categories")}
 
 
+def searxng_host() -> str:
+    """The host of the bot's SearXNG: ``WEB_SEARCH_SEARXNG_URL`` of the run, else the settings' default."""
+    from bot.web_search.settings import WebSearchSettings
+
+    url = os.environ.get("WEB_SEARCH_SEARXNG_URL") or WebSearchSettings.model_fields["searxng_url"].default
+    return (httpx.URL(str(url)).host or "").lower()
+
+
 def is_search(request: httpx.Request) -> bool:
-    """A SearXNG search of ``bot/web_search/searxng.py``: ``GET <base>/search?q=...``."""
-    return request.method == "GET" and request.url.path.rstrip("/").endswith("/search") and "q" in request.url.params
+    """A SearXNG search of ``bot/web_search/searxng.py``: ``GET <base>/search?q=...`` on the SearXNG host only
+    (Nominatim's or a site's ``/search?q=`` is not one)."""
+    return (request.method == "GET" and (request.url.host or "").lower() == searxng_host()
+            and request.url.path.rstrip("/").endswith("/search") and "q" in request.url.params)
 
 
 def llm_request(host: str, body: dict[str, Any]) -> dict[str, Any]:
