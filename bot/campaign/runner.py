@@ -335,6 +335,8 @@ class RunnerConfig:
     investor_lead_same_org: bool = False
     # An investor finding on the page of a one-off event whose date is before the runner's today is excluded (Q60).
     investor_past_event_excluded: bool = False
+    # The investor report's «Отправлено вам» counts the finding cards too, not only people and reach contacts (Q60).
+    investor_report_counts_all: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -1402,13 +1404,16 @@ class CampaignRunner:
         reads = await self.store.post_reads(campaign.id) if post_link_only(campaign) else []
         reach = await self.store.reach_sent(campaign.id)
         people_sent = max(await self.store.people_sent(campaign.id) - reach, 0)
+        # Q60: an investor search's finding cards (campaign_findings 'sent'); a «both» search counts them as objects
+        cards = (await self.store.streamed_count(campaign.id)
+                 if self.config.investor_report_counts_all and campaign.plan.vertical == "investors" else None)
         if not reads:
-            return LeadsSummary(people_sent=people_sent, reach_sent=reach)
+            return LeadsSummary(people_sent=people_sent, reach_sent=reach, cards_sent=cards)
         lines = tuple(post_read_line(r) if r.state == "done" else f"{post_read_line(r)} Расход: ${r.cost_usd:.2f}"
                       for r in reads)
         return LeadsSummary(read_lines=lines, leads_saved=sum(r.leads for r in reads), people_sent=people_sent, reach_sent=reach,
                             posts_read=sum(1 for r in reads if r.state == "done"),
-                            comments_read=sum(r.comments for r in reads))
+                            comments_read=sum(r.comments for r in reads), cards_sent=cards)
 
     async def _post_report(self, campaign: Campaign) -> None:
         """«Комментариев: N, лидов: M, $»: once, for a search over a post sent by link (the full investor report: B4)."""

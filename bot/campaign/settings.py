@@ -230,6 +230,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q60: an investor finding on the page of a one-off event (a ticket host or an event path) whose dates are all
     # before the runner's today is excluded («прошедшее событие»), never sent to the AI check; no date: unchanged.
     investor_past_event_excluded: bool = Field(default=False, validation_alias="INVESTOR_PAST_EVENT_EXCLUDED")
+    # Q60: the investor report's «Отправлено вам» counts every lead the chat got: the finding cards of the search
+    # (campaign_findings 'sent') besides the people and reach contacts (campaign_lead_deliveries); off: people only.
+    investor_report_counts_all: bool = Field(default=False, validation_alias="INVESTOR_REPORT_COUNTS_ALL")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -532,7 +535,8 @@ class CampaignRunnerSettings(BaseSettings):
                             held_offer_quality=self.held_offer_quality,
                             dedup_twin_listings=self.dedup_twin_listings,
                             investor_lead_same_org=self.investor_lead_same_org,
-                            investor_past_event_excluded=self.investor_past_event_excluded)
+                            investor_past_event_excluded=self.investor_past_event_excluded,
+                            investor_report_counts_all=self.investor_report_counts_all)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")
