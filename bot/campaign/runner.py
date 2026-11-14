@@ -957,7 +957,7 @@ class CampaignRunner:
                     from .quote_hits import home_purchase, tenant_terms
 
                     if home_purchase(hard, campaign.plan.vertical):
-                        terms += tenant_terms()
+                        terms = [*tenant_terms(), *terms]  # Q46: first, so they get the first windows
             verdict = await self.relevance.judge(
                 task_data(campaign, review=review, soft_wishes=soft),
                 finding_data(finding.payload, fallback_text=finding.text, original=finding.original, review=review,

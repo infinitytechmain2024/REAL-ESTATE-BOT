@@ -94,7 +94,7 @@ def test_flag_on_prompt_has_its_own_version_and_the_rule(flags) -> None:
     assert version in final_report._LEGAL_RULE_PROMPTS and rv.is_soft(version) is soft
     rule = system.split("- Not free to move in:", 1)[1].split("- budget, rooms, area:", 1)[0]
     for word in ('"task.hard.deal" is "sale"', "apartment or house", "«alquilada»", "«ocupada»", "«sin posesión»",
-                 "«nuda propiedad»", "«subasta»", "«pujas»", '"deal" is\n  "unknown"', '"overall" is "near"',
+                 "«nuda propiedad»", "«subasta»", "«pujas»", '"deal" is "unknown"', '"overall" is "near"',
                  "«с арендатором»", "«аукцион»", "«libre de inquilinos»", "«ideal para alquilar»", "«inversión»"):
         assert word in rule, word
     if nr:  # after the non-residential rule
