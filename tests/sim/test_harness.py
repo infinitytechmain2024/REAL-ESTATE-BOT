@@ -362,6 +362,103 @@ async def test_only_the_searxng_host_is_a_search(tmp_path: Path, monkeypatch: py
     assert len(net.pending_web) == 1 and [o["host"] for o in net.offline] == ["searxng"]
 
 
+
+@pytest.mark.asyncio
+async def test_a_served_search_and_a_recorded_failure_are_progress_of_the_pass(tmp_path: Path) -> None:
+    from bot.web_search.searxng import SearchError, SearxngClient
+
+    (tmp_path / "web").mkdir()
+    for query, entry in (("caido", {"error_status": 503}), ("algo", HITS)):
+        key = search_key(query, pageno=1, categories="general")
+        (tmp_path / "web" / f"{key}.json").write_text(json.dumps(entry), encoding="utf-8")
+    with offline(SimNet(tmp_path)) as net:
+        client = SearxngClient("http://searxng:8080")
+        with pytest.raises(SearchError):
+            await client.search("caido")
+        await client.search("algo")
+        await client.aclose()
+    assert net.calls == 2  # the loop's sign of progress (``Bench._progress``)
+
+
+class _LoopPool:
+    """The two questions ``Bench._loop`` asks the database: the campaign's state, is its web stage searching."""
+
+    def __init__(self, campaign: dict) -> None:
+        self.campaign = campaign
+        self.clock: list[float] = []
+
+    async def fetchval(self, sql: str, *_args: object) -> object:
+        return self.campaign["searching"] if "web_search_runs" in sql else self.campaign["state"]
+
+    async def execute(self, sql: str, *args: object) -> None:
+        assert "sim.clock" in sql
+        self.clock.append(float(args[0]))  # type: ignore[arg-type]
+
+
+async def _loop(tmp_path: Path, rounds_searching: int | None) -> tuple[object, _LoopPool]:
+    """``rounds_searching`` rounds of a web stage at work and no call, then the campaign ends (None: never)."""
+    from types import SimpleNamespace
+
+    from scripts.sim.harness import Bench, Persona
+
+    campaign = {"state": "running", "searching": True}
+    bench = Bench(tmp_path, "loop", Persona(name="t", task="t"))
+    bench.pool, bench.campaign_id = _LoopPool(campaign), "c1"  # type: ignore[attr-defined]
+    ticks = 0
+
+    async def web() -> None:
+        nonlocal ticks
+        ticks += 1
+        if rounds_searching is not None and ticks > rounds_searching:
+            campaign.update(state="completed", searching=False)
+
+    class Campaigns:
+        async def get(self, _id: str) -> object:
+            return SimpleNamespace(state=campaign["state"])
+
+    await bench._loop([("web", web)], Campaigns(), None)
+    return bench, bench.pool  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_searching_web_stage_is_no_idle_round_and_the_db_clock_follows(tmp_path: Path) -> None:
+    from scripts.sim.harness import MAX_JUMPS
+
+    bench, pool = await _loop(tmp_path, 3 * MAX_JUMPS)  # idle rounds would have stalled the run by now
+    assert bench.status == "running" and bench.stop_reason == ""  # ended, not «did not end»
+    assert pool.clock and pool.clock[-1] == bench.clock.offset.total_seconds()  # the DB's now() moved with it
+
+
+@pytest.mark.asyncio
+async def test_a_web_stage_that_never_ends_still_stalls_the_run(tmp_path: Path) -> None:
+    from scripts.sim.harness import IDLE_JUMP, MAX_BUSY_ROUNDS, MAX_JUMPS
+
+    bench, _ = await _loop(tmp_path, None)
+    assert bench.status == "stalled" and bench.stop_reason == "the campaign did not end"
+    assert bench.clock.offset.total_seconds() <= MAX_BUSY_ROUNDS * 10 + MAX_JUMPS * IDLE_JUMP.total_seconds()
+
+
+@postgres
+@pytest.mark.asyncio
+async def test_the_databases_now_is_the_runners_virtual_clock(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    import asyncpg
+
+    url = await db.reset(URL)
+    pool = await asyncpg.create_pool(url, min_size=1, max_size=2)
+    try:
+        await db.set_clock(pool, timedelta(hours=4))
+        campaign = await pool.fetchval("insert into campaigns(telegram_chat_id, requested_by, source_text, plan, state) "
+                                       "values (1, 1, 't', '{}'::jsonb, 'running') returning id")
+        await pool.execute("update campaigns set state = 'completed' where id = $1", campaign)
+        shift = await pool.fetchval("select finished_at - pg_catalog.now() from campaigns where id = $1", campaign)
+        assert timedelta(hours=3, minutes=59) < shift <= timedelta(hours=4, minutes=1)  # the trigger's now()
+    finally:
+        await pool.close()
+        await db.restore(URL)
+
+
 # --- the interview's screen --------------------------------------------------------------------------------------
 
 

@@ -7,7 +7,9 @@ migrations of ``bot/services/db/migrations`` (the list of ``scripts/apply_migrat
 Determinism: before the migrations, ``sim.gen_random_uuid()`` (a sequence, not random) is put ahead of
 ``pg_catalog`` (pgcrypto lives in ``ext``) in the ``search_path`` of the migrations and of the run's connections (a
 parameter of the run's URL), so the ids a replay creates are the ids the first pass created
-(and the answers that quote them still fit). ``SIM_DATABASE_URL`` uses another database instead (its name must end
+(and the answers that quote them still fit). The same way ``sim.now()`` and ``sim.clock_timestamp()`` give the
+database the runner's virtual clock: the real time plus the jumps of the run (``sim.clock``, ``set_clock``), so a
+``finished_at`` stamped by a trigger is on the runner's time. ``SIM_DATABASE_URL`` uses another database instead (its name must end
 in ``_test``: it is wiped).
 """
 
@@ -18,7 +20,9 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = ROOT / "bot" / "services" / "db" / "migrations"
@@ -99,6 +103,12 @@ create schema sim;
 create sequence sim.uuid_seq;
 create function sim.gen_random_uuid() returns uuid language sql volatile as
   $$ select ('00000000-0000-4000-8000-' || lpad(to_hex(nextval('sim.uuid_seq')), 12, '0'))::uuid $$;
+create table sim.clock (shift_seconds double precision not null);
+insert into sim.clock values (0);
+create function sim.now() returns timestamptz language sql stable as
+  $$ select pg_catalog.now() + make_interval(secs => (select shift_seconds from sim.clock)) $$;
+create function sim.clock_timestamp() returns timestamptz language sql volatile as
+  $$ select pg_catalog.clock_timestamp() + make_interval(secs => (select shift_seconds from sim.clock)) $$;
 """
 
 
@@ -109,6 +119,11 @@ def with_search_path(database_url: str) -> str:
     """The run's URL: every connection of the bot resolves ``gen_random_uuid`` to ``sim`` (asyncpg passes an unknown
     query parameter as a server setting); the database itself is not altered."""
     return f"{database_url}{'&' if '?' in database_url else '?'}search_path={SEARCH_PATH.replace(',', '%2C')}"
+
+
+async def set_clock(pool: Any, shift: timedelta) -> None:
+    """The database's ``now()`` is the real time plus ``shift`` (the runner's clock offset)."""
+    await pool.execute("update sim.clock set shift_seconds = $1", shift.total_seconds())
 
 
 async def reset(database_url: str) -> str:

@@ -33,6 +33,9 @@ CODE_DONE, CODE_WAITING, CODE_STALLED = 0, 3, 4
 MAX_ROUNDS = 400
 IDLE_JUMP = timedelta(minutes=20)  # an idle round moves the runner's clock past the drain's graces
 MAX_JUMPS = 12
+# rounds without a new call that still are no idle ones: the web stage of the campaign is ``searching`` (its pages
+# and searches take a few ticks); a stage that never ends stops counting after this many and the run stalls
+MAX_BUSY_ROUNDS = 60
 _VOLATILE = re.compile(r"(_at|_until|_seen|^at)$")
 _REAL_SLEEP = asyncio.sleep
 
@@ -658,7 +661,7 @@ class Bench:
                     apify_tasks: Any) -> None:
         from bot.campaign.models import TERMINAL_STATES
 
-        idle = jumps = after_end = 0
+        idle = jumps = after_end = busy = 0
         for _ in range(MAX_ROUNDS):
             before = self._progress()
             state_before = await self.pool.fetchval("select state from campaigns where id = $1::uuid",
@@ -680,19 +683,33 @@ class Bench:
                 after_end += 1
                 if after_end >= 2:  # the terminal step (summary, report) ran once more for the edits
                     return
-            moved = self._progress() != before
-            if moved or campaign.state != state_before:
+            moved = self._progress() != before or campaign.state != state_before
+            if not moved and busy < MAX_BUSY_ROUNDS and await self._web_searching():
+                busy += 1
+                moved = True
+            if moved:
                 idle = 0
-                self.clock.advance(timedelta(seconds=10))
+                await self._advance(timedelta(seconds=10))
                 continue
             idle += 1
             if idle >= 2:
                 if jumps >= MAX_JUMPS:
                     break
-                self.clock.advance(IDLE_JUMP)
+                await self._advance(IDLE_JUMP)
                 jumps += 1
                 idle = 0
         self.status, self.stop_reason = "stalled", "the campaign did not end"
+
+    async def _web_searching(self) -> bool:
+        """The campaign's web stage is still at work (``web_search_runs.state = 'searching'``)."""
+        return bool(await self.pool.fetchval("select exists(select 1 from web_search_runs where campaign_id = $1::uuid "
+                                             "and state = 'searching')", self.campaign_id))
+
+    async def _advance(self, delta: timedelta) -> None:
+        """The runner's clock and the database's ``now()`` (``db.set_clock``) move together: a ``finished_at`` the
+        trigger stamps is on the runner's time, a report is not cut by ``SUMMARY_WINDOW`` after the jumps."""
+        self.clock.advance(delta)
+        await db.set_clock(self.pool, self.clock.offset)
 
     def _progress(self) -> tuple[int, ...]:
         net = self.net
