@@ -33,6 +33,9 @@ CODE_DONE, CODE_WAITING, CODE_STALLED = 0, 3, 4
 MAX_ROUNDS = 400
 IDLE_JUMP = timedelta(minutes=20)  # an idle round moves the runner's clock past the drain's graces
 MAX_JUMPS = 12
+# rounds without a new call that still are no idle ones: the web stage of the campaign is ``searching`` (its pages
+# and searches take a few ticks); a stage that never ends stops counting after this many and the run stalls
+MAX_BUSY_ROUNDS = 60
 _VOLATILE = re.compile(r"(_at|_until|_seen|^at)$")
 _REAL_SLEEP = asyncio.sleep
 
@@ -264,7 +267,7 @@ class Bench:
     def _clear_pending(self) -> None:
         """This run's old pending files go: what is left after the pass is what it waits for now."""
         (self.root / "pending_answers" / f"{self.run_id}.json").unlink(missing_ok=True)
-        for folder in ("pending", "pending_apify"):
+        for folder in ("pending", "pending_apify", "pending_web"):
             for path in (self.root / folder).glob("*.json"):
                 with contextlib.suppress(ValueError, OSError):
                     if json.loads(path.read_text(encoding="utf-8")).get("run") == self.run_id:
@@ -298,7 +301,7 @@ class Bench:
                     await close()
 
     def _finish(self) -> int:
-        if self.net.pending_llm or self.net.pending_apify or self.net.blocked_apify:
+        if self.net.pending_llm or self.net.pending_apify or self.net.pending_web or self.net.blocked_apify:
             self.status = "waiting"
             return CODE_WAITING
         if self.status == "stalled":
@@ -308,11 +311,11 @@ class Bench:
 
     def _check(self) -> None:
         """A strict run's miss in a background task (an Apify run of the social stage) stops the run here."""
-        if self.strict and (self.net.pending_llm or self.net.pending_apify):
-            kind = "llm" if self.net.pending_llm else "apify"
-            name = self.net.pending_llm[0] if self.net.pending_llm else self.net.pending_apify[0]
-            folder = "pending" if kind == "llm" else "pending_apify"
-            raise SimStop(kind, self.root / folder / f"{name}.json")
+        for kind, folder, names in (("llm", "pending", self.net.pending_llm),
+                                    ("apify", "pending_apify", self.net.pending_apify),
+                                    ("web", "pending_web", self.net.pending_web)):
+            if self.strict and names:
+                raise SimStop(kind, self.root / folder / f"{names[0]}.json")
 
     # -- the interview (bot/control_plane/main.py) --
 
@@ -660,9 +663,9 @@ class Bench:
                     apify_tasks: Any) -> None:
         from bot.campaign.models import TERMINAL_STATES
 
-        idle = jumps = after_end = 0
+        idle = jumps = after_end = busy = 0
         for _ in range(MAX_ROUNDS):
-            before = (self.net.calls, len(self.net.pending_llm), len(self.net.pending_apify))
+            before = self._progress()
             state_before = await self.pool.fetchval("select state from campaigns where id = $1::uuid",
                                                     self.campaign_id)
             for name, step in stages:
@@ -682,19 +685,37 @@ class Bench:
                 after_end += 1
                 if after_end >= 2:  # the terminal step (summary, report) ran once more for the edits
                     return
-            moved = (self.net.calls, len(self.net.pending_llm), len(self.net.pending_apify)) != before
-            if moved or campaign.state != state_before:
+            moved = self._progress() != before or campaign.state != state_before
+            if not moved and busy < MAX_BUSY_ROUNDS and await self._web_searching():
+                busy += 1
+                moved = True
+            if moved:
                 idle = 0
-                self.clock.advance(timedelta(seconds=10))
+                await self._advance(timedelta(seconds=10))
                 continue
             idle += 1
             if idle >= 2:
                 if jumps >= MAX_JUMPS:
                     break
-                self.clock.advance(IDLE_JUMP)
+                await self._advance(IDLE_JUMP)
                 jumps += 1
                 idle = 0
         self.status, self.stop_reason = "stalled", "the campaign did not end"
+
+    async def _web_searching(self) -> bool:
+        """The campaign's web stage is still at work (``web_search_runs.state = 'searching'``)."""
+        return bool(await self.pool.fetchval("select exists(select 1 from web_search_runs where campaign_id = $1::uuid "
+                                             "and state = 'searching')", self.campaign_id))
+
+    async def _advance(self, delta: timedelta) -> None:
+        """The runner's clock and the database's ``now()`` (``db.set_clock``) move together: a ``finished_at`` the
+        trigger stamps is on the runner's time, a report is not cut by ``SUMMARY_WINDOW`` after the jumps."""
+        self.clock.advance(delta)
+        await db.set_clock(self.pool, self.clock.offset)
+
+    def _progress(self) -> tuple[int, ...]:
+        net = self.net
+        return net.calls, len(net.pending_llm), len(net.pending_apify), len(net.pending_web)
 
     async def _offer(self) -> bool:
         """The runner's «Есть ещё похожие варианты (…). Показать?» (``near:`` buttons, ``bot/campaign/offers.py``)
@@ -710,7 +731,8 @@ class Bench:
             if (message["chat_id"] != USER or message["message_id"] in self._offered or message.get("deleted")
                     or not any(str(b.get("data") or "").startswith(NEAR_PREFIX) for b in buttons)):
                 continue
-            if self.answers_used >= len(self._answers()) and (self.net.pending_llm or self.net.pending_apify):
+            if self.answers_used >= len(self._answers()) and (self.net.pending_llm or self.net.pending_apify
+                                                               or self.net.pending_web):
                 return answered
             self._offered.add(message["message_id"])
             reply = Reply(message["text"], tuple(Button(b["text"], callback_data=b["data"]) for b in buttons
@@ -758,7 +780,8 @@ class Bench:
         if pool is not None and campaign_id is not None:
             data.update(await self._campaign_data(pool, campaign_id))
         data["pending"] = {"llm": sorted(set(self.net.pending_llm)), "apify": sorted(set(self.net.pending_apify)),
-                           "apify_blocked": sorted(set(self.net.blocked_apify))}
+                           "apify_blocked": sorted(set(self.net.blocked_apify)),
+                           "web": sorted(set(self.net.pending_web))}
         data["llm_calls"] = _count(c["stage"] for c in self.net.llm_calls)
         data["offline"] = _count(f"{o['method']} {o['host']}{o['path']}" for o in self.net.offline)
         data["unhandled"] = sorted(set(self.net.unhandled))
