@@ -134,6 +134,8 @@ services:
       INTAKE_BOTH_MODE: ${INTAKE_BOTH_MODE:-false}
       # Q42: «Не важно» to «only the city or its province» widens a province capital to its province.
       INTAKE_SKIP_WIDENS_PLACE: ${INTAKE_SKIP_WIDENS_PLACE:-false}
+      # Q52: a role answer against the task's words («ищу соинвесторов», then «хочу вкладывать») is asked about once.
+      INTAKE_ROLE_CONFLICT_CHECK: ${INTAKE_ROLE_CONFLICT_CHECK:-false}
       # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
       ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}

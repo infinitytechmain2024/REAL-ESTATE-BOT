@@ -145,7 +145,8 @@ class ControlPlane:
                                  technical=self._is_owner, interviewer=interviewer,
                                  max_rounds=settings.interview_max_rounds, post_links=settings.apify_comments_enabled,
                                  both_mode=settings.intake_both_mode,
-                                 skip_widens_place=settings.intake_skip_widens_place)
+                                 skip_widens_place=settings.intake_skip_widens_place,
+                                 role_conflict_check=settings.intake_role_conflict_check)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""

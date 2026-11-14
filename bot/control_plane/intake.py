@@ -116,6 +116,38 @@ FIELDS["both"] = {**FIELDS["real_estate"], "who": FIELDS["investors"]["who"], "t
 _WORD = re.compile(r"\w+")
 # The labels ``Draft.goal_text`` writes around the person's words (keep in step with it): what reads the campaign's
 # ``source_text`` for the person's intent strips them first (Q23: «Районы или пригороды: Centro.» is no suburb request).
+# INTAKE_ROLE_CONFLICT_CHECK (Q52): who the task's own words say the person is. «ищу соинвесторов в свои проекты»:
+# raising money; «хочу вложить», «quiero invertir», «busco proyectos»: deploying it. Both or neither: unknown.
+_RAISING_WORDS = re.compile(
+    r"(?:ищу|ищем|шукаю|шукаємо|нужн\w*|нужен|требу\w*)\s+(?:\w+\s+){0,2}(?:со-?)?инвестор|соинвестор|співінвестор|"
+    r"(?:шукаю|шукаємо)\s+(?:\w+\s+){0,2}інвестор|привлеч\w*\s+(?:\w+\s+){0,2}(?:инвест|денег|деньги|капитал)|"
+    r"финансирован|фінансуванн|ищу деньги|ищем деньги|шукаю гроші|"
+    r"(?:в|для)\s+(?:сво\w+|мо\w+|наш\w+)\s+(?:\w+\s+)?(?:проект|стартап|бизнес)|"
+    r"\bsocios?\b|\bbusco\s+(?:\w+\s+){0,2}inversor|inversor\w*\s+para\s+(?:mi|nuestro)s?\s+proyecto|"
+    r"financiaci[oó]n|looking for (?:co-?)?investors|\bco-?investors? for (?:my|our)|\braise\b|\braising\b",
+    re.IGNORECASE)
+_DEPLOYING_WORDS = re.compile(
+    r"(?:хочу|хотим|готов\w*|планиру\w*)\s+(?:\w+\s+){0,2}(?:инвестир|вложи|вкладыва|вкласт|вкладат|інвестува)|"
+    r"(?:ищу|ищем|шукаю)\s+(?:(?:нов|хорош|интересн|перспективн|инвестиционн)\w*\s+)?(?:проект|объект\w* для инвест)|"
+    r"куда вложи|куди вкласти|"
+    r"сво\w+ деньги|"
+    r"quiero invertir|queremos invertir|\bbusco\s+(?:nuevos\s+|buenos\s+)?proyectos|"
+    r"\b(?:i|we) want to invest|looking for (?:\w+\s+)?projects to invest",
+    re.IGNORECASE)
+ROLE_CONFLICT_QUESTIONS = {
+    "raising": "Вы писали, что ищете инвесторов или деньги в свой проект, а сейчас — что хотите вкладывать сами. "
+               "Что верно?",
+    "deploying": "Вы писали, что хотите вкладывать сами, а сейчас — что ищете деньги в свой проект. Что верно?",
+}
+ROLE_CONFLICT_OPTIONS = (("Ищу деньги в свой проект", "role:raising"), ("Хочу вложить свои деньги", "role:deploying"))
+
+
+def role_in_text(text: str) -> str | None:
+    """INTAKE_ROLE_CONFLICT_CHECK (Q52): «raising» or «deploying» when the words say only one of them, else None."""
+    raising, deploying = bool(_RAISING_WORDS.search(text or "")), bool(_DEPLOYING_WORDS.search(text or ""))
+    return "raising" if raising and not deploying else "deploying" if deploying and not raising else None
+
+
 INTAKE_LABELS = ("Кого ищем", "Тип", "Задача", "Районы или пригороды", "Радиус поиска", "Главное", "Дополнительно")
 INTAKE_LABEL_RE = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, INTAKE_LABELS)) + r"):")
 
@@ -142,6 +174,7 @@ class Draft:
     forced: bool = False  # «Хватит, ищи» was pressed: no more questions for this task (except a missing place)
     choices: list[str] = field(default_factory=list)  # the model's suggested answers on screen (buttons «task:opt:<i>»)
     widened: bool = False  # INTAKE_SKIP_WIDENS_PLACE (Q42): «Не важно» widened the city to its province
+    role_check: str = ""  # INTAKE_ROLE_CONFLICT_CHECK (Q52): "" | asking (the question is on screen) | done (asked once)
 
     def copy(self, **changes: Any) -> Draft:
         return replace(self, dialogue=[dict(t) for t in self.dialogue], choices=list(self.choices),
@@ -215,7 +248,7 @@ class Draft:
     def payload(self) -> dict[str, Any]:
         return {"task": self.task, "message_id": self.message_id, "dialogue": self.dialogue, "rounds": self.rounds,
                 "asking": self.asking, "editing": self.editing, "forced": bool(self.forced),
-                "choices": list(self.choices), "widened": bool(self.widened)}
+                "choices": list(self.choices), "widened": bool(self.widened), "role_check": self.role_check}
 
     def spec_json(self) -> str | None:
         return self.spec.model_dump_json() if self.spec is not None else None
@@ -235,7 +268,7 @@ class Draft:
                    int(payload.get("rounds") or 0), payload.get("asking"), payload.get("editing"),
                    bool(payload.get("forced")),
                    [str(c) for c in payload.get("choices") or [] if isinstance(c, str)],
-                   bool(payload.get("widened")))
+                   bool(payload.get("widened")), str(payload.get("role_check") or ""))
 
     def expired(self, now: datetime) -> bool:
         return self.updated_at is not None and now - self.updated_at > DRAFT_TTL
@@ -381,7 +414,8 @@ class TaskIntake:
                  now: Callable[[], datetime] = lambda: datetime.now(UTC),
                  technical: Callable[[int], bool] = lambda _user_id: False,
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
-                 post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False) -> None:
+                 post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False,
+                 role_conflict_check: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -393,6 +427,10 @@ class TaskIntake:
         ``skip_widens_place`` (``INTAKE_SKIP_WIDENS_PLACE``, Q42): «Не важно» to «only the city or its province»
         widens a province capital to its province (see ``_widened_place``); off, the place stays the city.
 
+        ``role_conflict_check`` (``INTAKE_ROLE_CONFLICT_CHECK``, Q52): an answer that sets the investor role against the
+        task's own words («ищу соинвесторов в свои проекты» and then «хочу вкладывать») is asked about once with
+        buttons; the answer to it sets the role. Off, the answer is taken as it is.
+
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
         """
@@ -402,6 +440,7 @@ class TaskIntake:
         self.rules = RuleInterviewer()
         self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
         self.skip_widens_place = skip_widens_place
+        self.role_conflict_check = role_conflict_check
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
         return mode_menu(text, both=self.both_mode)
@@ -597,7 +636,33 @@ class TaskIntake:
                 turn.understood_ru = "пригороды: " + ", ".join(draft.spec.place.districts)
         draft.dialogue = [*draft.dialogue, {"role": "user", "text": message[:600]}][-MAX_DIALOGUE:]
         draft.editing = None
+        if (self.role_conflict_check and mode in ("investors", "both") and not editing
+                and (role := self._role_conflict(draft, spec, message)) is not None):
+            return await self._ask(draft, "", ROLE_CONFLICT_QUESTIONS[role], "investor.user_role", ROLE_CONFLICT_OPTIONS)
         return await self._carry_on(draft, turn, editing=editing)
+
+    def _role_conflict(self, draft: Draft, before: TaskSpec, message: str) -> str | None:
+        """INTAKE_ROLE_CONFLICT_CHECK (Q52): the task's role when this answer set the other one (asked once), else None.
+
+        The answer to that question sets the role from its words; words that name no role leave the model's reading.
+        """
+        assert draft.spec is not None
+        if draft.role_check == "asking":
+            draft.role_check = "done"
+            if draft.asking == "investor.user_role" and (said := role_in_text(message)) is not None:
+                draft.spec.investor.user_role = said  # type: ignore[assignment]
+            return None
+        role = draft.spec.investor.user_role
+        if draft.role_check or not role or role == before.investor.user_role or message == draft.task:
+            return None
+        task_role = role_in_text(draft.task)
+        if task_role is None or task_role == role:
+            return None
+        draft.role_check = "asking"
+        draft.spec.investor.user_role = before.investor.user_role
+        log.info("telegram.intake.role_conflict", extra={"user_id": draft.user_id, "task_role": task_role,
+                                                         "answer_role": role})
+        return task_role
 
     def _record_answer(self, draft: Draft, before: TaskSpec, after: TaskSpec, message: str, editing: bool,
                        *, next_question: str | None = None) -> TaskSpec:
