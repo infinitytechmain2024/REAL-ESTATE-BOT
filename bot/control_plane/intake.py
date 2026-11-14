@@ -114,8 +114,6 @@ FIELDS: dict[str, dict[str, tuple[str, str]]] = {
 FIELDS["both"] = {**FIELDS["real_estate"], "who": FIELDS["investors"]["who"], "ticket": FIELDS["investors"]["ticket"],
                   "role": FIELDS["investors"]["role"], "geo": FIELDS["investors"]["geo"]}
 _WORD = re.compile(r"\w+")
-# The labels ``Draft.goal_text`` writes around the person's words (keep in step with it): what reads the campaign's
-# ``source_text`` for the person's intent strips them first (Q23: «Районы или пригороды: Centro.» is no suburb request).
 # INTAKE_ROLE_CONFLICT_CHECK (Q52): who the task's own words say the person is. «ищу соинвесторов в свои проекты»:
 # raising money; «хочу вложить», «quiero invertir», «busco proyectos»: deploying it. Both or neither: unknown.
 _RAISING_WORDS = re.compile(
@@ -144,10 +142,21 @@ ROLE_CONFLICT_OPTIONS = (("Ищу деньги в свой проект", "role:
 
 def role_in_text(text: str) -> str | None:
     """INTAKE_ROLE_CONFLICT_CHECK (Q52): «raising» or «deploying» when the words say only one of them, else None."""
-    raising, deploying = bool(_RAISING_WORDS.search(text or "")), bool(_DEPLOYING_WORDS.search(text or ""))
+    raising, deploying = _said(_RAISING_WORDS, text or ""), _said(_DEPLOYING_WORDS, text or "")
     return "raising" if raising and not deploying else "deploying" if deploying and not raising else None
 
 
+# Q52: «не ищу инвесторов», «no busco socios», «not looking for investors»: a negation up to 2 words before the match.
+_NEGATION = re.compile(r"(?<!\w)(?:не|ні|нет|no|not|don'?t|doesn'?t|nunca)(?!\w)", re.IGNORECASE)
+_NEGATED_BEFORE = re.compile(r"(?<!\w)(?:не|ні|no|not|don'?t)\s+(?:\w+\s+)?$", re.IGNORECASE)
+
+
+def _said(pattern: re.Pattern[str], text: str) -> bool:
+    return any(not _NEGATED_BEFORE.search(text[:m.start()]) for m in pattern.finditer(text))
+
+
+# The labels ``Draft.goal_text`` writes around the person's words (keep in step with it): what reads the campaign's
+# ``source_text`` for the person's intent strips them first (Q23: «Районы или пригороды: Centro.» is no suburb request).
 INTAKE_LABELS = ("Кого ищем", "Тип", "Задача", "Районы или пригороды", "Радиус поиска", "Главное", "Дополнительно")
 INTAKE_LABEL_RE = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, INTAKE_LABELS)) + r"):")
 
@@ -564,7 +573,8 @@ class TaskIntake:
         if action == "deal" and value in ("rent", "sale") and draft.asking == "deal":
             return await self._interview(draft, f"Сделка: {DEAL_TEXT[value]}")
         if action == "role" and value in ("raising", "deploying") and draft.asking == "investor.user_role":
-            return await self._interview(draft, "ищу деньги для проекта" if value == "raising" else "хочу вкладывать")
+            return await self._interview(draft, "ищу деньги для проекта" if value == "raising" else "хочу вкладывать",
+                                         role=value if draft.role_check == "asking" else None)
         return Reply(STALE)
 
     def _edit_menu(self, draft: Draft) -> Reply:
@@ -615,10 +625,11 @@ class TaskIntake:
     # --- the interview ----------------------------------------------------------------------
 
     async def _interview(self, draft: Draft, message: str, *, editing: bool = False,
-                         widen: dict[str, object] | None = None) -> Reply:
+                         widen: dict[str, object] | None = None, role: str | None = None) -> Reply:
         """One user message: the interviewer updates the spec and says what to ask next, or the card is shown.
 
         ``widen`` (Q42): the place fields «Не важно» widened; applied after the model, which may resend the city.
+        ``role`` (Q52): the button pressed under the role-conflict question; it sets the role whatever the model read.
         """
         mode = draft.mode or "real_estate"
         spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
@@ -637,19 +648,25 @@ class TaskIntake:
         draft.dialogue = [*draft.dialogue, {"role": "user", "text": message[:600]}][-MAX_DIALOGUE:]
         draft.editing = None
         if (self.role_conflict_check and mode in ("investors", "both") and not editing
-                and (role := self._role_conflict(draft, spec, message)) is not None):
-            return await self._ask(draft, "", ROLE_CONFLICT_QUESTIONS[role], "investor.user_role", ROLE_CONFLICT_OPTIONS)
+                and (task_role := self._role_conflict(draft, spec, message, role)) is not None):
+            return await self._ask(draft, "", ROLE_CONFLICT_QUESTIONS[task_role], "investor.user_role",
+                                   ROLE_CONFLICT_OPTIONS, only_options=True)
         return await self._carry_on(draft, turn, editing=editing)
 
-    def _role_conflict(self, draft: Draft, before: TaskSpec, message: str) -> str | None:
+    def _role_conflict(self, draft: Draft, before: TaskSpec, message: str, pressed: str | None = None) -> str | None:
         """INTAKE_ROLE_CONFLICT_CHECK (Q52): the task's role when this answer set the other one (asked once), else None.
 
-        The answer to that question sets the role from its words; words that name no role leave the model's reading.
+        The answer to that question: a pressed button sets the role; typed words set it only where the model set
+        none (or the same), and never with a negation («не хочу вкладывать» is no «хочу вкладывать»).
         """
         assert draft.spec is not None
         if draft.role_check == "asking":
             draft.role_check = "done"
-            if draft.asking == "investor.user_role" and (said := role_in_text(message)) is not None:
+            model_role = draft.spec.investor.user_role
+            if pressed in ("raising", "deploying"):
+                draft.spec.investor.user_role = pressed  # type: ignore[assignment]
+            elif (draft.asking == "investor.user_role" and not _NEGATION.search(message)
+                  and (said := role_in_text(message)) is not None and model_role in (None, said)):
                 draft.spec.investor.user_role = said  # type: ignore[assignment]
             return None
         role = draft.spec.investor.user_role
@@ -749,16 +766,20 @@ class TaskIntake:
         return await self._card(draft)
 
     async def _ask(self, draft: Draft, understood: str, question: str, asking: str | None,
-                   options: tuple[tuple[str, str], ...], choices: tuple[str, ...] = ()) -> Reply:
+                   options: tuple[tuple[str, str], ...], choices: tuple[str, ...] = (), *,
+                   only_options: bool = False) -> Reply:
+        """``only_options`` (Q52, the role-conflict question): the option buttons and «Отмена», no skip or «enough»."""
         draft.step, draft.asking, draft.rounds = "ask", asking, draft.rounds + 1
         draft.choices = list(choices)
         draft.dialogue = [*draft.dialogue, {"role": "assistant", "text": question[:600]}][-MAX_DIALOGUE:]
         await self.store.save(draft)
         buttons = [Button(label, callback_data=f"task:{code}") for label, code in options]
         buttons += [Button(text, callback_data=f"task:opt:{i}") for i, text in enumerate(choices)]
-        if asking and asking != "place":
+        if asking and asking != "place" and not only_options:
             buttons.append(Button("Не важно", callback_data="task:skip"))
-        buttons += [Button("Хватит, ищи", callback_data="task:enough"), Button("Отмена", callback_data="task:cancel")]
+        if not only_options:
+            buttons.append(Button("Хватит, ищи", callback_data="task:enough"))
+        buttons.append(Button("Отмена", callback_data="task:cancel"))
         text = f"Понял: {understood}\n\n{question}" if understood else question
         return Reply(text, tuple(buttons), keyboard=DRAFT_KEYBOARD)
 
