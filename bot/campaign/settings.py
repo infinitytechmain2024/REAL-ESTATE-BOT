@@ -179,6 +179,9 @@ class CampaignRunnerSettings(BaseSettings):
     report_every_portal: bool = Field(default=False, validation_alias="REPORT_EVERY_PORTAL")
     # Q40: a finished search's last status line counts every delivery (cards, people, post leads, reach contacts).
     status_counts_all_deliveries: bool = Field(default=False, validation_alias="STATUS_COUNTS_ALL_DELIVERIES")
+    # Q41: held findings with no recorded why (why IS NULL) are listed too when an exclude_why is not given
+    # (PostgresRunStore.held_findings); off: «NULL IS DISTINCT FROM NULL» drops them, as before.
+    held_findings_null_why: bool = Field(default=False, validation_alias="HELD_FINDINGS_NULL_WHY")
     # Q43: the final report names a portal our page/budget caps stopped («не прочитан: исчерпан лимит ...»), not «до
     # него не дошла очередь запросов»; a listing rejected for more rooms than asked is «больше комнат», not «меньше».
     report_precise_reasons: bool = Field(default=False, validation_alias="REPORT_PRECISE_REASONS")

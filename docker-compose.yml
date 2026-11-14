@@ -132,6 +132,8 @@ services:
       APIFY_FACEBOOK_COMMENTS_ENABLED: ${APIFY_FACEBOOK_COMMENTS_ENABLED:-false}
       # The mode «Недвижимость + инвесторы» in the task menu (v2 C2); off: no such button.
       INTAKE_BOTH_MODE: ${INTAKE_BOTH_MODE:-false}
+      # Q42: «Не важно» to «only the city or its province» widens a province capital to its province.
+      INTAKE_SKIP_WIDENS_PLACE: ${INTAKE_SKIP_WIDENS_PLACE:-false}
       # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
       ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -763,6 +765,7 @@ services:
       CAMPAIGN_EMPTY_REPORT: ${CAMPAIGN_EMPTY_REPORT:-false}
       REPORT_EVERY_PORTAL: ${REPORT_EVERY_PORTAL:-false}
       STATUS_COUNTS_ALL_DELIVERIES: ${STATUS_COUNTS_ALL_DELIVERIES:-false}
+      HELD_FINDINGS_NULL_WHY: ${HELD_FINDINGS_NULL_WHY:-false}
       REPORT_PRECISE_REASONS: ${REPORT_PRECISE_REASONS:-false}
       # Investor leads from the comments under sent objects (bot/campaign/leads.py), and dead groups.
       CAMPAIGN_COMMENT_LEADS: ${CAMPAIGN_COMMENT_LEADS:-investors}

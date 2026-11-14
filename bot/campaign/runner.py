@@ -1690,7 +1690,7 @@ async def main() -> None:
     if post_reads is not None:
         config = replace(config, post_reads=True)
     store = PostgresRunStore(pool, settings.safety_limits(), dead_days=settings.facebook_group_dead_days,
-                             join_notices=settings.join_notices)
+                             join_notices=settings.join_notices, held_null_why=settings.held_findings_null_why)
     runner = CampaignRunner(campaigns, store, messenger, discovery,
                             config=config, owner_ids=settings.owner_ids(),
                             web=web[0].store if web else None, relevance=judge, recorder=PostgresRecorder(pool),
