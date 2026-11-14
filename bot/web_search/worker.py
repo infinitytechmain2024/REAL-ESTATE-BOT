@@ -175,6 +175,12 @@ class WebSearchConfig:
     # call, no plan queries, no portal URLs); its rounds ask for investors (``QueryTask.investor_web``) and a hit on a
     # listing portal is dropped. Off: the object search plan and its portals, as before.
     investor_web_queries: bool = False
+    # BOTH_MODE_PORTALS (Q54): the object part of a ``both`` campaign goes to the listing sources (Apify portals) as a
+    # ``real_estate`` task (``object_part``: the same type, deal, place and filters; the investor part of the spec never
+    # reaches a portal). In apify mode the stage waits for those runs; enough listings do not end the stage (the
+    # investor queries still run), they only skip the portals' direct pages and ``site:`` fill. Off: portals never
+    # take a ``both`` task, as before.
+    both_mode_portals: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -249,6 +255,15 @@ def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = 
                      nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only, query_hygiene=hygiene,
                      rental_term=task_rental_term(campaign.spec, campaign.source_text)
                      if plan.constraints.get("deal") == "rent" else None, investor_queries=investor)
+
+
+def object_part(task: QueryTask) -> QueryTask:
+    """BOTH_MODE_PORTALS (Q54): the object half of a ``both`` task, as the listing sources take a ``real_estate`` one.
+    The constraints (deal, property type, area, price, rooms) are the plan's object filters already; investor fields
+    (who, ticket, role) are never in a ``QueryTask``. Any other task: unchanged."""
+    if task.vertical != "both":
+        return task
+    return replace(task, vertical="real_estate", goal=re.sub(r"^both\b", "real_estate", task.goal))
 
 
 class WebSearchWorker:
@@ -409,12 +424,16 @@ class WebSearchWorker:
 
     async def _new_round(self, campaign: Campaign, used_count: int) -> bool:
         cfg = self.config
+        portals_done = False  # BOTH_MODE_PORTALS: a both campaign's portals gave enough, the rounds are for investors
         if used_count == 0:  # the first round: the search plan (once), then its direct portal pages
             campaign = await self._with_search_plan(campaign)
             await self._from_sources(campaign)
             # apify: the direct portal pages wait for the gate; they are queued only when it falls back to search
             if cfg.acquisition_mode == "apify" and await self._apify_gate(campaign):
                 return True
+        if cfg.acquisition_mode == "apify" and self._both_portals(campaign):
+            portals_done = await self._portals_enough(campaign)
+        if used_count == 0 and not portals_done:
             await self._enqueue_portal_urls(campaign)
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
@@ -423,7 +442,7 @@ class WebSearchWorker:
                           investor_queries=cfg.investor_web_queries)
         # The known portals (Idealista, Fotocasa first) are always searched: the ones not yet
         # searched take up to half of this round, written by the model or, if it skips one, from the task.
-        if cfg.cover_portals:
+        if cfg.cover_portals and not portals_done:
             task = replace(task, required_portals=missing_portals(task, used)[:portal_quota(want)])
         # Whatever generated them, every query names the campaign's place (``localise``).
         queries = localise(await self.generator.generate(task, used=used, count=want), task)
@@ -442,14 +461,26 @@ class WebSearchWorker:
         if any(r.state in ("starting", "running", "ready") for r in runs):
             await self.store.set_progress(campaign.id, None, self._line(0, None, "порталы через Apify…"))
             return True
+        if await self._portals_enough(campaign, runs):
+            if self._both_portals(campaign):
+                return False  # BOTH_MODE_PORTALS: the investor part of a both campaign still needs the search engine
+            await self._done(campaign, "apify_enough")
+            return True
+        return False  # too few listings (or no portal source at all): the search engine takes over
+
+    def _both_portals(self, campaign: Campaign) -> bool:
+        """BOTH_MODE_PORTALS (Q54) is on and the campaign is ``both``."""
+        return self.config.both_mode_portals and campaign.plan.vertical == "both"
+
+    async def _portals_enough(self, campaign: Campaign, runs: list[SourceRun] | None = None) -> bool:
+        """The completed portal runs gave ``apify_min_listings`` listings ``_import_source`` accepts."""
+        if runs is None:
+            runs = await self.store.source_runs(campaign.id)
         # The stored run has no import counter (no migration): the listings _import_source accepts are counted again.
         sources = {s.name: s for s in self.sources}
         usable = sum(1 for r in runs if r.state == "completed" and r.name in sources
                      for item in r.listings if self._listing_ok(campaign, sources[r.name], item, self._source_text(item)))
-        if usable >= self.config.apify_min_listings:
-            await self._done(campaign, "apify_enough")
-            return True
-        return False  # too few listings (or no portal source at all): the search engine takes over
+        return usable >= self.config.apify_min_listings
 
     async def _source_limit(self, campaign: Campaign, source: ListingSource) -> int:
         for host in source.hosts:
@@ -480,9 +511,11 @@ class WebSearchWorker:
         """The task a listing source searches. SEARCH_PLACE_LEVEL_FROM_SPEC: a source that does not take the spec's
         place level (Idealista ``axlymxp`` serves only a city) keeps the task it had without the flag, so turning the
         flag on never drops a source that searched before."""
-        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
+        # BOTH_MODE_PORTALS: a both campaign's sources get its object part (a real_estate task); off: the task as is
+        part = object_part if self._both_portals(campaign) else (lambda task: task)
+        task = part(query_task(campaign, spec_level=self.config.place_level_from_spec))
         if self.config.place_level_from_spec and not source.supports(task):
-            legacy = query_task(campaign)
+            legacy = part(query_task(campaign))
             if source.supports(legacy):
                 return legacy
         return task
