@@ -33,12 +33,12 @@ class CountingJudge:
         return Relevance("match")
 
 
-async def setup(**config):
+async def setup(vertical: str = "investors", **config):
     campaigns = MemoryCampaignStore()
     store, messenger, judge = MemoryRunStore(campaigns), ButtonMessenger(), CountingJudge()
     runner = CampaignRunner(campaigns, store, messenger, None, relevance=judge, now=Clock(), config=RunnerConfig(
         relevance_fail_closed=False, window_cooldown_seconds=0, **config))
-    plan = plan_campaign(GOAL, vertical="investors", location="Sevilla")
+    plan = plan_campaign(GOAL, vertical=vertical, location="Sevilla")
     cid = await campaigns.create(plan, chat_id=-100, requested_by=42, source_text=GOAL, actor="telegram:42")
     await campaigns.set_state(cid, "running", "campaign:test")
     store.add_groups(cid, 5)
@@ -57,12 +57,18 @@ def test_dates_named_in_several_languages() -> None:
     assert dates_named("Встреча проходила 21 августа 2025 года") == [date(2025, 8, 21)]
     assert dates_named("зустріч 21 серпня 2025") == [date(2025, 8, 21)]
     assert dates_named("2025-08-21 and 20.11.2025") == [date(2025, 8, 21), date(2025, 11, 20)]
+    assert dates_named("el 21 de noviembre del 2026") == [date(2026, 11, 21)]
+    assert dates_named("on 21-08-2025, 03/04/2026") == [date(2025, 8, 21), date(2026, 4, 3)]  # day first
     assert dates_named("in August 2025, founded 2019, 31 February 2025") == []
 
 
 def test_event_page_by_host_path_or_summary() -> None:
     assert event_page("https://wegottickets.com/event/1", None)
-    assert event_page("https://www.eventbrite.es/e/x-123", None)
+    assert event_page("https://www.eventbrite.es/e/x-tickets-123", None)
+    assert not event_page("https://www.eventbrite.es/o/club-de-inversores-123", None)  # an organiser's page
+    assert not event_page("https://www.eventbrite.es/d/spain--malaga/events/", None)
+    assert event_page("https://lu.ma/ab12cd34", None) and not event_page("https://lu.ma/discover", None)
+    assert not event_page("https://club.example.org/events/", None)  # a list of events, no event id
     assert event_page("https://club.example.org/events/42", None)
     assert event_page("https://club.example.org/x", {"summary": "Ticket page for the club meetup"})
     assert not event_page(CLUB, {"summary": "Monthly investor club in Sevilla"})
@@ -75,6 +81,14 @@ def test_past_event_needs_an_event_page_and_only_past_dates() -> None:
     assert not past_event(TICKETS, {"summary": "meetups on 21 August 2025 and 21 October 2026"}, TODAY)
     assert not past_event(TICKETS, {"summary": "monthly meetup, next date to be announced"}, TODAY)
     assert not past_event(CLUB, {"summary": "club founded on 21 August 2025"}, TODAY)  # the club's own page
+    # review Z1: a date we cannot read whole keeps the finding (in doubt, never excluded)
+    later = date(2026, 11, 14)
+    assert not past_event(TICKETS, {"summary": "Evento el 21 de noviembre del 2026 (publicado el 2 de octubre de 2026)"},
+                          later)
+    assert not past_event(TICKETS, {"summary": "Meetup on 21 August; tickets on sale since 1 June 2025"}, later)
+    assert not past_event(TICKETS, {"summary": "Meetup in noviembre del 2026; page of 1 June 2025"}, later)
+    assert not past_event(TICKETS, {"summary": "Meetup 21/08 at 7pm, listed 2025-06-01"}, later)
+    assert past_event(TICKETS, {"summary": "Meetup on 21-08-2025"}, later)
 
 
 def test_the_reason_is_named_in_the_report() -> None:
@@ -112,3 +126,10 @@ async def test_off_a_past_event_page_is_sent_as_before() -> None:
     _four(store, cid)
     await runner.step(cid)
     assert set(store.streamed[cid]) == {"past", "next", "nodate", "club"} and judge.calls == 4
+
+
+async def test_on_investor_findings_of_a_both_search_are_excluded_too() -> None:
+    store, _messenger, judge, runner, cid = await setup(vertical="both", investor_past_event_excluded=True)
+    page(store, cid, "past", TICKETS, "Ticket page for a networking meetup on 21 August 2025.")
+    await runner.step(cid)
+    assert store.buckets["past"][0] == "excluded" and store.whys["past"] == "past_event" and judge.calls == 0
