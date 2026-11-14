@@ -44,6 +44,16 @@ def test_review_match_excludes_a_failed_measured_number_only_with_the_flag() -> 
     assert review_match(Match("exact"), unknown, strict_fail=True).bucket == "similar"  # unknown is still offered
 
 
+def test_strict_keeps_an_approved_deviation_it_covers() -> None:
+    """The person approved a smaller area in the interview: the reviewer's area fail is covered, not a fail."""
+    approved = Match("exact", 0.1, "approved_deviation", note="площадь 1 700 м² при запросе от 2 000 м²",
+                     covers=("area",))
+    kept = review_match(approved, AREA_FAIL.review, strict_fail=True)
+    assert (kept.bucket, kept.why) == ("exact", "approved_deviation")
+    budget = {"overall": "reject", "criteria": [{"name": "area", "verdict": "fail"}, {"name": "budget", "verdict": "fail"}]}
+    assert review_match(approved, budget, strict_fail=True).bucket == "excluded"  # a fail it does not cover
+
+
 async def _rejected_plot(flag: bool):
     _, store, messenger, runner, cid = await setup(FakeJudge(AREA_FAIL), held_offer_quality=flag)
     store.add_finding(cid, "small", "🏠 small", payload=plot(1500), original="Vendo solar de 1500 metros",
@@ -113,6 +123,27 @@ def test_the_lot_rule_stays_narrow() -> None:
     other = post(URLS[1], LOT.replace("7 suelos", "9 suelos"))
     assert not pair(A, B, BODIES[0], other, *URLS, **ON)  # other numbers in the text
     assert not pair(A, B, post(URLS[0], "Obra nueva. " + LOT), post(URLS[1], "Obra nueva. " + LOT), *URLS, **ON)
+
+
+def test_the_lot_rule_needs_the_plot_area_unknown_on_both_sides() -> None:
+    assert not pair({**A, "plot_m2": 500.0}, {**B, "plot_m2": 1200.0}, *BODIES, *URLS, **ON)
+    assert not pair({**A, "plot_m2": 900.0}, B, *BODIES, *URLS, **ON)
+    assert not pair({**A, "area_m2": 900.0}, B, *BODIES, *URLS, **ON)
+
+
+NEIGHBOURS = ("Parcela rústica de 5.000 m² con referencia catastral 28999A001000010000XX, llana y con acceso por camino "
+              "asfaltado. Linda con la parcela 28999A001000020000XY, también en venta por la misma propiedad.")
+
+
+def test_a_neighbour_named_in_the_text_is_no_reference_of_the_plot() -> None:
+    a = lot("Camino del Paraje", "Agencia Uno", "+34600000001", price_amount=60_000, area_m2=5_000.0, plot_m2=5_000.0)
+    b = {**a, "price_amount": 65_000}
+    urls = (IDEALISTA.format(3001), IDEALISTA.format(3002))
+    second = NEIGHBOURS.replace("referencia catastral 28999A001000010000XX", "referencia catastral 28999A001000020000XY")
+    second = second.replace("Linda con la parcela 28999A001000020000XY", "Linda con la parcela 28999A001000010000XX")
+    la = listing_of(a, url=urls[0], body=post(urls[0], NEIGHBOURS))
+    assert la.parcels == {"28999A001000010000XX"}
+    assert not pair(a, b, post(urls[0], NEIGHBOURS), post(urls[1], second), *urls, **ON)
 
 
 def test_one_plot_with_the_same_cadastral_references_at_two_prices_is_one_object() -> None:

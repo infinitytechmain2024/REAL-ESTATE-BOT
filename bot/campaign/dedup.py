@@ -78,9 +78,10 @@ One plot or lot offered several times (``same_object(..., same_lot=True)``, ``HE
 agencies sell one lot of 31 rustic plots on Idealista at 357 900 € and 396 400 € (other municipality in the address,
 the same two cadastral references in both texts), and three agencies list one lot at one street with one description
 and one price, the area not stated (the rule of one host needs the floor or the area). Such pairs are one object:
-both texts state whole cadastral references (20 characters, ``_PARCEL``) and the same set, both ``land`` and
+both texts state whole cadastral references (20 characters, ``_PARCEL``, each within 40 characters after
+«catastral» / «catastro»: a neighbour of «Linda con la parcela ...» is not one) and the same set, both ``land`` and
 ``sale``, the area within 1 % (``_same_parcels``; the price may differ); or two ads of one portal (no social network)
-at one address (a shared street token), the area unknown on both sides, the same description (``COPY_JACCARD``, the
+at one address (a shared street token), the area unknown on both sides (``area_m2`` and ``plot_m2``), the same description (``COPY_JACCARD``, the
 same small numbers), the price exactly equal, both ``land``, the deal known and equal, the same rooms, no floor, no
 new development and no two agency references that differ (``_same_listed_lot``; the agencies may differ).
 
@@ -166,6 +167,10 @@ _CADASTRE = re.compile(r"ref(?:erencia|\.)?\s*catastral\s*:?\s*([0-9a-z]{14})(?:
 # Q55: a whole Spanish cadastral reference anywhere in the text (20 characters: the 14-character parcel, 4 digits and
 # 2 control letters), rustic («28124A005003650000JR») or urban («9872023VH5797S0001WX»)
 _PARCEL = re.compile(r"(?<![0-9a-z])(\d{5}[a-z]\d{8}|\d{7}[a-z]{2}\d{4}[a-z])\d{4}[a-z]{2}(?![0-9a-z])", re.IGNORECASE)
+# Q55: a reference counts only after «ref(erencia)(s) catastral(es)» / «catastro» at most this many characters before it
+# (a neighbour named in «Linda con la parcela ...» is no reference of the plot itself)
+PARCEL_CONTEXT = 40
+_PARCEL_CONTEXT = re.compile(r"catastr", re.IGNORECASE)
 _NEW_BUILD_NAME = re.compile(r"(?<!\w)(?:[Rr]esidencial|RESIDENCIAL)\s+(?:[A-ZÁÉÍÓÚÑ]|(?:[Ee]l|[Ll]a|[Ll]os|[Ll]as)\s+[A-ZÁÉÍÓÚÑ])")
 _NEW_BUILD_WORDS = re.compile(r"(?<!\w)(?:obra\s+nueva|promoci[oó]n|(?:complejo|conjunto)\s+residencial)(?!\w)",
                               re.IGNORECASE)
@@ -235,7 +240,7 @@ class Listing:
     zones: frozenset[str] = frozenset()  # planning zones of the body («N.Z. 8.1.A» -> "8.1.a")
     bare_numbers: tuple[int, ...] = ()  # ``numbers`` without the zone codes (the rule without an address)
     cadastre: frozenset[str] = frozenset()  # cadastral references of the body (the 14-character parcel part)
-    parcels: frozenset[str] = frozenset()  # Q55: whole cadastral references anywhere in the body (``_PARCEL``)
+    parcels: frozenset[str] = frozenset()  # Q55: whole cadastral references of the body (``parcels_of``)
     new_build: bool = False  # the body, title or location names a new development («obra nueva», «promoción» ...)
     agency_ref: str = ""  # the agency's own reference of the ad (``ref_key``), "" when unknown (Q15)
     # Q32: the description only (the body excerpt without a portal post's «JSON-LD», title and «Ссылка» lines,
@@ -300,11 +305,18 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         zones=zones_of(excerpt),
         bare_numbers=numbers_of(_ZONE.sub(" ", excerpt)),
         cadastre=frozenset(found.upper() for found in _CADASTRE.findall(excerpt)),
-        parcels=frozenset(found.group(0).upper() for found in _PARCEL.finditer(excerpt)),
+        parcels=parcels_of(excerpt),
         new_build=is_new_build(" ".join((excerpt, title, place))),
         agency_ref=ref_key(found_ref.group(1)) if found_ref else "",
         description=description,
     )
+
+
+def parcels_of(text: str) -> frozenset[str]:
+    """Q55: the whole cadastral references (``_PARCEL``) of a text stated as the plot's own: «catastr...» («referencia
+    catastral», «referencias catastrales», «catastro») within ``PARCEL_CONTEXT`` characters before each one."""
+    return frozenset(found.group(0).upper() for found in _PARCEL.finditer(text or "")
+                     if _PARCEL_CONTEXT.search(text[max(0, found.start() - PARCEL_CONTEXT):found.start()]))
 
 
 def description_of(body: str) -> str:
@@ -582,7 +594,7 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
         # area while the floor is unknown on both sides).
         if not (both_addressed and (street_a & street_b)):
             return False
-        if same_lot and host_a not in _SOCIAL_HOSTS and _same_listed_lot(a, b, area):
+        if same_lot and host_a not in _SOCIAL_HOSTS and _same_listed_lot(a, b):
             return True  # Q55: one lot of one address listed by several agencies, its area not stated
         same_floor = a.floor is not None and a.floor == b.floor
         if not (same_floor or (a.floor is None and b.floor is None and full)):
@@ -718,12 +730,12 @@ def _same_parcels(a: Listing, b: Listing) -> bool:
     return _close(_bare_area(a), _bare_area(b), COPY_AREA_TOLERANCE) is True
 
 
-def _same_listed_lot(a: Listing, b: Listing, area: bool | None) -> bool:
+def _same_listed_lot(a: Listing, b: Listing) -> bool:
     """Q55: two ads of one portal at one address (the caller checked a shared street token) whose area is unknown on
-    both sides: the same description (``COPY_JACCARD``, the same small numbers), the price exactly equal, both
-    ``land``, the deal known and equal, the same rooms and no floor on either; never a new development or two agency
+    both sides (``_bare_area``: neither ``area_m2`` nor a plot's ``plot_m2``): the same description (``COPY_JACCARD``,
+    the same small numbers), the price exactly equal, both ``land``, the deal known and equal, the same rooms and no floor on either; never a new development or two agency
     references that differ. Agencies may differ (a bank's lot resold by its servicers)."""
-    if area is not None or a.price is None or a.price != b.price:
+    if _bare_area(a) is not None or _bare_area(b) is not None or a.price is None or a.price != b.price:
         return False
     if a.new_build or b.new_build or not (a.kind == b.kind == "land") or not (a.deal and a.deal == b.deal):
         return False  # a flat's template (one agency, several units, one rent) is not one object
