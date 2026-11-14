@@ -29,13 +29,13 @@ class SeqJudge:
         return Relevance(self.verdicts.pop(0) if len(self.verdicts) > 1 else self.verdicts[0])
 
 
-async def setup(judge=None, **config):
+async def setup(judge=None, vertical: str = "investors", **config):
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
     messenger = ButtonMessenger()
     runner = CampaignRunner(campaigns, store, messenger, None, relevance=judge, config=RunnerConfig(
         relevance_fail_closed=False, window_cooldown_seconds=0, **config))
-    plan = plan_campaign(GOAL, vertical="investors", location="Sevilla")
+    plan = plan_campaign(GOAL, vertical=vertical, location="Sevilla")
     cid = await campaigns.create(plan, chat_id=-100, requested_by=42, source_text=GOAL, actor="telegram:42")
     await campaigns.set_state(cid, "running", "campaign:test")
     store.add_groups(cid, 5)  # the search is still running
@@ -53,14 +53,20 @@ def cards(messenger: ButtonMessenger) -> list[str]:
 
 
 def test_org_key_normalises_the_name() -> None:
-    assert org_key({"who": "Sevilla Investor Club (SIC)"}) == org_key({"who": "sevilla investor  club"})
-    assert org_key({"who": "Inversiones Ñandú, S.L."}) == "inversiones nandu"
+    assert org_key({"who": "Triana Deal Makers Club (TDM)"}) == org_key({"who": "triana deal  makers club"})
+    assert org_key({"who": "Inversiones Ñandú Rojo, S.L."}) == "inversiones nandu rojo"
+    assert org_key({"who": "Property Deal Network Marbella (PDN)"}) == "property deal network marbella"
     assert org_key({"who": "Private investor"}) is None and org_key({"who": "inversor particular"}) is None
     assert org_key({"who": "Частный инвестор"}) is None
     assert org_key({"who": None}) is None and org_key({}) is None and org_key(None) is None
-    assert not same_org({"who": "Sevilla Investor Club"}, {"who": "Málaga Investor Club"})
+    assert not same_org({"who": "Triana Deal Makers Club"}, {"who": "Triana Deal Breakers"})
     assert not same_org({"who": "Private investor"}, {"who": "Private investor"})
-    club = {"who": "Sevilla Investor Club"}
+    # review B1: descriptive «who» are no organisation: one word, generic words and places only
+    for who in ("David", "Family office", "Investor from Madrid", "Business Angels", "Club de inversores",
+                "Sevilla Investor Club", "Inversiones Ñandú, S.L.", "Real Estate Network Marbella"):
+        assert org_key({"who": who}) is None, who
+        assert not same_org({"who": who}, {"who": who}), who
+    club = {"who": "Triana Deal Makers Club"}
     assert _same_lead_org(StreamFinding("a", "", club, vertical="investors"), StreamFinding("b", "", club, vertical="investors"))
     assert not _same_lead_org(StreamFinding("a", "", club, vertical="real_estate"),
                               StreamFinding("b", "", club, vertical="real_estate"))
@@ -77,19 +83,19 @@ def test_flag_is_off_by_default_and_reaches_the_runner(monkeypatch) -> None:
 
 async def test_off_one_club_on_three_hosts_is_three_cards() -> None:
     store, messenger, runner, cid = await setup()
-    lead(store, cid, "a", CLUB_PAGE, "Sevilla Investor Club")
-    lead(store, cid, "b", TICKETS_1, "Sevilla Investor Club (SIC)")
-    lead(store, cid, "c", TICKETS_2, "sevilla investor club")
+    lead(store, cid, "a", CLUB_PAGE, "Triana Deal Makers Club")
+    lead(store, cid, "b", TICKETS_1, "Triana Deal Makers Club (TDM)")
+    lead(store, cid, "c", TICKETS_2, "triana deal makers club")
     await runner.step(cid)
     assert len(cards(messenger)) == 3 and store.duplicates == {}
 
 
 async def test_on_one_club_on_three_hosts_is_one_card_with_also_on() -> None:
     store, messenger, runner, cid = await setup(investor_lead_same_org=True)
-    lead(store, cid, "a", CLUB_PAGE, "Sevilla Investor Club")
-    lead(store, cid, "b", TICKETS_1, "Sevilla Investor Club (SIC)")
-    lead(store, cid, "c", TICKETS_2, "sevilla investor club")
-    lead(store, cid, "d", OTHER, "Guadalquivir Capital")
+    lead(store, cid, "a", CLUB_PAGE, "Triana Deal Makers Club")
+    lead(store, cid, "b", TICKETS_1, "Triana Deal Makers Club (TDM)")
+    lead(store, cid, "c", TICKETS_2, "triana deal makers club")
+    lead(store, cid, "d", OTHER, "Guadalquivir Homes Partners")
     await runner.step(cid)
     assert len(cards(messenger)) == 2  # the club once, the other fund apart
     assert store.duplicates == {"b": "a", "c": "a"}
@@ -108,9 +114,9 @@ async def test_on_generic_or_missing_names_are_never_merged() -> None:
 
 async def test_on_a_similar_copy_of_a_sent_card_is_not_held() -> None:
     store, messenger, runner, cid = await setup(SeqJudge("match", "near", "near"), investor_lead_same_org=True)
-    lead(store, cid, "a", CLUB_PAGE, "Sevilla Investor Club")
-    lead(store, cid, "b", TICKETS_1, "Sevilla Investor Club")
-    lead(store, cid, "c", TICKETS_2, "Sevilla Investor Club")
+    lead(store, cid, "a", CLUB_PAGE, "Triana Deal Makers Club")
+    lead(store, cid, "b", TICKETS_1, "Triana Deal Makers Club")
+    lead(store, cid, "c", TICKETS_2, "Triana Deal Makers Club")
     await runner.step(cid)
     assert len(cards(messenger)) == 1
     assert store.duplicates == {"b": "a", "c": "a"}
@@ -119,8 +125,8 @@ async def test_on_a_similar_copy_of_a_sent_card_is_not_held() -> None:
 
 async def test_on_held_copies_of_one_club_are_one_held_finding() -> None:
     store, _messenger, runner, cid = await setup(SeqJudge("near"), investor_lead_same_org=True)
-    lead(store, cid, "b", TICKETS_1, "Sevilla Investor Club")
-    lead(store, cid, "c", TICKETS_2, "Sevilla Investor Club")
+    lead(store, cid, "b", TICKETS_1, "Triana Deal Makers Club")
+    lead(store, cid, "c", TICKETS_2, "Triana Deal Makers Club")
     await runner.step(cid)
     assert [f.id for f in await store.held_findings(cid, "similar", 10)] == ["b"]
     assert store.duplicates == {"c": "b"}
@@ -128,8 +134,16 @@ async def test_on_held_copies_of_one_club_are_one_held_finding() -> None:
 
 async def test_off_held_copies_stay_apart() -> None:
     store, _messenger, runner, cid = await setup(SeqJudge("near"))
-    lead(store, cid, "b", TICKETS_1, "Sevilla Investor Club")
-    lead(store, cid, "c", TICKETS_2, "Sevilla Investor Club")
+    lead(store, cid, "b", TICKETS_1, "Triana Deal Makers Club")
+    lead(store, cid, "c", TICKETS_2, "Triana Deal Makers Club")
     await runner.step(cid)
     assert [f.id for f in await store.held_findings(cid, "similar", 10)] == ["b", "c"]
     assert store.duplicates == {}
+
+
+async def test_on_investor_findings_of_a_both_search_are_merged_too() -> None:
+    store, messenger, runner, cid = await setup(vertical="both", investor_lead_same_org=True)
+    lead(store, cid, "a", CLUB_PAGE, "Triana Deal Makers Club")
+    lead(store, cid, "b", TICKETS_1, "Triana Deal Makers Club")
+    await runner.step(cid)
+    assert len(cards(messenger)) == 1 and store.duplicates == {"b": "a"}
