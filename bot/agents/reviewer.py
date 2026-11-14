@@ -263,17 +263,28 @@ _NON_RESIDENTIAL = """- Not a home: when "type" is apartment or house (a place t
 assert SYSTEM.count(_BEFORE_NUMBERS) == 1
 
 # REVIEW_TENANT_HITS (Q45, rubric «Жилец»). Sim G2 («квартира в Валенсии до 250 000 €»): habitaclia «Actualmente
-# alquilada» went out as exact while its fotocasa twin was held as similar.
+# alquilada» went out as exact while its fotocasa twin was held as similar. Q46: «ocupada» means people, not a space;
+# deviation_ru by the kind of sign; the advert «¡Puja por…!», a usufruct of common areas and a rent-to-own are no sign.
 _TENANT = """- Not free to move in: when "task.hard.deal" is "sale" and "type" is apartment or house (a person buying a home),
-  a listing sold with a tenant or an occupant, or by auction, is a compromise, not an exact match. Signs: «alquilada»,
-  «alquilado», «actualmente alquilada», «con inquilino», «inquilinos», «arrendada», «arrendatario», «ocupada»,
-  «ocupado», «okupada», «sin posesión», «nuda propiedad», «usufructo», «renta antigua», «se vende con contrato de
-  alquiler», «tenanted»; an auction: «subasta», «pujas», «puja», «cesión de remate», «auction». Then "deal" is
-  "unknown" with that quote (never "fail": it is still a sale), "overall" is "near", deviation_ru «с арендатором»
-  (the buyer cannot move in) or «аукцион» (the final price is unknown); near_reason, when asked, is "other". These
-  words may also be in "hits". No sign: a negation or a past state («libre de inquilinos», «sin inquilinos», «se
-  entrega libre», «no está ocupada», «nunca alquilada»), a mere suggestion to rent it out («ideal para alquilar»,
-  «rentabilidad», «apto para alquiler turístico»), a garage or storage room rented apart; and none at all when the
+  a listing sold with people living in it, without the right to live in it, or by auction, is a compromise, not an
+  exact match. Then "deal" is "unknown" with that quote (never "fail": it is still a sale), "overall" is "near" and
+  near_reason, when asked, is "other". deviation_ru by the kind of sign:
+  * «с арендатором»: a tenant lives there: «alquilada», «alquilado», «actualmente alquilada», «con inquilino»,
+    «inquilinos», «arrendada», «arrendatario», «renta antigua», «se vende con contrato de alquiler», «tenanted».
+  * «занята»: people occupy it without a lease: «ocupada», «ocupado», «okupada», «okupas», «sin posesión». «Ocupada»
+    / «ocupado» is a sign only when it means occupied by people.
+  * «без права проживания»: only the bare ownership is sold: «nuda propiedad», «usufructo» (of the flat, kept by
+    somebody else).
+  * «аукцион»: the final price is unknown: «subasta», «pujas», «puja» (as a bid in an auction), «cesión de remate»,
+    «auction».
+  * «аренда с выкупом»: «alquiler con opción a compra», «rent to own»: not a plain sale, "deal" is "unknown".
+  These words may also be in "hits". No sign: a negation or a past state («libre de inquilinos», «sin inquilinos», «se
+  entrega libre», «no está ocupada», «nunca alquilada»); «ocupada» / «ocupado» about a space or a thing («superficie
+  ocupada», «ocupada por un trastero», «ocupada por la terraza», «parcela ocupada por la vivienda»); a «usufructo» of a
+  part or of common areas («usufructo de zonas comunes», «usufructo del jardín comunitario»); «puja» as an advert's
+  call («¡Puja por tu nuevo hogar!», «puja por él»); «alquiler con opción a compra» is no tenant sign (its label is
+  «аренда с выкупом», never «с арендатором»); a mere suggestion to rent it out («ideal para alquilar»,
+  «rentabilidad», «apto para alquiler turístico»); a garage or storage room rented apart; and none at all when the
   task text or "task.context" asks for an investment or a rented flat («для сдачи», «с арендатором», «inversión»).
 """
 

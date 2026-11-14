@@ -60,13 +60,16 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "соляри": ("solarium",),
 }
 # Q45: the words of a home sold with a tenant or occupant, and of an auction (folded). The reviewer reads the negations
-# («sin inquilinos», «libre de ocupantes»): a hit only shows where the word occurs.
+# («no está ocupada»): a hit only shows where the word occurs. Q46: a match right after a negation («sin inquilinos»,
+# «libre de ocupantes», «no alquilada») takes no window of these terms, so it never crowds out a real «alquilada».
 TENANT_WORDS: tuple[str, ...] = (
     "alquilada", "alquilado", "arrendada", "arrendado", "arrendatario", "arrendataria", "inquilino", "inquilina",
     "ocupada", "ocupado", "okupada", "okupado", "okupa", "ocupantes", "sin posesion", "nuda propiedad", "usufructo",
     "renta antigua", "contrato de alquiler", "tenant", "tenanted", "sitting tenant", "rented out")
 AUCTION_WORDS: tuple[str, ...] = ("subasta", "puja", "cesion de remate", "auction")
 HOME_TYPES = ("apartment", "house")
+# Q46: a negation right before a word of the Q45 terms (folded, the text's whitespace collapsed).
+_NEGATED = re.compile(r"(?<!\w)(?:no|sin|nunca|libres? de)\s$")
 _LATIN_END = re.compile(r"[a-z0-9]$")
 
 
@@ -86,7 +89,8 @@ def needles(term: str) -> list[str]:
 
 
 def tenant_terms() -> list[tuple[str, ...]]:
-    """Q45: the tenant and the auction terms for ``quote_hits`` (each a tuple of folded words)."""
+    """Q45: the tenant and the auction terms for ``quote_hits`` (each a tuple of folded words); the runner puts them
+    before the task's words (Q46), so they get the first windows."""
     return [TENANT_WORDS, AUCTION_WORDS]
 
 
@@ -123,15 +127,18 @@ def quote_hits(text: str, terms: Iterable[str | tuple[str, ...]], *, skip_before
 
     At most ``HITS_PER_TERM`` windows per term and ``MAX_HITS`` in all, taken round-robin over the terms (the first
     window of every term, then the second ...), so six «jardín» never push out a «piscina». Windows that overlap
-    are merged. A match ending before ``skip_before`` (the part the reviewer already reads as the excerpt) is skipped.
+    are merged. A match ending before ``skip_before`` (the part the reviewer already reads as the excerpt) is skipped,
+    and so is a match of a tuple term (Q45 ``tenant_terms``) right after «no», «sin», «nunca», «libre de» (Q46).
     """
     flat = " ".join(str(text or "").split())
     folded = fold_chars(flat)
     per_term: list[list[tuple[int, int]]] = []
     for term in terms:
+        negations = isinstance(term, tuple)  # Q46: only the Q45 terms; «sin piscina» of a must-have stays a hit
         spans = [(max(0, m.start() - WINDOW), min(len(flat), m.end() + WINDOW))
                  for needle in _needles_of(term)
-                 for m in re.finditer(_pattern(needle), folded) if m.end() > skip_before]
+                 for m in re.finditer(_pattern(needle), folded) if m.end() > skip_before
+                 and not (negations and _NEGATED.search(folded, max(0, m.start() - 12), m.start()))]
         if spans:
             per_term.append(_merge(spans)[:HITS_PER_TERM])
     chosen: list[tuple[int, int]] = []
