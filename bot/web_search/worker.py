@@ -178,7 +178,8 @@ class WebSearchConfig:
     # BOTH_MODE_PORTALS (Q54): the object part of a ``both`` campaign goes to the listing sources (Apify portals) as a
     # ``real_estate`` task (``object_part``: the same type, deal, place and filters; the investor part of the spec never
     # reaches a portal). In apify mode the stage waits for those runs; enough listings do not end the stage (the
-    # investor queries still run), they only skip the portals' direct pages and ``site:`` fill. Off: portals never
+    # investor queries still run), they only skip the portals' direct pages, ``site:`` fill and portal hits of the search;
+    # imported rows are fetched as ``real_estate`` (analysed once). Off: portals never
     # take a ``both`` task, as before.
     both_mode_portals: bool = False
 
@@ -689,7 +690,9 @@ class WebSearchWorker:
             await self.store.enqueue(cid, [Candidate(listing.url, key, host, kind="listing")],
                                      index_ttl_days=self.config.index_ttl_days, layer="api")
             queued = QueuedUrl(listing.url, key, host, 0, "listing", listing.title)
-            ticket = await self.store.begin_fetch(cid, queued, vertical=campaign.plan.vertical,
+            # BOTH_MODE_PORTALS: a portal row of a both campaign is an object, analysed once (not also as an investor)
+            vertical = "real_estate" if self._both_portals(campaign) else campaign.plan.vertical
+            ticket = await self.store.begin_fetch(cid, queued, vertical=vertical,
                                                   lease_seconds=self.config.lease_seconds,
                                                   max_runtime_seconds=self.config.page_runtime_seconds,
                                                   contact_site=False, index_ttl_days=self.config.index_ttl_days,
@@ -747,6 +750,9 @@ class WebSearchWorker:
         blocked = self.config.blocked_hosts | task.blocked_hosts
         deal, known, real_estate = campaign_deal(campaign), known_hosts_of(campaign), campaign.plan.vertical == "real_estate"
         allowed = self._allowed_hosts(campaign, known)
+        # BOTH_MODE_PORTALS: the portals gave a both campaign enough, its search is for investors, not portal pages
+        portals_done = (self.config.acquisition_mode == "apify" and self._both_portals(campaign)
+                        and await self._portals_enough(campaign))
         for query in await self.store.pending_queries(campaign.id, self.config.queries_per_tick):
             await self.store.set_progress(campaign.id, None, self._line(query_count, pages, "поиск"))
             try:
@@ -766,6 +772,9 @@ class WebSearchWorker:
                 host = host_of(hit.url)
                 if task.investor_web and listing_portal_host(host):
                     dropped += 1  # INVESTOR_WEB_QUERIES: a listing portal's page is no investor
+                    continue
+                if portals_done and listing_portal_host(host):
+                    dropped += 1  # BOTH_MODE_PORTALS: the portal's objects came through Apify already
                     continue
                 if deal and (deal_conflict(hit.url, deal) or deal_of(hit.title) not in (None, deal)):
                     dropped += 1  # a rent page for a sale campaign (and vice versa): its path or its title says so

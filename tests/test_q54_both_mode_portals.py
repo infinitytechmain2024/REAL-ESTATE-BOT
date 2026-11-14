@@ -17,7 +17,12 @@ from bot.campaign.spec import TaskSpec
 from bot.utils import costs
 from bot.web_search.settings import WebSearchSettings
 from bot.web_search.sources import SourceListing
-from bot.web_search.sources.apify import SourceRunContext, _execution, source_run_scope
+from bot.web_search.sources.apify import (
+    SourceRunContext,
+    TemporaryApifyError,
+    _execution,
+    source_run_scope,
+)
 from bot.web_search.sources.portals import (
     ApifyFotocasaSource,
     ApifyHabitacliaSource,
@@ -55,11 +60,12 @@ async def _campaign(mode: str, campaigns: MemoryCampaignStore | None = None):
     return await campaigns.get(cid)
 
 
-def _worker(campaigns=None, store=None, sources=(), **config) -> WebSearchWorker:
+def _worker(campaigns=None, store=None, sources=(), searcher=None, **config) -> WebSearchWorker:
     campaigns = campaigns or MemoryCampaignStore()
-    return WebSearchWorker(campaigns, store or MemoryWebStore(campaigns), FakeSearcher(), FakeFetcher(),
+    config.setdefault("cover_portals", False)
+    return WebSearchWorker(campaigns, store or MemoryWebStore(campaigns), searcher or FakeSearcher(), FakeFetcher(),
                            ListGenerator(["inversores inmobiliarios Madrid"]), sources=sources,
-                           config=WebSearchConfig(cover_portals=False, **config))
+                           config=WebSearchConfig(**config))
 
 
 def _api(requests):
@@ -139,8 +145,8 @@ class RealEstateSource:
     max_charge_usd = .10
     actor_id = "fixture"
 
-    def __init__(self, rows: int = 5):
-        self.rows, self.launches = rows, 0
+    def __init__(self, rows: int = 5, *, fail: bool = False):
+        self.rows, self.fail, self.launches = rows, fail, 0
 
     def supports(self, task):
         return task.vertical == "real_estate"
@@ -150,6 +156,8 @@ class RealEstateSource:
         if context.launch_allowed:
             self.launches += 1
             await context.save_run("run1", "data1")
+        if self.fail:
+            raise TemporaryApifyError("apify_http_503")
         await context.reconcile_usage("run1", .01)
         return [SourceListing(f"https://www.fotocasa.es/es/comprar/terreno/madrid/{183456700 + n}/d", "Terreno",
                               plot_m2=2200, deal="sale", property_type="land") for n in range(min(self.rows, limit))]
@@ -186,3 +194,70 @@ async def test_apify_mode_real_estate_gate_is_unchanged_by_the_flag(ledger):
     await run_until_done(w, real_estate.id)
     assert source.launches == 1 and store.runs[real_estate.id].stop_reason == "apify_enough"
     assert not w.searcher.calls
+
+
+PORTAL_INDEX = "https://www.fotocasa.es/es/comprar/terrenos/madrid-provincia/todas-las-zonas/l"
+PORTAL_HIT = "https://www.fotocasa.es/es/comprar/terreno/madrid/190000001/d"
+INVESTOR_HIT = "https://www.clubinversores-madrid.es/quienes-somos/"
+
+
+class RecordingStore(MemoryWebStore):
+    """Every candidate queued and the vertical of every fetch begun, by layer."""
+
+    def __init__(self, campaigns):
+        super().__init__(campaigns)
+        self.enqueued, self.verticals = [], []
+
+    async def enqueue(self, campaign_id, candidates, **kw):
+        self.enqueued = [*self.enqueued, *candidates]
+        return await super().enqueue(campaign_id, candidates, **kw)
+
+    async def begin_fetch(self, campaign_id, url, **kw):
+        self.verticals.append((kw.get("layer", "http"), kw["vertical"]))
+        return await super().begin_fetch(campaign_id, url, **kw)
+
+
+async def _both_run(source, *, flag=True):
+    campaigns = MemoryCampaignStore()
+    both = await _campaign("both", campaigns)
+    await campaigns.set_search_plan(both.id, {"portal_urls": [
+        {"host": "fotocasa.es", "url": PORTAL_INDEX, "why": "plots"}]})
+    store = RecordingStore(campaigns)
+    w = _worker(campaigns, store, (source,), searcher=FakeSearcher(default=[PORTAL_HIT, INVESTOR_HIT]),
+                cover_portals=True, both_mode_portals=flag, acquisition_mode="apify", apify_min_listings=5)
+    await run_until_done(w, both.id)
+    queued = {c.url for c in store.enqueued}
+    site_queries = [q for q, _ in w.searcher.calls if "site:" in q]
+    return both.id, store, queued, site_queries
+
+
+async def test_portals_done_both_imports_objects_once_and_skips_portal_pages(ledger):
+    source = RealEstateSource(rows=5)
+    cid, store, queued, site_queries = await _both_run(source)
+    assert source.launches == 1 and store.runs[cid].stop_reason != "apify_enough"
+    api = [vertical for layer, vertical in store.verticals if layer == "api"]
+    assert len(api) == 5 and set(api) == {"real_estate"}  # an object, never split into object and investor
+    imported = [p for p in store.posts if "fotocasa.es" in p["url"]]
+    assert len(imported) == 5  # each row read once
+    assert PORTAL_INDEX not in queued  # no direct portal page (``_enqueue_portal_urls`` skipped)
+    assert not site_queries  # no ``site:`` fill (``cover_portals and not portals_done``)
+    assert PORTAL_HIT not in queued and INVESTOR_HIT in queued  # the search is for investors
+    spent = [e for e in costs.ledger().entries if e.campaign_id == cid and e.provider == "apify" and e.kind == "cost"]
+    assert spent and spent[0].cost_usd == .01  # campaign_costs
+
+
+@pytest.mark.parametrize("source", [RealEstateSource(rows=0), RealEstateSource(rows=5, fail=True)],
+                         ids=["too_few", "failed"])
+async def test_portals_not_done_both_falls_back_to_portal_pages_and_search(ledger, source):
+    cid, store, queued, site_queries = await _both_run(source)
+    assert source.launches == 1 and store.runs[cid].stop_reason != "apify_enough"
+    if source.fail:
+        assert (await store.source_runs(cid))[0].state == "failed"
+    assert PORTAL_INDEX in queued and site_queries and PORTAL_HIT in queued and INVESTOR_HIT in queued
+
+
+async def test_flag_off_both_reads_portal_pages_as_before(ledger):
+    source = RealEstateSource(rows=5)
+    _, store, queued, site_queries = await _both_run(source, flag=False)
+    assert source.launches == 0 and not [v for layer, v in store.verticals if layer == "api"]
+    assert PORTAL_INDEX in queued and site_queries and PORTAL_HIT in queued
