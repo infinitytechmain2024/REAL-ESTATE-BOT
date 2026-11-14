@@ -66,6 +66,7 @@ from .queries import (
     QueryGenerator,
     QueryTask,
     cover_portals,
+    listing_portal_host,
     localise,
     missing_portals,
     place_level_of,
@@ -73,6 +74,7 @@ from .queries import (
     plan_sites,
     portal_place_level,
     portal_quota,
+    without_portals,
 )
 from .render import ChallengeDetected, Renderer, RenderError
 from .scrape_api import Scraper
@@ -169,6 +171,10 @@ class WebSearchConfig:
     # ``apify_min_listings`` listings; legacy: the search engine runs next to the sources, as before.
     acquisition_mode: str = "legacy"
     apify_min_listings: int = 5
+    # INVESTOR_WEB_QUERIES (Q51): an ``investors`` campaign (not ``both``) gets no listing search plan (no planner
+    # call, no plan queries, no portal URLs); its rounds ask for investors (``QueryTask.investor_web``) and a hit on a
+    # listing portal is dropped. Off: the object search plan and its portals, as before.
+    investor_web_queries: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -215,8 +221,10 @@ def hygienic_languages(campaign: Campaign) -> tuple[str, ...]:
     return kept or tuple(campaign.plan.languages)
 
 
-def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = False) -> QueryTask:
+def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = False,
+               investor_queries: bool = False) -> QueryTask:
     plan = campaign.plan
+    investor = investor_queries and plan.vertical == "investors"  # INVESTOR_WEB_QUERIES: no listing search plan
     place = (campaign.spec or {}).get("place") if isinstance(campaign.spec, dict) else None
     districts = place.get("districts") if isinstance(place, dict) else None
     nearby = tuple(value.strip() for value in districts[:12] if isinstance(value, str) and value.strip()) if isinstance(districts, list) else ()
@@ -237,10 +245,10 @@ def query_task(campaign: Campaign, *, hygiene: bool = False, spec_level: bool = 
                      constraints=dict(plan.constraints),
                      languages=hygienic_languages(campaign) if hygiene else tuple(plan.languages),
                      country_code=plan.country, place_level=level,
-                     search_plan=plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country),
+                     search_plan=None if investor else plan.search_plan, blocked_hosts=blocked_hosts_of(campaign.spec, plan.country),
                      nearby_places=nearby, radius_km=radius, suburbs_only=suburbs_only, query_hygiene=hygiene,
                      rental_term=task_rental_term(campaign.spec, campaign.source_text)
-                     if plan.constraints.get("deal") == "rent" else None)
+                     if plan.constraints.get("deal") == "rent" else None, investor_queries=investor)
 
 
 class WebSearchWorker:
@@ -411,14 +419,17 @@ class WebSearchWorker:
         want = min(cfg.queries_per_round, cfg.max_queries_per_campaign - used_count)
         used = await self.store.used_queries(campaign.id)
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
-        task = query_task(campaign, hygiene=cfg.query_hygiene, spec_level=cfg.place_level_from_spec)
+        task = query_task(campaign, hygiene=cfg.query_hygiene, spec_level=cfg.place_level_from_spec,
+                          investor_queries=cfg.investor_web_queries)
         # The known portals (Idealista, Fotocasa first) are always searched: the ones not yet
         # searched take up to half of this round, written by the model or, if it skips one, from the task.
         if cfg.cover_portals:
             task = replace(task, required_portals=missing_portals(task, used)[:portal_quota(want)])
         # Whatever generated them, every query names the campaign's place (``localise``).
         queries = localise(await self.generator.generate(task, used=used, count=want), task)
-        queries = cover_portals(queries, task, used, want)
+        # INVESTOR_WEB_QUERIES: the generator already dropped portal queries before its fill; this is only the guard
+        # for a generator that does not (a no-op for any other task).
+        queries = without_portals(cover_portals(queries, task, used, want), task)
         round_no = await self.store.next_round(campaign.id)
         added = await self.store.add_queries(campaign.id, round_no, queries[:want], reuse_hours=cfg.query_reuse_hours)
         log.info("web_search.round", extra={"campaign_id": campaign.id, "round": round_no, "generated": len(queries),
@@ -673,6 +684,8 @@ class WebSearchWorker:
         """The campaign with its model-written search plan: asked once (idempotent), stored, never required."""
         if self.planner is None or campaign.plan.search_plan is not None or not campaign.spec:
             return campaign
+        if self.config.investor_web_queries and campaign.plan.vertical == "investors":
+            return campaign  # INVESTOR_WEB_QUERIES: the planner writes listing plans; an investor task needs none
         try:
             spec = TaskSpec.model_validate(campaign.spec)
         except ValueError:
@@ -685,7 +698,8 @@ class WebSearchWorker:
 
     async def _enqueue_portal_urls(self, campaign: Campaign) -> None:
         """The plan's direct portal search pages go into the queue as depth-0 index pages (already queued: no-op)."""
-        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
+        task = query_task(campaign, spec_level=self.config.place_level_from_spec,
+                          investor_queries=self.config.investor_web_queries)
         blocked = self.config.blocked_hosts | task.blocked_hosts
         # The kind is what the URL looks like (an index page is expected; a concrete listing URL is never queued here).
         deal = campaign_deal(campaign)
@@ -695,7 +709,8 @@ class WebSearchWorker:
             await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
 
     async def _search(self, campaign: Campaign, query_count: int, pages: int) -> None:
-        task = query_task(campaign, spec_level=self.config.place_level_from_spec)
+        task = query_task(campaign, spec_level=self.config.place_level_from_spec,
+                          investor_queries=self.config.investor_web_queries)
         blocked = self.config.blocked_hosts | task.blocked_hosts
         deal, known, real_estate = campaign_deal(campaign), known_hosts_of(campaign), campaign.plan.vertical == "real_estate"
         allowed = self._allowed_hosts(campaign, known)
@@ -716,6 +731,9 @@ class WebSearchWorker:
                 if not fetchable(hit.url, blocked):
                     continue
                 host = host_of(hit.url)
+                if task.investor_web and listing_portal_host(host):
+                    dropped += 1  # INVESTOR_WEB_QUERIES: a listing portal's page is no investor
+                    continue
                 if deal and (deal_conflict(hit.url, deal) or deal_of(hit.title) not in (None, deal)):
                     dropped += 1  # a rent page for a sale campaign (and vice versa): its path or its title says so
                     continue
