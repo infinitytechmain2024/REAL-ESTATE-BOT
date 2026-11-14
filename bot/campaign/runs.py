@@ -328,11 +328,12 @@ def _window_size(limit: int) -> int:
 
 class PostgresRunStore:
     def __init__(self, pool: asyncpg.Pool[asyncpg.Record], limits: SafetyLimits, *,
-                 dead_days: int = DEAD_DAYS, join_notices: bool = False) -> None:
+                 dead_days: int = DEAD_DAYS, join_notices: bool = False, held_null_why: bool = False) -> None:
         if not 1 <= dead_days <= 365:
             raise ValueError("dead_days must be 1..365")
         self.pool, self.limits, self.dead_days = pool, limits, dead_days
         self.join_notices = join_notices  # CAMPAIGN_JOIN_NOTICES: migration 047's columns are read only with it
+        self.held_null_why = held_null_why  # HELD_FINDINGS_NULL_WHY (Q41): held_findings keeps rows with why IS NULL
 
     async def recover_discovery_profile(self) -> int:
         """Free a Facebook profile a crashed discovery left ``in_use``; returns how many were freed.
@@ -825,7 +826,11 @@ class PostgresRunStore:
 
     async def held_findings(self, campaign_id: str, bucket: str, limit: int,
                             exclude_why: str | None = None) -> list[StreamFinding]:
-        """Held findings of one bucket, closest to the request first."""
+        """Held findings of one bucket, closest to the request first.
+
+        With ``held_null_why`` (Q41) no ``exclude_why`` excludes nothing, as in MemoryRunStore; without it
+        ``why is distinct from NULL`` drops every row whose why is NULL (the old behaviour)."""
+        why = "($3::text is null or cf.why is distinct from $3)" if self.held_null_why else "cf.why is distinct from $3"
         rows = await self.pool.fetch(
             f"""select f.id::text as id,
                        coalesce(nullif(f.structured_payload->>'formatted', ''), f.structured_payload->>'summary', '') as text,
@@ -836,7 +841,7 @@ class PostgresRunStore:
                   join findings f on f.id = cf.finding_id
                   join collected_posts p on p.id = f.post_id
                  where cf.campaign_id = $1::uuid and cf.bucket = $2 and cf.state = 'held'
-                   and cf.why is distinct from $3
+                   and {why}
                  order by cf.distance nulls last, f.created_at, f.id limit {int(limit)}""",
             campaign_id, bucket, exclude_why,
         )

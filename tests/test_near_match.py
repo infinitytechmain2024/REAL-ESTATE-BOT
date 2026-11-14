@@ -322,8 +322,7 @@ needs_db = pytest.mark.skipif(not URL or not URL.split("?")[0].rstrip("/").endsw
 MIGRATIONS = sorted((Path(__file__).resolve().parents[1] / "bot/services/db/migrations").glob("[0-9][0-9][0-9]_*.sql"))
 
 
-@pytest.fixture
-async def pool():
+async def _migrated_pool():
     import asyncpg
 
     conn = await asyncpg.connect(URL)
@@ -331,7 +330,12 @@ async def pool():
     for path in MIGRATIONS:
         await conn.execute(path.read_text(encoding="utf-8"))
     await conn.close()
-    pool = await asyncpg.create_pool(URL, min_size=1, max_size=4)
+    return await asyncpg.create_pool(URL, min_size=1, max_size=4)
+
+
+@pytest.fixture
+async def pool():
+    pool = await _migrated_pool()
     try:
         yield pool
     finally:
@@ -437,7 +441,7 @@ async def test_postgres_persists_the_hold_reason_and_skips_listed_findings(pool)
     from bot.orchestra.store import SafetyLimits
 
     campaigns = PostgresCampaignStore(pool)
-    store = PostgresRunStore(pool, SafetyLimits())
+    store = PostgresRunStore(pool, SafetyLimits(), held_null_why=True)  # HELD_FINDINGS_NULL_WHY (Q41)
     cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
                                  actor="telegram:42")
     ids = await _seed_findings(pool, cid, {"a": 52_000, "b": 53_000, "c": 54_000})
@@ -448,6 +452,76 @@ async def test_postgres_persists_the_hold_reason_and_skips_listed_findings(pool)
     assert not await store.hold_finding(cid, ids["a"], "similar", 0.0, "other")
     held = {f.id: f.hold_reason for f in await store.held_findings(cid, "similar", 5)}
     assert held == {ids["a"]: note, ids["b"]: None}
+
+
+@needs_db
+async def test_postgres_without_the_flag_drops_held_findings_with_no_why(pool) -> None:
+    """Q41, HELD_FINDINGS_NULL_WHY=false: the old query (``why is distinct from NULL``) loses every row whose why is
+    NULL, so such a finding is never offered, deduplicated or reported. Kept to document the rollback."""
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+
+    campaigns = PostgresCampaignStore(pool)
+    store = PostgresRunStore(pool, SafetyLimits())
+    cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
+                                 actor="telegram:42")
+    ids = await _seed_findings(pool, cid, {"a": 52_000, "b": 53_000})
+    assert await store.hold_finding(cid, ids["a"], "similar", 0.0, why="price")
+    assert await store.hold_finding(cid, ids["b"], "similar", 0.0)
+    assert [f.id for f in await store.held_findings(cid, "similar", 5)] == [ids["a"]]
+    # With an exclude_why the old query already keeps them: NULL is distinct from 'price'.
+    assert [f.id for f in await store.held_findings(cid, "similar", 5, exclude_why="price")] == [ids["b"]]
+
+
+@pytest.fixture(params=[pytest.param("postgres", marks=needs_db), "memory"])
+async def held_store(request):
+    """A run store (Postgres with HELD_FINDINGS_NULL_WHY on, or Memory), a campaign and three seeded findings."""
+    if request.param == "memory":
+        campaigns = MemoryCampaignStore()
+        store = MemoryRunStore(campaigns)
+        cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
+                                     actor="telegram:42")
+        for n, name in enumerate("abc"):
+            add(store, cid, name, 52_000 + n)
+        yield store, cid, {name: name for name in "abc"}
+        return
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+
+    pool = await _migrated_pool()
+    try:
+        campaigns = PostgresCampaignStore(pool)
+        cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
+                                     actor="telegram:42")
+        ids = await _seed_findings(pool, cid, {"a": 52_000, "b": 53_000, "c": 54_000})
+        yield PostgresRunStore(pool, SafetyLimits(), held_null_why=True), cid, ids
+    finally:
+        await pool.close()
+
+
+async def test_held_findings_keep_the_ones_with_no_why(held_store) -> None:
+    """Q41: a held finding whose why is NULL is listed with no exclude_why and with one (NULL is not that category);
+    Postgres with the flag and MemoryRunStore agree."""
+    store, cid, ids = held_store
+    assert await store.hold_finding(cid, ids["a"], "similar", 0.1, why="price")
+    assert await store.hold_finding(cid, ids["b"], "similar", 0.2)
+    assert await store.hold_finding(cid, ids["c"], "other", 0.3)
+    assert [f.id for f in await store.held_findings(cid, "similar", 5)] == [ids["a"], ids["b"]]
+    assert [f.id for f in await store.held_findings(cid, "similar", 5, exclude_why="price")] == [ids["b"]]
+    assert [f.id for f in await store.held_findings(cid, "similar", 5, exclude_why="area")] == [ids["a"], ids["b"]]
+    assert [f.id for f in await store.held_findings(cid, "other", 5)] == [ids["c"]]
+
+
+def test_held_findings_null_why_flag_is_off_by_default(monkeypatch) -> None:
+    from bot.campaign.settings import CampaignRunnerSettings
+
+    monkeypatch.delenv("HELD_FINDINGS_NULL_WHY", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    assert CampaignRunnerSettings(_env_file=None).held_findings_null_why is False
+    monkeypatch.setenv("HELD_FINDINGS_NULL_WHY", "true")
+    assert CampaignRunnerSettings(_env_file=None).held_findings_null_why is True
 
 
 async def test_a_rental_for_a_purchase_is_never_offered_or_sent() -> None:
