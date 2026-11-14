@@ -94,6 +94,7 @@ BASE_ENV: dict[str, str] = {
     "DEDUP_HELD_FINDINGS": "true",  # Q27
     "DEDUP_CROSS_PORTAL_FACTS": "true",  # Q32
     "DEDUP_SAME_HOST_COPY": "true",  # Q47
+    "DEDUP_DESCRIPTION_NORMALIZE": "true",  # Q50
     "OFFER_AFTER_SEARCH": "true",  # Q27
     "CAMPAIGN_EMPTY_REPORT": "true",  # Q33
     "REPORT_EVERY_PORTAL": "true",  # Q37

@@ -62,6 +62,17 @@ not recognised as one), two agency references that differ. An agency template fo
 (floor, m², rooms) and stays two cards; numbers past the compared excerpt (about 1 100 characters of the description
 after the «JSON-LD» line) are not seen.
 
+One description on two portals with a wrapper (``same_object(..., description_normalize=True)``,
+``DEDUP_DESCRIPTION_NORMALIZE``, Q50): Milanuncios shows an agency's Fotocasa ad with «Ref: Ausias Marc 127.» before
+the same text, no street, no phone (``stripSellerPII``), no agency and another district name («Eixample» for «Fort
+Pienc»); the reference adds a small number and the shorter «JSON-LD» line moves the excerpt, so no text rule holds.
+Two sites (no social network), at least one description under a leading «Ref: ...» wrapper, are one object when all
+hold: the descriptions without the wrapper (``normalized_description``) are the same (``_same_description`` with ``COPY_JACCARD``); the price equal as in
+``_cross_price``; the area within 3 % (both known); the rooms, the property type and the deal known on both sides and
+equal; one named city. Never: a new development, two named streets without a shared street token, two references
+that differ (the agency's ``agency_ref`` or the wrapper's one). Two aggregators renting one flat (Spotahome and
+HousingAnywhere) write other texts and other references: two cards.
+
 A district for a street (``same_object(..., district_not_street=True)``, ``DEDUP_DISTRICT_NOT_STREET``, Q15): portals
 fill the «address» of an ad without a street with the district, and two portals name it differently («L'Amistat» and
 «Algirós»). When one side's address has no street (no street word such as «calle», «C/», «avenida», «plaza»,
@@ -96,7 +107,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
@@ -170,6 +181,8 @@ _STREET_WORD = re.compile(
 # Street words that also name districts («Camí Fondo», «Gran Vía», «La Rambla»): a street only when the address is
 # more than the listing's district (``_named_street``); the other street words are always a street.
 _DISTRICT_STREET_WORD = re.compile(r"(?<![^\W_])(?:camino|cami|via|ronda|rambla|bulevar|boulevard|glorieta)(?![^\W_])")
+# Q50 (``DEDUP_DESCRIPTION_NORMALIZE``): a portal's «Ref: <agency reference>.» before the description (Milanuncios).
+_REF_WRAPPER = re.compile(r"\A\s*ref(?:erencia)?\s*\.?\s*:\s*([^\n.]{1,40})\.\s*", re.IGNORECASE)
 _AGENCY_REF_FIELD = re.compile(r',?\s*"agency_ref":\s*"((?:[^"\\]|\\.)*)"')
 _SOCIAL_HOSTS = frozenset({"facebook.com", "web.facebook.com", "fb.com", "fb.watch", "instagram.com"})
 _STOP = frozenset({
@@ -483,13 +496,16 @@ def _host(url: str | None) -> str:
 
 
 def same_object(a: Listing, b: Listing, *, without_address: bool = False, district_not_street: bool = False,
-                cross_portal_facts: bool = False, same_host_copy: bool = False) -> bool:
+                cross_portal_facts: bool = False, same_host_copy: bool = False,
+                description_normalize: bool = False) -> bool:
     """True only when the two listings are almost surely one property (see the module notes); ``without_address``
     (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``);
     ``district_not_street`` (``DEDUP_DISTRICT_NOT_STREET``, Q15) does not require a shared street when an address is
     only a district and compares the agency references; ``cross_portal_facts`` (``DEDUP_CROSS_PORTAL_FACTS``, Q32)
     lets two portals' addresses without a shared street merge by exact facts and a strong sign (``_same_cross_facts``);
-    ``same_host_copy`` (``DEDUP_SAME_HOST_COPY``, Q47) merges one ad filed twice on one portal (``_same_host_copy``)."""
+    ``same_host_copy`` (``DEDUP_SAME_HOST_COPY``, Q47) merges one ad filed twice on one portal (``_same_host_copy``);
+    ``description_normalize`` (``DEDUP_DESCRIPTION_NORMALIZE``, Q50) merges one description on two sites under a
+    «Ref: ...» wrapper (``_same_wrapped_description``)."""
     if a.deal and b.deal and a.deal != b.deal:
         return False
     if a.currency and b.currency and a.currency != b.currency:
@@ -518,6 +534,8 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
             return False  # another reference of the agency: another flat
     if same_host_copy and _same_host_copy(a, b):
         return True  # Q47: one ad filed twice on one portal, under two addresses
+    if description_normalize and _same_wrapped_description(a, b):
+        return True  # Q50: one description on two sites, one under a «Ref: ...» wrapper
     if both_addressed and not (street_a & street_b):
         if cross_portal_facts and _same_cross_facts(a, b):
             return True  # Q32: one object, two portals naming the district differently
@@ -665,6 +683,40 @@ def _same_host_copy(a: Listing, b: Listing) -> bool:
     if _named_street(a) and _named_street(b):
         return False  # two streets that differ: two objects (units of a development not named one)
     return _same_description(a, b, COPY_JACCARD)
+
+
+def normalized_description(description: str) -> tuple[str, str]:
+    """Q50: (the description without a leading «Ref: <reference>.» wrapper, ``ref_key`` of that reference or "")."""
+    found = _REF_WRAPPER.match(description or "")
+    if not found:
+        return description or "", ""
+    return description[found.end():], ref_key(found.group(1))
+
+
+def _same_wrapped_description(a: Listing, b: Listing) -> bool:
+    """Q50: one description on two sites, a «Ref: ...» wrapper dropped (see the module notes)."""
+    host_a, host_b = _host(a.url), _host(b.url)
+    if not host_a or not host_b or host_a == host_b or host_a in _SOCIAL_HOSTS or host_b in _SOCIAL_HOSTS:
+        return False
+    if a.new_build or b.new_build or not (a.kind and a.kind == b.kind) or not (a.deal and a.deal == b.deal):
+        return False
+    if not (a.rooms and a.rooms == b.rooms):
+        return False
+    if not _cross_price(a.price, b.price) or _close(a.area, b.area, AREA_TOLERANCE) is not True:
+        return False
+    cities = _cities(a)
+    if not cities or cities != _cities(b):
+        return False
+    if _named_street(a) and _named_street(b) and not ((tokens(a.address) & tokens(b.address)) - _DISTRICT_STOP):
+        return False  # two streets that differ: two objects
+    text_a, wrapped_a = normalized_description(a.description)
+    text_b, wrapped_b = normalized_description(b.description)
+    if not (wrapped_a or wrapped_b):
+        return False  # no wrapper: the rules of Q32 decide
+    ref_a, ref_b = a.agency_ref or wrapped_a, b.agency_ref or wrapped_b
+    if ref_a and ref_b and ref_a != ref_b:
+        return False  # another reference of the agency: another unit
+    return _same_description(replace(a, description=text_a), replace(b, description=text_b), COPY_JACCARD)
 
 
 def _place_tokens(listing: Listing) -> frozenset[str]:
