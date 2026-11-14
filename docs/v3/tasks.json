@@ -1,5 +1,5 @@
 {
-  "updated": "2026-11-11",
+  "updated": "2026-11-14",
   "statuses": [
     "waiting_owner",
     "blocked",
@@ -818,7 +818,7 @@
       "deps": [
         "P1.8"
       ],
-      "status": "review",
+      "status": "done",
       "day": "",
       "hours": 10
     },
@@ -830,7 +830,7 @@
       "deps": [
         "T1"
       ],
-      "status": "review",
+      "status": "done",
       "day": "",
       "hours": 4
     },
@@ -842,7 +842,379 @@
       "deps": [
         "T2"
       ],
-      "status": "blocked",
+      "status": "in_progress",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q4",
+      "title": "Место из текста объявления, конфликт → ревью",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q5",
+      "title": "Гигиена поисковых запросов",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q6",
+      "title": "Тексты отчёта",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q7",
+      "title": "Стенд: правки после пилота",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q8",
+      "title": "Дедуп копий участков без адреса",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q9",
+      "title": "Мягкие пожелания остаются мягкими",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q10",
+      "title": "Idealista: сортировка по площади для больших участков",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q11",
+      "title": "Уровень места из задачи в порталы",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q12",
+      "title": "Порталы: защита от точки по умолчанию",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q13",
+      "title": "Муниципалитет из текста; проверка площади за флагом (off)",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q14",
+      "title": "Стенд: словоформы слотов ответов",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q15",
+      "title": "Межпортальный дедуп, когда адрес — район",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q16",
+      "title": "Факты портала из строки, флаг аукциона",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q17",
+      "title": "Idealista: однозначное место, код wrong_place",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q18",
+      "title": "Таунхаус = дом; полное описание с hits для ревью",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q19",
+      "title": "Стенд: «Показать похожие», рубрика одобренных",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q20",
+      "title": "Порталы: срок аренды",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q21",
+      "title": "(отложено владельцем после 3 ревью)",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "cut",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q22",
+      "title": "Правило нежилого в ревью",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q23",
+      "title": "Метки интервью не выключают порталы",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q24",
+      "title": "Стенд: кнопки персон, слот must_have, truth G5",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q25",
+      "title": "«Показать похожие» перечисляет все причины",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q26",
+      "title": "Idealista: поиск по району",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q27",
+      "title": "Дедуп отложенных находок, предложение после поиска",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q28",
+      "title": "Названия мест во фразах пользователя",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q29",
+      "title": "Спальни из текста объявления (отложено владельцем после 3 ревью)",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "cut",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q30",
+      "title": "Статичные центры городов для Idealista",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q31",
+      "title": "Bbox Elche, Cartagena, Mérida",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q32",
+      "title": "Межпортальный дедуп по телефону или описанию",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q33",
+      "title": "Отчёт пустой инвесторской кампании",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "review",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q34",
+      "title": "Стенд: ответы SearXNG, прогресс и часы",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "in_progress",
       "day": "",
       "hours": 0
     }
