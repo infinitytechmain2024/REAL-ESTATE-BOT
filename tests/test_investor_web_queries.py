@@ -149,8 +149,17 @@ def test_portal_queries_and_hosts_are_recognised() -> None:
                GeneratedQuery("thinkspain.com investors Malaga", "en"),
                GeneratedQuery("club de inversores Málaga", "es")]
     assert [q.text for q in without_portals(queries, task)] == ["club de inversores Málaga"]
-    assert listing_portal_host("www.lucasfox.com") and listing_portal_host("idealista.com")
-    assert not listing_portal_host("urbanitae.com")
+    assert listing_portal_host("www.lucasfox.com") and listing_portal_host("lucasfox.es")
+    assert listing_portal_host("idealista.com") and listing_portal_host("news.idealista.com")
+    assert listing_portal_host("www.fotocasa.es") and listing_portal_host("solvia.es")
+    for host in ("urbanitae.com", "altamira-capital.es", "solvia-inversiones.es", "tucasa-invest.es",
+                 "colegio-altamira.es", "notidealista.com"):
+        assert not listing_portal_host(host), host
+    places = [GeneratedQuery("inversores inmobiliarios Altamira Almería", "es"),
+              GeneratedQuery("Solvia inversores Málaga", "es"),
+              GeneratedQuery("site:solvia.es inversión Málaga", "es"),
+              GeneratedQuery("site:altamirainmuebles.com Málaga", "es")]
+    assert [q.text for q in without_portals(places, task)] == [q.text for q in places[:2]]
     templates = TemplateQueryGenerator().candidates(task)
     assert templates and all("site:" not in q.text for q in templates)
 
@@ -182,3 +191,38 @@ def test_setting_reaches_the_config(monkeypatch) -> None:
     assert WebSearchSettings(_env_file=None).config().investor_web_queries is False
     monkeypatch.setenv("INVESTOR_WEB_QUERIES", "true")
     assert WebSearchSettings(_env_file=None).config().investor_web_queries is True
+
+
+class PortalModel:
+    """A model that answers an investor round with portal queries only."""
+
+    model = "portal-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, task, *, used, count):
+        self.calls += 1
+        return [GeneratedQuery("site:idealista.com inversión Málaga", "es"),
+                GeneratedQuery("fotocasa pisos inversión Málaga", "es"),
+                GeneratedQuery("site:www.thinkspain.com investors Malaga", "en")][:count]
+
+
+async def test_portal_only_model_round_is_filled_by_templates_before_the_round_ends() -> None:
+    campaigns, store = MemoryCampaignStore(), MemoryWebStore(None)
+    store.campaigns = campaigns
+    cid = await make_campaign(campaigns, "investors")
+    model = PortalModel()
+    w = WebSearchWorker(campaigns, store, FakeSearcher(), FakeFetcher(), FallbackQueryGenerator(model),
+                        planner=FixedPlanner(),
+                        config=WebSearchConfig(cover_portals=False, queries_per_round=4, max_queries_per_campaign=8,
+                                               domain_policy="off", investor_web_queries=True))
+    await w.tick()  # the first round
+    run_ = await store.get_run(cid)
+    assert run_ is not None and run_.state == "searching"  # not «queries_exhausted» on the first round
+    texts = [q.text for q in store.queries[cid]]
+    assert model.calls == 1 and len(texts) == 4
+    assert all(not portal_query(t) and "site:" not in t for t in texts)
+    assert "club de inversores" in " ".join(texts).lower()
+    generated = await FallbackQueryGenerator(model).generate(_investor_task(), used=[], count=3)
+    assert len(generated) == 3 and not any(portal_query(q.text) for q in generated)

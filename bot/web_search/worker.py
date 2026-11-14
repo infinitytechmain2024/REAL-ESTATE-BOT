@@ -427,6 +427,8 @@ class WebSearchWorker:
             task = replace(task, required_portals=missing_portals(task, used)[:portal_quota(want)])
         # Whatever generated them, every query names the campaign's place (``localise``).
         queries = localise(await self.generator.generate(task, used=used, count=want), task)
+        # INVESTOR_WEB_QUERIES: the generator already dropped portal queries before its fill; this is only the guard
+        # for a generator that does not (a no-op for any other task).
         queries = without_portals(cover_portals(queries, task, used, want), task)
         round_no = await self.store.next_round(campaign.id)
         added = await self.store.add_queries(campaign.id, round_no, queries[:want], reuse_hours=cfg.query_reuse_hours)

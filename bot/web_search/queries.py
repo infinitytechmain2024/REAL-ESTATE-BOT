@@ -634,14 +634,18 @@ def cover_portals(queries: list[GeneratedQuery], task: QueryTask, used: list[str
 
 
 _HOST_IN_QUERY = re.compile(r"((?:[a-z0-9-]+\.)+[a-z]{2,})")
-# A listing portal named by its brand (``idealista``, ``fotocasa``, ``pisos.com`` → ``pisos`` is too common: skipped).
+# A listing portal named by its brand in a QUERY only (``pisos`` is too common; ``altamira`` is also a place, ``solvia``
+# a word of company names: both are caught only as a domain or after ``site:``).
 _PORTAL_NAME = re.compile(r"(?<!\w)(?:idealista|fotocasa|habitaclia|yaencontre|milanuncios|kyero|thinkspain|indomio"
-                          r"|tucasa|spainhouses|green-acres|servihabitat|solvia|altamira|lucas fox|lucasfox)(?!\w)")
+                          r"|tucasa|spainhouses|green-acres|servihabitat|lucas fox|lucasfox)(?!\w)")
+# Listing agencies with portal-sized catalogues that are not in the portal lists (exact domains).
+_LISTING_AGENCY_HOSTS = ("lucasfox.com", "lucasfox.es")
 
 
 def listing_portal_host(host: str) -> bool:
-    """A listing portal or a big listing agency site (INVESTOR_WEB_QUERIES: never read for an investor task)."""
-    return known_portal(host) or bool(_PORTAL_NAME.search(host.lower()))
+    """A known listing portal (``urls.known_portal``: the portal lists) or a listing agency of
+    ``_LISTING_AGENCY_HOSTS``, by exact domain or its subdomain (INVESTOR_WEB_QUERIES: never read for investors)."""
+    return known_portal(host.lower().rstrip("."), _LISTING_AGENCY_HOSTS)
 
 
 def without_portals(queries: list[GeneratedQuery], task: QueryTask) -> list[GeneratedQuery]:
@@ -653,7 +657,7 @@ def without_portals(queries: list[GeneratedQuery], task: QueryTask) -> list[Gene
     for query in queries:
         text = query.text.lower()
         hosts = _HOST_IN_QUERY.findall(text)
-        if any(known_portal(h.removeprefix("www.")) for h in hosts) or _PORTAL_NAME.search(text):
+        if any(listing_portal_host(h) for h in hosts) or _PORTAL_NAME.search(text):
             log.info("web_search.query_dropped", extra={"reason": "investor_portal", "query": query.text[:120]})
             continue
         kept.append(query)
@@ -943,16 +947,18 @@ class FallbackQueryGenerator:
         self.primary, self.fallback = primary, fallback or TemplateQueryGenerator()
 
     async def generate(self, task: QueryTask, *, used: list[str], count: int) -> list[GeneratedQuery]:
-        kept = planned_round(task, used, count)  # the search plan's queries go first, then the model, then templates
+        # The search plan's queries go first, then the model, then templates. INVESTOR_WEB_QUERIES: a portal query is
+        # dropped here, before the templates fill the round (``without_portals``; no-op for any other task).
+        kept = without_portals(planned_round(task, used, count), task)
         if self.primary is not None and len(kept) < count:
             try:
-                more = local_round(await self.primary.generate(task, used=[*used, *(q.text for q in kept)],
-                                                               count=count - len(kept)),
+                more = local_round(without_portals(await self.primary.generate(
+                    task, used=[*used, *(q.text for q in kept)], count=count - len(kept)), task),
                                    task, [*used, *(q.text for q in kept)], count - len(kept))
                 kept += more
             except QueryGenerationError as exc:
                 log.warning("web_search.query_generation_failed %s %s", exc.code, exc.status)
         if len(kept) < count:
             more = await self.fallback.generate(task, used=[*used, *(q.text for q in kept)], count=count - len(kept))
-            kept += more
+            kept += without_portals(more, task)
         return kept
