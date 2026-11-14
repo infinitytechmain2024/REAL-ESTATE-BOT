@@ -133,6 +133,7 @@ def card_line(deviation: Deviation) -> str | None:
 
 
 MAX_REASONS = 5  # OFFER_ALL_REASONS (Q25): at most this many differences in the question, then «и ещё N»
+OTHER_REASON = "другие отличия"  # Q64: a held listing whose difference the reviewer did not name
 
 
 def reasons_of(deviations: Iterable[Deviation]) -> list[str]:
@@ -174,14 +175,62 @@ def reasons_of(deviations: Iterable[Deviation]) -> list[str]:
     return reasons
 
 
-def reasons_question(reasons: Iterable[str], *, land: bool = False, exact_found: bool) -> str:
+def counted_reasons(deviations: Iterable[Deviation]) -> list[str]:
+    """Q64 (``OFFER_REASONS_FROM_REVIEW``): one difference per held listing (the reviewer's phrase, «дороже» /
+    «площадь меньше» by the worst value, «не подтверждено: …»), the same ones grouped and ranked by how many listings
+    have them, the first seen first on a tie: «земля rústico, не urbano — 6; не подтверждено: площадь — 3». A listing
+    whose difference the reviewer did not name counts under «другие отличия»; none named at all: empty."""
+    counts: dict[str, int] = {}
+    dearest: Deviation | None = None
+    smallest: Deviation | None = None
+    for d in deviations:
+        if d.kind == "price" and d.example:
+            key = "price"
+            if dearest is None or (d.value or 0) > (dearest.value or 0):
+                dearest = d
+        elif d.kind == "area" and d.example:
+            key = "area"
+            if smallest is None or (d.value is not None and (smallest.value is None or d.value < smallest.value)):
+                smallest = d
+        elif d.kind == "area_unknown":
+            key = "не подтверждено: площадь"
+        elif d.kind == "unverified":
+            key = f"не подтверждено: {', '.join(d.unknown)}" if d.unknown else "не удалось проверить автоматически"
+        elif d.kind == "deal_kind" and d.phrase and d.phrase.strip():
+            key = f"другой вид сделки: {d.phrase.strip()}"
+        elif d.phrase and d.phrase.strip():
+            key = d.phrase.strip()
+        else:
+            key = OTHER_REASON
+        counts[key] = counts.get(key, 0) + 1
+    if set(counts) == {OTHER_REASON}:
+        return []  # nothing named: the question stays as before (Q25 / ``similar_question``)
+    labels = {"price": f"дороже (до {dearest.example})" if dearest else "дороже",
+              "area": f"площадь меньше (от {smallest.example})" if smallest else "площадь меньше"}
+    # stable: a tie keeps the order seen; «другие отличия» always last
+    ranked = sorted(counts.items(), key=lambda item: (item[0] == OTHER_REASON, -item[1]))
+    return [f"{labels.get(key, key)} — {count}" for key, count in ranked]
+
+
+def _more_kinds(n: int) -> str:
+    """Q64: «и ещё 1 другое отличие», «и ещё 3 других отличия», «и ещё 7 других отличий»."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f" и ещё {n} другое отличие"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f" и ещё {n} других отличия"
+    return f" и ещё {n} других отличий"
+
+
+def reasons_question(reasons: Iterable[str], *, land: bool = False, exact_found: bool, counted: bool = False) -> str:
     """Q25 (``OFFER_ALL_REASONS``): the similar question names every distinct difference of the held listings, at most
     ``MAX_REASONS``, then «и ещё N»: «… есть участки с отличиями — участок занят; дороже (до ~60 000 €) и ещё 2.
-    Показать?» (a dash: the reasons carry their own colons)."""
+    Показать?» (a dash: the reasons carry their own colons). ``counted`` (Q64, reasons with counts): «и ещё N других
+    отличий», so N is not read as a number of listings."""
     unique = list(dict.fromkeys(r for r in reasons if r))
     listed = "; ".join(unique[:MAX_REASONS])
     if len(unique) > MAX_REASONS:
-        listed += f" и ещё {len(unique) - MAX_REASONS}"
+        rest = len(unique) - MAX_REASONS
+        listed += _more_kinds(rest) if counted else f" и ещё {rest}"
     what = "участки" if land else "варианты"
     if exact_found:
         return f"Есть ещё похожие {what} с отличиями — {listed}. Показать?"

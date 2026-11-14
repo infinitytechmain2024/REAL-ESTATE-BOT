@@ -575,7 +575,7 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
                  tolerance: float | None = None, soft_wishes: bool = False,
                  task_wishes: Sequence[Any] = (), townhouse_is_house: bool = False,
                  quote_hits: bool = False, non_residential: bool = False, places: bool = False,
-                 tenant: bool = False, seasonal: bool = False) -> Review:
+                 tenant: bool = False, seasonal: bool = False, land_terms: bool = False) -> Review:
     """The model's answer after harmless drift is fixed and the rules above are enforced.
 
     ``ValueError``: not a JSON object. ``expected``: the criteria asked for (an unanswered one is ``unknown``,
@@ -588,7 +588,8 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     ``near`` (a suburb, a promotion of several flats; a townhouse for a house without ``REVIEW_TOWNHOUSE_IS_HOUSE``,
     with it only when the task asks for a detached house) stays ``near`` with its deviation. ``townhouse_is_house``,
     ``quote_hits``, ``non_residential``, ``tenant`` and ``seasonal`` only name the prompt version stored with the review; ``places``
-    (``USER_PHRASE_PLACES``, Q28) keeps Latin place names in the deviation phrase.
+    (``USER_PHRASE_PLACES``, Q28) keeps Latin place names in the deviation phrase, ``land_terms``
+    (``OFFER_REASONS_FROM_REVIEW``, Q64) the Spanish land-status words («земля rústico, не urbano»).
     """
     data = json.loads(_FENCE.sub("", content))
     if not isinstance(data, dict):
@@ -627,7 +628,7 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     confidence = data.get("confidence")
     confidence = (max(0.0, min(1.0, float(confidence)))
                   if isinstance(confidence, int | float) and not isinstance(confidence, bool) else None)
-    deviation = (user_phrase(data.get("deviation_ru") or data.get("deviation"), places=places)
+    deviation = (user_phrase(data.get("deviation_ru") or data.get("deviation"), places=places, land_terms=land_terms)
                  if overall == "near" else None)
     prompt = prompt_of(soft_wishes=soft_wishes, townhouse_is_house=townhouse_is_house, quote_hits=quote_hits,
                        non_residential=non_residential, tenant=tenant, seasonal=seasonal)[0]
@@ -711,7 +712,7 @@ class OpenRouterReviewer:
                  client: httpx.AsyncClient | None = None, soft_wishes: bool = False,
                  townhouse_is_house: bool = False, quote_hits: bool = False,
                  non_residential: bool = False, phrase_places: bool = False, tenant: bool = False,
-                 seasonal: bool = False) -> None:
+                 seasonal: bool = False, phrase_land_terms: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the reviewer")
         self.model = model
@@ -722,6 +723,7 @@ class OpenRouterReviewer:
         self.tenant_hits = tenant  # REVIEW_TENANT_HITS (Q45): a tenanted / auctioned home is similar for a buyer
         self.seasonal = seasonal  # RENT_DEFAULT_LONG_TERM (Q49): a seasonal let is similar for a home rent
         self.phrase_places = phrase_places  # USER_PHRASE_PLACES (Q28): Latin place names in the deviation phrase
+        self.phrase_land_terms = phrase_land_terms  # OFFER_REASONS_FROM_REVIEW (Q64): «rústico» in the phrase
         self._llm = OpenRouterJSON(api_key, timeout_seconds=timeout_seconds, client=client)
 
     async def aclose(self) -> None:
@@ -744,7 +746,8 @@ class OpenRouterReviewer:
                                 tolerance=_number(task.get("tolerance_pct")), soft_wishes=self.soft_wishes,
                                 task_wishes=task.get("wishes") or (), townhouse_is_house=self.townhouse_is_house,
                                 quote_hits=self.quote_hits, non_residential=self.non_residential,
-                                places=self.phrase_places, tenant=self.tenant_hits, seasonal=self.seasonal)
+                                places=self.phrase_places, tenant=self.tenant_hits, seasonal=self.seasonal,
+                                land_terms=self.phrase_land_terms)
         except Exception as exc:
             log.warning("campaign.review_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response") from exc

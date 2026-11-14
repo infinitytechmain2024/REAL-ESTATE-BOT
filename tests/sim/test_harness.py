@@ -512,6 +512,36 @@ async def test_a_web_stage_that_never_ends_still_stalls_the_run(tmp_path: Path) 
     assert bench.clock.offset.total_seconds() <= MAX_BUSY_ROUNDS * 10 + MAX_JUMPS * IDLE_JUMP.total_seconds()
 
 
+@pytest.mark.asyncio
+async def test_the_run_ends_only_after_a_quiet_round_once_the_campaign_ended(tmp_path: Path) -> None:
+    """Q64 (sim b6-g1-s7): after «Одобрить» an ended campaign still sends the approved held cards, 20 a step, then the
+    status and the report; the run used to stop one round after the press, with 17 cards held and no report."""
+    from types import SimpleNamespace
+
+    from scripts.sim.harness import Bench, Persona
+
+    campaign = {"state": "completed", "searching": False}
+    bench = Bench(tmp_path, "loop", Persona(name="t", task="t"))
+    bench.pool, bench.campaign_id = _LoopPool(campaign), "c1"  # type: ignore[attr-defined]
+    chat = bench.net.telegram
+    batches = [20, 17, 2]  # held cards, then the report and the status below them
+    rounds = 0
+
+    async def runner() -> None:
+        nonlocal rounds
+        rounds += 1
+        for _ in range(batches.pop(0) if batches else 0):
+            chat.call("sendMessage", {"chat_id": 1, "text": "card"})
+
+    class Campaigns:
+        async def get(self, _id: str) -> object:
+            return SimpleNamespace(state=campaign["state"])
+
+    await bench._loop([("runner", runner)], Campaigns(), None)
+    assert len(chat.messages) == 39 and rounds == 4  # three rounds that wrote, then one quiet round
+    assert bench.status != "stalled"
+
+
 @postgres
 @pytest.mark.asyncio
 async def test_the_databases_now_is_the_runners_virtual_clock(tmp_path: Path) -> None:

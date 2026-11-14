@@ -93,6 +93,7 @@ BASE_ENV: dict[str, str] = {
     "ANALYSIS_AREA_TEXT_CHECK": "false",  # Q13: off until area_check review blockers (N4, N5) are fixed
     "DEDUP_DISTRICT_NOT_STREET": "true",  # Q15
     "OFFER_ALL_REASONS": "true",  # Q25
+    "OFFER_REASONS_FROM_REVIEW": "true",  # Q64
     "USER_PHRASE_PLACES": "true",  # Q28
     "PORTAL_DISTRICT_SEARCH": "true",  # Q26; REDIS_URL is empty here: no geocoder, so the input stays as before
     "DEDUP_HELD_FINDINGS": "true",  # Q27
@@ -699,7 +700,7 @@ class Bench:
 
         idle = jumps = after_end = busy = 0
         for _ in range(MAX_ROUNDS):
-            before = self._progress()
+            before, chat_before = self._progress(), self._chat()
             state_before = await self.pool.fetchval("select state from campaigns where id = $1::uuid",
                                                     self.campaign_id)
             for name, step in stages:
@@ -716,7 +717,9 @@ class Bench:
             if campaign is None:
                 break
             if campaign.state in TERMINAL_STATES:
-                after_end += 1
+                # A terminal step that still wrote to the chat (approved held cards, max_stream_per_step a step, then
+                # the status and the report) is not the end: the run ends after one quiet terminal round.
+                after_end = after_end + 1 if self._chat() == chat_before else 1
                 if after_end >= 2:  # the terminal step (summary, report) ran once more for the edits
                     return
             moved = self._progress() != before or campaign.state != state_before
@@ -746,6 +749,11 @@ class Bench:
         trigger stamps is on the runner's time, a report is not cut by ``SUMMARY_WINDOW`` after the jumps."""
         self.clock.advance(delta)
         await db.set_clock(self.pool, self.clock.offset)
+
+    def _chat(self) -> tuple[int, int, int]:
+        """The chat as the user sees it: messages sent, edits and deletions so far."""
+        messages = self.net.telegram.messages
+        return len(messages), sum(m["edits"] for m in messages), sum(1 for m in messages if m["deleted"])
 
     def _progress(self) -> tuple[int, ...]:
         net = self.net

@@ -141,6 +141,7 @@ QUEUE_BUSY = "Ожидание: Facebook занят другой кампани�
 STOPPED = "Кампания остановлена"
 MAX_MESSAGE_CHARS = 3900
 HELD_DEDUP_LIMIT = 200  # Q27: the held findings of a bucket a new one is compared with (closest first)
+REASONS_LIMIT = 200  # Q64: the held similar findings whose differences the «Показать?» question counts
 SUMMARY_STATES = frozenset({"completed", "cancelled"})
 SUMMARY_WINDOW = timedelta(hours=2)
 # OFFER_AFTER_SEARCH (Q27): the final report waits for the checks and the similar question at most this long after the
@@ -313,6 +314,7 @@ class RunnerConfig:
     dedup_description_normalize: bool = False
     # The similar question names every distinct difference of the held listings, not only the closest one's (Q25).
     offer_all_reasons: bool = False
+    offer_reasons_from_review: bool = False  # Q64: the question names the reviewer's differences, counted
     # A held similar/other finding is merged with the same object already held or sent before it is held (Q27).
     dedup_held_findings: bool = False
     # The similar question is asked once the search and the checks are over, not at the first held finding (Q27).
@@ -1245,7 +1247,16 @@ class CampaignRunner:
                     names.update(dict.fromkeys(offers.unknown_of(other.hold_reason)))
                 deviation = replace(deviation, unknown=tuple(names))
             text = offers.similar_question(deviation, exact_found=exact_found)
-            if self.config.offer_all_reasons:  # Q25: one «Одобрить» sends them all, so the question names them all
+            if self.config.offer_reasons_from_review:  # Q64: every held one's difference, grouped and counted
+                try:
+                    reasons = await self._counted_reasons(campaign, request, closest)
+                except Exception:  # noqa: BLE001 - the question goes out with the closest one's difference
+                    log.warning("campaign.offer_reasons_failed", extra={"campaign_id": campaign.id})
+                    reasons = []
+                if reasons:
+                    text = offers.reasons_question(reasons, land=deviation.land, exact_found=exact_found,
+                                                   counted=True)
+            elif self.config.offer_all_reasons:  # Q25: one «Одобрить» sends them all, so the question names them all
                 try:
                     reasons = await self._reasons(campaign, request, deviation)
                 except Exception:  # noqa: BLE001 - the question goes out with the closest one's difference
@@ -1275,6 +1286,19 @@ class CampaignRunner:
             except Exception:  # noqa: BLE001 - the question still goes out with the differences known so far
                 continue
         return offers.reasons_of(deviations)
+
+    async def _counted_reasons(self, campaign: Campaign, request: Request, closest: StreamFinding) -> list[str]:
+        """Q64: the difference of each held similar finding (the closest one when none is listed), grouped and ranked
+        by count (``offers.counted_reasons``); a finding whose difference cannot be told is skipped."""
+        held = await self.store.held_findings(campaign.id, "similar", REASONS_LIMIT,
+                                              exclude_why=self._unoffered("similar"))
+        deviations: list[offers.Deviation] = []
+        for finding in held or [closest]:
+            try:
+                deviations.append(await self._deviation(campaign, request, finding))
+            except Exception:  # noqa: BLE001 - the question still goes out with the differences known so far
+                continue
+        return offers.counted_reasons(deviations)
 
     async def _summary(self, campaign: Campaign) -> None:
         """«Итог поиска»: what each source gave, sent once to an owner's campaign when it completes or is cancelled.
