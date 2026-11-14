@@ -50,7 +50,7 @@ or by auction («subasta», «pujas») is a similar variant, not an exact one: `
 
 ``RENT_DEFAULT_LONG_TERM`` (Q49, off by default): for a person renting a home (deal rent, type apartment, house or no
 type) who did not ask for a short stay («на сезон», «на пару месяцев», «посуточно»; «не знаю» / «не важно» is no such
-request) a seasonal, temporary or holiday let («alquiler de temporada», «temporal», «vacacional», «por meses»,
+request) a seasonal, temporary or holiday let («alquiler de temporada», «alquiler temporal», «uso vacacional», «por meses»,
 «estancias cortas», «vacation rental») is a similar variant: ``deal`` is ``unknown`` with the quote, ``overall``
 ``near``, deviation «сезонная аренда»; «larga temporada», «larga estancia», «no temporal» are no sign. The version gets
 ``-lt`` after ``-tn`` and before ``-hits`` (``reviewer-v3-lt``, ``reviewer-v3-soft-th-nr-tn-lt-hits`` ...). Off: the
@@ -305,14 +305,18 @@ _SEASONAL = """- Seasonal let: when "task.hard.deal" is "rent" and "type" is apa
   месяцев», «на 1–3 месяца», «посуточно», «краткосрочно», «temporada», «vacaciones»), a seasonal, temporary or holiday
   let is a compromise, not an exact match. Then "deal" is "unknown" with that quote (never "fail": it is still a
   rent), "overall" is "near", near_reason, when asked, is "other", and deviation_ru is «сезонная аренда». An answer
-  «не знаю», «не важно», «пока не знаю» about the term is no request for a short stay. Signs: «alquiler de
-  temporada», «de temporada», «alquiler temporal», «temporal», «temporalidad», «vacacional», «uso exclusivo
-  vacaciones», «estancias vacacionales», «por meses», «hasta 11 meses», «máximo 11 meses», «estancias cortas», «media
-  estancia», «vacation rental», «holiday let», «short-term rental», «seasonal rental», the label «Alquiler de
-  temporada». These words may also be in "hits". No sign: a long let or a negation («larga temporada», «alquiler de
-  larga temporada», «larga estancia», «larga duración», «no temporal», «no se alquila por temporada», «sin
-  temporada»); a holiday or a season named for something else («temporada alta» of a nearby beach, «ideal para
-  vacaciones» about the area without a short let).
+  «не знаю», «не важно», «пока не знаю» about the term is no request for a short stay. Signs (a let word with its term,
+  never a bare word): «alquiler de temporada», «alquiler temporal», «alquileres temporales», «contrato de temporada»,
+  «arrendamiento de temporada», «se alquila por temporadas», «justificar temporalidad», «alquiler vacacional», «uso
+  vacacional», «estancias vacacionales», «uso exclusivo vacaciones», «uso para vacaciones», «hasta 11 meses», «máximo
+  11 meses», «por meses» (as the let's term), «estancias cortas», «media estancia», «vacation rental», «holiday let»,
+  «short-term rental», «seasonal rental», the label «Alquiler de temporada». These words may also be in "hits". No
+  sign: a long let («alquiler de larga temporada», «alquiler de temporada larga», «larga estancia», «larga duración»);
+  a negation («no es un alquiler de temporada», «no se alquila por temporada», «alquiler no temporal»); a bare
+  «temporada», «temporal» or «vacaciones» about something else («temporada de verano en la piscina comunitaria»,
+  «temporada alta en la playa», «frutas de temporada», «contrato laboral temporal», «trabajadores temporales», «ideal
+  para vacaciones o vivir todo el año»); months of a deposit or a payment («fianza máximo 2 meses», «garantía de hasta
+  2 meses», «pago por meses adelantados»).
 """
 
 

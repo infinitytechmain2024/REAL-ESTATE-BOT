@@ -65,7 +65,7 @@ Other constraints
   house or unknown) lives there, so a term not asked for or answered «не знаю» / «не важно» means a long lease. The
   portal row says temporary (``rental_term``, written with ``PORTAL_RENTAL_TERM``) or the listing's summaries name a
   seasonal, temporary or holiday let (``bot/utils/listing_text.py`` ``seasonal_let_named``: «alquiler de temporada»,
-  «temporal», «vacacional», «por meses», «estancias cortas»; not «larga temporada», «no temporal»). A task that asks
+  «alquiler temporal», «uso vacacional», «por meses», «estancias cortas»; not «larga temporada», «no temporal»). A task that asks
   for a short term («на сезон», «на пару месяцев», «посуточно»; ``task_rental_term`` «short»): unchanged.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country

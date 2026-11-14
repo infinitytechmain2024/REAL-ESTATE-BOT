@@ -100,7 +100,9 @@ def _prompt(flags: tuple[bool, ...], lt: bool) -> tuple[str, str]:
     "para estancias vacacionales de más de 32 días", "solo alquiler de temporada de hasta 4 meses",
     "Se alquila por meses", "ideal para estancias cortas", "Vacation rental in Eixample",
     "Временная аренда только для отдыха (vacacional)",
-    "Piso no amueblado en alquiler de temporada",
+    "Piso no amueblado en alquiler de temporada", "Piso no amueblado, en alquiler de temporada",
+    "Contrato de temporada de 6 meses", "alquiler vacacional", "hay que justificar temporalidad",
+    "Se alquila por temporadas", "Alquiler de temporada",
 ])
 def test_seasonal_signs(text):
     assert seasonal_let_named(text) is True
@@ -110,6 +112,15 @@ def test_seasonal_signs(text):
     "Alquiler de larga temporada", "Piso para larga estancia", "Contrato de larga duración", "alquiler no temporal",
     "No se alquila por temporada", "долгосрочная аренда, не временная аренда", "Piso de 3 habitaciones con terraza",
     None,
+    # B1: a bare «temporada» / «temporal» / «vacaciones» about something else, a long let
+    "temporada de verano en la piscina comunitaria", "temporada alta en la playa", "frutas de temporada",
+    "la temporada escolar", "ideal para vacaciones o vivir todo el año", "contrato laboral temporal",
+    "trabajadores temporales", "alquiler de temporada larga",
+    # B2: months of a deposit or a payment
+    "fianza máximo 2 meses", "garantía de hasta 2 meses", "pago por meses adelantados", "Fianza: máx. 2 meses",
+    "Depósito de hasta 2 meses y aval bancario",
+    # a negation in the same clause with linking words between
+    "no es un alquiler de temporada", "No se trata de un alquiler temporal",
 ])
 def test_no_seasonal_sign(text):
     assert seasonal_let_named(text) is False
@@ -137,6 +148,39 @@ def test_summary_words_are_similar_without_a_portal_field(monkeypatch):
     assert (classify(found, request).bucket, classify(found, request).note) == ("similar", SEASONAL_NOTE)
     russian = {**FLAT, "summary_ru": "Квартира, временная аренда только для отдыха, 1400 € в месяц."}
     assert classify(russian, request).bucket == "similar"
+
+
+# The 13 seasonal lets of sim b4-g5-s5 that went out as exact: (portal rental_term, summary) as stored.
+SIM_SEASONAL = [
+    ("temporary", "Piso en alquiler en Vallcarca, Gràcia, Barcelona, 1346 € al mes; solo alquiler de temporada de "
+                  "hasta 4 meses."),
+    ("temporary", "Piso amueblado en alquiler de temporada con internet en Barcelona."),
+    ("long", "Piso amueblado de 64 m² con 2 habitaciones y balcón en alquiler temporal (máximo 11 meses) en el Barri "
+             "Gòtic, Barcelona."),
+    ("temporary", "Piso semi amueblado de 1 habitación en 3ª planta con ascensor en alquiler de temporada de ocio en "
+                  "La Bordeta, Barcelona, 1200 € al mes."),
+    ("temporary", "Vivienda de 29 m² en alquiler de temporada de 11 meses en El Carmel, Barcelona."),
+    (None, "Piso de 2 habitaciones con balcón en alquiler de temporada de uso vacacional en calle Còrsega, Eixample."),
+    ("temporary", "Estudio reformado junto a la playa de la Barceloneta, Barcelona, en alquiler temporal, 1150 € al "
+                  "mes, 26 m²."),
+    ("temporary", "Piso reformado y amueblado de 48 m² en alquiler de temporada en la Rambla del Raval, Barcelona."),
+    ("temporary", "Piso de 2 dormitorios con ascensor en El Raval, Barcelona, para estancias vacacionales de más de 32 "
+                  "días, 1.350 € al mes."),
+    ("temporary", "Piso recientemente reformado de 2 dormitorios en alquiler de temporada (hay que justificar "
+                  "temporalidad) en calle Santa Albina, La Teixonera."),
+    ("temporary", "Piso de 1 dormitorio en Barcelona, 1.100 € al mes."),
+    ("temporary", "Piso en Barcelona en alquiler temporal, 1.250 € al mes."),
+    ("temporary", "Piso de 2 habitaciones dobles en Calle de les Moles, El Gòtic, Barcelona, en alquiler temporal de "
+                  "6 a 12 meses solo para estudiantes."),
+]
+
+
+def test_the_thirteen_sim_seasonal_lets_are_similar(monkeypatch):
+    request = barcelona(monkeypatch, True)
+    assert len(SIM_SEASONAL) == 13
+    for term, summary in SIM_SEASONAL:
+        match = classify({**FLAT, "rental_term": term, "summary": summary}, request)
+        assert (match.bucket, match.note) == ("similar", SEASONAL_NOTE), summary
 
 
 def test_long_term_words_stay_exact(monkeypatch):
@@ -203,6 +247,9 @@ def test_flag_on_prompt_has_the_rule_and_the_suffix(flags):
     assert version == (old_version.replace("-hits", "") + "-lt" + ("-hits" if flags[2] else ""))
     assert system.index("- Seasonal let:") < system.index(rv._BEFORE_NUMBERS)
     assert "larga temporada" in system and "не знаю" in system
+    for case in ("temporada alta en la playa", "contrato laboral temporal", "fianza máximo 2 meses",
+                 "alquiler de temporada larga", "no es un alquiler de temporada"):
+        assert case in system  # the prompt names the same no-signs as ``seasonal_let_named``
     assert version in final_report._LEGAL_RULE_PROMPTS
 
 
