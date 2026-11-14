@@ -13,10 +13,11 @@ ACTOR = "analysis_pipeline"
 
 
 def build_task_hint(goal: str | None, place: str | None, spec: dict[str, Any] | None, *,
-                    user_role: bool = False) -> dict[str, Any] | None:
+                    user_role: bool = False, seller_role: bool = False) -> dict[str, Any] | None:
     """A small, bounded dict of what the requester wants; empty values are left out.
 
-    ``user_role`` (INVESTOR_LEAD_SOURCE_CHECK, Q53): also the investor block's role (raising | deploying)."""
+    ``user_role`` (INVESTOR_LEAD_SOURCE_CHECK, Q53): also the investor block's role (raising | deploying);
+    ``seller_role`` (INVESTOR_SELLER_ROLE, Q63): the role «selling» of a person who sells a property."""
     spec = spec if isinstance(spec, dict) else {}
     budget = spec.get("budget") if isinstance(spec.get("budget"), dict) else {}
     rooms = spec.get("rooms") if isinstance(spec.get("rooms"), dict) else {}
@@ -35,14 +36,20 @@ def build_task_hint(goal: str | None, place: str | None, spec: dict[str, Any] | 
         investor = spec.get("investor") if isinstance(spec.get("investor"), dict) else {}
         role = investor.get("user_role")
         hint["user_role"] = role if role in ("raising", "deploying") else None
+    if seller_role:
+        investor = spec.get("investor") if isinstance(spec.get("investor"), dict) else {}
+        if investor.get("user_role") == "selling":
+            hint["user_role"] = "selling"
     hint = {k: v for k, v in hint.items() if v not in (None, "", [])}
     return hint or None
 
 
 class PostgresAnalysisStore:
-    def __init__(self, database_url: str, *, exclude_platforms: tuple[str, ...] = (), user_role: bool = False):
+    def __init__(self, database_url: str, *, exclude_platforms: tuple[str, ...] = (), user_role: bool = False,
+                 seller_role: bool = False):
         self.database_url = database_url
         self.user_role = user_role  # INVESTOR_LEAD_SOURCE_CHECK (Q53): the hint carries the investor's role
+        self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): the hint carries the role «selling»
         # Platforms another worker owns (the live reduction worker takes ``website``): never claimed here.
         self.exclude_platforms = list(exclude_platforms)
         self.pool: Any = None
@@ -126,7 +133,8 @@ class PostgresAnalysisStore:
                                     location_from_text=getattr(outcome, "location_from_text", False) is True,
                                     agency_rule=getattr(outcome, "agency_rule", False) is True,
                                     investor_rule=getattr(outcome, "investor_rule", False) is True,
-                                    fact_conflict=getattr(outcome, "fact_conflict", False) is True)),
+                                    fact_conflict=getattr(outcome, "fact_conflict", False) is True,
+                                    seller_rule=getattr(outcome, "seller_rule", False) is True)),
             )
             return str(row["id"])
 
@@ -171,7 +179,7 @@ class PostgresAnalysisStore:
             return None
         spec = row["spec"]
         spec = json.loads(spec) if isinstance(spec, str) else (spec or {})
-        return build_task_hint(row["goal"], row["place"], spec, user_role=self.user_role)
+        return build_task_hint(row["goal"], row["place"], spec, user_role=self.user_role, seller_role=self.seller_role)
 
     async def task_context(self, post_id: str) -> TaskContext | None:
         """The campaign a web/Facebook post was collected for and its hard numbers (``prefilter``), else None."""

@@ -22,13 +22,13 @@ import httpx
 
 from bot.campaign.spec import TaskSpec
 from bot.control_plane.interviewer import (
-    SYSTEM,
     TURN_SCHEMA,
     Interviewer,
     InterviewError,
     InterviewTurn,
     parse_turn,
     state_message,
+    system_text,
 )
 from bot.utils import costs
 
@@ -53,22 +53,27 @@ def task_prompt(mode: str) -> str:
         return ""
 
 
-def system_prompt(mode: str, *, post_link: bool = False) -> str:
-    """``SYSTEM`` plus the mode's skill; for a task built from a post link (``spec.post_link``) the post-link skill too."""
+def system_prompt(mode: str, *, post_link: bool = False, seller_role: bool = False) -> str:
+    """``SYSTEM`` plus the mode's skill; for a task built from a post link (``spec.post_link``) the post-link skill too.
+
+    ``seller_role`` (INVESTOR_SELLER_ROLE, Q63): ``SYSTEM_SELLER`` (the selling role) instead of ``SYSTEM``."""
+    base = system_text(seller_role)
     skill = task_prompt(mode)
     if post_link and (extra := task_prompt("post_link")):
         skill = f"{skill}\n\n{extra}" if skill else extra
-    return f"{SYSTEM}\n\nTASK SKILL ({mode}); it refines the rules above, it never overrides the output format:\n{skill}" if skill else SYSTEM
+    return f"{base}\n\nTASK SKILL ({mode}); it refines the rules above, it never overrides the output format:\n{skill}" if skill else base
 
 
 class AnthropicInterviewer:
     """POSTs one message to the Claude API with a forced ``submit_turn`` tool call."""
 
     def __init__(self, *, api_key: str, model: str, timeout_seconds: float = 90.0,
-                 base_url: str = ANTHROPIC_BASE_URL, client: httpx.AsyncClient | None = None) -> None:
+                 base_url: str = ANTHROPIC_BASE_URL, client: httpx.AsyncClient | None = None,
+                 seller_role: bool = False) -> None:
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is required for the Anthropic interviewer")
         self.model = model
+        self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): the prompt with the selling role
         self._url = f"{base_url.rstrip('/')}/v1/messages"
         self._headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION,
                          "content-type": "application/json"}
@@ -85,7 +90,8 @@ class AnthropicInterviewer:
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": MAX_TOKENS,
-            "system": system_prompt(mode, post_link=bool(getattr(spec, "post_link", False))),
+            "system": system_prompt(mode, post_link=bool(getattr(spec, "post_link", False)),
+                                    seller_role=self.seller_role),
             "messages": [{"role": "user", "content": state_message(mode, spec, dialogue, message, asking, editing)}],
             "tools": [{"name": TOOL_NAME, "description": "Return the updated task and the next question.",
                        "input_schema": TURN_SCHEMA}],
@@ -112,7 +118,7 @@ class AnthropicInterviewer:
             block = next(b for b in body["content"] if b.get("type") == "tool_use" and b.get("name") == TOOL_NAME)
             if not isinstance(block["input"], dict):
                 raise ValueError("tool input is not an object")
-            return parse_turn(json.dumps(block["input"], ensure_ascii=False), spec)
+            return parse_turn(json.dumps(block["input"], ensure_ascii=False), spec, seller_role=self.seller_role)
         except Exception as exc:
             # The type only: the answer may quote the person's words.
             log.warning("telegram.intake.interview_unreadable %s", type(exc).__name__)

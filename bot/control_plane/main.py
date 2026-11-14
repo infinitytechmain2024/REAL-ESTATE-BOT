@@ -151,10 +151,12 @@ async def run() -> None:
     interviewer: Interviewer | None = None
     if settings.openrouter_api_key:
         interviewer = OpenRouterInterviewer(api_key=settings.openrouter_api_key, model=settings.interview_model,
-                                            timeout_seconds=settings.interview_timeout_seconds)
+                                            timeout_seconds=settings.interview_timeout_seconds,
+                                            seller_role=settings.investor_seller_role)
     if settings.architect_provider == "anthropic":
         claude = AnthropicInterviewer(api_key=settings.anthropic_api_key, model=settings.anthropic_interview_model,
-                                      timeout_seconds=settings.anthropic_timeout_seconds)
+                                      timeout_seconds=settings.anthropic_timeout_seconds,
+                                      seller_role=settings.investor_seller_role)
         interviewer = FallbackInterviewer(claude, interviewer) if interviewer is not None else claude
         install_interview_costs(orchestra_store.pool)
     if interviewer is None:

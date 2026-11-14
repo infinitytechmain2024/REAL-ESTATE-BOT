@@ -24,7 +24,7 @@ import logging
 import re
 from collections.abc import Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlsplit
@@ -77,6 +77,49 @@ TEMPLATES: tuple[tuple[str, str, str], ...] = (
     ("web", "es", "agencia inmobiliaria {city} contacto"),
     ("web", "uk", "інвестори в нерухомість {city}"),
 )
+
+# INVESTOR_SELLER_ROLE (Q63): the person sells one property and looks for its buyers; {obj} is that property.
+SELLER_TEMPLATES: tuple[tuple[str, str, str], ...] = (
+    ("reddit", "en", "site:reddit.com looking to buy {obj} {city}"),
+    ("web", "en", "looking to buy {obj} {city}"),
+    ("web", "es", "busco comprar {obj} {city}"),
+    ("telegram", "ru", "site:t.me купить {obj} {city}"),
+    ("web", "en", "relocating to {city} buying {obj} forum"),
+    ("reddit", "en", "site:reddit.com moving to {city} buy {obj}"),
+    ("web", "es", "inversores inmobiliarios {obj} {city}"),
+    ("web", "en", "family office real estate {city}"),
+    ("web", "ru", "хочу купить {obj} {city}"),
+    ("web", "es", "busco {obj} para comprar {city}"),
+    ("web", "uk", "купити {obj} {city}"),
+)
+_SELLER_OBJECTS = {
+    "villa": {"en": "villa", "es": "villa", "ru": "виллу", "uk": "віллу"},
+    "house": {"en": "house", "es": "casa", "ru": "дом", "uk": "будинок"},
+    "apartment": {"en": "apartment", "es": "piso", "ru": "квартиру", "uk": "квартиру"},
+    "land": {"en": "land plot", "es": "terreno", "ru": "участок", "uk": "ділянку"},
+    "commercial": {"en": "commercial property", "es": "local comercial", "ru": "коммерческую недвижимость",
+                   "uk": "комерційну нерухомість"},
+    "any": {"en": "property", "es": "vivienda", "ru": "недвижимость", "uk": "нерухомість"},
+}
+_SELLER_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("villa", re.compile(r"(?<!\w)(?:villas?|вилл\w*|вілл\w*)(?!\w)", re.I)),
+    ("land", re.compile(r"(?<!\w)(?:land|plot|terreno|parcela|solar|участ\w*|земл\w*|ділянк\w*)(?!\w)", re.I)),
+    ("house", re.compile(r"(?<!\w)(?:house|casa|chalet|дом\w*|будин\w*)(?!\w)", re.I)),
+    ("commercial", re.compile(r"(?<!\w)(?:office|oficina|local|nave|warehouse|офис\w*|склад\w*)(?!\w)", re.I)),
+    ("apartment", re.compile(r"(?<!\w)(?:apartments?|flat|piso|apartamento|квартир\w*|апартамент\w*)(?!\w)", re.I)),
+)
+
+
+def seller_object(text: str, language: str) -> str:
+    """INVESTOR_SELLER_ROLE: the property the seller's task names, in ``language`` (villa, casa …; else property)."""
+    kind = next((k for k, pattern in _SELLER_KINDS if pattern.search(text or "")), "any")
+    return _SELLER_OBJECTS[kind].get(language) or _SELLER_OBJECTS[kind]["en"]
+
+
+def is_seller(investor: dict[str, Any] | None) -> bool:
+    """INVESTOR_SELLER_ROLE: the spec's investor block says the person sells a property."""
+    return isinstance(investor, dict) and investor.get("user_role") == "selling"
+
 
 _RESERVED = {
     "x": {"search", "hashtag", "i", "home", "explore", "intent", "share", "login", "settings", "messages", "tos",
@@ -156,6 +199,8 @@ class ReachCampaign:
     country: str | None = None  # ISO-2 of the place (any place in the world)
     # The spec's investor block (who, ticket, asset_class, geography, languages, user_role); None without a spec.
     investor: dict[str, Any] | None = None
+    # INVESTOR_SELLER_ROLE (Q63): the person sells a property (set by the worker with the flag): its buyers are wanted.
+    seller: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +246,16 @@ def plan_queries(campaign: ReachCampaign) -> list[ReachQuery]:
     spanish_ok = campaign.country in (None, "ES")
     queries: list[ReachQuery] = []
     seen: set[str] = set()
+    if campaign.seller:  # INVESTOR_SELLER_ROLE (Q63): buyers of the property, never business angels or startups
+        for platform, language, template in SELLER_TEMPLATES:
+            if (language not in campaign.languages and language != "en") or (language == "es" and not spanish_ok):
+                continue
+            city = campaign.aliases.get(language) or campaign.location
+            text = template.format(city=city, obj=seller_object(f"{campaign.task} {campaign.goal}", language))
+            if text.casefold() not in seen:
+                seen.add(text.casefold())
+                queries.append(ReachQuery(platform, language, text))
+        return queries
     if campaign.investor:  # the spec's who / asset class / languages first, then the generic templates
         for platform, language, text in people.spec_queries(
                 campaign.investor, city_for=lambda lang: campaign.aliases.get(lang) or campaign.location,
@@ -262,14 +317,38 @@ _RULES: tuple[tuple[Kind, re.Pattern[str]], ...] = (
 )
 
 
+# INVESTOR_SELLER_ROLE: a buyer who says what they want («looking to buy a villa», «busco casa para comprar»)
+_BUYER = re.compile(
+    r"\b(?:looking\s+to\s+buy|want(?:s|ed)?\s+to\s+buy|buying\s+an?\s+(?:villa|house|home|property|apartment|flat|"
+    r"plot)|moving\s+to\b.{0,60}?\bbuy(?:ing)?|busco\s+comprar|busco\b.{0,60}?\bpara\s+comprar|"
+    r"quiero\s+comprar|queremos\s+comprar)\b|(?<!\w)(?:хочу|хотим|ищу|ищем)\s+(?:\w+\s+){0,2}купи(?:ть|ти)(?!\w)",
+    re.IGNORECASE)
+# ... who a seller's property is not for, anywhere: a startup investor or a buyer's agent (rejected here and by the
+# model's SELLER_RULES alike)
+_NOT_BUYER = re.compile(r"\b(?:startups?|business\s+angels?|venture|crowdfunding|buyer's\s+agents?|property\s+finders?)\b",
+                        re.IGNORECASE)
+# ... and in the title only (a buyer's snippet may well mention «villas for sale» or a current rental): an offer
+_OFFER_TITLE = re.compile(r"\b(?:for\s+sale|en\s+venta|se\s+vende|for\s+rent|alquiler)\b|(?<!\w)(?:продаж\w*|продаю|"
+                          r"продаётся|продается|аренд\w*)(?!\w)", re.IGNORECASE)
+
+
 def rule_judge(candidate: Candidate, campaign: ReachCampaign) -> Judged:
-    """Keywords decide the kind; the place (any of its names or their parts) must be in the title or snippet."""
+    """Keywords decide the kind; the place (any of its names or their parts) must be in the title or snippet.
+
+    A seller's campaign (INVESTOR_SELLER_ROLE, Q63): only a buyer («looking to buy …») or a property investor or fund
+    is relevant, as ``investor``/``fund``; agents, agencies, developers, networks, seekers, sales and rentals are not."""
     from . import geo
 
     text = f"{candidate.title} {candidate.snippet}"
     in_city = geo.mentions_place(text, geo.place_names(campaign.location, campaign.aliases))
     kind: Kind = next((k for k, pattern in _RULES if pattern.search(text)), "other")
     name = re.split(r"\s[-|–·]\s", candidate.title, maxsplit=1)[0].strip()[:200] or None
+    if campaign.seller:
+        title, folded = candidate.title.replace("\u2019", "'"), text.replace("\u2019", "'")
+        kind = "investor" if _BUYER.search(folded) else kind
+        offer = _OFFER_TITLE.search(title) and not _BUYER.search(title)
+        wanted = kind in ("investor", "fund") and not _NOT_BUYER.search(folded) and not offer
+        return Judged(kind, in_city and wanted, 0.6 if in_city else 0.4, name)
     return Judged(kind, in_city and kind != "other", 0.6 if in_city else 0.4, name)
 
 
@@ -307,6 +386,18 @@ HARD CRITERIA (data.investor, from the person's interview; these are requirement
   relevant=false. asset_class and languages: prefer matches, but a clear contradiction is relevant=false.
 - user_role: raising = the person seeks money, so wanted are those who invest; deploying = the person invests, so
   wanted are those who offer projects, deals or partnerships."""
+
+# INVESTOR_SELLER_ROLE (Q63): a seller's campaign (user_role selling) is judged by these, after SPEC_RULES.
+SELLER_RULES = """
+
+SELLER (data.investor.user_role is "selling"): the person has ONE property to sell (described in TASK) and wants its
+buyers. relevant=true only for someone who wants to BUY or invest in that kind of property in or around PLACE: a buyer
+who says what they look for («looking to buy a villa in …», «busco comprar casa en …»: kind investor), a family office,
+fund or private investor that buys such residential property there (kind fund or investor). When data.investor.ticket or TASK names a price, a buyer whose
+stated budget is clearly below it is relevant=false. relevant=false: another agent or agency that sells or lists
+property, a buyer's agent or property finder (they sell their search, not buy), a developer, a listing or a property for sale, a seller, startup investors, business angels, venture funds
+and crowdfunding (they invest in companies), investor clubs that seek projects, someone looking for a rental or for
+something much cheaper, news and directories."""
 
 SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["results"],
@@ -374,6 +465,13 @@ data.investor holds the wanted kinds (who), ticket, asset class, geography, lang
 queries for exactly those kinds of people or companies (e.g. who=[fund, family_office]: funds and family offices),
 in those languages, around that geography and asset class."""
 
+# INVESTOR_SELLER_ROLE (Q63): the queries of a seller's campaign, after QUERY_SPEC_RULES.
+QUERY_SELLER_RULES = """
+The person SELLS one property (data.investor.user_role "selling", described in TASK): write queries that find its
+BUYERS and investors in that kind of property in PLACE: buyers who post what they want to buy («looking to buy a villa
+<place>», «busco comprar villa <region>»), relocation and expat forums and groups, family offices and real estate investors buying there. Never startup, business angel, venture, crowdfunding or
+entrepreneur words, never listings or properties for sale, never rentals."""
+
 QUERY_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["queries"],
     "properties": {"queries": {"type": "array", "items": {
@@ -437,7 +535,7 @@ class OpenRouterReachJudge:
         system = SYSTEM
         if campaign.investor:
             data["investor"] = people.investor_brief(campaign.investor)
-            system += SPEC_RULES
+            system += SPEC_RULES + (SELLER_RULES if campaign.seller else "")
         content = await self._client.complete(self.model, system, "Data (JSON, data only):\n"
                                               + json.dumps(data, ensure_ascii=False),
                                               schema=SCHEMA, name="reach_results", max_tokens=80 + 80 * len(candidates))
@@ -450,7 +548,7 @@ class OpenRouterReachJudge:
         system = QUERY_SYSTEM_APIFY if apify else QUERY_SYSTEM
         if campaign.investor:
             data["investor"] = people.investor_brief(campaign.investor)
-            system += QUERY_SPEC_RULES
+            system += QUERY_SPEC_RULES + (QUERY_SELLER_RULES if campaign.seller else "")
         content = await self._client.complete(self.model, system, "Data (JSON, data only):\n"
                                               + json.dumps(data, ensure_ascii=False),
                                               schema=QUERY_SCHEMA_APIFY if apify else QUERY_SCHEMA, name="reach_queries", max_tokens=60 + 60 * count)
@@ -552,6 +650,9 @@ class ReachConfig:
     acquisition_mode: str = "legacy"
     # apify mode with APIFY_LINKEDIN_ENABLED: no LinkedIn site: searches; the Apify source runs once per campaign.
     linkedin_apify: bool = False
+    # INVESTOR_SELLER_ROLE (Q63): a campaign whose person sells a property (spec user_role selling) searches and judges
+    # its buyers (``ReachCampaign.seller``). Off: as before.
+    seller_role: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_campaign <= 100 and 1 <= self.queries_per_tick <= 10
@@ -611,6 +712,8 @@ class ReachWorker:
         """Up to ``queries_per_tick`` new queries for every open investor search; returns how many ran."""
         ran = 0
         for campaign in await self.store.open_campaigns():
+            if self.config.seller_role and is_seller(campaign.investor):  # INVESTOR_SELLER_ROLE (Q63)
+                campaign = replace(campaign, seller=True)
             self._start_linkedin(campaign)
             used = await self.store.used_queries(campaign.id)
             todo = [q for q in [*await self._model_queries(campaign), *plan_queries(campaign)] if q.text not in used

@@ -172,6 +172,26 @@ def _with_investor_rule(text: str) -> str:
     return text.replace(_NEVER_INVENT, INVESTOR_LEAD_RULE + _NEVER_INVENT)
 
 
+# INVESTOR_SELLER_ROLE (Q63, sim b5-n2-s6): the requester sells one property (task_hint.user_role selling) and wants its
+# buyers; for such an investor post this rule takes the place of INVESTOR_LEAD_RULE (a buyer is a lead, not news).
+SELLER_LEAD_RULE = (
+    "task_hint.user_role is selling: the requester sells ONE property (task_hint.goal, property_type, budget) and looks "
+    "for its buyers. For the vertical investors a lead (relevant=true, category investors, listing_kind wanted) is ONLY "
+    "a named or identifiable person or organisation that wants to BUY or invest in that kind of property in or around "
+    "task_hint.place: a buyer who writes what they look for ('looking to buy a villa in ...', 'busco comprar casa en "
+    "...'), a family office, fund or private investor buying "
+    "such residential property there; who is that buyer and price_amount its stated budget (with its quote), else "
+    "null. Not a lead (relevant=false, listing_kind other): another agent, agency or developer that offers property, "
+    "a buyer's agent or property finder, "
+    "any property for sale or rent, a seller, startup investors, business angels, venture funds and crowdfunding that "
+    "invest in companies, someone looking for a rental, news, blogs and directories. "
+)
+
+
+def _with_seller_rule(text: str) -> str:
+    return text.replace(_NEVER_INVENT, SELLER_LEAD_RULE + _NEVER_INVENT)
+
+
 # ANALYSIS_FACT_CONFLICT_NULL (Q56): the JSON-LD line of a portal may carry a wrong count («rooms: 1» on fotocasa and
 # habitaclia for a flat whose description says «Piso de 3 habitaciones»); the JSON-LD rule made it authoritative and
 # the card showed one of the two numbers. With the flag a number the title or description explicitly contradict is
@@ -209,29 +229,35 @@ LOCATION_PROMPT_VERSION = f"{PROMPT_VERSION}-loc"  # findings analysed with ANAL
 AGENCY_PROMPT_VERSION = f"{LOCATION_PROMPT_VERSION}-agency"  # ... and PORTAL_DESCRIPTION_FULL=true (Q18)
 INVESTOR_SUFFIX = "-isrc"  # INVESTOR_LEAD_SOURCE_CHECK=true, investor posts only (Q53): «analysis-v6-isrc», «…-loc-isrc»
 FACT_CONFLICT_SUFFIX = "-fc"  # ANALYSIS_FACT_CONFLICT_NULL=true (Q56): «analysis-v6-fc», «…-loc-agency-fc-isrc»
+SELLER_SUFFIX = "-sell"  # INVESTOR_SELLER_ROLE=true, an investor post of a seller's task (Q63): «analysis-v6-sell»
 
 
 def prompt_version(location_from_text: bool = False, agency_rule: bool = False, investor_rule: bool = False,
-                   fact_conflict: bool = False) -> str:
+                   fact_conflict: bool = False, seller_rule: bool = False) -> str:
     if not location_from_text:
         version = PROMPT_VERSION
     else:
         version = AGENCY_PROMPT_VERSION if agency_rule else LOCATION_PROMPT_VERSION
     version = version + FACT_CONFLICT_SUFFIX if fact_conflict else version
+    if seller_rule:
+        return version + SELLER_SUFFIX
     return version + INVESTOR_SUFFIX if investor_rule else version
 
 
 def instructions(location_from_text: bool = False, agency_rule: bool = False, investor_rule: bool = False,
-                 fact_conflict: bool = False) -> str:
+                 fact_conflict: bool = False, seller_rule: bool = False) -> str:
     """The analysis prompt: the old one, or (ANALYSIS_LOCATION_FROM_TEXT) the one with the place taken from the text;
     ``agency_rule`` (PORTAL_DESCRIPTION_FULL, Q18, only with it) adds that an agency's office is not the place;
     ``investor_rule`` (INVESTOR_LEAD_SOURCE_CHECK, Q53, investor posts only) adds what an investor lead is;
-    ``fact_conflict`` (ANALYSIS_FACT_CONFLICT_NULL, Q56) nulls a JSON-LD rooms / area / price the text contradicts."""
+    ``fact_conflict`` (ANALYSIS_FACT_CONFLICT_NULL, Q56) nulls a JSON-LD rooms / area / price the text contradicts;
+    ``seller_rule`` (INVESTOR_SELLER_ROLE, Q63, an investor post of a seller's task) puts the buyer rule instead."""
     if not location_from_text:
         text = INSTRUCTIONS
     else:
         text = INSTRUCTIONS_LOCATION_AGENCY if agency_rule else INSTRUCTIONS_LOCATION_FROM_TEXT
     text = _with_fact_conflict_rule(text) if fact_conflict else text
+    if seller_rule:
+        return _with_seller_rule(text)
     return _with_investor_rule(text) if investor_rule else text
 
 
@@ -518,12 +544,20 @@ def parse_result(content: str) -> AnalysisResult:
 INVALID = "invalid_structured_model_response"
 
 
+def seller_rule(analyzer: Any, vertical: str, task_hint: dict[str, Any] | None) -> bool:
+    """INVESTOR_SELLER_ROLE (Q63): the analyzer has the flag and this is an investor post of a seller's task."""
+    return (getattr(analyzer, "seller_role", False) is True and vertical == "investors"
+            and isinstance(task_hint, dict) and task_hint.get("user_role") == "selling")
+
+
 class OpenRouterAnalyzer:
     def __init__(self, api_key: str, model: str, *, timeout_seconds: int = 30, invalid_retry: bool = False,
                  fallback_model: str = "", location_from_text: bool = False, area_text_check: bool = False,
                  place_description_chars: int | None = None, investor_lead_check: bool = False,
-                 fact_conflict_null: bool = False) -> None:
+                 fact_conflict_null: bool = False, seller_role: bool = False) -> None:
         self.api_key, self.model, self.timeout_seconds = api_key, model, timeout_seconds
+        # INVESTOR_SELLER_ROLE (Q63): an investor post of a seller's task (task_hint.user_role selling): the buyer rule
+        self.seller_role = seller_role
         # INVESTOR_LEAD_SOURCE_CHECK (Q53): the investor lead rule in the prompt; the pipeline drops news pages
         self.investor_lead_check = investor_lead_check
         self.invalid_retry, self.fallback_model = invalid_retry, fallback_model.strip()
@@ -585,7 +619,8 @@ class OpenRouterAnalyzer:
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": instructions(self.location_from_text, self.agency_rule,
                                                          self.investor_lead_check and vertical == "investors",
-                                                         self.fact_conflict_null)
+                                                         self.fact_conflict_null,
+                                                         seller_rule(self, vertical, task_hint))
                  + json.dumps(data, ensure_ascii=False)},
             ],
         }

@@ -128,6 +128,9 @@ class CampaignRunnerSettings(BaseSettings):
     # is (an investor's own page or «we invest in …»; news about a deal is not) and the person's role (prompt
     # relevance-v3-isrc). false (default): the relevance-v3 prompt and task as before.
     investor_lead_source_check: bool = Field(default=False, validation_alias="INVESTOR_LEAD_SOURCE_CHECK")
+    # Q63: a person who sells a property (spec.investor.user_role selling): the AI check («relevance-v3-sell») and the
+    # reach judge take its buyers and property investors, not agents, sellers, business angels or renters. Off: as before.
+    investor_seller_role: bool = Field(default=False, validation_alias="INVESTOR_SELLER_ROLE")
     # The most one campaign may spend in USD (LLM, scrape API, paid search, listing APIs), summed over every service
     # from the campaign_costs ledger (bot/utils/costs.py). Reached: the web stage stops (budget_cap), the analysis
     # worker and the AI check skip the campaign's findings, the report says so. 0: no limit.
@@ -147,7 +150,8 @@ class CampaignRunnerSettings(BaseSettings):
         legacy = OpenRouterRelevanceJudge(api_key=self.openrouter_api_key, model=self.relevance_model,
                                           timeout_seconds=self.relevance_timeout_seconds,
                                           phrase_places=self.user_phrase_places,
-                                          investor_leads=self.investor_lead_source_check)
+                                          investor_leads=self.investor_lead_source_check,
+                                          seller_role=self.investor_seller_role)
         if self.judge == "legacy":
             return legacy
         from bot.agents.reviewer import OpenRouterReviewer
@@ -559,7 +563,8 @@ class CampaignRunnerSettings(BaseSettings):
                            queries_per_tick=self.reach_queries_per_tick, queries_per_day=self.reach_queries_per_day,
                            model_queries=self.reach_model_queries,
                            enrich_per_campaign=self.reach_enrich_per_campaign,
-                           acquisition_mode=self.acquisition_mode, linkedin_apify=self.linkedin_apify_on())
+                           acquisition_mode=self.acquisition_mode, linkedin_apify=self.linkedin_apify_on(),
+                           seller_role=self.investor_seller_role)
 
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig
