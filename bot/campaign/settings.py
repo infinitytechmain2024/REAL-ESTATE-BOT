@@ -185,6 +185,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q43: the final report names a portal our page/budget caps stopped («не прочитан: исчерпан лимит ...»), not «до
     # него не дошла очередь запросов»; a listing rejected for more rooms than asked is «больше комнат», not «меньше».
     report_precise_reasons: bool = Field(default=False, validation_alias="REPORT_PRECISE_REASONS")
+    # Q44: «📋 Отчёт по поиску» waits for the answer to «Показать?» and the approved similar cards (at most 10 min after
+    # the campaign ended), so it counts what the chat got; no answer in time: the report goes as before.
+    report_after_offer: bool = Field(default=False, validation_alias="REPORT_AFTER_OFFER")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -480,7 +483,8 @@ class CampaignRunnerSettings(BaseSettings):
                             offer_after_search=self.offer_after_search,
                             empty_report=self.empty_report,
                             status_counts_all_deliveries=self.status_counts_all_deliveries,
-                            report_precise_reasons=self.report_precise_reasons)
+                            report_precise_reasons=self.report_precise_reasons,
+                            report_after_offer=self.report_after_offer)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

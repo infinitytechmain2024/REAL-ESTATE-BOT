@@ -318,6 +318,8 @@ class RunnerConfig:
     status_counts_all_deliveries: bool = False
     # A portal stopped by our page/budget caps has its own report reason; more rooms than asked is not «fewer» (Q43).
     report_precise_reasons: bool = False
+    # The final report waits (at most REPORT_WAIT) for the answer to «Показать?» and the approved cards (Q44).
+    report_after_offer: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -398,6 +400,9 @@ class CampaignRunner:
         # OFFER_AFTER_SEARCH (Q27): ended campaigns whose final report waits for the checks and the similar question.
         self._report_waits: set[str] = set()
         self._report_forced: set[str] = set()  # ...and those whose report went without it (logged once)
+        # REPORT_AFTER_OFFER (Q44): ended campaigns whose report waited for the answer, and those it went without it.
+        self._answer_waits: set[str] = set()
+        self._answer_forced: set[str] = set()
         self._cards_since: dict[str, int] = {}  # campaign id -> cards sent since its status message was posted
         self._phase: dict[str, str] = {}  # campaign id -> the user line's phase now: searching | checking | done
         self._posted_phase: dict[str, str] = {}  # ... and the phase the posted status message was sent in
@@ -476,7 +481,8 @@ class CampaignRunner:
             await self._stream(campaign, final=True)
             await self._metrics(campaign, final=True)
             await self._summary(campaign)
-            if not self._report_waits_for_offer(campaign):  # OFFER_AFTER_SEARCH (Q27): after the question
+            if (not self._report_waits_for_offer(campaign)  # OFFER_AFTER_SEARCH (Q27): after the question
+                    and not await self._report_waits_for_answer(campaign)):  # REPORT_AFTER_OFFER (Q44): the answer
                 await self._final_report(campaign)
             line = self._final_line(campaign, await self.store.streamed_count(campaign_id))
         await self._show(campaign, line)
@@ -491,6 +497,26 @@ class CampaignRunner:
         if campaign.id not in self._report_forced:
             self._report_forced.add(campaign.id)
             log.warning("campaign.final_report_without_offer", extra={"campaign_id": campaign.id})
+        return False
+
+    async def _report_waits_for_answer(self, campaign: Campaign) -> bool:
+        """Q44 (``REPORT_AFTER_OFFER``): the final report waits while a «Показать?» question is not answered or the
+        approved held cards are not all sent, so it counts what the chat got; at most ``REPORT_WAIT`` after the campaign
+        ended, then it goes as before (logged once). Read from the store only: a restart waits the same way, and the
+        report is claimed once in the database (never two)."""
+        if not self.config.report_after_offer or campaign.finished_at is None:
+            return False
+        if self.now() - campaign.finished_at >= REPORT_WAIT:
+            if campaign.id in self._answer_waits and campaign.id not in self._answer_forced:
+                self._answer_forced.add(campaign.id)
+                log.warning("campaign.final_report_without_answer", extra={"campaign_id": campaign.id})
+            return False
+        for bucket in HELD_BUCKETS:
+            state = await self.store.offer_state(campaign.id, bucket)
+            if state == "asked" or (state == "approved" and await self.store.held_findings(
+                    campaign.id, bucket, 1, exclude_why=self._unoffered(bucket))):
+                self._answer_waits.add(campaign.id)
+                return True
         return False
 
     # -- phases --
