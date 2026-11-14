@@ -93,6 +93,7 @@ BASE_ENV: dict[str, str] = {
     "ANALYSIS_AREA_TEXT_CHECK": "false",  # Q13: off until area_check review blockers (N4, N5) are fixed
     "DEDUP_DISTRICT_NOT_STREET": "true",  # Q15
     "OFFER_ALL_REASONS": "true",  # Q25
+    "OFFER_REASONS_FROM_REVIEW": "true",  # Q64
     "USER_PHRASE_PLACES": "true",  # Q28
     "PORTAL_DISTRICT_SEARCH": "true",  # Q26; REDIS_URL is empty here: no geocoder, so the input stays as before
     "DEDUP_HELD_FINDINGS": "true",  # Q27

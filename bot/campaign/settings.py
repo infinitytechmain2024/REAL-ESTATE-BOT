@@ -151,7 +151,8 @@ class CampaignRunnerSettings(BaseSettings):
                                           timeout_seconds=self.relevance_timeout_seconds,
                                           phrase_places=self.user_phrase_places,
                                           investor_leads=self.investor_lead_source_check,
-                                          seller_role=self.investor_seller_role)
+                                          seller_role=self.investor_seller_role,
+                                          phrase_land_terms=self.offer_reasons_from_review)
         if self.judge == "legacy":
             return legacy
         from bot.agents.reviewer import OpenRouterReviewer
@@ -164,7 +165,8 @@ class CampaignRunnerSettings(BaseSettings):
                                                 non_residential=self.review_non_residential,
                                                 tenant=self.review_tenant_hits,
                                                 seasonal=self.rent_default_long_term,
-                                                phrase_places=self.user_phrase_places), legacy,
+                                                phrase_places=self.user_phrase_places,
+                                                phrase_land_terms=self.offer_reasons_from_review), legacy,
                              max_calls=self.review_max_calls)
 
     def final_reporter(self):  # -> bot.campaign.final_report.FinalReporter | None
@@ -196,6 +198,10 @@ class CampaignRunnerSettings(BaseSettings):
     dedup_description_normalize: bool = Field(default=False, validation_alias="DEDUP_DESCRIPTION_NORMALIZE")
     # Q25: the «Показать?» question names every distinct difference of the held similar listings (at most 5).
     offer_all_reasons: bool = Field(default=False, validation_alias="OFFER_ALL_REASONS")
+    # Q64: the «Показать?» question names the AI reviewer's differences of all held similar listings, the same ones
+    # grouped, ranked by how many listings have them («земля rústico, не urbano — 6; …»); the reviewer's phrase may
+    # keep Spanish land-status words (rústico, urbano). false (default): as before.
+    offer_reasons_from_review: bool = Field(default=False, validation_alias="OFFER_REASONS_FROM_REVIEW")
     # Q27: a held similar/other listing is merged with the same object already held or sent (one card after «Одобрить»,
     # the other links in «Также на»); the «Показать?» question waits until the search and the checks are over.
     dedup_held_findings: bool = Field(default=False, validation_alias="DEDUP_HELD_FINDINGS")
@@ -530,6 +536,7 @@ class CampaignRunnerSettings(BaseSettings):
                             dedup_same_host_copy=self.dedup_same_host_copy,
                             dedup_description_normalize=self.dedup_description_normalize,
                             offer_all_reasons=self.offer_all_reasons,
+                            offer_reasons_from_review=self.offer_reasons_from_review,
                             dedup_held_findings=self.dedup_held_findings,
                             offer_after_search=self.offer_after_search,
                             empty_report=self.empty_report,

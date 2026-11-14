@@ -275,6 +275,13 @@ def _verdict(value: object) -> Verdict:
 _LATIN_WORD = re.compile(r"[a-zà-öø-ÿ][a-zà-öø-ÿ'’·-]*", re.IGNORECASE)  # «Ávila», «Sants-Montjuïc», «Paral·lel»
 _PLACE_LINKS = frozenset({"de", "del", "la", "las", "los", "el", "y", "i", "d", "l", "dels", "les"})
 _ARTICLES = frozenset({"a", "o"})  # Galician articles: «A Coruña», «O Grove»
+# OFFER_REASONS_FROM_REVIEW (Q64): the Spanish land-status words the reviewer keeps in its Russian phrase (the person
+# wrote «urbano» in the task): «земля rústico, не urbano», «сельхозучасток (rústica), а не solar urbano».
+_LAND_TERMS = frozenset({
+    "urbano", "urbana", "urbanos", "urbanas", "urbanizable", "urbanizables", "urbanizado", "urbanizada",
+    "rústico", "rústica", "rústicos", "rústicas", "rustico", "rustica", "rusticos", "rusticas",
+    "solar", "suelo", "finca", "no", "edificable", "sectorizado", "sectorizada",
+})
 
 # Capitalised prose is still prose: «Near The Center», «A 5 Minutos», «Sin Ascensor», «Precio Negociable» are not
 # place names. Lowercase connectors are links inside a name, a capitalised lone one («район Y») is not a name.
@@ -327,28 +334,37 @@ def _latin_is_places(phrase: str) -> bool:
     return True
 
 
-def user_phrase(text: object, *, places: bool = False) -> str | None:
+def _latin_is_land_terms(phrase: str, *, places: bool) -> bool:
+    """Q64: every Latin word is a land-status word (``_LAND_TERMS``) or, with ``places``, a capitalised name."""
+    return all(word.casefold() in _LAND_TERMS or (places and _is_name(word)) for word in _LATIN_WORD.findall(phrase))
+
+
+def user_phrase(text: object, *, places: bool = False, land_terms: bool = False) -> str | None:
     """A deviation phrase a user may read: short Russian, no Latin letters, else None. Users see it in the
     «Показать?» question and on cards, so English or Spanish prose the model drifted into never reaches them.
-    ``places`` (``USER_PHRASE_PLACES``, Q28): Latin place names are allowed («не в центре (Vista Alegre)»)."""
+    ``places`` (``USER_PHRASE_PLACES``, Q28): Latin place names are allowed («не в центре (Vista Alegre)»).
+    ``land_terms`` (``OFFER_REASONS_FROM_REVIEW``, Q64): Spanish land-status words are allowed too («земля rústico,
+    не urbano»), other Latin prose still drops the phrase."""
     phrase = " ".join(str(text or "").split()).strip(" .,;:«»\"'")
     if not 3 <= len(phrase) <= 80 or not _CYRILLIC.search(phrase):
         return None
-    if _LATIN.search(phrase) and not (places and _latin_is_places(phrase)):
+    if (_LATIN.search(phrase) and not (places and _latin_is_places(phrase))
+            and not (land_terms and _latin_is_land_terms(phrase, places=places))):
         return None
     if places and _LATIN_WORD.match(phrase):
         return phrase  # a phrase that begins with a place name keeps its capital
     return phrase[0].lower() + phrase[1:]
 
 
-def parse_relevance(content: str, *, model: str | None = None, places: bool = False) -> Relevance:
+def parse_relevance(content: str, *, model: str | None = None, places: bool = False,
+                    land_terms: bool = False) -> Relevance:
     """The model's verdict after harmless drift is fixed; ``ValueError`` without a readable verdict."""
     data = json.loads(_FENCE.sub("", content))
     if not isinstance(data, dict):
         raise ValueError("model response is not a JSON object")
     verdict = _verdict(data.get("verdict") or data.get("decision") or data.get("result"))
     reason = " ".join(str(data.get("reason") or data.get("why") or "").split())[:300]
-    deviation = (user_phrase(data.get("deviation_ru") or data.get("deviation"), places=places)
+    deviation = (user_phrase(data.get("deviation_ru") or data.get("deviation"), places=places, land_terms=land_terms)
                  if verdict == "near" else None)
     return Relevance(verdict, reason, deviation, model)
 
@@ -358,11 +374,13 @@ class OpenRouterRelevanceJudge:
 
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 15,
                  base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None,
-                 phrase_places: bool = False, investor_leads: bool = False, seller_role: bool = False) -> None:
+                 phrase_places: bool = False, investor_leads: bool = False, seller_role: bool = False,
+                 phrase_land_terms: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the relevance check")
         self.model, self.timeout_seconds = model, timeout_seconds
         self.phrase_places = phrase_places  # USER_PHRASE_PLACES (Q28)
+        self.phrase_land_terms = phrase_land_terms  # OFFER_REASONS_FROM_REVIEW (Q64): «rústico» in the phrase
         self.investor_leads = investor_leads  # INVESTOR_LEAD_SOURCE_CHECK (Q53): SYSTEM_INVESTORS for investor findings
         self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): SYSTEM_SELLER for a seller's investor findings
         self._url = f"{base_url.rstrip('/')}/chat/completions"
@@ -413,7 +431,7 @@ class OpenRouterRelevanceJudge:
         await costs.llm_response(self.model, response)
         try:
             return parse_relevance(response.json()["choices"][0]["message"]["content"], model=self.model,
-                                   places=self.phrase_places)
+                                   places=self.phrase_places, land_terms=self.phrase_land_terms)
         except Exception as exc:
             log.warning("campaign.relevance_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response", status=response.status_code) from exc

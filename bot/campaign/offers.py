@@ -174,6 +174,40 @@ def reasons_of(deviations: Iterable[Deviation]) -> list[str]:
     return reasons
 
 
+def counted_reasons(deviations: Iterable[Deviation]) -> list[str]:
+    """Q64 (``OFFER_REASONS_FROM_REVIEW``): one difference per held listing (the reviewer's phrase, «дороже» /
+    «площадь меньше» by the worst value, «не подтверждено: …»), the same ones grouped and ranked by how many listings
+    have them, the first seen first on a tie: «земля rústico, не urbano — 6; не подтверждено: площадь — 3». A listing
+    whose difference the reviewer did not name counts under «другие отличия»."""
+    counts: dict[str, int] = {}
+    dearest: Deviation | None = None
+    smallest: Deviation | None = None
+    for d in deviations:
+        if d.kind == "price" and d.example:
+            key = "price"
+            if dearest is None or (d.value or 0) > (dearest.value or 0):
+                dearest = d
+        elif d.kind == "area" and d.example:
+            key = "area"
+            if smallest is None or (d.value is not None and (smallest.value is None or d.value < smallest.value)):
+                smallest = d
+        elif d.kind == "area_unknown":
+            key = "не подтверждено: площадь"
+        elif d.kind == "unverified":
+            key = f"не подтверждено: {', '.join(d.unknown)}" if d.unknown else "не удалось проверить автоматически"
+        elif d.kind == "deal_kind" and d.phrase and d.phrase.strip():
+            key = f"другой вид сделки: {d.phrase.strip()}"
+        elif d.phrase and d.phrase.strip():
+            key = d.phrase.strip()
+        else:
+            key = "другие отличия"
+        counts[key] = counts.get(key, 0) + 1
+    labels = {"price": f"дороже (до {dearest.example})" if dearest else "дороже",
+              "area": f"площадь меньше (от {smallest.example})" if smallest else "площадь меньше"}
+    ranked = sorted(counts.items(), key=lambda item: -item[1])  # stable: a tie keeps the order seen
+    return [f"{labels.get(key, key)} — {count}" for key, count in ranked]
+
+
 def reasons_question(reasons: Iterable[str], *, land: bool = False, exact_found: bool) -> str:
     """Q25 (``OFFER_ALL_REASONS``): the similar question names every distinct difference of the held listings, at most
     ``MAX_REASONS``, then «и ещё N»: «… есть участки с отличиями — участок занят; дороже (до ~60 000 €) и ещё 2.
