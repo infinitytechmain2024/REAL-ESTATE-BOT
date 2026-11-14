@@ -149,6 +149,8 @@ class WebSearchSettings(BaseSettings):
     query_hygiene: bool = Field(default=False, validation_alias="SEARCH_QUERY_HYGIENE")
     # The place level from the campaign's TaskSpec before its text; a Spanish province goes to the portals as one.
     place_level_from_spec: bool = Field(default=False, validation_alias="SEARCH_PLACE_LEVEL_FROM_SPEC")
+    # Q51: an investors campaign's web stage searches investors (no listing search plan, no portal queries or pages).
+    investor_web_queries: bool = Field(default=False, validation_alias="INVESTOR_WEB_QUERIES")
     # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
     # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or
     # an area), off (the old rule: a property word and a deal word). A country without a portal list is soft.
@@ -225,7 +227,7 @@ class WebSearchSettings(BaseSettings):
             page_runtime_seconds=int(min(600, self.request_timeout_seconds * 3)),
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
             cover_portals=self.cover_portals, query_hygiene=self.query_hygiene, render_on_refusal=self.render_on_refusal,
-            place_level_from_spec=self.place_level_from_spec,
+            place_level_from_spec=self.place_level_from_spec, investor_web_queries=self.investor_web_queries,
             render_index_on_refusal=self.render_index_on_refusal,
             human_verification=self.human_verification and self.render_enabled,
             verified_host_interval_seconds=self.verified_host_interval_seconds,
