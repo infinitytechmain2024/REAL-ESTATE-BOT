@@ -95,6 +95,22 @@ _SUBURB = re.compile(r"пригород|передміст|окрестност|
 # «огород», «пригород»).
 _PROVINCE_WORD = re.compile(r"(?<!\w)(?:провинци|област)|\bprovinc", re.IGNORECASE)
 _CITY_WORD = re.compile(r"(?<!\w)город|\bciudad\b|\bcity\b", re.IGNORECASE)
+# INTAKE_ASK_CITY_OR_PROVINCE (Q62): a province capital the person named bare («участок в Мадриде») is asked about
+# once: only the city or the whole province. Not asked when the person said which already (city, capital, province,
+# region, coast, suburbs) or named a district, a street or another town.
+SCOPE_PATH = "place.level"
+SCOPE_QUESTION = "Искать только в самом городе {city} или по всей провинции?"
+SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (("Только в городе", "scope:city"), ("Вся провинция", "scope:province"))
+_SCOPE_CITY = re.compile(r"(?<!\w)(?:столиц|міст[оіау]?\b)|\bcapital\b", re.IGNORECASE)
+_SCOPE_COAST = re.compile(r"(?<!\w)(?:побережь|узбережж|коста(?!\w))|\b(?:costa|coast\w*)\b", re.IGNORECASE)
+_SCOPE_SAID = re.compile(r"(?<!\w)(?:город|провинци|провінці|област|регион|окрестност|пригород)|"
+                         r"\b(?:ciudad|city|provinc\w*|comunidad|region)\b", re.IGNORECASE)
+_STREET_WORD = re.compile(r"(?<!\w)(?:улиц|ул\.|проспект|переул|бульвар|район|квартал|микрорайон|вулиц|c/)|"
+                          r"\b(?:calle|avenida|avda|plaza|paseo|barrio|distrito|street|avenue|district)\b",
+                          re.IGNORECASE)
+_WHOLE_WORD = re.compile(r"(?<!\w)(?:вс[яеию]|всей|весь|везде|любо\w*)(?!\w)|\b(?:toda|todo|whole|entire|all)\b",
+                         re.IGNORECASE)
+_ONLY_WORD = re.compile(r"(?<!\w)только(?!\w)|\b(?:solo|sólo|only)\b", re.IGNORECASE)
 _RADIUS = re.compile(r"(?<!\d)(\d{1,3}(?:[.,]\d+)?)\s*(?:км|km|kilomet(?:er|re)s?)(?!\w)", re.IGNORECASE)
 # «Изменить»: callback code -> (button title, the TaskSpec field the interviewer is pointed at)
 FIELDS: dict[str, dict[str, tuple[str, str]]] = {
@@ -184,6 +200,7 @@ class Draft:
     choices: list[str] = field(default_factory=list)  # the model's suggested answers on screen (buttons «task:opt:<i>»)
     widened: bool = False  # INTAKE_SKIP_WIDENS_PLACE (Q42): «Не важно» widened the city to its province
     role_check: str = ""  # INTAKE_ROLE_CONFLICT_CHECK (Q52): "" | asking (the question is on screen) | done (asked once)
+    scope_check: str = ""  # INTAKE_ASK_CITY_OR_PROVINCE (Q62): "" | asking (the question is on screen) | done
 
     def copy(self, **changes: Any) -> Draft:
         return replace(self, dialogue=[dict(t) for t in self.dialogue], choices=list(self.choices),
@@ -257,7 +274,8 @@ class Draft:
     def payload(self) -> dict[str, Any]:
         return {"task": self.task, "message_id": self.message_id, "dialogue": self.dialogue, "rounds": self.rounds,
                 "asking": self.asking, "editing": self.editing, "forced": bool(self.forced),
-                "choices": list(self.choices), "widened": bool(self.widened), "role_check": self.role_check}
+                "choices": list(self.choices), "widened": bool(self.widened), "role_check": self.role_check,
+                "scope_check": self.scope_check}
 
     def spec_json(self) -> str | None:
         return self.spec.model_dump_json() if self.spec is not None else None
@@ -277,7 +295,8 @@ class Draft:
                    int(payload.get("rounds") or 0), payload.get("asking"), payload.get("editing"),
                    bool(payload.get("forced")),
                    [str(c) for c in payload.get("choices") or [] if isinstance(c, str)],
-                   bool(payload.get("widened")), str(payload.get("role_check") or ""))
+                   bool(payload.get("widened")), str(payload.get("role_check") or ""),
+                   str(payload.get("scope_check") or ""))
 
     def expired(self, now: datetime) -> bool:
         return self.updated_at is not None and now - self.updated_at > DRAFT_TTL
@@ -424,7 +443,7 @@ class TaskIntake:
                  technical: Callable[[int], bool] = lambda _user_id: False,
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
                  post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False,
-                 role_conflict_check: bool = False) -> None:
+                 role_conflict_check: bool = False, ask_city_or_province: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -440,6 +459,11 @@ class TaskIntake:
         task's own words («ищу соинвесторов в свои проекты» and then «хочу вкладывать») is asked about once with
         buttons; the answer to it sets the role. Off, the answer is taken as it is.
 
+        ``ask_city_or_province`` (``INTAKE_ASK_CITY_OR_PROVINCE``, Q62): a bare province capital («в Мадриде») is
+        asked about once after the hard fields: «Искать только в самом городе Мадрид или по всей провинции?» with
+        buttons; «Вся провинция» and «Не важно» make the place the province, «Только в городе» keeps the city (see
+        ``_needs_scope``). Off, nothing is asked and the place stays the city.
+
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
         """
@@ -450,6 +474,7 @@ class TaskIntake:
         self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
         self.skip_widens_place = skip_widens_place
         self.role_conflict_check = role_conflict_check
+        self.ask_city_or_province = ask_city_or_province
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
         return mode_menu(text, both=self.both_mode)
@@ -514,6 +539,8 @@ class TaskIntake:
                 return await self._edit_value(draft, text)
             if word in ENOUGH_WORDS:
                 return await self._enough(draft)
+            if draft.asking == SCOPE_PATH and draft.scope_check == "asking" and word not in self._skip_words():
+                return await self._scope_answer(draft, _scope_in_text(text, draft.spec.place), text)
             if word in self._skip_words() and draft.asking and draft.asking != "place":
                 return await self._skip(draft)
             return await self._interview(draft, text)
@@ -572,6 +599,8 @@ class TaskIntake:
             return await self._interview(draft, draft.choices[int(value)])
         if action == "deal" and value in ("rent", "sale") and draft.asking == "deal":
             return await self._interview(draft, f"Сделка: {DEAL_TEXT[value]}")
+        if action == "scope" and value in ("city", "province") and draft.asking == SCOPE_PATH:
+            return await self._scope_answer(draft, value)
         if action == "role" and value in ("raising", "deploying") and draft.asking == "investor.user_role":
             return await self._interview(draft, "ищу деньги для проекта" if value == "raising" else "хочу вкладывать",
                                          role=value if draft.role_check == "asking" else None)
@@ -612,10 +641,45 @@ class TaskIntake:
     async def _skip(self, draft: Draft) -> Reply:
         """«Не важно»: the asked field stays open on purpose; the interviewer asks the next one."""
         spec = draft.spec or TaskSpec(mode=draft.mode)  # type: ignore[arg-type]
+        if draft.asking == SCOPE_PATH:  # Q62: «Не важно» to «only the city or the whole province»: the province
+            return await self._scope_answer(draft, "province")
         if draft.asking and draft.asking != "place":
             draft.spec = spec.mark_unspecified(draft.asking)
         widen = _widened_place(draft, spec) if self.skip_widens_place else None
         return await self._interview(draft, "Не важно", widen=widen)
+
+    async def _scope_answer(self, draft: Draft, level: str | None, text: str = "") -> Reply:
+        """INTAKE_ASK_CITY_OR_PROVINCE (Q62): the answer to «only the city or the whole province» (asked once).
+
+        ``level`` «city» or «province» sets the place's level whatever the model reads; None (a typed answer that
+        says neither, e.g. «север: Алькобендас») goes to the interviewer as the answer about the districts.
+        """
+        draft.scope_check = "done"
+        if level is None:
+            draft.asking = "place.districts"
+            return await self._interview(draft, text)
+        city = (draft.spec.place.names.get("ru") or draft.spec.place.name) if draft.spec else ""
+        message = f"По всей провинции {city}" if level == "province" else f"Только в самом городе {city}"
+        return await self._interview(draft, message, place_level=level)
+
+    def _needs_scope(self, draft: Draft, spec: TaskSpec, question: str | None) -> bool:
+        """INTAKE_ASK_CITY_OR_PROVINCE (Q62): ask «only the city or the whole province» for this place.
+
+        Only a city of Spain whose name is its province's too (Madrid, Málaga, Alicante, Valencia, Sevilla; not
+        Marbella), without districts or a radius, not asked before. Not when the person's words already say which
+        («в городе», «capital», «в провинции», «побережье», «пригороды»), name a street or a district word, or name
+        another place (a capitalised word inside a sentence of the task: «в Чамбери, Мадрид»), nor when the model has
+        asked the same already (a question with «город» and «провинция»).
+        """
+        place = spec.place
+        if (draft.scope_check or not place.name or place.level != "city" or place.districts or place.radius_km
+                or place.country not in (None, "ES") or not is_province(place.name)):
+            return False
+        said = [draft.task, *(t["text"] for t in draft.dialogue if t.get("role") == "user")]
+        if any(p.search(t) for t in said for p in (_SCOPE_SAID, _SCOPE_CITY, _SCOPE_COAST, _STREET_WORD)) or _other_place(draft.task, place):
+            return False
+        asked = [question or "", *(t["text"] for t in draft.dialogue if t.get("role") == "assistant")]
+        return not any(_CITY_WORD.search(q) and _PROVINCE_WORD.search(q) for q in asked)
 
     async def _enough(self, draft: Draft) -> Reply:
         """«Хватит, ищи»: no more questions; only a missing place is still asked."""
@@ -625,11 +689,13 @@ class TaskIntake:
     # --- the interview ----------------------------------------------------------------------
 
     async def _interview(self, draft: Draft, message: str, *, editing: bool = False,
-                         widen: dict[str, object] | None = None, role: str | None = None) -> Reply:
+                         widen: dict[str, object] | None = None, role: str | None = None,
+                         place_level: str | None = None) -> Reply:
         """One user message: the interviewer updates the spec and says what to ask next, or the card is shown.
 
         ``widen`` (Q42): the place fields «Не важно» widened; applied after the model, which may resend the city.
         ``role`` (Q52): the button pressed under the role-conflict question; it sets the role whatever the model read.
+        ``place_level`` (Q62): «city» or «province» answered to «only the city or the whole province»; applied last.
         """
         mode = draft.mode or "real_estate"
         spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
@@ -640,6 +706,10 @@ class TaskIntake:
             draft.spec.place = draft.spec.place.model_copy(update=widen)
             draft.widened = True
             log.info("telegram.intake.place_widened", extra={"user_id": draft.user_id, **widen})
+        if place_level and draft.spec.place.name:
+            draft.spec.place = draft.spec.place.model_copy(update={"level": place_level})
+            draft.widened = place_level == "province"
+            log.info("telegram.intake.place_scope", extra={"user_id": draft.user_id, "level": place_level})
         if draft.asking == "place.districts" and _SUBURB.search(draft.task):
             if draft.spec.place.radius_km and draft.spec.place.radius_km != spec.place.radius_km:
                 turn.understood_ru = f"радиус {draft.spec.place.radius_km:g} км"
@@ -748,6 +818,12 @@ class TaskIntake:
             asking = "place.districts"
             question = "Какие пригороды или населённые пункты искать? Можно вместо названий указать радиус в км от города."
             options, choices = (), ()
+        elif (not missing and not capped and not editing and self.ask_city_or_province
+              and self._needs_scope(draft, spec, question)):
+            draft.scope_check = "asking"
+            asking = SCOPE_PATH
+            question = SCOPE_QUESTION.format(city=spec.place.names.get("ru") or spec.place.name)
+            options, choices = SCOPE_OPTIONS, ()
         elif question is None and missing and not capped:
             asking, question = missing[0], question_for(spec, missing[0])
             options = options_for(missing[0])
@@ -793,7 +869,8 @@ class TaskIntake:
             return Reply(f"{exc}\nОпишите задачу иначе, например {EXAMPLES.get(draft.mode or '', EXAMPLES['real_estate'])}.")
         draft.step, draft.asking, draft.editing = "summary", None, None
         await self.store.save(draft)
-        lines = ["Проверьте задачу:", draft.spec.summary_ru(province_scope=self.skip_widens_place and draft.widened)]
+        lines = ["Проверьте задачу:", draft.spec.summary_ru(
+            province_scope=(self.skip_widens_place or self.ask_city_or_province) and draft.widened)]
         if self.technical(draft.user_id):
             limits = plan.limits
             model = getattr(self.interviewer, "model", "")
@@ -877,6 +954,35 @@ def _widened_place(draft: Draft, spec: TaskSpec) -> dict[str, object] | None:
     if not (_CITY_WORD.search(question) and _PROVINCE_WORD.search(question) and _names_place(question, place)):
         return None
     return {"level": "province"}
+
+
+def _scope_in_text(text: str, place: Place) -> str | None:
+    """INTAKE_ASK_CITY_OR_PROVINCE (Q62): «city», «province» or None (neither) in a typed answer to the scope question.
+
+    «вся провинция», «Малага и Коста-дель-Соль», «везде», «не только город» -> province; «только город», «solo la
+    ciudad», «только Мадрид» -> city; both words: province with «вся/весь/toda», else city.
+    """
+    province = bool(_PROVINCE_WORD.search(text) or _SCOPE_COAST.search(text))
+    city = bool(_CITY_WORD.search(text) or _SCOPE_CITY.search(text))
+    if re.search(r"(?<!\w)не\s+только(?!\w)|\bno\s+s[oó]lo\b|\bnot\s+only\b", text, re.IGNORECASE):
+        return "province"
+    if province and city:
+        return "province" if _WHOLE_WORD.search(text) else "city"
+    if province:
+        return "province"
+    if city or (_ONLY_WORD.search(text) and _names_place(text, place)):
+        return "city"
+    return "province" if _WHOLE_WORD.search(text) else None
+
+
+def _other_place(text: str, place: Place) -> bool:
+    """Q62: the task names a place besides ``place``: a capitalised word inside a sentence that is not the place
+    («в Чамбери, Мадрид», «Мадрид, Las Rozas»); the first word of a sentence and acronyms («IBI») do not count."""
+    for sentence in re.split(r"[.!?\n:;]", text):
+        words = re.findall(r"[^\W\d_][\w'-]*", sentence)
+        if any(w[0].isupper() and not w.isupper() and not _names_place(w, place) for w in words[1:]):
+            return True
+    return False
 
 
 def _names_place(question: str, place: Place) -> bool:
