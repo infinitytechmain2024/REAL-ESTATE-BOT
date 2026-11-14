@@ -306,6 +306,8 @@ class RunnerConfig:
     dedup_district_not_street: bool = False
     # Two portals' addresses without a shared street merge by the facts rule (``same_object(cross_portal_facts=True)``, Q32).
     dedup_cross_portal_facts: bool = False
+    # One ad filed twice on one portal under two addresses is one object (``same_object(same_host_copy=True)``, Q47).
+    dedup_same_host_copy: bool = False
     # The similar question names every distinct difference of the held listings, not only the closest one's (Q25).
     offer_all_reasons: bool = False
     # A held similar/other finding is merged with the same object already held or sent before it is held (Q27).
@@ -787,7 +789,8 @@ class CampaignRunner:
                 if head.sent.finding.id == finding.id or not same_object(
                         mine, head.listing, without_address=self.config.dedup_without_address,
                         district_not_street=self.config.dedup_district_not_street,
-                        cross_portal_facts=self.config.dedup_cross_portal_facts):
+                        cross_portal_facts=self.config.dedup_cross_portal_facts,
+                        same_host_copy=self.config.dedup_same_host_copy):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -826,7 +829,8 @@ class CampaignRunner:
                 if head.sent.finding.id == finding.id or not same_object(
                         mine, head.listing, without_address=self.config.dedup_without_address,
                         district_not_street=self.config.dedup_district_not_street,
-                        cross_portal_facts=self.config.dedup_cross_portal_facts):
+                        cross_portal_facts=self.config.dedup_cross_portal_facts,
+                        same_host_copy=self.config.dedup_same_host_copy):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
