@@ -105,6 +105,7 @@ BASE_ENV: dict[str, str] = {
     "REPORT_PRECISE_REASONS": "true",  # Q43
     "REPORT_AFTER_OFFER": "true",  # Q44
     "INVESTOR_WEB_QUERIES": "true",  # Q51
+    "INVESTOR_LEAD_SOURCE_CHECK": "true",  # Q53
     "INTAKE_ROLE_CONFLICT_CHECK": "true",  # Q52
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
