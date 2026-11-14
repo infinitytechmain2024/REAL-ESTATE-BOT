@@ -100,7 +100,8 @@ def _prompt(flags: tuple[bool, ...], lt: bool) -> tuple[str, str]:
     "para estancias vacacionales de más de 32 días", "solo alquiler de temporada de hasta 4 meses",
     "Se alquila por meses", "ideal para estancias cortas", "Vacation rental in Eixample",
     "Временная аренда только для отдыха (vacacional)",
-    "Piso no amueblado en alquiler de temporada", "Piso no amueblado, en alquiler de temporada",
+    "Piso no amueblado, en alquiler de temporada", "alquiler de corta temporada",
+    "se alquila este piso por temporada", "Se alquila piso amueblado en Gracia por temporadas",
     "Contrato de temporada de 6 meses", "alquiler vacacional", "hay que justificar temporalidad",
     "Se alquila por temporadas", "Alquiler de temporada",
 ])
@@ -121,6 +122,12 @@ def test_seasonal_signs(text):
     "Depósito de hasta 2 meses y aval bancario",
     # a negation in the same clause with linking words between
     "no es un alquiler de temporada", "No se trata de un alquiler temporal",
+    # B3: a negation among the 4 words before, after the sign, a long let in the same sentence
+    "no se permite alquiler vacacional", "no se permite el alquiler de temporada", "no apto para alquiler de temporada",
+    "no se aceptan alquileres de temporada", "no disponible para alquiler de temporada",
+    "no hacemos alquiler de temporada", "nada de alquiler de temporada", "salvo alquiler de temporada",
+    "excepto alquiler vacacional", "uso vacacional no permitido", "uso vacacional prohibido por la comunidad",
+    "se alquila por temporadas cortas o largas", "alquiler temporal o de larga duración",
 ])
 def test_no_seasonal_sign(text):
     assert seasonal_let_named(text) is False
@@ -248,7 +255,9 @@ def test_flag_on_prompt_has_the_rule_and_the_suffix(flags):
     assert system.index("- Seasonal let:") < system.index(rv._BEFORE_NUMBERS)
     assert "larga temporada" in system and "не знаю" in system
     for case in ("temporada alta en la playa", "contrato laboral temporal", "fianza máximo 2 meses",
-                 "alquiler de temporada larga", "no es un alquiler de temporada"):
+                 "alquiler de temporada larga", "no es un alquiler de temporada", "no se permite alquiler vacacional",
+                 "nada de alquiler de temporada", "uso vacacional no permitido", "cortas o largas",
+                 "alquiler de corta temporada"):
         assert case in system  # the prompt names the same no-signs as ``seasonal_let_named``
     assert version in final_report._LEGAL_RULE_PROMPTS
 

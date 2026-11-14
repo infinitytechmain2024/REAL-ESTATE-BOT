@@ -199,17 +199,22 @@ def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] |
 # words (folded text, ``_fold``). Sim b4-g5-s5 («снять piso в Барселоне до 1500», term «не знаю пока»): «alquiler de
 # temporada», «alquiler temporal (máximo 11 meses)», «uso exclusivo vacaciones/ocio», «estancias vacacionales» went out
 # as exact. A sign is a let word with its term, never a bare word: «temporada» / «temporal» only right after
-# «alquiler», «arrendamiento», «contrato (de alquiler)» or «se alquila por» («temporada de verano en la piscina»,
-# «contrato laboral temporal» are none); «vacaciones» only in «uso (exclusivo) (de|para) vacaciones» («ideal para
-# vacaciones» is none); «vacacional» after «alquiler», «uso», «estancia(s)». No sign: a long let («alquiler de larga
-# temporada», «alquiler de temporada larga», «larga estancia»); a term of months in a sentence about the deposit or the
-# payment («fianza máximo 2 meses», «garantía de hasta 2 meses», «pago por meses adelantados»); a negation before the
-# sign in its clause with only linking words between («no es un alquiler de temporada», «no se alquila por
-# temporada», «не временная аренда»; «no amueblado, en alquiler de temporada» is still a sign).
+# «alquiler», «arrendamiento», «contrato (de alquiler)» («alquiler de corta temporada» too) or «por temporada» within 4
+# words after «se alquila» («temporada de verano en la piscina», «contrato laboral temporal» are none); «vacaciones»
+# only in «uso (exclusivo) (de|para) vacaciones» («ideal para vacaciones» is none); «vacacional» after «alquiler»,
+# «uso», «estancia(s)». No sign:
+# * a long let («alquiler de larga temporada», «alquiler de temporada larga»), or a long let named in the same sentence
+#   («se alquila por temporadas cortas o largas», «alquiler temporal o de larga duración»);
+# * a term of months in a sentence about the deposit or the payment («fianza máximo 2 meses», «pago por meses»);
+# * a negation before the sign in its clause: among the 4 words before it («no se permite alquiler vacacional», «nada
+#   de alquiler de temporada», «salvo alquiler de temporada»), or farther with only linking words between («no es un
+#   alquiler de temporada», «не временная аренда»); «no amueblado, en alquiler de temporada» is still a sign;
+# * a negation within 3 words after the sign in its clause («uso vacacional no permitido», «uso vacacional prohibido
+#   por la comunidad»).
 _LET = r"(?:alquiler(?:es)?|arrendamientos?|contratos?(?:\s+de\s+(?:alquiler|arrendamiento))?)"
 _SEASONAL_LET = re.compile(
-    rf"(?<!\w)(?:{_LET}\s+(?:de\s+|por\s+)?(?:temporadas?|temporal(?:es)?)(?!\s+larga)"
-    r"|(?:se\s+)?alquil(?:a|an|o|amos)\s+por\s+temporadas?|justificar\s+(?:la\s+)?temporalidad"
+    rf"(?<!\w)(?:{_LET}\s+(?:de\s+|por\s+)?(?:corta\s+)?(?:temporadas?|temporal(?:es)?)(?!\s+larga)"
+    r"|(?:se\s+)?alquil(?:a|an|o|amos)(?:\s+\w+){0,4}?\s+por\s+temporadas?|justificar\s+(?:la\s+)?temporalidad"
     r"|(?:alquiler(?:es)?|uso|estancias?)\s+(?:exclusiva(?:mente)?\s+|exclusivo\s+)?vacacional(?:es)?"
     r"|uso\s+(?:exclusivo\s+)?(?:de\s+|para\s+)?vacaciones"
     r"|estancias?\s+cortas?|cortas?\s+estancias?|media\s+estancia"
@@ -219,16 +224,30 @@ _SEASONAL_LET = re.compile(
 # A term of months: a sign unless its sentence is about the deposit or the payment.
 _SEASONAL_MONTHS = re.compile(r"(?<!\w)(?:por\s+meses|(?:hasta|maximo|max\.?)\s+(?:de\s+)?(?:[1-9]|1[01])\s+meses)(?!\w)")
 _DEPOSIT = re.compile(r"(?<!\w)(?:fianzas?|garantias?|depositos?|aval(?:es)?|pagos?|deposit)(?!\w)")
+_LONG_LET = re.compile(r"(?<!\w)(?:largas?\s+(?:temporadas?|duracion|estancias?)|temporadas?\s+largas?|o\s+largas?"
+                       r"|long[\s-]?term)(?!\w)")
 _SENTENCE_END = re.compile(r"(?<!\bmax)[.;!?|\n]")
-# A negation before the sign, with only linking words between: «no es un», «no se», «no se trata de», «не».
+# A negation among the 4 words before the sign in its clause.
+_NEAR_NEGATIONS = frozenset({"no", "sin", "nunca", "nada", "ni", "excepto", "salvo", "prohibido", "prohibida", "not",
+                             "never", "не", "без"})
+# A negation farther before the sign, with only linking words between: «no es un», «no se permite el», «не».
 _SEASONAL_NEGATION = re.compile(
-    r"(?<!\w)(?:no|sin|ni|nunca|not|never|не|без)"
+    r"(?<!\w)(?:no|sin|ni|nunca|nada|not|never|не|без)"
     r"(?:\s+(?:es|son|sera|un|una|el|la|los|las|se|trata|de|del|hay|ofrece|ofrecemos|admite|admiten|aceptamos|acepta"
-    r"|para|por|is|a|an|this|it|это|для))*\s*$")
+    r"|aceptan|permite|permiten|apto|apta|disponible|hacemos|para|por|is|a|an|this|it|это|для))*\s*$")
+# A negation within 3 words after the sign in its clause: «no permitido», «prohibido», «no».
+_NEGATION_AFTER = re.compile(r"^(?:\W*\w+){0,2}?\W*(?<!\w)(?:prohibid[oa]s?|no)(?!\w)")
 
 
-def _seasonal_negated(folded: str, start: int) -> bool:
-    return bool(_SEASONAL_NEGATION.search(_CLAUSE_END.split(folded[:start])[-1]))
+def _seasonal_counts(folded: str, start: int, end: int) -> bool:
+    """The sign at ``folded[start:end]`` is not negated before or after and its sentence names no long let."""
+    clause = _CLAUSE_END.split(folded[:start])[-1]
+    if _NEAR_NEGATIONS.intersection(re.findall(r"\w+", clause)[-4:]) or _SEASONAL_NEGATION.search(clause):
+        return False
+    if _NEGATION_AFTER.search(_CLAUSE_END.split(folded[end:])[0]):
+        return False
+    sentence = _SENTENCE_END.split(folded[:start])[-1] + folded[start:end] + _SENTENCE_END.split(folded[end:])[0]
+    return not _LONG_LET.search(sentence)
 
 
 def seasonal_let_named(*texts: object) -> bool:
@@ -236,11 +255,11 @@ def seasonal_let_named(*texts: object) -> bool:
     temporal», «uso vacacional», «hasta 11 meses», «estancias cortas», «vacation rental», «временная аренда»); never for
     a bare «temporada» / «temporal» / «vacaciones», a long let, a deposit of months or a negated sign (see above)."""
     folded = " ".join(_fold(" ".join(str(t or "") for t in texts)).split())
-    if any(not _seasonal_negated(folded, hit.start()) for hit in _SEASONAL_LET.finditer(folded)):
+    if any(_seasonal_counts(folded, hit.start(), hit.end()) for hit in _SEASONAL_LET.finditer(folded)):
         return True
     for hit in _SEASONAL_MONTHS.finditer(folded):
-        before, after = folded[:hit.start()], folded[hit.end():]
-        sentence = _SENTENCE_END.split(before)[-1] + hit.group(0) + _SENTENCE_END.split(after)[0]
-        if not _DEPOSIT.search(sentence) and not _seasonal_negated(folded, hit.start()):
+        sentence = (_SENTENCE_END.split(folded[:hit.start()])[-1] + hit.group(0)
+                    + _SENTENCE_END.split(folded[hit.end():])[0])
+        if not _DEPOSIT.search(sentence) and _seasonal_counts(folded, hit.start(), hit.end()):
             return True
     return False
