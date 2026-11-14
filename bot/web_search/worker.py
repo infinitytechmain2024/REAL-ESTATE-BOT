@@ -57,6 +57,7 @@ from .models import (
     SEARCH_RESULT_NOTE,
     Candidate,
     FetchTicket,
+    GeneratedQuery,
     PageResult,
     QueuedUrl,
     SourceRun,
@@ -184,8 +185,9 @@ class WebSearchConfig:
     both_mode_portals: bool = False
     # BOTH_MODE_INVESTOR_QUERIES (Q61): a ``both`` campaign's query rounds alternate -- odd rounds search objects as
     # before, even rounds are the INVESTOR_WEB_QUERIES investor round (``investor_part``) and a page one of their
-    # queries found is fetched as ``investors``. ``max_queries_per_campaign`` caps all rounds together. Off: every
-    # round of a ``both`` campaign searches objects, as before.
+    # queries found is fetched as ``investors``. ``max_queries_per_campaign`` caps all rounds together. A half whose
+    # round stores no query is exhausted (``round_halves``): the other one writes every later round, the stage ends
+    # only when both are. Off: every round of a ``both`` campaign searches objects, as before.
     both_mode_investor_queries: bool = False
 
     def __post_init__(self) -> None:
@@ -281,9 +283,31 @@ def investor_part(task: QueryTask) -> QueryTask:
                    required_portals=(), investor_queries=True)
 
 
-def investor_round(round_no: int | None) -> bool:
-    """BOTH_MODE_INVESTOR_QUERIES: the even rounds of a ``both`` campaign are its investor rounds."""
-    return round_no is not None and round_no % 2 == 0
+HALVES = ("objects", "investors")  # BOTH_MODE_INVESTOR_QUERIES: the two halves of a both campaign's query rounds
+
+
+def next_half(previous: str | None, exhausted: set[str]) -> str | None:
+    """BOTH_MODE_INVESTOR_QUERIES: the half after ``previous`` (objects first), the other one when it is exhausted,
+    None when both are."""
+    order = HALVES if previous is None else (HALVES[1 - HALVES.index(previous)], previous)
+    return next((half for half in order if half not in exhausted), None)
+
+
+def round_halves(rounds: int, filled: set[int]) -> tuple[dict[int, str], set[str]]:
+    """BOTH_MODE_INVESTOR_QUERIES: which half wrote each of the ``rounds`` rounds of a both campaign, and the halves
+    exhausted. Replayed from the history: the halves alternate (objects, investors, objects ...); a round that stored
+    no query (``filled``: the rounds with stored queries) exhausts its half, the rest goes to the other one."""
+    halves: dict[int, str] = {}
+    exhausted: set[str] = set()
+    half: str | None = None
+    for round_no in range(1, rounds + 1):
+        half = next_half(half, exhausted)
+        if half is None:
+            break
+        halves[round_no] = half
+        if round_no not in filled:
+            exhausted.add(half)
+    return halves, exhausted
 
 
 class WebSearchWorker:
@@ -430,7 +454,10 @@ class WebSearchWorker:
             await self._done(campaign, "page_cap")
             return
         run = await self.store.get_run(cid)
-        if counts.queries >= cfg.max_queries_per_campaign or (run is not None and run.rounds >= cfg.max_rounds):
+        rounds = run.rounds if run is not None else 0
+        if rounds and self._both_investors(campaign):  # BOTH_MODE_INVESTOR_QUERIES: an exhausted half's empty round
+            rounds = len(await self.store.filled_rounds(cid))  # is no round of the limit (at most one per half)
+        if counts.queries >= cfg.max_queries_per_campaign or (run is not None and rounds >= cfg.max_rounds):
             if not waiting:  # a site's check is still pending: the stage waits for it (or for its expiry)
                 await self._done(campaign, "queries_done")
             return
@@ -460,11 +487,29 @@ class WebSearchWorker:
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
         task = query_task(campaign, hygiene=cfg.query_hygiene, spec_level=cfg.place_level_from_spec,
                           investor_queries=cfg.investor_web_queries)
-        investors = False  # BOTH_MODE_INVESTOR_QUERIES: this round of a both campaign asks for investors
-        if self._both_investors(campaign):
+        if not self._both_investors(campaign):
+            return bool(await self._write_round(campaign, task, used, want, portals_done, investors=False))
+        # BOTH_MODE_INVESTOR_QUERIES: the next half writes this round; when it stores nothing, that half is exhausted
+        # and the other one writes the round in the same tick. Exhausted only when both halves are.
+        run = await self.store.get_run(campaign.id)
+        rounds = run.rounds if run is not None else 0
+        halves, exhausted = round_halves(rounds, await self.store.filled_rounds(campaign.id))
+        half = next_half(halves.get(rounds), exhausted)
+        while half is not None:
+            investors = half == "investors"
+            await self._write_round(campaign, investor_part(task) if investors else task, used, want, portals_done,
+                                    investors=investors)
             run = await self.store.get_run(campaign.id)
-            investors = investor_round((run.rounds if run is not None else 0) + 1)
-            task = investor_part(task) if investors else task
+            if run is not None and run.rounds in await self.store.filled_rounds(campaign.id):
+                return True
+            exhausted.add(half)
+            half = next_half(half, exhausted)
+        return False
+
+    async def _write_round(self, campaign: Campaign, task: QueryTask, used: list[str], want: int,
+                           portals_done: bool, *, investors: bool) -> list[GeneratedQuery]:
+        """One round of queries written by ``task`` and stored; the queries generated (stored or not)."""
+        cfg = self.config
         # The known portals (Idealista, Fotocasa first) are always searched: the ones not yet
         # searched take up to half of this round, written by the model or, if it skips one, from the task.
         if cfg.cover_portals and not portals_done and not investors:
@@ -478,7 +523,7 @@ class WebSearchWorker:
         added = await self.store.add_queries(campaign.id, round_no, queries[:want], reuse_hours=cfg.query_reuse_hours)
         log.info("web_search.round", extra={"campaign_id": campaign.id, "round": round_no, "generated": len(queries),
                                             "added": added})
-        return bool(queries)
+        return queries
 
     async def _apify_gate(self, campaign: Campaign) -> bool:
         """apify mode, before any search query: True when the stage waits for the portals or is already done."""
@@ -500,9 +545,18 @@ class WebSearchWorker:
     async def _url_vertical(self, campaign: Campaign, url: QueuedUrl) -> str:
         """The vertical a page is fetched as: an investor round's hit of a both campaign is ``investors``
         (BOTH_MODE_INVESTOR_QUERIES); anything else the campaign's own, as before."""
-        if self._both_investors(campaign) and investor_round(await self.store.url_round(campaign.id, url.url_key)):
+        if self._both_investors(campaign) and await self._investor_round(
+                campaign, await self.store.url_round(campaign.id, url.url_key)):
             return "investors"
         return campaign.plan.vertical
+
+    async def _investor_round(self, campaign: Campaign, round_no: int | None) -> bool:
+        """BOTH_MODE_INVESTOR_QUERIES: round ``round_no`` of a both campaign was written by its investor half."""
+        if round_no is None:
+            return False
+        run = await self.store.get_run(campaign.id)
+        halves, _ = round_halves(run.rounds if run is not None else 0, await self.store.filled_rounds(campaign.id))
+        return halves.get(round_no) == "investors"
 
     def _both_portals(self, campaign: Campaign) -> bool:
         """BOTH_MODE_PORTALS (Q54) is on and the campaign is ``both``."""
@@ -791,7 +845,8 @@ class WebSearchWorker:
         for query in await self.store.pending_queries(campaign.id, self.config.queries_per_tick):
             await self.store.set_progress(campaign.id, None, self._line(query_count, pages, "поиск"))
             # BOTH_MODE_INVESTOR_QUERIES: an investor round's query of a both campaign is filtered as Q51's
-            investors = self._both_investors(campaign) and investor_round(await self.store.query_round(query.id))
+            investors = self._both_investors(campaign) and await self._investor_round(
+                campaign, await self.store.query_round(query.id))
             try:
                 # A Spanish campaign searches Spain (es-ES) whatever the query's language.
                 hits = await self.searcher.search(query.text, language=task.search_language or query.language)

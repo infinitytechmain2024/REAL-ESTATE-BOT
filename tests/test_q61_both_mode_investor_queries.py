@@ -15,8 +15,9 @@ from bot.web_search.worker import (
     WebSearchConfig,
     WebSearchWorker,
     investor_part,
-    investor_round,
+    next_half,
     query_task,
+    round_halves,
 )
 from tests.test_q54_both_mode_portals import _campaign
 from tests.test_web_search import FakeFetcher, FakeSearcher, run_until_done
@@ -27,13 +28,17 @@ PORTAL_HIT = "https://www.fotocasa.es/es/comprar/terreno/madrid/19000000{n}/d"
 
 
 class RoundGenerator:
-    """Writes ``count`` new queries a round: investor words for an investor task, plot words otherwise."""
+    """Writes ``count`` new queries a round: investor words for an investor task, plot words otherwise. A vertical in
+    ``empty`` has nothing new after ``rounds`` rounds of it."""
 
-    def __init__(self) -> None:
+    def __init__(self, empty: dict[str, int] | None = None) -> None:
         self.tasks: list[QueryTask] = []
+        self.empty = empty or {}
 
     async def generate(self, task: QueryTask, *, used: list[str], count: int) -> list[GeneratedQuery]:
         self.tasks.append(task)
+        if sum(t.vertical == task.vertical for t in self.tasks) > self.empty.get(task.vertical, 10**6):
+            return []
         words = "inversores proyecto" if task.vertical == "investors" else "solar urbano venta"
         start = len(used)
         return [GeneratedQuery(f"{words} Madrid {start + i}", "es") for i in range(count)]
@@ -61,10 +66,11 @@ class VerticalStore(MemoryWebStore):
         return await super().begin_fetch(campaign_id, url, **kw)
 
 
-async def _run(mode: str, *, flag: bool, max_queries: int = 7, investor_web: bool = True):
+async def _run(mode: str, *, flag: bool, max_queries: int = 7, investor_web: bool = True,
+               empty: dict[str, int] | None = None):
     campaigns = MemoryCampaignStore()
     camp = await _campaign(mode, campaigns)
-    store, generator, searcher = VerticalStore(campaigns), RoundGenerator(), RoundSearcher()
+    store, generator, searcher = VerticalStore(campaigns), RoundGenerator(empty), RoundSearcher()
     w = WebSearchWorker(campaigns, store, searcher, FakeFetcher(), generator,
                         config=WebSearchConfig(cover_portals=False, queries_per_round=2,
                                                max_queries_per_campaign=max_queries, domain_policy="off",
@@ -111,7 +117,60 @@ def test_investor_part_and_rounds() -> None:
     assert part.search_plan is None and part.required_portals == () and part.portals() == ()
     real_estate = QueryTask(goal="g", task_text="t", location="Madrid", location_aliases={}, vertical="real_estate")
     assert investor_part(real_estate) is real_estate
-    assert [investor_round(n) for n in (None, 1, 2, 3, 4)] == [False, False, True, False, True]
+    assert next_half(None, set()) == "objects" and next_half("objects", set()) == "investors"
+    assert next_half("objects", {"investors"}) == "objects" and next_half(None, {"objects"}) == "investors"
+    assert next_half("investors", {"objects", "investors"}) is None
+    assert round_halves(4, {1, 2, 3, 4}) == ({1: "objects", 2: "investors", 3: "objects", 4: "investors"}, set())
+    # round 2 (investors) stored nothing: every later round is an object round
+    assert round_halves(5, {1, 3, 4, 5}) == ({1: "objects", 2: "investors", 3: "objects", 4: "objects",
+                                              5: "objects"}, {"investors"})
+    assert round_halves(3, {2, 3}) == ({1: "objects", 2: "investors", 3: "investors"}, {"objects"})
+
+
+# --- flag on: one half exhausted, the other goes on ----------------------------------------------------
+
+
+def _halves(generator: RoundGenerator) -> list[str]:
+    return [t.vertical for t in generator.tasks]
+
+
+async def test_flag_on_empty_investor_half_leaves_the_object_rounds() -> None:
+    cid, store, generator, searcher = await _run("both", flag=True, max_queries=20, empty={"investors": 0})
+    assert _halves(generator) == ["both", "investors", *["both"] * 7]  # asked once, then never again
+    assert len(store.queries[cid]) == 16 == len(searcher.calls)  # WEB_SEARCH_MAX_ROUNDS (8) object rounds
+    assert all(q.text.startswith("solar") for q in store.queries[cid])
+    assert set(store.verticals.values()) == {"both"}
+    assert store.runs[cid].stop_reason == "queries_done"
+
+
+async def test_flag_on_empty_object_half_leaves_the_investor_rounds() -> None:
+    cid, store, generator, _searcher = await _run("both", flag=True, max_queries=20, empty={"both": 0})
+    assert _halves(generator) == ["both", *["investors"] * 8]
+    assert len(store.queries[cid]) == 16 and all(q.text.startswith("inversores") for q in store.queries[cid])
+    assert store.verticals and set(store.verticals.values()) == {"investors"}
+    assert store.runs[cid].stop_reason == "queries_done"
+
+
+async def test_flag_on_half_exhausted_later_keeps_the_earlier_investor_pages_investors() -> None:
+    cid, store, generator, _searcher = await _run("both", flag=True, max_queries=12, empty={"investors": 1})
+    assert _halves(generator) == ["both", "investors", "both", "investors", "both", "both", "both"]
+    assert {q.round_no for q in store.queries[cid] if q.text.startswith("inversores")} == {2}
+    assert len(store.queries[cid]) == 12
+    investors = {u for u, v in store.verticals.items() if v == "investors"}
+    assert investors and all("clubinversores" in u for u in investors)
+    assert all(v == "both" for u, v in store.verticals.items() if "terrenos-madrid" in u)
+
+
+async def test_flag_on_both_halves_empty_is_queries_exhausted() -> None:
+    cid, store, generator, _searcher = await _run("both", flag=True, empty={"both": 1, "investors": 1})
+    assert _halves(generator) == ["both", "investors", "both", "investors"]
+    assert len(store.queries[cid]) == 4 and store.runs[cid].stop_reason == "queries_exhausted"
+
+
+async def test_flag_off_empty_round_still_ends_the_stage_as_before() -> None:
+    cid, store, generator, _searcher = await _run("both", flag=False, max_queries=20, empty={"both": 1})
+    assert _halves(generator) == ["both", "both"]
+    assert len(store.queries[cid]) == 2 and store.runs[cid].stop_reason == "queries_exhausted"
 
 
 # --- flag off: as before; real_estate and investors: unchanged ----------------------------------------

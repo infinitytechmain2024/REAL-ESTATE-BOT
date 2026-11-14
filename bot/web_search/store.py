@@ -93,6 +93,7 @@ class WebStore(Protocol):
     async def pending_queries(self, campaign_id: str, limit: int) -> list[PendingQuery]: ...
     async def query_round(self, query_id: str) -> int | None: ...
     async def url_round(self, campaign_id: str, url_key: str) -> int | None: ...
+    async def filled_rounds(self, campaign_id: str) -> set[int]: ...
     async def query_done(self, query_id: str, *, ok: bool, results: int, new_urls: int,
                          error: str | None = None) -> None: ...
     async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
@@ -457,6 +458,12 @@ class PostgresWebStore:
         """BOTH_MODE_INVESTOR_QUERIES: the round a query was written in (None: no such query)."""
         value = await self.pool.fetchval("select round_no from web_search_queries where id = $1::uuid", query_id)
         return None if value is None else int(value)
+
+    async def filled_rounds(self, campaign_id: str) -> set[int]:
+        """BOTH_MODE_INVESTOR_QUERIES: the rounds that stored at least one query (pending, searched or skipped)."""
+        rows = await self.pool.fetch(
+            "select distinct round_no from web_search_queries where campaign_id = $1::uuid", campaign_id)
+        return {int(r["round_no"]) for r in rows}
 
     async def url_round(self, campaign_id: str, url_key: str) -> int | None:
         """BOTH_MODE_INVESTOR_QUERIES: the round of the query that queued the URL (None: not from a search hit)."""
@@ -1202,6 +1209,9 @@ class MemoryWebStore:
 
     async def query_round(self, query_id: str) -> int | None:
         return next((q.round_no for qs in self.queries.values() for q in qs if q.id == query_id), None)
+
+    async def filled_rounds(self, campaign_id: str) -> set[int]:
+        return {q.round_no for q in self.queries.get(campaign_id, [])}
 
     async def url_round(self, campaign_id: str, url_key: str) -> int | None:
         row = self.urls.get(campaign_id, {}).get(url_key)
