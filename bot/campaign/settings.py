@@ -112,7 +112,7 @@ class CampaignRunnerSettings(BaseSettings):
     # Q49: for a home rent that asked for no short term («не знаю» included) a seasonal / temporary / holiday let is
     # similar, «сезонная аренда» (bot/campaign/tolerance.py, reviewer prompts «-lt»). false (default): as before.
     rent_default_long_term: bool = Field(default=False, validation_alias="RENT_DEFAULT_LONG_TERM")
-    # Q59: for the same home rent allowing no short let («от 6 месяцев» allows none) a seasonal / temporary / holiday let
+    # Q59: for the same home rent naming no term or only a clear long one («от 6 месяцев») a seasonal / temporary / holiday let
     # is excluded, «сезонная аренда» in the report, never offered (bot/campaign/tolerance.py). false: as before.
     rent_seasonal_excluded: bool = Field(default=False, validation_alias="RENT_SEASONAL_EXCLUDED")
     # Q59: against the task's rooms a studio without rooms has 0 bedrooms («меньше комнат»), with one room unconfirmed

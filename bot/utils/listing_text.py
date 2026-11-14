@@ -180,25 +180,48 @@ def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] |
     return "long" if long and not short else "short" if short and not long else None
 
 
-# RENT_SEASONAL_EXCLUDED (Q59). An open lease term in the person's words: «от 6 месяцев», «минимум 8 месяцев», «не менее
-# 3 месяцев», «8 месяцев минимум», «от полугода». It sets a floor, not an end, so it is no short term (sim b5-g5-s6
-# answered «от 6 месяцев»). A fixed term under a year («на 6 месяцев», «на 10 месяцев», «на полгода») is short: in
-# Spain that is what an «alquiler de temporada» is for.
-_MONTHS = r"(?:\d+|один|одного|два|двух|три|трех|четыре|четырех|пять|пяти|шесть|шести|семь|семи|восемь|восьми|девять|девяти" \
-    r"|десять|десяти|одиннадцать|одиннадцати|пару|нескольких|несколько)\s+(?:месяц|місяц)\w*"
-_OPEN_TERM = re.compile(
-    rf"(?<!\w)(?:(?:на\s+)?{_MONTHS}\s+(?:минимум|мінімум|и\s+(?:более|больше|дольше)|или\s+(?:больше|дольше))(?!\w)"
-    rf"|(?:от|від|минимум|мінімум|не\s+менее|не\s+меньше|хотя\s+бы)\s+(?:на\s+)?{_MONTHS}"
-    r"|(?:от|від)\s+(?:полугода|пол\s+года|півроку|пів\s+року)(?!\w))")
-_HALF_YEAR = re.compile(r"(?<!\w)на\s+(?:полгода|пол\s+года|півроку|пів\s+року)(?!\w)")
+# RENT_SEASONAL_EXCLUDED (Q59). A seasonal let is excluded only on a clear long term or no term at all (conservative):
+# a missed short term («3 месяца», «месяца на три», «летом», «for the summer», «para el verano») must never exclude.
+# Folded text (``_fold``). Clear long: ``_LONG_TERM`` («на год», «от года», «на 2 года», «долгосрочно», «long term»,
+# «larga duración»), 12+ months, an open term of 6+ months («от 6 месяцев», «минимум 8 месяцев», «6 месяцев минимум»,
+# «от полугода», «at least 6 months», «mínimo 6 meses»). Any other mention of a term (months, weeks, days, nights, a
+# season, a year, «временно», «temporada») allows a short let. A price per month («1500 в месяц», «al mes») is no term.
+_SIX_PLUS = r"(?:[6-9]|1[01]|шесть|шести|семь|семи|восемь|восьми|девять|девяти|десять|десяти|одиннадцать|одиннадцати)"
+_CLEAR_LONG = re.compile(
+    r"(?<!\w)(?:(?:на|от|від|минимум|мінімум|не\s+менее|не\s+меньше|хотя\s+бы|минимум\s+на|for|desde|minimo)\s+)?"
+    r"(?:1[2-9]|[2-9]\d)\s+(?:месяц\w*|місяц\w*|мес|months?|meses)(?!\w)"
+    rf"|(?<!\w)(?:от|від|минимум|мінімум|не\s+менее|не\s+меньше|хотя\s+бы|at\s+least|minimum|min|desde|minimo|a\s+partir\s+de)"
+    rf"\s+(?:на\s+)?{_SIX_PLUS}\s+(?:месяц\w*|місяц\w*|мес|months?|meses)(?!\w)"
+    rf"|(?<!\w)(?:на\s+)?{_SIX_PLUS}\s*\+?\s*(?:месяц\w*|місяц\w*|мес|months?|meses)\s+"
+    r"(?:минимум|мінімум|и\s+(?:более|больше|дольше)|или\s+(?:больше|дольше)|minimum|or\s+more|o\s+mas|como\s+minimo)(?!\w)"
+    r"|(?<!\w)(?:[6-9]|1[01])\s*\+\s*(?:months?|meses|месяц\w*|мес)(?!\w)"
+    r"|(?<!\w)(?:от|від)\s+(?:полугода|пол\s+года|півроку|пів\s+року)(?!\w)")
+_PRICE_PER = re.compile(
+    r"(?:(?<!\w)(?:в|за)\s+|/\s*)(?:месяц|мес|місяць)\w*\.?|(?<!\w)(?:al|por|el)\s+mes(?!\w)|/\s*mes(?!\w)"
+    r"|(?<!\w)(?:per|a|/)\s*month(?!\w)|(?<!\w)(?:monthly|mensual\w*|ежемесячн\w*|помесячн\w*)(?!\w)")
+_TERM_MENTION = re.compile(
+    r"(?<!\w)(?:\w*месяц\w*|\w*місяц\w*|мес|недел\w*|тижн\w*|тиждень|дн(?:я|еи|и)|день|сут\w*|\w*суточн\w*|подобов\w*"
+    r"|ноч\w*|лет|лет(?:о|ом|а)|летн\w*|літ\w*|зим\w*|весн\w*|осен\w*|сезон\w*|полгода|пол\s+года|полугод\w*|півроку"
+    r"|год\w*|рок\w*|рік|краткосрочн\w*|короткостроков\w*|долгосрочн\w*|довгостроков\w*|временн\w*|тимчасов\w*"
+    r"|months?|weeks?|days?|nights?|summer|winter|spring|autumn|seasons?|seasonal|years?|yearly|holidays?|vacations?"
+    r"|short[\s-]?term|long[\s-]?term|mes|meses|semanas?|dias?|noches?|verano|invierno|primavera|otono|quincena"
+    r"|temporada\w*|temporal\w*|vacacion\w*|anos?|anual)(?!\w)")
 
 
-def task_asks_short(spec: object, *texts: object) -> bool:
-    """Q59: the person's words allow a short let: a short term is named («на сезон», «на 1–3 месяца», «на 6 месяцев»,
-    «на полгода», «посуточно»), alone or beside a long one («на год или на лето»). An open term («от 6 месяцев»,
-    «минимум 8 месяцев», «от полугода») is not counted as short."""
-    folded = _OPEN_TERM.sub(" | ", _task_words(spec, texts))
-    return _term_named(_SHORT_TERM, folded) or _term_named(_HALF_YEAR, folded)
+def task_long_or_unnamed(spec: object, *texts: object) -> bool:
+    """Q59: True when the person's words name no lease term at all, or only a clear long one («от 6 месяцев», «на
+    год», «долгосрочно»); False on any other mention of a term («3 месяца», «на 6 месяцев», «летом», «for the
+    summer», «por 3 meses», «на год или на лето», «не обязательно на год»: a negated long term is a mention)."""
+    folded = _PRICE_PER.sub(" | ", _task_words(spec, texts))
+    for pattern in (_CLEAR_LONG, _LONG_TERM):
+        kept, last = [], 0
+        for hit in pattern.finditer(folded):
+            clause = _CLAUSE_END.split(folded[:hit.start()])[-1]
+            if not _TERM_NEGATIONS.intersection(re.findall(r"\w+", clause)[-3:]):
+                kept.append(folded[last:hit.start()] + " | ")
+                last = hit.end()
+        folded = "".join(kept) + folded[last:]
+    return _TERM_MENTION.search(folded) is None
 
 
 # STUDIO_ZERO_BEDROOMS (Q59). The person asked for a studio themselves («студия», «estudio», «studio», «loft»; the

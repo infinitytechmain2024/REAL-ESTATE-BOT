@@ -17,7 +17,7 @@ from bot.campaign.tolerance import (
     request_for,
     seasonal_excluded_enabled,
 )
-from bot.utils.listing_text import task_asks_short
+from bot.utils.listing_text import task_long_or_unnamed
 from tests.test_portal_rental_term import SOURCE_TEXT, TERM_QUESTION
 from tests.test_q49_seasonal_rent import FLAT, SIM_SEASONAL
 from tests.test_reviewer import settings
@@ -36,19 +36,29 @@ def barcelona(monkeypatch, flag: bool, answer: str | None = "от 6 месяце
                        spec=_spec(answer))
 
 
-@pytest.mark.parametrize(("answer", "short"), [
-    # open terms, long terms, none: no short let
-    ("от 6 месяцев", False), ("от полугода", False), ("минимум 8 месяцев", False), ("8 месяцев минимум", False),
-    ("не менее 3 месяцев", False), ("на год", False), ("на 12 месяцев", False), ("не знаю", False),
-    ("долгосрочно", False),
-    # a fixed term under a year is an «alquiler de temporada»; a short term beside a long one allows it too
-    ("на 6 месяцев", True), ("на 10 месяцев", True), ("на полгода", True), ("на 3 месяца", True), ("на сезон", True),
-    ("посуточно", True), ("на лето", True), ("на 6 месяцев или на лето", True), ("на год или на лето", True),
-    # «temporada» in the person's words is read as a short sign, «larga temporada» too: the safe side, not excluded
-    ("alquiler de larga temporada", True),
-])
-def test_task_asks_short(answer, short):
-    assert task_asks_short(_spec(answer), SOURCE_TEXT) is short
+CLEAR_LONG_OR_NONE = [
+    None, "не знаю", "не важно", "от 6 месяцев", "минимум 8 месяцев", "8 месяцев минимум", "не менее 6 месяцев",
+    "от полугода", "на год", "от года", "на 2 года", "на 12 месяцев", "12 месяцев", "долгосрочно", "long term",
+    "larga duración", "at least 6 months", "6+ months", "mínimo 6 meses", "до 1500 в месяц", "1200 €/мес",
+    "1400 al mes",
+]
+# Review round 2: any other term, the short ones missed by ``_SHORT_TERM`` first of all, keeps the Q49 bucket.
+OTHER_TERMS = [
+    "3 месяца", "2-3 месяца", "месяца на три", "летом", "for 3 months", "for the summer", "por 3 meses",
+    "para el verano", "от 3 месяцев", "на 6 месяцев", "на 10 месяцев", "на 11 месяцев", "на полгода", "полгода",
+    "6 месяцев", "на сезон", "на 1–3 месяца", "посуточно", "на пару недель", "зимой", "short term", "до года",
+    "на год или на лето", "не обязательно на год", "larga temporada", "alquiler de larga temporada",
+]
+
+
+@pytest.mark.parametrize("answer", CLEAR_LONG_OR_NONE)
+def test_clear_long_or_no_term(answer):
+    assert task_long_or_unnamed(_spec(answer), SOURCE_TEXT) is True
+
+
+@pytest.mark.parametrize("answer", OTHER_TERMS)
+def test_any_other_term(answer):
+    assert task_long_or_unnamed(_spec(answer), SOURCE_TEXT) is False
 
 
 def test_the_sim_seasonal_lets_are_excluded(monkeypatch):
@@ -66,14 +76,13 @@ def test_excluded_without_q49_too(monkeypatch, q49):
     assert classify(found, request).bucket == "excluded"
 
 
-@pytest.mark.parametrize("answer", ["от 6 месяцев", "минимум 8 месяцев", "не знаю", None, "на год", "долгосрочно"])
+@pytest.mark.parametrize("answer", CLEAR_LONG_OR_NONE)
 def test_no_short_term_excludes(monkeypatch, answer):
     request = barcelona(monkeypatch, True, answer)
     assert classify({**FLAT, "rental_term": "temporary"}, request).bucket == "excluded"
 
 
-@pytest.mark.parametrize("answer", ["на сезон", "на 1–3 месяца", "посуточно", "на 6 месяцев", "на 10 месяцев",
-                                    "на полгода", "на год или на лето", "larga temporada"])
+@pytest.mark.parametrize("answer", OTHER_TERMS)
 def test_a_short_term_asked_for_keeps_the_old_bucket(monkeypatch, answer):
     request = barcelona(monkeypatch, True, answer)
     assert request.seasonal_excluded is False

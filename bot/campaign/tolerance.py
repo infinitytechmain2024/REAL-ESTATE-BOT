@@ -69,11 +69,12 @@ Other constraints
   for a short term («на сезон», «на пару месяцев», «посуточно»; ``task_rental_term`` «short»): unchanged.
 * Seasonal let excluded (Q59, ``RENT_SEASONAL_EXCLUDED``; ``Request.seasonal_excluded``) -> excluded (``seasonal``,
   «сезонная аренда»), never offered with «Показать?»: the same home rent and the same listing signs as Q49, but the
-  person does not want a seasonal let at all. An open term («от 6 месяцев», «минимум 8 месяцев», «от полугода»;
-  ``bot/utils/listing_text.py`` ``task_asks_short``) is no short term; a fixed one under a year («на 6 месяцев», «на
-  полгода»), a short one beside a long one («на год или на лето») or the word «temporada» in the task («larga
-  temporada» too) allows a short let: unchanged. Sim b5-g5-s6 («от 6 месяцев»): 12 seasonal lets were offered as
-  similar and approved.
+  person does not want a seasonal let at all. Only when the person's words name no term at all (the long default of
+  Q49) or only a clear long one: «от 6 месяцев», «минимум 8 месяцев», «от полугода», «на год», «от года», 12+ months,
+  «долгосрочно», «long term», «larga duración» (``bot/utils/listing_text.py`` ``task_long_or_unnamed``). Any other
+  term («3 месяца», «от 3 месяцев», «на 6 месяцев», «на полгода», «летом», «for the summer», «por 3 meses», «на год
+  или на лето», «larga temporada») keeps the Q49 bucket: a missed short term must never exclude. Sim b5-g5-s6 («от 6
+  месяцев»): 12 seasonal lets were offered as similar and approved.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
   (Москва, Минск ...), its link is under another country's TLD (``.ru``,
@@ -118,7 +119,7 @@ from typing import Any, Literal
 from bot.utils.listing_text import (
     auction_named,
     seasonal_let_named,
-    task_asks_short,
+    task_long_or_unnamed,
     task_names_studio,
     task_rental_term,
 )
@@ -389,9 +390,9 @@ def studio_zero_enabled() -> bool:
 
 
 def _seasonal_excluded(deal: object, kind: str | None, spec: dict[str, Any] | None, text: str | None) -> bool:
-    """RENT_SEASONAL_EXCLUDED (Q59): a rent of a home whose words allow no short let (an open term «от 6 месяцев» is none)."""
+    """RENT_SEASONAL_EXCLUDED (Q59): a rent of a home whose words name no term or only a clear long one."""
     return (deal == "rent" and kind in (None, "apartment", "house") and seasonal_excluded_enabled()
-            and not task_asks_short(spec, text))
+            and task_long_or_unnamed(spec, text))
 
 
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
