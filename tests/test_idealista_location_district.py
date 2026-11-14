@@ -7,6 +7,8 @@ its ``district`` «Nueva Andalucía» was dropped, and the reviewer wrote «Не
 
 from dataclasses import replace
 
+import pytest
+
 from bot.web_search.queries import QueryTask
 from bot.web_search.settings import WebSearchSettings
 from bot.web_search.sources.portals import ApifyIdealistaPortalSource
@@ -58,6 +60,29 @@ def test_on_no_duplicate_when_district_is_the_neighbourhood():
     listing = ApifyIdealistaPortalSource("token", location_district=True)._normalize(
         item, replace(task(), location="Benahavís", nearby_places=()), None)
     assert listing is not None and listing.address == "Piso en La Quinta, Benahavís, Málaga"
+
+
+@pytest.mark.parametrize(("fields", "expected"), [
+    ({"neighborhood": "Centro", "district": "Marbella"}, "Chalet en Calle Uno, Centro, Marbella, Málaga"),
+    ({"neighborhood": "PUERTO BANÚS", "district": "Puerto Banús"}, "Chalet en Calle Uno, PUERTO BANÚS, Marbella, Málaga"),
+    ({"neighborhood": "Nueva Andalucia", "district": "Nueva Andalucía"},
+     "Chalet en Calle Uno, Nueva Andalucia, Marbella, Málaga"),
+    ({"neighborhood": "Nueva Andalucía - Puerto Banús", "district": "Nueva Andalucía"},
+     "Chalet en Calle Uno, Nueva Andalucía - Puerto Banús, Marbella, Málaga"),
+    ({"neighborhood": 123, "district": {"x": 1}}, "Chalet en Calle Uno, Marbella, Málaga"),
+])
+def test_on_no_duplicates_by_case_accent_or_contained_name(fields, expected):
+    assert place(row(address="Chalet en Calle Uno", **fields), location_district=True) == expected
+
+
+def test_on_street_names_are_not_searched():
+    item = row(address="Piso en Calle Centro Comercial, Marbella", neighborhood="Centro", district="Casco Antiguo")
+    assert place(item, location_district=True) == "Piso en Calle Centro Comercial, Marbella, Centro, Casco Antiguo, Málaga"
+
+
+def test_on_whole_words_not_substrings():
+    item = row(address="Piso en Calle Uno, Marbella", neighborhood="Elviria", district="Marbella Este")
+    assert place(item, location_district=True) == "Piso en Calle Uno, Marbella, Elviria, Marbella Este, Málaga"
 
 
 async def test_setting_reaches_the_source(monkeypatch):

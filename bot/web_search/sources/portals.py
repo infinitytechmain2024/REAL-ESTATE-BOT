@@ -565,6 +565,28 @@ def _district_ok(district: str, *fields: Any) -> bool:
     return False
 
 
+def _hierarchy(street: str, neighbourhood: str, district: str, municipality: str, province: str) -> list[str]:
+    """IDEALISTA_LOCATION_DISTRICT (Q57): the row's place names to add after its ``address``, in this order, each once.
+    Compared folded, by whole words (``_district_words``: case, accents, hyphens). A name is left out when it is a whole
+    comma part of the address (the first part counted after its last « en »: «Chalet en Puerto Banús» names Puerto
+    Banús, «Piso en Calle Centro Comercial» does not name «Centro»; street names are never searched inside) or a name
+    already added; a district or neighbourhood is also left out when an added district or neighbourhood holds it as
+    whole words («Nueva Andalucía - Puerto Banús» holds «Nueva Andalucía»)."""
+    parts = street.split(",")
+    named = {_district_words(parts[0].rsplit(" en ", 1)[-1]), *map(_district_words, parts[1:])}
+    added: list[str] = []
+    local: list[str] = []
+    for value, inner in ((neighbourhood, True), (district, True), (municipality, False), (province, False)):
+        words = _district_words(value)
+        if not words or words in named or (inner and any(f" {words} " in f" {other} " for other in local)):
+            continue
+        named.add(words)
+        if inner:
+            local.append(words)
+        added.append(value)
+    return added
+
+
 class ApifyIdealistaPortalSource(_PortalSource):
     """Idealista through ``igolaizola/idealista-scraper`` (``APIFY_IDEALISTA_PROVIDER=igolaizola``), any city or
     province by name; rows follow the output schema the Store infers from its recent runs (``url``, ``operation``,
@@ -776,11 +798,12 @@ class ApifyIdealistaPortalSource(_PortalSource):
         phone = contact.get("phone1") if isinstance(contact.get("phone1"), dict) else {}
         texts = item.get("suggestedTexts") if isinstance(item.get("suggestedTexts"), dict) else {}
         street = _text(item.get("address"))  # already "Terreno en <calle>, <barrio>, <municipio>"
-        places: tuple[str, ...] = (municipality, province)
+        places = [p for p in (municipality, province) if _fold(p) not in _fold(street)]
         if self.location_district:
             # Q57: the address names the neighbourhood only («Chalet pareado en Puerto Banús, Marbella»); the row's
             # ``district`` («Nueva Andalucía») is what a task names, so the place the reviewer sees carries it too.
-            places = (_text(item.get("neighborhood")), _text(item.get("district")), municipality, province)
+            places = _hierarchy(street, _text(item.get("neighborhood")), _text(item.get("district")),
+                                municipality, province)
         shown = (item.get("priceInfo") or {}).get("price") if isinstance(item.get("priceInfo"), dict) else None
         shown = shown if isinstance(shown, dict) else {}
         suffix = _text(shown.get("currencySuffix")).casefold()
@@ -790,7 +813,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
         return self._listing(
             task, url=url, title=_text(texts.get("title")) or f"Inmueble en {municipality}".strip(),
             price=price, area=item.get("size"), rooms=item.get("rooms"),
-            address=[street, *(p for p in places if _fold(p) not in _fold(street))],
+            address=[street, *places],
             description=_text(item.get("description")),
             phone=(phone.get("phoneNumberForMobileDialing") or phone.get("phoneNumber")
                    or phone.get("formattedPhone")),
