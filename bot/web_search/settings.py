@@ -151,6 +151,8 @@ class WebSearchSettings(BaseSettings):
     place_level_from_spec: bool = Field(default=False, validation_alias="SEARCH_PLACE_LEVEL_FROM_SPEC")
     # Q51: an investors campaign's web stage searches investors (no listing search plan, no portal queries or pages).
     investor_web_queries: bool = Field(default=False, validation_alias="INVESTOR_WEB_QUERIES")
+    # Q54: the object part of a both campaign goes to the Apify portals as a real_estate task (off: portals skip both).
+    both_mode_portals: bool = Field(default=False, validation_alias="BOTH_MODE_PORTALS")
     # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
     # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or
     # an area), off (the old rule: a property word and a deal word). A country without a portal list is soft.
@@ -228,6 +230,7 @@ class WebSearchSettings(BaseSettings):
             max_renders_per_campaign=self.max_renders_per_campaign if self.render_enabled else 0,
             cover_portals=self.cover_portals, query_hygiene=self.query_hygiene, render_on_refusal=self.render_on_refusal,
             place_level_from_spec=self.place_level_from_spec, investor_web_queries=self.investor_web_queries,
+            both_mode_portals=self.both_mode_portals,
             render_index_on_refusal=self.render_index_on_refusal,
             human_verification=self.human_verification and self.render_enabled,
             verified_host_interval_seconds=self.verified_host_interval_seconds,
