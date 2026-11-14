@@ -1445,8 +1445,8 @@ class CampaignRunner:
             return text
         if terminal:
             found = await self.store.streamed_count(campaign.id)
-            if self.config.status_counts_all_deliveries:  # people_sent holds post leads, comment people and reach
-                found += await self.store.people_sent(campaign.id)
+            if self.config.status_counts_all_deliveries:  # post leads, comment people and reach: one per message
+                found += await self.store.person_messages_sent(campaign.id)
             return campaign_label(campaign.state, found=found, reason=campaign.stop_reason)
         if live is not None:
             return live
