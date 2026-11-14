@@ -488,7 +488,7 @@ CATEGORY = {"price": "budget", "currency": "budget", "location": "place", "forei
             "type": "type", "rooms": "rooms", "area": "area", "area_max": "area", "area_unknown": "area_unknown",
             "location_unknown": "unverified", "kind": "kind", "unverified": "unverified", "ai": "ai", "criteria": "criteria",
             "ai_failed": "ai_failed", "cost_cap": "cost_cap", MANDATORY_UNKNOWN: MANDATORY_UNKNOWN,
-            "approved_deviation": "approved", "deal_kind": "deal_kind"}
+            "approved_deviation": "approved", "deal_kind": "deal_kind", "seasonal": "seasonal"}
 # The reviewer's criterion -> the rules' ``Match.why``.
 CRITERION_WHY = {"place": "location", "deal": "deal", "type": "type", "budget": "price", "rooms": "rooms",
                  "area": "area"}

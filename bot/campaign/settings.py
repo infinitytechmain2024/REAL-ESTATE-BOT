@@ -112,6 +112,12 @@ class CampaignRunnerSettings(BaseSettings):
     # Q49: for a home rent that asked for no short term («не знаю» included) a seasonal / temporary / holiday let is
     # similar, «сезонная аренда» (bot/campaign/tolerance.py, reviewer prompts «-lt»). false (default): as before.
     rent_default_long_term: bool = Field(default=False, validation_alias="RENT_DEFAULT_LONG_TERM")
+    # Q59: for the same home rent naming no term or only a clear long one («от 6 месяцев») a seasonal / temporary / holiday let
+    # is excluded, «сезонная аренда» in the report, never offered (bot/campaign/tolerance.py). false: as before.
+    rent_seasonal_excluded: bool = Field(default=False, validation_alias="RENT_SEASONAL_EXCLUDED")
+    # Q59: against the task's rooms a studio without rooms has 0 bedrooms («меньше комнат»), with one room unconfirmed
+    # (similar); not when the task asks for a studio (bot/campaign/tolerance.py). false (default): as before.
+    studio_zero_bedrooms: bool = Field(default=False, validation_alias="STUDIO_ZERO_BEDROOMS")
     # Q18, the same variable as bot/web_search/settings.py: the reviewer also gets «hits», windows of the whole
     # listing text around the must-have words, and may quote them (prompt «-hits»). Off: as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")

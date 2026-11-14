@@ -175,6 +175,67 @@ def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] |
     """«long» when the person's words ask for a long lease («на год», «долгосрочно», «long term») and name no short
     one; «short» for the reverse («на лето», «на 1–3 месяца», «посуточно»); None when neither or both are named.
     A term with a negation among the 3 words before it («не обязательно на год», «not long term») is not named."""
+    folded = _task_words(spec, texts)
+    long, short = _term_named(_LONG_TERM, folded), _term_named(_SHORT_TERM, folded)
+    return "long" if long and not short else "short" if short and not long else None
+
+
+# RENT_SEASONAL_EXCLUDED (Q59). A seasonal let is excluded only on a clear long term or no term at all (conservative):
+# a missed short term («3 месяца», «месяца на три», «летом», «for the summer», «para el verano») must never exclude.
+# Folded text (``_fold``). Clear long: ``_LONG_TERM`` («на год», «от года», «на 2 года», «долгосрочно», «long term»,
+# «larga duración»), 12+ months, an open term of 6+ months («от 6 месяцев», «минимум 8 месяцев», «6 месяцев минимум»,
+# «от полугода», «at least 6 months», «mínimo 6 meses»). Any other mention of a term (months, weeks, days, nights, a
+# season, a year, «временно», «temporada») allows a short let. A price per month («1500 в месяц», «al mes») is no term.
+_SIX_PLUS = r"(?:[6-9]|1[01]|шесть|шести|семь|семи|восемь|восьми|девять|девяти|десять|десяти|одиннадцать|одиннадцати)"
+_CLEAR_LONG = re.compile(
+    r"(?<!\w)(?:(?:на|от|від|минимум|мінімум|не\s+менее|не\s+меньше|хотя\s+бы|минимум\s+на|for|desde|minimo)\s+)?"
+    r"(?:1[2-9]|[2-9]\d)\s+(?:месяц\w*|місяц\w*|мес|months?|meses)(?!\w)"
+    rf"|(?<!\w)(?:от|від|минимум|мінімум|не\s+менее|не\s+меньше|хотя\s+бы|at\s+least|minimum|min|desde|minimo|a\s+partir\s+de)"
+    rf"\s+(?:на\s+)?{_SIX_PLUS}\s+(?:месяц\w*|місяц\w*|мес|months?|meses)(?!\w)"
+    rf"|(?<!\w)(?:на\s+)?{_SIX_PLUS}\s*\+?\s*(?:месяц\w*|місяц\w*|мес|months?|meses)\s+"
+    r"(?:минимум|мінімум|и\s+(?:более|больше|дольше)|или\s+(?:больше|дольше)|minimum|or\s+more|o\s+mas|como\s+minimo)(?!\w)"
+    r"|(?<!\w)(?:[6-9]|1[01])\s*\+\s*(?:months?|meses|месяц\w*|мес)(?!\w)"
+    r"|(?<!\w)(?:от|від)\s+(?:полугода|пол\s+года|півроку|пів\s+року)(?!\w)")
+_PRICE_PER = re.compile(
+    r"(?:(?<!\w)(?:в|за)\s+|/\s*)(?:месяц|мес|місяць)\w*\.?|(?<!\w)(?:al|por|el)\s+mes(?!\w)|/\s*mes(?!\w)"
+    r"|(?<!\w)(?:per|a|/)\s*month(?!\w)|(?<!\w)(?:monthly|mensual\w*|ежемесячн\w*|помесячн\w*)(?!\w)")
+_TERM_MENTION = re.compile(
+    r"(?<!\w)(?:\w*месяц\w*|\w*місяц\w*|мес|недел\w*|тижн\w*|тиждень|дн(?:я|еи|и)|день|сут\w*|\w*суточн\w*|подобов\w*"
+    r"|ноч\w*|лет|лет(?:о|ом|а)|летн\w*|літ\w*|зим\w*|весн\w*|осен\w*|сезон\w*|полгода|пол\s+года|полугод\w*|півроку"
+    r"|год\w*|рок\w*|рік|краткосрочн\w*|короткостроков\w*|долгосрочн\w*|довгостроков\w*|временн\w*|тимчасов\w*"
+    r"|months?|weeks?|days?|nights?|summer|winter|spring|autumn|seasons?|seasonal|years?|yearly|holidays?|vacations?"
+    r"|short[\s-]?term|long[\s-]?term|mes|meses|semanas?|dias?|noches?|verano|invierno|primavera|otono|quincena"
+    r"|temporada\w*|temporal\w*|vacacion\w*|anos?|anual)(?!\w)")
+
+
+def task_long_or_unnamed(spec: object, *texts: object) -> bool:
+    """Q59: True when the person's words name no lease term at all, or only a clear long one («от 6 месяцев», «на
+    год», «долгосрочно»); False on any other mention of a term («3 месяца», «на 6 месяцев», «летом», «for the
+    summer», «por 3 meses», «на год или на лето», «не обязательно на год»: a negated long term is a mention)."""
+    folded = _PRICE_PER.sub(" | ", _task_words(spec, texts))
+    for pattern in (_CLEAR_LONG, _LONG_TERM):
+        kept, last = [], 0
+        for hit in pattern.finditer(folded):
+            clause = _CLAUSE_END.split(folded[:hit.start()])[-1]
+            if not _TERM_NEGATIONS.intersection(re.findall(r"\w+", clause)[-3:]):
+                kept.append(folded[last:hit.start()] + " | ")
+                last = hit.end()
+        folded = "".join(kept) + folded[last:]
+    return _TERM_MENTION.search(folded) is None
+
+
+# STUDIO_ZERO_BEDROOMS (Q59). The person asked for a studio themselves («студия», «estudio», «studio», «loft»; the
+# interview's rooms answer «студия» sets rooms.min=1, bot/control_plane/rules.py): a studio is then what they want.
+_STUDIO_ASKED = re.compile(r"(?<!\w)(?:студи\w*|estudios?|studios?|lofts?|лофт\w*)(?!\w)")
+
+
+def task_names_studio(spec: object, *texts: object) -> bool:
+    """Q59: the person's words name a studio, not negated («не студия», «без студий» are none)."""
+    return _term_named(_STUDIO_ASKED, _task_words(spec, texts))
+
+
+def _task_words(spec: object, texts: tuple[object, ...]) -> str:
+    """The person's own words of a task, folded: the texts, the interview answers, must-haves, wishes and notes."""
     parts = [str(t or "") for t in texts]
     if isinstance(spec, dict):
         context = spec.get("context")
@@ -190,9 +251,7 @@ def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] |
             if isinstance(wish, dict):
                 parts.append(str(wish.get("text") or ""))
         parts.append(str(spec.get("notes") or ""))
-    folded = " ".join(_fold(" | ".join(parts)).split())
-    long, short = _term_named(_LONG_TERM, folded), _term_named(_SHORT_TERM, folded)
-    return "long" if long and not short else "short" if short and not long else None
+    return " ".join(_fold(" | ".join(parts)).split())
 
 
 # RENT_DEFAULT_LONG_TERM (Q49). A listing that says it is a seasonal, temporary or holiday let, read from its own
