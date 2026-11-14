@@ -74,6 +74,7 @@ BASE_ENV: dict[str, str] = {
     "IDEALISTA_UNAMBIGUOUS_PLACE": "true",  # Q17; REDIS_URL is empty here: no geocoder, so the input stays the name
     "IDEALISTA_STATIC_CENTERS": "true",  # Q30: ...except for a city of the static list (its centre and circle)
     "IDEALISTA_PROVINCE_LOCATION_ID": "true",  # Q36: a province goes as its Location ID 0-EU-ES-<INE code>
+    "IDEALISTA_LOCATION_DISTRICT": "true",  # Q57: the row's district and neighbourhood are in the listing's place
     "PORTAL_PROVINCE_BY_CODE": "true",  # Q38: a row's province is the task's by INE code (Alacant = Alicante)
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",

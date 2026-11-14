@@ -623,13 +623,14 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
                  unambiguous_place: bool = False, district_search: bool = False, static_centers: bool = False,
-                 province_location_id: bool = False, **kwargs: Any) -> None:
+                 province_location_id: bool = False, location_district: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
         self.unambiguous_place = unambiguous_place  # IDEALISTA_UNAMBIGUOUS_PLACE (Q17)
         self.static_centers = static_centers  # IDEALISTA_STATIC_CENTERS (Q30)
         self.district_search = district_search  # PORTAL_DISTRICT_SEARCH (Q26)
         self.province_location_id = province_location_id  # IDEALISTA_PROVINCE_LOCATION_ID (Q36)
+        self.location_district = location_district  # IDEALISTA_LOCATION_DISTRICT (Q57)
 
     def _sort(self, min_area: int | None, max_area: int | None) -> str:
         """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
@@ -775,6 +776,11 @@ class ApifyIdealistaPortalSource(_PortalSource):
         phone = contact.get("phone1") if isinstance(contact.get("phone1"), dict) else {}
         texts = item.get("suggestedTexts") if isinstance(item.get("suggestedTexts"), dict) else {}
         street = _text(item.get("address"))  # already "Terreno en <calle>, <barrio>, <municipio>"
+        places: tuple[str, ...] = (municipality, province)
+        if self.location_district:
+            # Q57: the address names the neighbourhood only («Chalet pareado en Puerto Banús, Marbella»); the row's
+            # ``district`` («Nueva Andalucía») is what a task names, so the place the reviewer sees carries it too.
+            places = (_text(item.get("neighborhood")), _text(item.get("district")), municipality, province)
         shown = (item.get("priceInfo") or {}).get("price") if isinstance(item.get("priceInfo"), dict) else None
         shown = shown if isinstance(shown, dict) else {}
         suffix = _text(shown.get("currencySuffix")).casefold()
@@ -784,7 +790,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
         return self._listing(
             task, url=url, title=_text(texts.get("title")) or f"Inmueble en {municipality}".strip(),
             price=price, area=item.get("size"), rooms=item.get("rooms"),
-            address=[street, *(p for p in (municipality, province) if _fold(p) not in _fold(street))],
+            address=[street, *(p for p in places if _fold(p) not in _fold(street))],
             description=_text(item.get("description")),
             phone=(phone.get("phoneNumberForMobileDialing") or phone.get("phoneNumber")
                    or phone.get("formattedPhone")),
