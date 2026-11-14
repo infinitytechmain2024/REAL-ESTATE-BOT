@@ -112,6 +112,11 @@ SKIP = (("Не важно", "task:skip"), ("Хватит, ищи", "task:enough"
     ("Понял: Желательно вода, свет и нормальный подъезд\n\nИщем только в самом городе Мадрид или можно города вокруг? "
      "Например: «только город», «вся провинция Мадрид», «север: Алькобендас, Трес-Кантос».", "district"),
     ("Только город или окрестности тоже?", "district"),
+    # Q65: the Q62 scope question «only the city or the whole province» is no question about districts
+    ("Понял: Квартира в Валенсии\n\nИскать только в самом городе Валенсия или по всей провинции?", "scope"),
+    ("Шукати тільки в самому місті Валенсія чи по всій провінції?", "scope"),
+    ("¿Buscar solo en la ciudad de Valencia o en toda la provincia?", "scope"),
+    ("Search only in the city of Valencia or the whole province?", "scope"),
     # «категори» alone is not the land's category: the type, the budget, the place come first
     ("Какой тип недвижимости, какая категория: квартира или дом?", "property_type"),
     ("Какой бюджет на эту категорию?", "budget"),
@@ -202,6 +207,59 @@ def test_a_land_persona_answers_the_pilots_questions(name: str) -> None:
         assert len(province) == 1  # one province answer, no near-duplicate
         # ≈3/5 widen to the province; the rest keeps a real share of a narrower answer (districts, «не важно»)
         assert province[0]["weight"] / sum(o["weight"] for o in district) == pytest.approx(3 / 5)
+
+
+SCOPE_BUTTONS = (("Только в городе", "scope:city"), ("Вся провинция", "scope:province"), *SKIP)
+SCOPE_QUESTION = "Искать только в самом городе Мадрид или по всей провинции?"
+
+
+@pytest.mark.parametrize(("name", "press"), [
+    ("g2_flat_valencia", "Только в городе"),  # «toda Valencia» is the whole city (b6-g2-s7), not «Не важно»
+    ("g3_house_marbella", "Только в городе"), ("g5_rent_barcelona", "Только в городе"),
+    ("n1_rent_madrid_voice", "Только в городе"), ("n3_flat_madrid_vague", "Только в городе"),
+    ("g1_land_madrid", "Вся провинция"), ("g4_land_alicante", "Вся провинция"), ("g9_both_land_madrid", "Вся провинция"),
+    ("n4_solar_madrid_mixed", "Вся провинция"),
+    ("g7_coinvest_malaga", "Вся провинция"), ("n2_agent_buyers_estepona", "Вся провинция"),  # from replies.place
+])
+def test_the_scope_question_is_answered_from_the_place_replies(tmp_path: Path, name: str, press: str) -> None:
+    persona = load(PERSONAS / f"{name}.json")
+    assert "scope" not in persona["replies"]
+    for seed in range(20):
+        root = tmp_path / str(seed)
+        pending(root, "r", SCOPE_QUESTION, buttons=SCOPE_BUTTONS)
+        code, _ = answer_user.answer_pending(root, "r", persona, seed)
+        data = load(root / "answers" / "r.json")
+        assert code == answer_user.EXIT_ANSWERED and data["answers"] == [{"press": press}]
+        assert data["log"][0]["slot"] == "scope"
+
+
+def test_the_scope_answer_by_seed_its_own_reply_and_the_default(tmp_path: Path) -> None:
+    mixed = {"replies": {"district": [{"text": "toda Valencia", "weight": 1}, {"text": "вся провинция", "weight": 1},
+                                      {"press": "task:skip", "weight": 5, "tag": "any"}]}}
+    screen = {"question": SCOPE_QUESTION, "index": 2,
+              "buttons": [{"text": t, "data": d} for t, d in SCOPE_BUTTONS]}
+    picks = {seed: answer_user.choose(mixed, screen, seed, "r").answer["press"] for seed in range(40)}
+    assert set(picks.values()) == {"Только в городе", "Вся провинция"}  # a press says nothing of the scope
+    assert all(answer_user.choose(mixed, screen, s, "r").answer["press"] == p for s, p in picks.items())
+    # the district first, then the place
+    assert answer_user.choose({"replies": {"district": [{"text": "barrio Ruzafa o Benimaclet", "weight": 1}],
+                                           "place": [{"text": "провинция", "weight": 1}]}},
+                              screen, 0, "r").answer == {"press": "Только в городе"}
+    assert answer_user.choose({"replies": {"district": [{"text": "Чамбери", "weight": 1}],
+                                           "place": [{"text": "Madrid y alrededores", "weight": 1}]}},
+                              screen, 0, "r").log["scope_from"] == "place"
+    # the persona's own ``replies.scope`` wins
+    own = {"replies": {"scope": [{"press": "Вся провинция", "weight": 1}],
+                       "district": [{"text": "toda Valencia", "weight": 1}]}}
+    assert answer_user.choose(own, screen, 0, "r").answer == {"press": "Вся провинция"}
+    # nothing about the place: «Не важно», as before; no such button - a human decides
+    for persona in ({"replies": {}}, {"replies": {"place": [{"text": "Мадрид", "weight": 1}]}}):
+        pick = answer_user.choose(persona, screen, 0, "r")
+        assert pick.slot == "scope" and pick.answer == {"press": "task:skip"} and pick.tag == "default"
+    assert answer_user.choose({"replies": {}}, {**screen, "buttons": []}, 0, "r").answer is None
+    # no scope buttons (the AI interviewer asks it in words): the persona's words
+    words = answer_user.choose(load(PERSONAS / "g2_flat_valencia.json"), {**screen, "buttons": []}, 0, "r")
+    assert words.answer in ({"text": "toda Valencia"}, {"text": "Ruzafa o Benimaclet"})
 
 
 def test_the_helper_answers_by_weight_with_a_seed(tmp_path: Path) -> None:

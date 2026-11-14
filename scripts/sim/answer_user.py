@@ -54,6 +54,12 @@ SLOT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("rooms", r"комнат|спальн|спален|спалень|кімнат|bedroom|\brooms?\b|habitaci|dormitorio"),
     ("deal", r"аренда или покупка|аренду или покупку|купить или снять|снять или купить|оренда чи купівля|"
              r"купити чи орендувати|rent or buy|alquiler o compra|alquilar o comprar"),
+    # Q62 «Искать только в самом городе Валенсия или по всей провинции?» (buttons «Только в городе» / «Вся провинция»):
+    # the scope of the place, not its districts (Q65), before the «в самом городе» of ``district``
+    ("scope", r"(?:только|тільки|лише)\s+(?:в|у)\s+сам\w*\s+(?:город|міст)\w*\s+[^?\n]{0,40}?(?:или|чи|або)\s+"
+              r"(?:по\s+)?(?:всей|всій|усій|цілій)\s+(?:провинци|провінці)|"
+              r"s[oó]lo\s+en\s+la\s+(?:propia\s+)?ciudad\s+[^?\n]{0,40}?o\s+(?:en\s+)?toda\s+la\s+provincia|"
+              r"only\s+(?:in\s+)?the\s+city\s+[^?\n]{0,40}?or\s+(?:in\s+)?the\s+whole\s+province"),
     # «только в самом городе или можно города вокруг?» widens the place: before ``place``, which «город» matches
     ("district", r"в самом городе|города вокруг|вся провинция|окрестност|міста навколо|вся провінція|околиц"),
     ("place", r"в каком городе|где искать|в каких странах|в якому місті|де шукати|\bв яких країнах|in which city|"
@@ -206,12 +212,74 @@ def _pressed(answer: dict[str, Any], pending: dict[str, Any]) -> tuple[dict[str,
     return {**answer, "press": label}, {"press_as": press, "label": label}
 
 
+# Q65: the scope question («only the city or the whole province», Q62) without ``replies.scope`` is answered from
+# what the persona says of the place: ``replies.district``, else ``replies.place`` (never ``truth``). A reply that
+# names the province, the region, the coast, the suburbs or the towns around is «Вся провинция»; the whole city
+# («toda Valencia», «весь Мадрид»), the city, its centre, a district or «any district» is «Только в городе»; a bare name
+# or a press says nothing. No such reply - «Не важно» (``task:skip``), as before.
+SCOPE, SCOPE_SOURCES, SCOPE_DEFAULT = "scope", ("district", "place"), "task:skip"
+SCOPE_CITY, SCOPE_PROVINCE = "Только в городе", "Вся провинция"
+_SCOPE_DATA = {SCOPE_CITY: "scope:city", SCOPE_PROVINCE: "scope:province"}
+_WIDE = (r"провинци|провінці|област|регион|регіон|comunidad|provinc|region|побереж|узбереж|costa|(?<!\w)коста|coast|"
+         r"пригород|передмі|окрестност|околиц|alrededor|afueras|suburb|outskirt|nearby|рядом с|поруч|вокруг|навколо|cerca de|"
+         r"соседн|сусідн|не только город|не лише міст|не тільки міст|"
+         r"(?<!\w)(?:испани|іспані|españa|spain)")
+_WHOLE_CITY = (r"(?<!\w)(?:весь|вся|всё|все|увесь|уся|toda|todo|all of|whole|entire)(?!\w)|(?<!\w)город|"
+               r"(?<!\w)міст[оіау]?(?!\w)|\bciudad\b|\bcity\b|(?<!\w)центр|\bcentr[oe]|\bcenter\b|(?<!\w)район|"
+               r"\bbarrio|\bdistrict|neighbou?rhood")
+
+
+def scope_of(option: dict[str, Any]) -> str | None:
+    """The scope button a persona's place reply means: ``SCOPE_PROVINCE``, ``SCOPE_CITY`` or None (a press, a bare
+    name)."""
+    text = _label(option.get("text"))
+    if not text:
+        return None
+    if re.search(_WIDE, text):
+        return SCOPE_PROVINCE
+    if re.search(_WHOLE_CITY, text) or option.get("tag") == "any":
+        return SCOPE_CITY
+    return None
+
+
+def _scope_button(pending: dict[str, Any], label: str) -> str | None:
+    """The scope button on screen: its label or data, else a label naming the city or the province."""
+    word = r"город|міст|ciudad|city" if label == SCOPE_CITY else r"провинц|провінц|provincia|province"
+    for button in pending.get("buttons") or ():
+        if _SCOPE_DATA[label] == button.get("data") or label == button.get("text"):
+            return str(button.get("text") or button.get("data"))
+    found = [b for b in pending.get("buttons") or () if re.search(word, _label(b.get("text")))]
+    return str(found[0].get("text")) if len(found) == 1 else None
+
+
+def _derived_scope(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str) -> Pick:
+    """The scope question answered from ``replies.district`` / ``replies.place`` (Q65), deterministic for
+    (seed, run, index): a weighted choice among the replies that mean a scope, pressed as its button."""
+    replies = persona.get("replies", {})
+    for source in SCOPE_SOURCES:
+        meant = [(o, scope_of(o)) for o in replies.get(source, [])]
+        meant = [(o, s) for o, s in meant if s is not None and float(o.get("weight", 1)) > 0]
+        if not meant:
+            continue
+        rng = random.Random(f"{seed}:{run}:{int(pending.get('index', 0))}:{SCOPE}")
+        option, label = rng.choices(meant, weights=[float(o.get("weight", 1)) for o, _ in meant], k=1)[0]
+        press = _scope_button(pending, label)
+        answer = {"press": press} if press else {"text": option["text"]}  # no buttons (the AI interviewer): words
+        return Pick(SCOPE, answer, option.get("tag"), log={"scope_from": source, "label": label})
+    if _button_ok({"press": SCOPE_DEFAULT}, pending):
+        return Pick(SCOPE, {"press": SCOPE_DEFAULT}, "default",
+                    reason=f"no place reply means a scope: {SCOPE_DEFAULT!r}")
+    return Pick(SCOPE, None, reason="no place reply means a scope and no «Не важно» on screen")
+
+
 def choose(persona: dict[str, Any], pending: dict[str, Any], seed: int, run: str,
            history: list[dict[str, Any]] | None = None) -> Pick:
     """The persona's answer to this pending question, deterministic for (seed, run, index, slot)."""
     slot = slot_of(pending, persona.get("slot_patterns"))
     if slot is None:
         return Pick(None, None, reason="no slot matches the question")
+    if slot == SCOPE and not persona.get("replies", {}).get(SCOPE):
+        return _derived_scope(persona, pending, seed, run)
     # a meaning press stays a choice: when no single button means it, the question is left for a human
     options = [o for o in persona.get("replies", {}).get(slot, [])
                if _button_ok(o, pending) or o.get("press") in PRESS_MEANINGS]
