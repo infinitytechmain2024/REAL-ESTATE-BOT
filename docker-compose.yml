@@ -763,6 +763,7 @@ services:
       CAMPAIGN_EMPTY_REPORT: ${CAMPAIGN_EMPTY_REPORT:-false}
       REPORT_EVERY_PORTAL: ${REPORT_EVERY_PORTAL:-false}
       STATUS_COUNTS_ALL_DELIVERIES: ${STATUS_COUNTS_ALL_DELIVERIES:-false}
+      REPORT_PRECISE_REASONS: ${REPORT_PRECISE_REASONS:-false}
       # Investor leads from the comments under sent objects (bot/campaign/leads.py), and dead groups.
       CAMPAIGN_COMMENT_LEADS: ${CAMPAIGN_COMMENT_LEADS:-investors}
       CAMPAIGN_COMMENT_MAX_POSTS: ${CAMPAIGN_COMMENT_MAX_POSTS:-15}

@@ -43,6 +43,17 @@ class Site:
     api_empty: bool = False    # its API source run finished and returned no listing
     api_failed: bool = False   # its API source run failed on the provider's side
     api_wrong_place: bool = False  # its API source run returned only objects from another place (Q17)
+    api_limited: bool = False  # our own page/budget caps stopped its API source run before it was read (Q43)
+
+
+def without_limited(reports: Sequence[object]) -> list[object]:
+    """REPORT_PRECISE_REASONS off (Q43): the reports without a row that only says «our caps stopped its source run»,
+    so the report reads exactly as before the flag."""
+    numbers = ("queries", "results", "links", "read", "from_search", "refused", "read_api")
+    flags = ("unverified", "api_empty", "api_failed", "api_wrong_place")
+    return [r for r in reports if not (getattr(r, "api_limited", False) is True
+                                       and not any(getattr(r, n, 0) for n in numbers)
+                                       and not any(getattr(r, f, False) is True for f in flags))]
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -81,6 +92,7 @@ def _sites(sources: Sequence[SourceCount], reports: Sequence[object], portals: S
         row["api_failed"] = row.get("api_failed", 0) or int(getattr(report, "api_failed", False) is True)
         row["api_wrong_place"] = (row.get("api_wrong_place", 0)
                                   or int(getattr(report, "api_wrong_place", False) is True))
+        row["api_limited"] = row.get("api_limited", 0) or int(getattr(report, "api_limited", False) is True)
     for source in sources:
         if source.platform != "website":
             continue
@@ -89,7 +101,8 @@ def _sites(sources: Sequence[SourceCount], reports: Sequence[object], portals: S
             row[name] = row.get(name, 0) + value
     return {host: Site(host, **{**row, "unverified": bool(row.get("unverified")), "api_empty": bool(row.get("api_empty")),
                                 "api_failed": bool(row.get("api_failed")),
-                                "api_wrong_place": bool(row.get("api_wrong_place"))})
+                                "api_wrong_place": bool(row.get("api_wrong_place")),
+                                "api_limited": bool(row.get("api_limited"))})
             for host, row in merged.items()}
 
 
@@ -118,14 +131,18 @@ def _site_line(site: Site) -> str:
     return f"{name} — {' · '.join(parts) or 'ничего'} {_cards(site.sent, site.held)}"
 
 
-def _ran(site: Site) -> bool:
-    """Its API source run ended: completed empty, failed on the provider's side, or only objects from elsewhere."""
-    return site.api_empty or site.api_failed or site.api_wrong_place
+def _ran(site: Site, limited: bool = False) -> bool:
+    """Its API source run ended: completed empty, failed on the provider's side, or only objects from elsewhere;
+    ``limited`` (REPORT_PRECISE_REASONS, Q43): also stopped by our own page/budget caps."""
+    return site.api_empty or site.api_failed or site.api_wrong_place or (limited and site.api_limited)
 
 
-def _nothing_line(site: Site, every_portal: bool = False) -> str:
-    """A portal with no links: why, from its ``site:`` queries."""
-    if site.api_empty:
+def _nothing_line(site: Site, every_portal: bool = False, limited: bool = False) -> str:
+    """A portal with no links: why, from its ``site:`` queries. ``limited`` (REPORT_PRECISE_REASONS, Q43): a portal
+    whose source run our caps stopped says so, not «до него не дошла очередь запросов»."""
+    if limited and site.api_limited:
+        why = "не прочитан: исчерпан лимит страниц или бюджета поиска"
+    elif site.api_empty:
         why = "объявлений не найдено" if every_portal else "0 объявлений по запросу"
     elif site.api_failed:
         why = "портал вернул ошибку"
@@ -141,11 +158,13 @@ def _nothing_line(site: Site, every_portal: bool = False) -> str:
 
 
 def site_lines(sources: Sequence[SourceCount], reports: Sequence[object],
-               portals: Sequence[str] = (), *, every_portal: bool = False) -> tuple[list[str], list[Site]]:
+               portals: Sequence[str] = (), *, every_portal: bool = False,
+               limited: bool = False) -> tuple[list[str], list[Site]]:
     """One line per site (the known portals in priority order, then the busiest others, the rest summed) and the
     portals the search found nothing on. Shared by the owners' summary and the user's final report.
     ``every_portal`` (REPORT_EVERY_PORTAL, Q37): a portal whose API source ran gets a line even when it gave nothing
-    and is not one of ``ALWAYS_SHOWN`` or of ``portals`` («Habitaclia — объявлений не найдено»)."""
+    and is not one of ``ALWAYS_SHOWN`` or of ``portals`` («Habitaclia — объявлений не найдено»). ``limited``
+    (REPORT_PRECISE_REASONS, Q43): a portal whose source run our page/budget caps stopped has its own reason."""
     lines: list[str] = []
     sites = _sites(sources, reports, portals)
     shown: set[str] = set()
@@ -155,15 +174,15 @@ def site_lines(sources: Sequence[SourceCount], reports: Sequence[object],
         if site.links or site.posts:
             lines.append(_site_line(site))
             shown.add(portal)
-        elif portal in ALWAYS_SHOWN or (every_portal and _ran(site)):
-            lines.append(_nothing_line(site, every_portal))
+        elif portal in ALWAYS_SHOWN or (every_portal and _ran(site, limited)):
+            lines.append(_nothing_line(site, every_portal, limited))
             shown.add(portal)
         else:
             nothing.append(site)
     if every_portal:
         for host, site in sorted(sites.items()):
-            if host not in shown and host not in portals and _ran(site) and not (site.links or site.posts):
-                lines.append(_nothing_line(site, every_portal))
+            if host not in shown and host not in portals and _ran(site, limited) and not (site.links or site.posts):
+                lines.append(_nothing_line(site, every_portal, limited))
                 shown.add(host)
     others = sorted((s for h, s in sites.items() if h not in shown and h not in portals and (s.links or s.posts)),
                     key=lambda s: (-s.sent, -s.held, -(s.read + s.from_search), s.host))

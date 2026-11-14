@@ -152,7 +152,8 @@ class CampaignRunnerSettings(BaseSettings):
         recommender = (OpenRouterRecommender(api_key=self.openrouter_api_key, model=self.final_model,
                                              timeout_seconds=float(self.final_timeout_seconds))
                        if self.openrouter_api_key else None)
-        return FinalReporter(recommender, every_portal=self.report_every_portal)
+        return FinalReporter(recommender, every_portal=self.report_every_portal,
+                             precise_reasons=self.report_precise_reasons)
 
     # Tell the chat about closed Facebook groups (Apify group_private) and read them after «Вступил».
     join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
@@ -178,6 +179,9 @@ class CampaignRunnerSettings(BaseSettings):
     report_every_portal: bool = Field(default=False, validation_alias="REPORT_EVERY_PORTAL")
     # Q40: a finished search's last status line counts every delivery (cards, people, post leads, reach contacts).
     status_counts_all_deliveries: bool = Field(default=False, validation_alias="STATUS_COUNTS_ALL_DELIVERIES")
+    # Q43: the final report names a portal our page/budget caps stopped («не прочитан: исчерпан лимит ...»), not «до
+    # него не дошла очередь запросов»; a listing rejected for more rooms than asked is «больше комнат», not «меньше».
+    report_precise_reasons: bool = Field(default=False, validation_alias="REPORT_PRECISE_REASONS")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -472,7 +476,8 @@ class CampaignRunnerSettings(BaseSettings):
                             dedup_held_findings=self.dedup_held_findings,
                             offer_after_search=self.offer_after_search,
                             empty_report=self.empty_report,
-                            status_counts_all_deliveries=self.status_counts_all_deliveries)
+                            status_counts_all_deliveries=self.status_counts_all_deliveries,
+                            report_precise_reasons=self.report_precise_reasons)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")
