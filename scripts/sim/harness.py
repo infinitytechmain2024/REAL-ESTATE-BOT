@@ -99,6 +99,7 @@ BASE_ENV: dict[str, str] = {
     "INTAKE_SKIP_WIDENS_PLACE": "true",  # Q42
     "HELD_FINDINGS_NULL_WHY": "true",  # Q41
     "REPORT_PRECISE_REASONS": "true",  # Q43
+    "REPORT_AFTER_OFFER": "true",  # Q44
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")
