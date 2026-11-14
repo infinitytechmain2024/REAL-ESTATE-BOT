@@ -13,7 +13,7 @@ from bot.utils import costs
 from .formatters import digest
 from .models import Evidence
 from .openrouter import OpenRouterAnalyzer
-from .pipeline import AnalysisPipeline
+from .pipeline import INVESTOR_NEWS, AnalysisPipeline
 from .prefilter import TaskContext, prefilter
 from .settings import AnalysisSettings
 from .source_place import PLACE_DESCRIPTION_CHARS
@@ -135,6 +135,8 @@ async def _analyse_post(store, pipeline: AnalysisPipeline, e: Evidence, vertical
                 continue
             if not result.accepted:
                 log.info("analysis.not_a_finding %s %s %s", e.post_id, vertical, result.reason)
+                if result.reason == INVESTOR_NEWS:  # dropped before the model: counted «отсеяно до ИИ» in the report
+                    await costs.skip("llm", f"prefilter_{INVESTOR_NEWS}", item=host)
             fid = await store.save(e, vertical, result, model, token)
             if fid:
                 found.append((vertical, fid, result.formatted or ""))
@@ -155,14 +157,16 @@ async def run_once(store=None, pipeline: AnalysisPipeline | None = None, send: S
     s = settings or AnalysisSettings()
     own_store = store is None
     if own_store:
-        store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms)
+        store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms,
+                                      user_role=s.investor_lead_source_check)
         await store.connect()
     try:
         p = pipeline or AnalysisPipeline(
             OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds,
                                invalid_retry=s.invalid_retry, fallback_model=s.fallback_model,
                                location_from_text=s.location_from_text, area_text_check=s.area_text_check,
-                               place_description_chars=PLACE_DESCRIPTION_CHARS if s.portal_description_full else None)
+                               place_description_chars=PLACE_DESCRIPTION_CHARS if s.portal_description_full else None,
+                               investor_lead_check=s.investor_lead_source_check)
         )
         formatted, processed = await analyse_batch(store, p, batch_size=s.batch_size, claim_seconds=s.claim_seconds, model=s.openrouter_model)
         saved = [fid for entries in formatted.values() for fid, _ in entries]
@@ -187,13 +191,15 @@ async def serve() -> None:
         log.warning("analysis.disabled", extra={"hint": "set OPENROUTER_API_KEY"})
         while True:
             await asyncio.sleep(3600)
-    store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms)
+    store = PostgresAnalysisStore(s.database_url, exclude_platforms=s.excluded_platforms,
+                                  user_role=s.investor_lead_source_check)
     await store.connect()
     costs.install(costs.PostgresLedger(store._pool()), s.budget_usd)
     pipeline = AnalysisPipeline(OpenRouterAnalyzer(s.openrouter_api_key, s.openrouter_model, timeout_seconds=s.timeout_seconds,
                                invalid_retry=s.invalid_retry, fallback_model=s.fallback_model,
                                location_from_text=s.location_from_text, area_text_check=s.area_text_check,
-                               place_description_chars=PLACE_DESCRIPTION_CHARS if s.portal_description_full else None))
+                               place_description_chars=PLACE_DESCRIPTION_CHARS if s.portal_description_full else None,
+                               investor_lead_check=s.investor_lead_source_check))
     log.info("analysis.started", extra={"poll_seconds": s.poll_seconds, "digests": bool(s.telegram_chat_id)})
     try:
         while True:
