@@ -71,8 +71,8 @@ def test_agency_template_with_other_numbers_is_two_objects() -> None:
             "como primera vivienda o para inversión, con certificado energético en trámite.")
     flat = {"price_amount": 245_000, "price_currency": "EUR", "area_m2": 85, "rooms": 3, "deal_type": "sale",
             "property_type": "apartment", "advertiser": "Agencia Ejemplo", "phone": PHONE}
-    a, b = ({**flat, "address": f"Calle {street}, Valencia", "location": f"{street}, Valencia"}
-            for street in ("Uno", "Dos"))
+    a, b = ({**flat, "address": f"{district}, Valencia", "location": f"{district}, Valencia", "district": district}
+            for district in ("Benimaclet", "Ruzafa"))
     body_a = post(IDEALISTA.format(1), text.format(floor=2, door=4))
     body_b = post(IDEALISTA.format(2), text.format(floor=5, door=1))
     assert not pair(a, b, body_a, body_b, url_a=IDEALISTA.format(1), url_b=IDEALISTA.format(2), **ON)
@@ -103,6 +103,38 @@ def test_other_facts_or_signs_are_two_objects() -> None:
     assert not _same_host_copy(replace(la, url="https://www.facebook.com/groups/1/posts/2"),
                                replace(lb, url="https://www.facebook.com/groups/1/posts/3"))
     assert not _same_host_copy(la, replace(lb, url=la.url))
+
+
+PLOT = ("Parcela urbana en la urbanización, totalmente llana y con todos los servicios a pie de parcela: agua, luz, "
+        "alcantarillado y fibra óptica. Orientación sur, vistas despejadas a la sierra y entorno muy tranquilo, a pocos "
+        "minutos del centro del pueblo, colegios y supermercados. Edificabilidad para vivienda unifamiliar aislada con "
+        "piscina y jardín. Calles asfaltadas, alumbrado público y zonas verdes comunes. Consulte sin compromiso, "
+        "financiación disponible y visitas con cita previa en nuestra oficina.")
+
+
+def test_typical_plots_of_one_urbanization_are_two_objects() -> None:
+    """One agency's typical plots: one price, area and text, one urbanization in the address (the copy rule needs two
+    addresses without a shared street or district token)."""
+    plot = {"price_amount": 95_000, "price_currency": "EUR", "plot_m2": 800.0, "deal_type": "sale",
+            "property_type": "land", "advertiser": "Agencia Ejemplo", "phone": PHONE,
+            "address": "Urbanización Los Pinos, Pedrezuela", "district": "Los Pinos", "location": "Los Pinos, Pedrezuela"}
+    urls = {"url_a": IDEALISTA.format(1), "url_b": IDEALISTA.format(2)}
+    for text in (PLOT, "Parcelas desde 95.000 €. " + PLOT, "Lote de parcelas. " + PLOT):
+        bodies = post(IDEALISTA.format(1), text), post(IDEALISTA.format(2), text)
+        assert not pair(plot, plot, *bodies, **urls, **ON)
+        assert not pair(plot, {**plot, "address": "Urbanización Los Pinos, Pedrezuela, Madrid"}, *bodies, **urls, **ON)
+
+
+def test_two_named_streets_are_two_objects() -> None:
+    """Units of a development not recognised as one: two named streets are two objects."""
+    flat = {"price_amount": 210_000, "price_currency": "EUR", "area_m2": 78.0, "rooms": 2, "deal_type": "sale",
+            "property_type": "apartment", "advertiser": "Agencia Ejemplo", "phone": PHONE, "location": "Alicante"}
+    urls = {"url_a": IDEALISTA.format(1), "url_b": IDEALISTA.format(2)}
+    bodies = post(IDEALISTA.format(1), PLOT), post(IDEALISTA.format(2), PLOT)
+    a, b = {**flat, "address": "Calle Mayor"}, {**flat, "address": "Avenida Diagonal"}
+    assert not pair(a, b, *bodies, **urls, **ON)
+    # a street on one side only: the copy rule may apply
+    assert pair(a, {**b, "address": "Cabo de las Huertas", "district": "Cabo de las Huertas"}, *bodies, **urls, **ON)
 
 
 def test_new_development_is_never_merged() -> None:

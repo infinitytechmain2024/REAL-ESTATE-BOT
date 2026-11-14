@@ -55,8 +55,12 @@ portal (not a social network) are one object when all hold: the same description
 stricter ``COPY_JACCARD``: on the common length of at least 400 characters, the same small numbers, 5-word shingles
 Jaccard >= 0.90); a shared phone or the same agency; the price exactly equal and the area within 1 % (both known; a
 plot's ``plot_m2`` when there is no ``area_m2``); the property type and the deal known on both sides and equal; the
-same rooms and floor (or unknown on both). Never: a new development, two agency references that differ. An agency
-template for other units differs in its numbers (floor, m², rooms) and stays two cards.
+same rooms and floor (or unknown on both); the two addresses (with the locations) share no street or district token
+(``_DISTRICT_STOP`` dropped: one urbanization's typical plots share it, and a copy at the same address is the rule of
+one host above). Never: a new development, two named streets (``_named_street`` on both sides: units of a development
+not recognised as one), two agency references that differ. An agency template for other units differs in its numbers
+(floor, m², rooms) and stays two cards; numbers past the compared excerpt (about 1 100 characters of the description
+after the «JSON-LD» line) are not seen.
 
 A district for a street (``same_object(..., district_not_street=True)``, ``DEDUP_DISTRICT_NOT_STREET``, Q15): portals
 fill the «address» of an ad without a street with the district, and two portals name it differently («L'Amistat» and
@@ -641,8 +645,8 @@ def _same_description(a: Listing, b: Listing, jaccard: float = TEXT_PRICE_JACCAR
 
 def _same_host_copy(a: Listing, b: Listing) -> bool:
     """Q47: one ad filed twice on one portal (see the module notes): the same description (``COPY_JACCARD``), the same
-    phone or agency, the price exactly and the area within 1 %, the same type, deal, rooms and floor; never a new
-    development or two agency references."""
+    phone or agency, the price exactly and the area within 1 %, the same type, deal, rooms and floor, two addresses
+    without a shared street or district token; never a new development, two named streets or two agency references."""
     host_a, host_b = _host(a.url), _host(b.url)
     if not host_a or host_a != host_b or a.url == b.url or host_a in _SOCIAL_HOSTS:
         return False
@@ -656,7 +660,17 @@ def _same_host_copy(a: Listing, b: Listing) -> bool:
         return False  # another reference of the agency: another unit
     if not (a.phones & b.phones or (a.agency and a.agency == b.agency)):
         return False
+    if _place_tokens(a) & _place_tokens(b):
+        return False  # one street or district: typical plots or units of one estate (the rule of one host decides)
+    if _named_street(a) and _named_street(b):
+        return False  # two streets that differ: two objects (units of a development not named one)
     return _same_description(a, b, COPY_JACCARD)
+
+
+def _place_tokens(listing: Listing) -> frozenset[str]:
+    """Q47: the street and district tokens of a listing (``tokens`` of its address and location, without
+    ``_DISTRICT_STOP``)."""
+    return (tokens(listing.address) | tokens(listing.location)) - _DISTRICT_STOP
 
 
 def _same_cross_facts(a: Listing, b: Listing) -> bool:
