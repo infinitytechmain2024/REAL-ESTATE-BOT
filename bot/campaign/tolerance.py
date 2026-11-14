@@ -93,6 +93,10 @@ Other constraints
   excluded; room, other and an unknown type are lenient.
 * Rooms: when the task names a number of rooms and the listing's known count is
   lower, it is other; an unknown count (or more rooms) changes nothing.
+* Studio (Q59, ``STUDIO_ZERO_BEDROOMS``; ``Request.studio_zero``): a listing of type ``studio`` with no rooms or one
+  (the studio's own room, «dispone de una habitación») has 0 bedrooms against the task's rooms, so «от 1 спальни» makes
+  it other (a ``rooms_delta`` that reaches 0 still approves it). A studio naming 2+ rooms, any other type with an
+  unknown count, or no rooms in the task: unchanged. Sim b5-g5-s6: «Estudio a estrenar», rooms 1, went out as exact.
 * A budget with an unknown listing price is other (see Budget).
 * Findings of the investors vertical carry no prices; they are always exact.
 """
@@ -169,6 +173,8 @@ class Request:
     seasonal_guard: bool = False
     # RENT_SEASONAL_EXCLUDED (Q59): a home rent that asked for no short term; a seasonal let is excluded
     seasonal_excluded: bool = False
+    # STUDIO_ZERO_BEDROOMS (Q59): a studio with no rooms or one has 0 bedrooms against the task's rooms
+    studio_zero: bool = False
 
     @property
     def country_code(self) -> str | None:
@@ -370,6 +376,11 @@ def seasonal_excluded_enabled() -> bool:
     return os.environ.get("RENT_SEASONAL_EXCLUDED", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def studio_zero_enabled() -> bool:
+    """STUDIO_ZERO_BEDROOMS (default off): a studio has 0 bedrooms against the task's rooms (Q59)."""
+    return os.environ.get("STUDIO_ZERO_BEDROOMS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _seasonal_excluded(deal: object, kind: str | None, spec: dict[str, Any] | None, text: str | None) -> bool:
     """RENT_SEASONAL_EXCLUDED (Q59): a rent of a home whose words name no short term (six months or more is none)."""
     return (deal == "rent" and kind in (None, "apartment", "house") and seasonal_excluded_enabled()
@@ -414,6 +425,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         rental_term=task_rental_term(spec, text) if deal == "rent" and rental_term_enabled() else None,
         seasonal_guard=_seasonal_guard(deal, kind, spec, text),
         seasonal_excluded=_seasonal_excluded(deal, kind, spec, text),
+        studio_zero=studio_zero_enabled(),
     )
 
 
@@ -478,7 +490,15 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
             notes.append(f"площадь {area_text(float(area))} при запросе до {round(request.max_area):,} м²".replace(",", " "))
             covers.append("area")
     listed = payload.get("rooms")
-    if (request.rooms and isinstance(listed, int | float) and not isinstance(listed, bool)
+    if (request.studio_zero and request.rooms and payload.get("property_type") == "studio"
+            and (listed is None or (isinstance(listed, int | float) and not isinstance(listed, bool) and listed <= 1))):
+        # Q59: a studio's one room is not a bedroom, it has 0 against the task's rooms
+        if request.rooms_delta and request.rooms - request.rooms_delta <= 0:
+            notes.append(f"студия при запросе от {request.rooms} комн.")
+            covers.append("rooms")
+        else:
+            result = worse(result, Match("other", math.inf, "rooms"))
+    elif (request.rooms and isinstance(listed, int | float) and not isinstance(listed, bool)
             and 0 < listed < request.rooms):
         if request.rooms_delta and listed >= request.rooms - request.rooms_delta:
             notes.append(f"комнат: {int(listed)} при запросе от {request.rooms}")
