@@ -947,12 +947,17 @@ class CampaignRunner:
         try:
             review = bool(getattr(self.relevance, "reviews", False))  # the reviewer also gets the hard criteria
             soft = review and bool(getattr(self.relevance, "soft_wishes", False))  # RELEVANCE_SOFT_WISHES
-            terms: list[str] = []
+            terms: list[str | tuple[str, ...]] = []
             if review and bool(getattr(self.relevance, "quote_hits", False)):  # PORTAL_DESCRIPTION_FULL (Q18)
                 from bot.agents.reviewer import hard_criteria
 
                 hard = hard_criteria(campaign)
                 terms = [*(hard.get("must_have") or []), *(hard.get("exclude") or [])]
+                if bool(getattr(self.relevance, "tenant_hits", False)):  # REVIEW_TENANT_HITS (Q45)
+                    from .quote_hits import home_purchase, tenant_terms
+
+                    if home_purchase(hard, campaign.plan.vertical):
+                        terms += tenant_terms()
             verdict = await self.relevance.judge(
                 task_data(campaign, review=review, soft_wishes=soft),
                 finding_data(finding.payload, fallback_text=finding.text, original=finding.original, review=review,

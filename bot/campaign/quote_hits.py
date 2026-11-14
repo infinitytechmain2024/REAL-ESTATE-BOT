@@ -9,6 +9,11 @@ A task's terms are often Russian and the listing Spanish: ``SYNONYMS`` maps the 
 of the term -> Spanish and English words). A term not in it is searched as it is. Matching ignores case and accents
 and starts at a word start; the windows are slices of the text with its whitespace collapsed (as the excerpt is), so a
 quote taken from them is found in the folded haystack.
+
+Q45 (``REVIEW_TENANT_HITS``, off by default; rubric rule «Жилец»): for a person buying a home (``home_purchase``) the
+runner adds ``tenant_terms()``, two terms given as their own folded words (a tuple, not a task word): a tenant or an
+occupant («alquilada», «ocupada», «sin posesión», «nuda propiedad» ...) and an auction («subasta», «pujas» ...), so the
+reviewer sees them even far in the description. Off: the terms are only the task's, as before.
 """
 
 from __future__ import annotations
@@ -54,6 +59,14 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "барбекю": ("barbacoa", "bbq", "barbecue"),
     "соляри": ("solarium",),
 }
+# Q45: the words of a home sold with a tenant or occupant, and of an auction (folded). The reviewer reads the negations
+# («sin inquilinos», «libre de ocupantes»): a hit only shows where the word occurs.
+TENANT_WORDS: tuple[str, ...] = (
+    "alquilada", "alquilado", "arrendada", "arrendado", "arrendatario", "arrendataria", "inquilino", "inquilina",
+    "ocupada", "ocupado", "okupada", "okupado", "okupa", "ocupantes", "sin posesion", "nuda propiedad", "usufructo",
+    "renta antigua", "contrato de alquiler", "tenant", "tenanted", "sitting tenant", "rented out")
+AUCTION_WORDS: tuple[str, ...] = ("subasta", "puja", "cesion de remate", "auction")
+HOME_TYPES = ("apartment", "house")
 _LATIN_END = re.compile(r"[a-z0-9]$")
 
 
@@ -72,6 +85,16 @@ def needles(term: str) -> list[str]:
     return found
 
 
+def tenant_terms() -> list[tuple[str, ...]]:
+    """Q45: the tenant and the auction terms for ``quote_hits`` (each a tuple of folded words)."""
+    return [TENANT_WORDS, AUCTION_WORDS]
+
+
+def home_purchase(hard: dict, vertical: str | None) -> bool:
+    """Q45: the task is to buy a home -- not investors, deal «sale», type apartment or house (``hard_criteria``)."""
+    return vertical != "investors" and hard.get("deal") == "sale" and hard.get("type") in HOME_TYPES
+
+
 def _pattern(needle: str) -> str:
     """From a word start; a Latin needle also to a word end (a plural «s» / «es» allowed)."""
     end = r"(?:e?s)?(?!\w)" if _LATIN_END.search(needle) else ""
@@ -88,7 +111,14 @@ def _merge(spans: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
     return [(a, b) for a, b in merged]
 
 
-def quote_hits(text: str, terms: Iterable[str], *, skip_before: int = 0) -> list[str]:
+def _needles_of(term: object) -> Iterable[str]:
+    """A task word's needles; a tuple (Q45 ``tenant_terms``) is already its folded needles."""
+    if isinstance(term, str):
+        return needles(term)
+    return [w for w in term if isinstance(w, str) and w] if isinstance(term, tuple) else ()
+
+
+def quote_hits(text: str, terms: Iterable[str | tuple[str, ...]], *, skip_before: int = 0) -> list[str]:
     """Windows of ``text`` (whitespace collapsed) around the words of ``terms``, in text order.
 
     At most ``HITS_PER_TERM`` windows per term and ``MAX_HITS`` in all, taken round-robin over the terms (the first
@@ -100,7 +130,7 @@ def quote_hits(text: str, terms: Iterable[str], *, skip_before: int = 0) -> list
     per_term: list[list[tuple[int, int]]] = []
     for term in terms:
         spans = [(max(0, m.start() - WINDOW), min(len(flat), m.end() + WINDOW))
-                 for needle in (needles(term) if isinstance(term, str) else ())
+                 for needle in _needles_of(term)
                  for m in re.finditer(_pattern(needle), folded) if m.end() > skip_before]
         if spans:
             per_term.append(_merge(spans)[:HITS_PER_TERM])

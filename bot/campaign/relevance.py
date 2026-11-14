@@ -151,12 +151,13 @@ def task_data(campaign: Campaign, *, review: bool = False, soft_wishes: bool = F
 
 def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", original: str = "",
                  review: bool = False, vertical: str | None = None,
-                 hit_terms: Sequence[str] = ()) -> dict[str, Any]:
+                 hit_terms: Sequence[str | tuple[str, ...]] = ()) -> dict[str, Any]:
     """A bounded summary of a finding's payload plus the start of the original post; never the whole post.
 
     ``review``: for the reviewer, also the extracted evidence quotes and details, and 900 characters of the text.
     ``hit_terms`` (``PORTAL_DESCRIPTION_FULL``, Q18, reviewer only): the task's must-have and exclusion words; the
-    windows of the whole original around them go as ``hits`` (``quote_hits``), past the 900 characters of the excerpt.
+    windows of the whole original around them go as ``hits`` (``quote_hits``), past the 900 characters of the excerpt;
+    with ``REVIEW_TENANT_HITS`` (Q45) also the tenant and auction words (``quote_hits.tenant_terms``).
     """
     payload = payload or {}
     summary = payload.get("summary_ru") or payload.get("summary") or fallback_text
@@ -400,6 +401,11 @@ class ReviewerJudge:
     def quote_hits(self) -> bool:
         """``PORTAL_DESCRIPTION_FULL`` (Q18): the runner hands over ``hits``, windows of the whole text."""
         return bool(getattr(self.reviewer, "quote_hits", False))
+
+    @property
+    def tenant_hits(self) -> bool:
+        """``REVIEW_TENANT_HITS`` (Q45): for a home purchase the «hits» also show the tenant and auction words."""
+        return bool(getattr(self.reviewer, "tenant_hits", False))
 
     @property
     def soft_wishes(self) -> bool:

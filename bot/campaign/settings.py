@@ -106,6 +106,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q22: for a home a listing with signs of a non-residential unit («IVA incluido» in a rent, «uso profesional»,
     # «sin cédula de habitabilidad» ...) gets type fail, an indirect sign unknown (prompts «-nr»). false: as before.
     review_non_residential: bool = Field(default=False, validation_alias="REVIEW_NON_RESIDENTIAL")
+    # Q45 (rubric «Жилец»): for a home purchase a tenanted / occupied / bare-ownership flat or an auction is similar, not
+    # exact (prompts «-tn»); with PORTAL_DESCRIPTION_FULL the «hits» also show those words. false: as before.
+    review_tenant_hits: bool = Field(default=False, validation_alias="REVIEW_TENANT_HITS")
     # Q18, the same variable as bot/web_search/settings.py: the reviewer also gets «hits», windows of the whole
     # listing text around the must-have words, and may quote them (prompt «-hits»). Off: as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")
@@ -141,6 +144,7 @@ class CampaignRunnerSettings(BaseSettings):
                                                 townhouse_is_house=self.review_townhouse_is_house,
                                                 quote_hits=self.portal_description_full,
                                                 non_residential=self.review_non_residential,
+                                                tenant=self.review_tenant_hits,
                                                 phrase_places=self.user_phrase_places), legacy,
                              max_calls=self.review_max_calls)
 

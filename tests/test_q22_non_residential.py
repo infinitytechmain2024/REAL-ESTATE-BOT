@@ -114,7 +114,7 @@ def test_flag_on_rule_keeps_ordinary_homes_out() -> None:
 
 def test_all_sixteen_versions_are_distinct_and_trusted_by_the_report() -> None:
     versions = {_prompt(flags, nr)[0] for flags in FLAGS for nr in (False, True)}
-    assert len(versions) == 16 and versions == set(final_report._LEGAL_RULE_PROMPTS)
+    assert len(versions) == 16 and versions <= set(final_report._LEGAL_RULE_PROMPTS)  # Q45 adds the -tn ones
 
 
 def _answer(criteria: list[str], *, type_verdict: str, quote: str) -> str:
