@@ -308,6 +308,8 @@ class RunnerConfig:
     dedup_cross_portal_facts: bool = False
     # One ad filed twice on one portal under two addresses is one object (``same_object(same_host_copy=True)``, Q47).
     dedup_same_host_copy: bool = False
+    # One description on two sites under a «Ref: ...» wrapper is one object (``same_object(description_normalize=True)``, Q50).
+    dedup_description_normalize: bool = False
     # The similar question names every distinct difference of the held listings, not only the closest one's (Q25).
     offer_all_reasons: bool = False
     # A held similar/other finding is merged with the same object already held or sent before it is held (Q27).
@@ -790,7 +792,8 @@ class CampaignRunner:
                         mine, head.listing, without_address=self.config.dedup_without_address,
                         district_not_street=self.config.dedup_district_not_street,
                         cross_portal_facts=self.config.dedup_cross_portal_facts,
-                        same_host_copy=self.config.dedup_same_host_copy):
+                        same_host_copy=self.config.dedup_same_host_copy,
+                        description_normalize=self.config.dedup_description_normalize):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -830,7 +833,8 @@ class CampaignRunner:
                         mine, head.listing, without_address=self.config.dedup_without_address,
                         district_not_street=self.config.dedup_district_not_street,
                         cross_portal_facts=self.config.dedup_cross_portal_facts,
-                        same_host_copy=self.config.dedup_same_host_copy):
+                        same_host_copy=self.config.dedup_same_host_copy,
+                        description_normalize=self.config.dedup_description_normalize):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
