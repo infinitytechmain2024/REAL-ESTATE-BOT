@@ -55,6 +55,7 @@ REASONS: dict[str, str] = {
     "kind": "не объявление (каталог, статистика, поиск жилья)",
     "deal_kind": "аукцион или nuda propiedad (другой вид сделки)",
     "seasonal": "сезонная аренда",  # RENT_SEASONAL_EXCLUDED (Q59)
+    "past_event": "прошедшее событие",  # INVESTOR_PAST_EVENT_EXCLUDED (Q60)
     "unverified": "не удалось подтвердить",
     "area_unknown": "площадь не указана",
     "ai_failed": "ИИ-проверка не сработала",
@@ -713,11 +714,13 @@ class LeadsSummary:
     posts_read: int | None = None
     comments_read: int | None = None
     read_lines: tuple[str, ...] = ()  # one line per post read, a failed one with its reason and cost
+    # INVESTOR_REPORT_COUNTS_ALL (Q60): the finding cards sent by an investor search; None: not counted (as before)
+    cards_sent: int | None = None
 
     @property
     def empty(self) -> bool:
         return not (self.leads_saved or self.people_sent or self.reach_sent or self.posts_read or self.comments_read
-                    or self.read_lines)
+                    or self.read_lines or self.cards_sent)
 
 
 # Cost-ledger items (``Entry.item``) that identify a branch; every other item stays «общее» (models of the lead and
@@ -758,6 +761,11 @@ def investors_section(leads: LeadsSummary | None) -> list[str]:
     lines.extend(leads.read_lines)
     if leads.leads_saved is not None:
         lines.append(f"Лидов сохранено: {leads.leads_saved}")
+    if leads.cards_sent is not None:  # Q60: every lead the chat got, the finding cards too
+        total = leads.cards_sent + leads.people_sent + leads.reach_sent
+        lines.append(f"Отправлено вам: всего {total} — находок {leads.cards_sent}, людей {leads.people_sent}, "
+                     f"доставок из поиска {leads.reach_sent}")
+        return lines
     lines.append(f"Отправлено вам: людей {leads.people_sent}, доставок из поиска {leads.reach_sent}")
     return lines
 
