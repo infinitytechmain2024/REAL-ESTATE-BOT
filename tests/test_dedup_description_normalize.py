@@ -69,8 +69,17 @@ def test_bench_pair_is_one_object_only_with_the_flag() -> None:
     assert not pair(FC, MI, fotocasa_post(), milanuncios_post(), **BENCH)  # the bug: two cards
     assert pair(FC, MI, fotocasa_post(), milanuncios_post(), **ON)
     assert pair(FC, MI, fotocasa_post(), milanuncios_post(), description_normalize=True)
-    # «Referencia:» and no reference of the agency on the other side
-    assert pair(FC, MI, fotocasa_post(ref=""), milanuncios_post("Referencia: AM-127. "), **ON)
+    # «Referencia:» with the same reference of the agency on the other side
+    assert pair(FC, MI, fotocasa_post(ref="AM-127"), milanuncios_post("Referencia: AM-127. "), **ON)
+
+
+def test_a_reference_on_one_side_only_is_two_objects() -> None:
+    """«Ref: AM-12» against a Fotocasa ad without a reference: maybe the agency's template for another unit."""
+    assert not pair(FC, MI, fotocasa_post(ref=""), milanuncios_post("Referencia: AM-127. "), **ON)
+    assert not pair(FC, MI, fotocasa_post(ref=""), milanuncios_post("Ref: AM-12. "), **ON)
+    # a weak reference (a year) on both sides is no sign of this rule (it adds no small number: the old rules decide)
+    la = listing_of(FC, url=FOTOCASA, body=fotocasa_post(ref="2024"))
+    assert not _same_wrapped_description(la, listing_of(MI, url=MILANUNCIOS, body=milanuncios_post("Ref: 2024. ")))
 
 
 def test_normalized_description() -> None:

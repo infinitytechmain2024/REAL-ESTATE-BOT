@@ -67,10 +67,11 @@ One description on two portals with a wrapper (``same_object(..., description_no
 the same text, no street, no phone (``stripSellerPII``), no agency and another district name («Eixample» for «Fort
 Pienc»); the reference adds a small number and the shorter «JSON-LD» line moves the excerpt, so no text rule holds.
 Two sites (no social network), at least one description under a leading «Ref: ...» wrapper, are one object when all
-hold: the descriptions without the wrapper (``normalized_description``) are the same (``_same_description`` with ``COPY_JACCARD``); the price equal as in
+hold: the same strong reference (``strong_ref``) on both sides (the agency's ``agency_ref`` or the wrapper's one: a
+reference on one side only may be a template of another unit); the descriptions without the wrapper
+(``normalized_description``) are the same (``_same_description`` with ``COPY_JACCARD``); the price equal as in
 ``_cross_price``; the area within 3 % (both known); the rooms, the property type and the deal known on both sides and
-equal; one named city. Never: a new development, two named streets without a shared street token, two references
-that differ (the agency's ``agency_ref`` or the wrapper's one). Two aggregators renting one flat (Spotahome and
+equal; one named city. Never: a new development, two named streets without a shared street token. Two aggregators renting one flat (Spotahome and
 HousingAnywhere) write other texts and other references: two cards.
 
 A district for a street (``same_object(..., district_not_street=True)``, ``DEDUP_DISTRICT_NOT_STREET``, Q15): portals
@@ -714,8 +715,8 @@ def _same_wrapped_description(a: Listing, b: Listing) -> bool:
     if not (wrapped_a or wrapped_b):
         return False  # no wrapper: the rules of Q32 decide
     ref_a, ref_b = a.agency_ref or wrapped_a, b.agency_ref or wrapped_b
-    if ref_a and ref_b and ref_a != ref_b:
-        return False  # another reference of the agency: another unit
+    if not (ref_a and ref_a == ref_b and strong_ref(ref_a)):
+        return False  # no reference on one side (a template of another unit) or another reference: another unit
     return _same_description(replace(a, description=text_a), replace(b, description=text_b), COPY_JACCARD)
 
 
