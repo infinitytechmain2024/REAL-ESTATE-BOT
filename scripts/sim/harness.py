@@ -97,8 +97,6 @@ BASE_ENV: dict[str, str] = {
     "REPORT_EVERY_PORTAL": "true",  # Q37
     "STATUS_COUNTS_ALL_DELIVERIES": "true",  # Q40
     "REPORT_PRECISE_REASONS": "true",  # Q43
-    # Q39: every page of the web stage is an operator's answer (pending_page); 30 per campaign, not prod's 400.
-    "WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN": "30",
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")
