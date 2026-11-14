@@ -169,6 +169,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q32: across two portals exact facts (round price equal, area, rooms, type, city) with a strong sign (phone, strong
     # agency reference, description) merge even when the addresses share no street (districts differ).
     dedup_cross_portal_facts: bool = Field(default=False, validation_alias="DEDUP_CROSS_PORTAL_FACTS")
+    # Q47: one ad filed twice on one portal (other address) is one object: the same description, phone or agency,
+    # exact price, area (±1 %), type and deal; never a new development.
+    dedup_same_host_copy: bool = Field(default=False, validation_alias="DEDUP_SAME_HOST_COPY")
     # Q25: the «Показать?» question names every distinct difference of the held similar listings (at most 5).
     offer_all_reasons: bool = Field(default=False, validation_alias="OFFER_ALL_REASONS")
     # Q27: a held similar/other listing is merged with the same object already held or sent (one card after «Одобрить»,
@@ -482,6 +485,7 @@ class CampaignRunnerSettings(BaseSettings):
                             dedup_without_address=self.dedup_without_address,
                             dedup_district_not_street=self.dedup_district_not_street,
                             dedup_cross_portal_facts=self.dedup_cross_portal_facts,
+                            dedup_same_host_copy=self.dedup_same_host_copy,
                             offer_all_reasons=self.offer_all_reasons,
                             dedup_held_findings=self.dedup_held_findings,
                             offer_after_search=self.offer_after_search,
