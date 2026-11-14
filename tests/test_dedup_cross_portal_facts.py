@@ -73,48 +73,121 @@ def pair(a: dict, b: dict, *, url_a: str = FOTO.format(1), url_b: str = HAB.form
     return same_object(la, lb, **flags) and same_object(lb, la, **flags)
 
 
+ON = {**BENCH, "cross_portal_facts": True}
+DESCRIPTION = ("Villa contemporanea con vistas al mar, salon de doble altura, cocina abierta equipada, cinco suites con "
+               "bano, gimnasio, bodega, jardin con piscina desbordante, garaje para tres coches, a pocos minutos de la "
+               "playa y de los campos de golf.")
+OTHER = ("Casa adosada en urbanizacion cerrada con zonas comunes, salon con chimenea, cocina independiente, tres "
+         "dormitorios, solarium en la planta alta, plaza de garaje y trastero en el sotano, cerca de colegios.")
+
+
+def post(url: str, description: str, ref: str | None = None, title: str = "Casa en venta, Marbella") -> str:
+    """A portal post as ``web_search.worker._source_text`` writes it (the «JSON-LD» line and the title differ per
+    portal: Fotocasa «Casa en venta, <district>», Habitaclia the agency's own title)."""
+    facts = f'"url": "{url}", "title": "{title}"' + (f', "agency_ref": "{ref}"' if ref else "")
+    return f"JSON-LD: {{{facts}}}\n{title}\nСсылка: {url}\n{description}"
+
+
+HAB_TITLE = "Exclusiva villa moderna a 300 m de la playa con 2 piscinas"
+
+
 @pytest.mark.parametrize("index", range(len(PAIRS)))
 def test_bench_pairs_merge_only_with_the_flag(index: int) -> None:
     a, b = PAIRS[index]
-    assert not pair(a, b, **BENCH)  # the bug: two cards
+    # the bench bodies: one description and one reference, weak (4 digits: no ``strong_ref``, Q15 does not merge)
+    kw = {"body_a": post(FOTO.format(1), DESCRIPTION, "1496"), "body_b": post(HAB.format(1), DESCRIPTION, "1496", HAB_TITLE)}
+    assert not pair(a, b, **BENCH, **kw)  # the bug: two cards
+    assert pair(a, b, **ON, **kw)
+    assert pair(a, b, cross_portal_facts=True, **kw)
+
+
+@pytest.mark.parametrize("index", range(len(PAIRS)))
+def test_bench_pairs_by_the_payload_alone(index: int) -> None:
+    """Without a body only the agency names are a sign; «Fastighetsformedling» and «Gr8 Real Estate» share none and
+    their shared features no longer merge (pair 11/18 merges by its reference or description, above)."""
+    a, b = PAIRS[index]
+    assert not pair(a, b, **BENCH)
     # «Nueva Andalucía» is shared, but with Q15 its words are district stop words (``_DISTRICT_STOP``): no street left
     assert pair(a, b) is (index == 5)
-    assert pair(a, b, **BENCH, cross_portal_facts=True)
-    assert pair(a, b, cross_portal_facts=True)
+    assert pair(a, b, **ON) is (index != 6)
+
+
+def test_each_strong_sign_alone() -> None:
+    a, b = PAIRS[6]  # two agency names without a shared word
+    assert not pair(a, b, **ON)
+    assert pair(a, {**b, "phone": PHONE}, **ON)
+    assert pair(a, b, body_a=post(FOTO.format(1), OTHER, "GR8-04051"), body_b=post(HAB.format(1), DESCRIPTION, "gr8 04051", HAB_TITLE), **ON)
+    assert pair(a, b, body_a=post(FOTO.format(1), DESCRIPTION), body_b=post(HAB.format(1), DESCRIPTION, title=HAB_TITLE),
+                **ON)
+    assert not pair(a, b, body_a=post(FOTO.format(1), DESCRIPTION), body_b=post(HAB.format(1), OTHER), **ON)
+    # another floor in one template text: another flat
+    assert not pair(a, b, body_a=post(FOTO.format(1), "Planta 2. " + DESCRIPTION),
+                    body_b=post(HAB.format(1), "Planta 5. " + DESCRIPTION), **ON)
+    # generic words of two agency names are no sign («Inmobiliaria», «Real Estate», a city)
+    assert not pair({**a, "advertiser": "Inmobiliaria Marbella"}, {**b, "advertiser": "MARBELLA REAL ESTATE"}, **ON)
+    assert not pair({**a, "advertiser": "Inmobiliaria"}, {**b, "advertiser": "INMOBILIARIA"}, **ON)
+
+
+def test_bench_false_pairs_do_not_merge() -> None:
+    """The bench's own false pairs (habitaclia rows, invented names and references): only the facts and features agree."""
+    features = ["aire acondicionado", "garaje", "piscina"]
+    town = house("Casco Antiguo", price=850_000, area=207, rooms=3, features=features, advertiser="Agencia Seis")
+    villa = house("Las Chapas - El Rosario", price=850_000, area=210, rooms=3, features=features,
+                  advertiser="Agencia Siete Invest")
+    assert not pair(town, villa, **ON)
+    assert not pair(town, villa, body_a=post(FOTO.format(1), OTHER, "RR2705-AA"),
+                    body_b=post(HAB.format(1), DESCRIPTION, "14889"), **ON)
+
+    def rent(district: str, advertiser: str) -> dict:
+        return {"price_amount": 1200, "price_currency": "EUR", "area_m2": 60, "rooms": 1, "deal_type": "rent",
+                "property_type": "apartment", "district": district, "location": f"{district}, Madrid",
+                "address": f"{district}, Madrid", "advertiser": advertiser, "features": ["ascensor", "parquet"]}
+    assert not pair(rent("Ciudad Lineal", "Agencia Ocho"), rent("Barrio de Salamanca", "Agencia Nueve"), **ON,
+                    url_b="https://www.idealista.com/inmueble/5/")
+
+
+def test_a_round_price_must_be_equal() -> None:
+    a = house("Nueva Andalucía", price=999_000, area=300, rooms=4, features=["piscina", "terraza"], advertiser="Promo Dev")
+    b = house("Elviria", price=995_000, area=305, rooms=4, features=["piscina", "terraza"], advertiser="Promo Dev SL")
+    assert not pair(a, b, **ON)  # 0.4 %: within 1 %, still two villas of one developer
+    assert pair(a, {**b, "price_amount": 999_000}, **ON)
+    # a price that is not round: within 0.5 %
+    assert pair({**a, "price_amount": 999_950}, {**b, "price_amount": 998_450}, **ON)
+    assert not pair({**a, "price_amount": 999_950}, {**b, "price_amount": 993_950}, **ON)
+
+
+def test_the_type_must_be_known_on_both_sides() -> None:
+    a, b = PAIRS[2]
+    assert not pair(a, {**b, "property_type": None}, **ON)
+    assert not pair({**a, "property_type": None}, {**b, "property_type": None}, **ON)
+    assert not pair(a, {**b, "property_type": "apartment"}, **ON)
 
 
 def test_one_agency_two_units_do_not_merge() -> None:
     a, b = PAIRS[2]  # one advertiser on both portals, 4.5M
-    flags = {**BENCH, "cross_portal_facts": True}
-    assert not pair(a, {**b, "area_m2": 600}, **flags)  # another area
-    assert not pair(a, {**b, "rooms": 4}, **flags)  # other rooms
-    assert not pair(a, {**b, "rooms": None}, **flags)  # rooms unknown on one side
-    assert not pair({**a, "rooms": None}, {**b, "rooms": None}, **flags)
-    assert not pair(a, {**b, "price_amount": 4_400_000}, **flags)  # beyond 1 %
-    assert not pair(a, b, url_b=FOTO.format(2), **flags)  # two ads of one portal
-    assert not pair(a, {**b, "property_type": "apartment"}, **flags)
+    assert not pair(a, {**b, "area_m2": 600}, **ON)  # another area
+    assert not pair(a, {**b, "rooms": 4}, **ON)  # other rooms
+    assert not pair(a, {**b, "rooms": None}, **ON)  # rooms unknown on one side
+    assert not pair({**a, "rooms": None}, {**b, "rooms": None}, **ON)
+    assert not pair(a, b, url_b=FOTO.format(2), **ON)  # two ads of one portal
 
 
 def test_new_development_and_references() -> None:
     a, b = PAIRS[2]
-    flags = {**BENCH, "cross_portal_facts": True}
     promo = "Obra nueva en Marbella, villas de diseno con piscina."
-    assert not pair(a, b, body_a=promo, body_b=promo, **flags)  # units of one project share the facts
-    ref = 'JSON-LD: {{"agency_ref": "{}"}}\nVilla con piscina.'
-    assert not pair(a, b, body_a=ref.format("NT-101"), body_b=ref.format("NT-102"), **flags)
-    assert pair(a, b, body_a=ref.format("NT-101"), body_b=ref.format("NT-101"), **flags)
+    assert not pair(a, b, body_a=promo, body_b=promo, **ON)  # units of one project share the facts
+    assert not pair(a, b, body_a=post(FOTO.format(1), DESCRIPTION, "NT-101"),
+                    body_b=post(HAB.format(1), DESCRIPTION, "NT-102"), **ON)
+    assert pair(a, b, body_a=post(FOTO.format(1), DESCRIPTION, "NT-101"),
+                body_b=post(HAB.format(1), DESCRIPTION, "NT-101"), **ON)
 
 
-def test_streets_and_evidence() -> None:
+def test_streets_and_city() -> None:
     a, b = PAIRS[0]
-    flags = {**BENCH, "cross_portal_facts": True}
-    assert not pair({**a, "address": "Calle Uno 5, Marbella"}, {**b, "address": "Calle Dos, Marbella"}, **flags)
+    assert not pair({**a, "address": "Calle Uno 5, Marbella"}, {**b, "address": "Calle Dos, Marbella"}, **ON)
     # a street on one side and another district on the other
-    assert not pair({**a, "address": "Calle Uno, Marbella"}, b, **flags)
-    # no shared phone, agency or two features
-    assert not pair({**a, "features": ["piscina"]}, {**b, "features": ["piscina"]}, **flags)
-    # another city
-    assert not pair(a, {**b, "location": "Milla de Oro, Estepona", "address": "Milla de Oro, Estepona"}, **flags)
+    assert not pair({**a, "address": "Calle Uno, Marbella"}, b, **ON)
+    assert not pair(a, {**b, "location": "Milla de Oro, Estepona", "address": "Milla de Oro, Estepona"}, **ON)
 
 
 def test_settings_pass_the_flag(monkeypatch) -> None:
@@ -127,7 +200,7 @@ def test_settings_pass_the_flag(monkeypatch) -> None:
     assert CampaignRunnerSettings(_env_file=None).runner_config().dedup_cross_portal_facts is True
 
 
-GOAL = "Купить дом в Марбелье до 1000000 евро"
+GOAL = "Купить дом в Марбелье до 4000000 евро"
 
 
 async def _cards(flag: bool) -> tuple[int, dict]:
@@ -141,9 +214,11 @@ async def _cards(flag: bool) -> tuple[int, dict]:
                                  actor="telegram:42")
     await campaigns.set_state(cid, "running", "campaign:test")
     store.add_groups(cid, 5)
-    for fid, link, payload in (("f1", FOTO.format(2), PAIRS[1][0]), ("f2", HAB.format(2), PAIRS[1][1])):
-        pl = {**payload, "original_post_link": link, "summary_ru": "Дом"}
-        store.add_finding(cid, fid, f"🏠 {fid}", payload=pl, original="", vertical="real_estate", url=link)
+    for fid, link, payload, title in (("f1", FOTO.format(2), PAIRS[6][0], "Casa en venta, La Mairena"),
+                                      ("f2", HAB.format(2), PAIRS[6][1], HAB_TITLE)):
+        pl = {**payload, "original_post_link": link, "summary_ru": "Дом"}  # pair 11/18: only the description is a sign
+        store.add_finding(cid, fid, f"🏠 {fid}", payload=pl, original=post(link, DESCRIPTION, title=title), vertical="real_estate",
+                          url=link)
     await runner.step(cid)
     return len(messenger.findings()), store.duplicates
 

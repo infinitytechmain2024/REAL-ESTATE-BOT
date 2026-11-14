@@ -36,9 +36,15 @@ phone, the agency or at least two features are shared too, even if the districts
 Across two sites when the districts differ in the address too (``same_object(..., cross_portal_facts=True)``,
 ``DEDUP_CROSS_PORTAL_FACTS``, Q32): without the flag two addresses without a shared street token never reach the rule
 above (Fotocasa «Las Lomas de Río Verde» and Habitaclia «Milla de Oro» for one villa). With it, such a pair merges by
-that rule when, in addition, the rooms are known on both sides, the city is named, neither is a new development, the
-property types agree, not both addresses name a street (two streets that differ are two objects), a street on one side
-shares a district token with the other and the agency references, when both are known, are the same.
+such a pair merges only with exact facts and a strong sign (``_same_cross_facts``): the price equal when both are
+round (a multiple of 1 000, or of 50 below 10 000), else within 0.5 %; the area within 3 %; the rooms and the property
+type known on both sides and equal; one named city; no new development; not two named streets (two streets that
+differ are two objects) and a street on one side only with a shared district token; two agency references, when both
+are known, equal. The strong sign is one of: a shared phone, a shared distinctive word of the agency names
+(``_AGENCY_GENERIC`` dropped: «Privo Investments» and «Privo Real Estate») or the same whole name, the same agency
+reference on both sides, or the same description (5-word shingles of the first 500 characters of the post body
+without its «JSON-LD», title and «Ссылка» lines, Jaccard >= 0.60, the same small numbers, at least 15 words each). Shared features are not one (most
+villas of a town share «piscina» and «garaje»).
 
 Two ads of one portal are not merged by text (only Facebook, where one flat is posted in many groups, is).
 
@@ -90,6 +96,12 @@ BARE_PRICE_TOLERANCE = 0.01  # the rule without an address (``_same_bare_facts``
 BARE_AREA_TOLERANCE = 0.02
 BARE_ROUND_AREA = 50  # a plot area that is a multiple of this is a typical estate plot
 FACTS_MIN_FEATURES = 2
+CROSS_PRICE_TOLERANCE = 0.005  # Q32 (``_same_cross_facts``): a price that is not round
+CROSS_ROUND_PRICE = 1000  # Q32: a multiple of this is a round price (compared exactly)
+CROSS_SMALL_PRICE = 10_000  # Q32: below it (a rent) a multiple of ``CROSS_ROUND_RENT`` is round too
+CROSS_ROUND_RENT = 50
+# Q32: characters of the description compared: one prefix on both sides, wherever the «JSON-LD» line ends the excerpt
+DESCRIPTION_LIMIT = 500
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
 
@@ -140,6 +152,15 @@ _STREET_WORD = re.compile(
 # more than the listing's district (``_named_street``); the other street words are always a street.
 _DISTRICT_STREET_WORD = re.compile(r"(?<![^\W_])(?:camino|cami|via|ronda|rambla|bulevar|boulevard|glorieta)(?![^\W_])")
 _AGENCY_REF_FIELD = re.compile(r',?\s*"agency_ref":\s*"((?:[^"\\]|\\.)*)"')
+# Q32: words of agency names that do not tell two agencies apart (``agency_words``; cities are dropped too).
+_AGENCY_GENERIC = frozenset({
+    "real", "estate", "estates", "properties", "property", "propiedades", "inmobiliaria", "inmobiliarias", "inmuebles",
+    "immobiliaria", "immobiliaries", "homes", "home", "house", "houses", "casa", "casas", "villas", "group", "grupo",
+    "invest", "investment", "investments", "inversiones", "slu", "realty", "realtors", "realtor", "costa", "sol",
+    "international", "internacional", "gestion", "consulting", "servicios", "agencia", "agency", "agents", "the", "and",
+    "del", "las", "los", "spain", "espana", "fincas", "finques", "living", "luxury", "partners", "sales", "asesores",
+    "api", "marbella", "golden", "mile", "premium", "prime", "select", "exclusive", "solutions", "services", "global",
+})
 _SOCIAL_HOSTS = frozenset({"facebook.com", "web.facebook.com", "fb.com", "fb.watch", "instagram.com"})
 _STOP = frozenset({
     "calle", "carrer", "avenida", "avda", "plaza", "paseo", "camino", "barrio", "zona", "centro", "street", "road",
@@ -179,6 +200,10 @@ class Listing:
     cadastre: frozenset[str] = frozenset()  # cadastral references of the body (the 14-character parcel part)
     new_build: bool = False  # the body, title or location names a new development («obra nueva», «promoción» ...)
     agency_ref: str = ""  # the agency's own reference of the ad (``ref_key``), "" when unknown (Q15)
+    # Q32: shingles and small numbers of the description only (the body without a portal post's «JSON-LD», title and
+    # «Ссылка» lines, ``description_of``)
+    description_shingles: frozenset[str] = frozenset()
+    description_numbers: tuple[int, ...] = ()
 
 
 def _positive(value: object) -> float | None:
@@ -199,6 +224,7 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
     if found_ref:  # its digits are no detail of the flat (``numbers``) and no phone
         excerpt = excerpt.replace(found_ref.group(0), "", 1)
     shingles, words = fingerprint(excerpt)
+    description = description_of(excerpt)[:DESCRIPTION_LIMIT]
     price = _positive(payload.get("price_amount"))
     if price is None:
         price = main_price(excerpt)
@@ -239,7 +265,21 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
         cadastre=frozenset(found.upper() for found in _CADASTRE.findall(excerpt)),
         new_build=is_new_build(" ".join((excerpt, title, place))),
         agency_ref=ref_key(found_ref.group(1)) if found_ref else "",
+        description_shingles=fingerprint(description)[0],
+        description_numbers=numbers_of(description),
     )
+
+
+def description_of(body: str) -> str:
+    """Q32: the description of a post body. A portal post (``web_search.worker._source_text``) is «JSON-LD: {...}», its
+    title, «Ссылка: ...» and the description; another post with the «JSON-LD» line loses that line; else the body."""
+    lines = (body or "").lstrip().split("\n")
+    if not lines[0].startswith("JSON-LD:"):
+        return body or ""
+    rest = lines[1:]
+    if len(rest) >= 2 and rest[1].startswith("Ссылка:"):
+        rest = rest[2:]
+    return "\n".join(rest)
 
 
 def ref_key(value: str | None) -> str:
@@ -440,7 +480,7 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
     (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``);
     ``district_not_street`` (``DEDUP_DISTRICT_NOT_STREET``, Q15) does not require a shared street when an address is
     only a district and compares the agency references; ``cross_portal_facts`` (``DEDUP_CROSS_PORTAL_FACTS``, Q32)
-    lets two portals' addresses without a shared street merge by the facts rule (``_same_cross_facts``)."""
+    lets two portals' addresses without a shared street merge by exact facts and a strong sign (``_same_cross_facts``)."""
     if a.deal and b.deal and a.deal != b.deal:
         return False
     if a.currency and b.currency and a.currency != b.currency:
@@ -562,14 +602,60 @@ def _same_facts(a: Listing, b: Listing) -> bool:
         or len(a.features & b.features) >= FACTS_MIN_FEATURES
 
 
-def _same_cross_facts(a: Listing, b: Listing) -> bool:
-    """Q32: ``_same_facts`` for two addresses without a shared street (the districts named differently by two portals),
-    stricter: the rooms known on both sides, a city named, no new development (units of one project share price, area
-    and rooms), the same property type when both are known, not two named streets, a street on one side only with a
-    shared district token, and the same agency reference when both are known (one agency, two units)."""
-    if a.new_build or b.new_build or not (a.rooms and b.rooms) or not _cities(a):
+def _round_price(price: float) -> bool:
+    return price % CROSS_ROUND_PRICE == 0 or (price < CROSS_SMALL_PRICE and price % CROSS_ROUND_RENT == 0)
+
+
+def _cross_price(a: float | None, b: float | None) -> bool:
+    """Q32: a round price is copied from the agency's feed as is (999 000 and 995 000 are two objects); another within
+    ``CROSS_PRICE_TOLERANCE``."""
+    if a is None or b is None:
         return False
-    if a.kind and b.kind and a.kind != b.kind:
+    if _round_price(a) and _round_price(b):
+        return a == b
+    return _close(a, b, CROSS_PRICE_TOLERANCE) is True
+
+
+def agency_words(agency: str) -> frozenset[str]:
+    """Q32: the distinctive words of an ``agency_key``: no ``_AGENCY_GENERIC`` word, no city, at least 3 characters."""
+    return frozenset(w for w in agency.split() if len(w) >= 3 and w not in _AGENCY_GENERIC and not _is_city(w))
+
+
+def _same_agency(a: str, b: str) -> bool:
+    """Q32: the same whole name with a distinctive word in it («NT Gestión Inmobiliaria» on both portals), or a shared
+    distinctive word («Marbaes Properties» and «Marbaes Real Estate»)."""
+    if not a or not b:
+        return False
+    if a == b:
+        return any(w not in _AGENCY_GENERIC for w in a.split())
+    return bool(agency_words(a) & agency_words(b))
+
+
+def _same_description(a: Listing, b: Listing) -> bool:
+    """Q32: one description reposted on two portals: Jaccard of the description shingles >= ``TEXT_PRICE_JACCARD``,
+    at least ``TEXT_SAME_MIN_WORDS`` words on each side and the same small numbers (another floor or door is another
+    flat of a template)."""
+    least = TEXT_SAME_MIN_WORDS - SHINGLE_WORDS + 1
+    if len(a.description_shingles) < least or len(b.description_shingles) < least:
+        return False
+    if a.description_numbers != b.description_numbers:
+        return False
+    return shingle_similarity(a.description_shingles, b.description_shingles) >= TEXT_PRICE_JACCARD
+
+
+def _same_cross_facts(a: Listing, b: Listing) -> bool:
+    """Q32: two portals' addresses without a shared street (the districts named differently): exact facts and a strong
+    sign (see the module notes). Shared features are no sign; no new development (units of one project share price,
+    area and rooms); the property type known on both sides; two agency references never merge."""
+    host_a, host_b = _host(a.url), _host(b.url)
+    if not host_a or not host_b or host_a == host_b:
+        return False
+    if a.new_build or b.new_build or not (a.rooms and a.rooms == b.rooms) or not (a.kind and a.kind == b.kind):
+        return False
+    if not _cross_price(a.price, b.price) or _close(a.area, b.area, AREA_TOLERANCE) is not True:
+        return False
+    cities = _cities(a)
+    if not cities or cities != _cities(b):
         return False
     street_a, street_b = _named_street(a), _named_street(b)
     if street_a and street_b:
@@ -578,7 +664,9 @@ def _same_cross_facts(a: Listing, b: Listing) -> bool:
         return False  # a street on one side, another district on the other
     if a.agency_ref and b.agency_ref and a.agency_ref != b.agency_ref:
         return False  # another reference of the agency: another unit
-    return _same_facts(a, b)
+    return bool(a.phones & b.phones) or _same_agency(a.agency, b.agency) or bool(
+        a.agency_ref and a.agency_ref == b.agency_ref and any(c.isdigit() for c in a.agency_ref)
+        and not re.fullmatch(r"(?:19|20)\d\d", a.agency_ref)) or _same_description(a, b)
 
 
 def _bare_area(listing: Listing) -> float | None:

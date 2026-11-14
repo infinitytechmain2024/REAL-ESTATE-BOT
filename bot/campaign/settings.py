@@ -161,8 +161,8 @@ class CampaignRunnerSettings(BaseSettings):
     # Q15: an address that is only a district does not need a shared street across two portals; the agency's reference
     # of the ad (Fotocasa, Habitaclia) with the price and area merges, two references never do.
     dedup_district_not_street: bool = Field(default=False, validation_alias="DEDUP_DISTRICT_NOT_STREET")
-    # Q32: across two portals the same price, area, rooms and city with a shared phone, agency or two features merge even
-    # when the addresses share no street (districts named differently); never a new development or two references.
+    # Q32: across two portals exact facts (round price equal, area, rooms, type, city) with a strong sign (phone, agency
+    # name word, agency reference, description) merge even when the addresses share no street (districts differ).
     dedup_cross_portal_facts: bool = Field(default=False, validation_alias="DEDUP_CROSS_PORTAL_FACTS")
     # Q25: the «Показать?» question names every distinct difference of the held similar listings (at most 5).
     offer_all_reasons: bool = Field(default=False, validation_alias="OFFER_ALL_REASONS")
