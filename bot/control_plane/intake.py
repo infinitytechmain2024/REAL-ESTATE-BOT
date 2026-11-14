@@ -31,6 +31,7 @@ import base64
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,7 @@ from pydantic import ValidationError
 from bot.campaign.architect import MAX_TEXT_CHARS, InvalidGoal, find_places, plan_campaign
 from bot.campaign.fblinks import is_facebook_post
 from bot.campaign.models import CampaignPlan
+from bot.campaign.provinces import is_province
 from bot.campaign.spec import (
     DEAL_RU,
     INVESTOR_WHO_RU,
@@ -89,6 +91,10 @@ DEAL_TEXT = dict(DEAL_RU)
 EXAMPLES = {"real_estate": "«квартиры в аренду в Мадриде до 1200 €»", "investors": "«инвесторы для стартапа в Барселоне»",
             "both": "«квартиры на продажу в Валенсии до 300 тыс. € и инвесторы в недвижимость там же»"}
 _SUBURB = re.compile(r"пригород|передміст|окрестност|околиц|afueras|alrededores|suburb|outskirts", re.IGNORECASE)
+# INTAKE_SKIP_WIDENS_PLACE (Q42): the scope question names the city and offers its province (whole words: no
+# «огород», «пригород»).
+_PROVINCE_WORD = re.compile(r"(?<!\w)(?:провинци|област)|\bprovinc", re.IGNORECASE)
+_CITY_WORD = re.compile(r"(?<!\w)город|\bciudad\b|\bcity\b", re.IGNORECASE)
 _RADIUS = re.compile(r"(?<!\d)(\d{1,3}(?:[.,]\d+)?)\s*(?:км|km|kilomet(?:er|re)s?)(?!\w)", re.IGNORECASE)
 # «Изменить»: callback code -> (button title, the TaskSpec field the interviewer is pointed at)
 FIELDS: dict[str, dict[str, tuple[str, str]]] = {
@@ -135,6 +141,7 @@ class Draft:
     editing: str | None = None  # the spec field being changed from «Изменить»
     forced: bool = False  # «Хватит, ищи» was pressed: no more questions for this task (except a missing place)
     choices: list[str] = field(default_factory=list)  # the model's suggested answers on screen (buttons «task:opt:<i>»)
+    widened: bool = False  # INTAKE_SKIP_WIDENS_PLACE (Q42): «Не важно» widened the city to its province
 
     def copy(self, **changes: Any) -> Draft:
         return replace(self, dialogue=[dict(t) for t in self.dialogue], choices=list(self.choices),
@@ -208,7 +215,7 @@ class Draft:
     def payload(self) -> dict[str, Any]:
         return {"task": self.task, "message_id": self.message_id, "dialogue": self.dialogue, "rounds": self.rounds,
                 "asking": self.asking, "editing": self.editing, "forced": bool(self.forced),
-                "choices": list(self.choices)}
+                "choices": list(self.choices), "widened": bool(self.widened)}
 
     def spec_json(self) -> str | None:
         return self.spec.model_dump_json() if self.spec is not None else None
@@ -227,7 +234,8 @@ class Draft:
                    updated_at, loaded, dialogue,
                    int(payload.get("rounds") or 0), payload.get("asking"), payload.get("editing"),
                    bool(payload.get("forced")),
-                   [str(c) for c in payload.get("choices") or [] if isinstance(c, str)])
+                   [str(c) for c in payload.get("choices") or [] if isinstance(c, str)],
+                   bool(payload.get("widened")))
 
     def expired(self, now: datetime) -> bool:
         return self.updated_at is not None and now - self.updated_at > DRAFT_TTL
@@ -373,7 +381,7 @@ class TaskIntake:
                  now: Callable[[], datetime] = lambda: datetime.now(UTC),
                  technical: Callable[[int], bool] = lambda _user_id: False,
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
-                 post_links: bool = False, both_mode: bool = False) -> None:
+                 post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -381,6 +389,9 @@ class TaskIntake:
 
         ``both_mode`` (``INTAKE_BOTH_MODE``): the mode «Недвижимость + инвесторы» is offered and accepted; off,
         the menu has no such button and the choice is refused.
+
+        ``skip_widens_place`` (``INTAKE_SKIP_WIDENS_PLACE``, Q42): «Не важно» to «only the city or its province»
+        widens a province capital to its province (see ``_widened_place``); off, the place stays the city.
 
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
@@ -390,6 +401,7 @@ class TaskIntake:
         self.interviewer = interviewer
         self.rules = RuleInterviewer()
         self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
+        self.skip_widens_place = skip_widens_place
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
         return mode_menu(text, both=self.both_mode)
@@ -537,6 +549,8 @@ class TaskIntake:
         path = draft.editing or ""
         title = next((t for t, p in FIELDS[draft.mode or "real_estate"].values() if p == path), path)
         spec = draft.spec or TaskSpec(mode=draft.mode)  # type: ignore[arg-type]
+        if path == "place":
+            draft.widened = False  # Q42: a new place is no longer the widened one
         if _norm(text) in self._skip_words() and path != "place":
             draft.spec = _cleared(spec, path).mark_unspecified(path)
             text = "не важно"
@@ -551,7 +565,8 @@ class TaskIntake:
         spec = draft.spec or TaskSpec(mode=draft.mode)  # type: ignore[arg-type]
         if draft.asking and draft.asking != "place":
             draft.spec = spec.mark_unspecified(draft.asking)
-        return await self._interview(draft, "Не важно")
+        widen = _widened_place(draft, spec) if self.skip_widens_place else None
+        return await self._interview(draft, "Не важно", widen=widen)
 
     async def _enough(self, draft: Draft) -> Reply:
         """«Хватит, ищи»: no more questions; only a missing place is still asked."""
@@ -560,13 +575,21 @@ class TaskIntake:
 
     # --- the interview ----------------------------------------------------------------------
 
-    async def _interview(self, draft: Draft, message: str, *, editing: bool = False) -> Reply:
-        """One user message: the interviewer updates the spec and says what to ask next, or the card is shown."""
+    async def _interview(self, draft: Draft, message: str, *, editing: bool = False,
+                         widen: dict[str, object] | None = None) -> Reply:
+        """One user message: the interviewer updates the spec and says what to ask next, or the card is shown.
+
+        ``widen`` (Q42): the place fields «Не важно» widened; applied after the model, which may resend the city.
+        """
         mode = draft.mode or "real_estate"
         spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
         turn = await self._turn(draft, mode, spec, message, editing)
         draft.spec = _enrich(self._record_answer(draft, spec, turn.spec, message, editing,
                                                  next_question=turn.question), mode)
+        if widen:
+            draft.spec.place = draft.spec.place.model_copy(update=widen)
+            draft.widened = True
+            log.info("telegram.intake.place_widened", extra={"user_id": draft.user_id, **widen})
         if draft.asking == "place.districts" and _SUBURB.search(draft.task):
             if draft.spec.place.radius_km and draft.spec.place.radius_km != spec.place.radius_km:
                 turn.understood_ru = f"радиус {draft.spec.place.radius_km:g} км"
@@ -684,7 +707,7 @@ class TaskIntake:
             return Reply(f"{exc}\nОпишите задачу иначе, например {EXAMPLES.get(draft.mode or '', EXAMPLES['real_estate'])}.")
         draft.step, draft.asking, draft.editing = "summary", None, None
         await self.store.save(draft)
-        lines = ["Проверьте задачу:", draft.spec.summary_ru()]
+        lines = ["Проверьте задачу:", draft.spec.summary_ru(province_scope=self.skip_widens_place and draft.widened)]
         if self.technical(draft.user_id):
             limits = plan.limits
             model = getattr(self.interviewer, "model", "")
@@ -747,6 +770,42 @@ def _enrich(spec: TaskSpec, mode: str) -> TaskSpec:
         spec.place = spec.place.model_copy(update={"names": known.get("names", {}),
                                                    "country": spec.place.country or known.get("country")})
     return spec
+
+
+def _widened_place(draft: Draft, spec: TaskSpec) -> dict[str, object] | None:
+    """INTAKE_SKIP_WIDENS_PLACE (Q42): what «Не важно» to «only the city or its province» widens the place to.
+
+    The question on screen is the scope question when it was asked for ``place.districts`` or the task-specific
+    round and its text names the city, the word «город» and the province («Искать только в самом городе Мадрид или
+    по провинции?»); the rules' «Район или вся Валенсия?», «огород вокруг дома» or a province question without the
+    city are not. Only a city whose name is a province of Spain too (Madrid, Valencia, Málaga; a one-province
+    community) becomes that province («Мадрид и провинция»): Marbella or Elche have no province of their name and
+    stay as they are. A place that is wider already, or has districts or a radius, is left too. None: no change.
+    """
+    place = spec.place
+    if (not place.name or place.level != "city" or place.districts or place.radius_km
+            or place.country not in (None, "ES") or not is_province(place.name)
+            or draft.asking not in ("place.districts", TASK_PATH)):
+        return None
+    question = next((t["text"] for t in reversed(draft.dialogue) if t.get("role") == "assistant"), "")
+    if not (_CITY_WORD.search(question) and _PROVINCE_WORD.search(question) and _names_place(question, place)):
+        return None
+    return {"level": "province"}
+
+
+def _names_place(question: str, place: Place) -> bool:
+    """The question names the place: its name in any language, also in another case («Мадриде», «Валенсии»)."""
+    folded = _fold_text(question)
+    for name in {place.name or "", *place.names.values()}:
+        stem = _fold_text(name)
+        stem = stem[:-1] if len(stem) > 4 else stem
+        if stem and re.search(rf"(?<!\w){re.escape(stem)}", folded):
+            return True
+    return False
+
+
+def _fold_text(value: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", value.casefold()) if not unicodedata.combining(c))
 
 
 def _cleared(spec: TaskSpec, path: str) -> TaskSpec:

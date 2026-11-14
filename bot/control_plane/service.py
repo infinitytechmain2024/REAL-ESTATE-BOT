@@ -144,7 +144,8 @@ class ControlPlane:
         self.intake = TaskIntake(intake_store or MemoryIntakeStore(), command_sink, notify_owners=self._tell_owners,
                                  technical=self._is_owner, interviewer=interviewer,
                                  max_rounds=settings.interview_max_rounds, post_links=settings.apify_comments_enabled,
-                                 both_mode=settings.intake_both_mode)
+                                 both_mode=settings.intake_both_mode,
+                                 skip_widens_place=settings.intake_skip_widens_place)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""
