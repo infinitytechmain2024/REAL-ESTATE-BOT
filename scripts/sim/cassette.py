@@ -13,7 +13,8 @@ the transport every client of the bot ends up on, so no production constructor c
   language, pageno, categories) -> ``sim/web/<key>.json`` (SearXNG JSON); a miss writes ``sim/pending_web/<key>.json``, the bot gets a 503;
 * pages of the web fetcher (``bot.web_search.fetcher.PageFetcher``, a page or its ``robots.txt``): key = hash of
   the normalised URL (``page_key``) -> ``sim/page/<key>.json`` (``{"status": 200, "content_type": "text/html", "body":
-  "..."}`` or ``{"status": 404}``); a missing page writes ``sim/pending_page/<key>.json``, the bot gets a 503; a
+  "..."}``, ``{"status": 404}`` or a redirect ``{"status": 301, "location": "..."}``); a missing page writes
+  ``sim/pending_page/<key>.json``, the bot gets a connection failure (not a 503: no refusal of the site); a
   missing ``robots.txt`` is a 404 (no robots.txt), never pending. ``offline`` resolves every host of the fetcher to
   ``SIM_ADDRESS`` (no DNS on the bench), so its public-address check passes and the request reaches ``SimNet``;
 * any other host (sites): ``sim/http/<host>/<hash>.json`` if recorded, else a 503, listed in ``offline``.
@@ -439,6 +440,8 @@ class SimNet:
             self.hits["page"] += 1
             self.calls += 1
             status = int(entry.get("status", 200))
+            if status in (301, 302, 303, 307, 308) and entry.get("location"):
+                return httpx.Response(status, headers={"location": str(entry["location"])})
             if status >= 300:
                 return httpx.Response(status, text="sim: recorded status")
             return httpx.Response(status, text=str(entry.get("body", "")),
@@ -455,7 +458,9 @@ class SimNet:
             self.pending_page.append(key)
         if self.strict:
             raise SimStop("page", pending)
-        return httpx.Response(503, text="sim: waiting for a page answer")
+        # Not a 503: the bot counts a 503 as the site's refusal (host breaker after 3, layer block, render/scrape
+        # layers). A connection failure is ``network_error:ConnectError``: the page fails, the site is not blamed.
+        raise httpx.ConnectError("sim: waiting for a page answer", request=request)
 
     # -- everything else --
 

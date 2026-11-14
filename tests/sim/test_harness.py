@@ -855,7 +855,7 @@ async def test_a_page_without_an_answer_is_pending_and_robots_txt_is_absent(tmp_
         fetcher = PageFetcher(user_agent="sim-test", impersonate="off", host_interval_seconds=0)
         assert await fetcher.allowed(url)
         for _ in range(2):  # the same page twice in a pass: one pending
-            with pytest.raises(FetchError, match="http_503"):
+            with pytest.raises(FetchError, match="network_error:ConnectError"):
                 await fetcher.fetch(url)
         await fetcher.aclose()
     [path] = (tmp_path / "pending_page").glob("*.json")
@@ -888,6 +888,43 @@ async def test_a_recorded_robots_txt_and_a_missing_page_are_served(tmp_path: Pat
         await fetcher.aclose()
     assert net.hits["page"] == 2 and net.pending_page == [] and not (tmp_path / "pending_page").exists()
 
+
+
+@pytest.mark.asyncio
+async def test_page_misses_are_no_refusal_of_the_site_every_one_is_pending(tmp_path: Path) -> None:
+    from bot.web_search import store, worker
+    from bot.web_search.fetcher import FetchError, PageFetcher
+
+    urls = [f"https://agencia.example.es/inmueble/{n}/" for n in range(5)]
+    errors = []
+    with offline(SimNet(tmp_path, run_id="r1")) as net:
+        fetcher = PageFetcher(user_agent="sim-test", impersonate="off", host_interval_seconds=0)
+        for url in urls:
+            with pytest.raises(FetchError) as failed:
+                await fetcher.fetch(url)
+            errors.append(failed.value.code)
+        await fetcher.aclose()
+    assert sorted(net.pending_page) == sorted(page_key(u) for u in urls) and len(net.pending_page) == 5
+    assert len(list((tmp_path / "pending_page").glob("*.json"))) == 5
+    for code in set(errors):  # not a 503: no host breaker, no layer block, no render/scrape layer
+        assert code == "network_error:ConnectError"
+        assert code not in worker.BREAKER_ERRORS and code not in store._REFUSALS and code not in worker.RENDER_ON
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_redirect_is_followed_to_its_own_page(tmp_path: Path) -> None:
+    from bot.web_search.fetcher import PageFetcher
+
+    (tmp_path / "page").mkdir()
+    (tmp_path / "page" / f"{page_key('https://club.example.es/old')}.json").write_text(json.dumps(
+        {"status": 301, "location": "/nuevo"}), encoding="utf-8")
+    (tmp_path / "page" / f"{page_key('https://club.example.es/nuevo')}.json").write_text(json.dumps(
+        {"status": 200, "content_type": "text/html", "body": "<p>Fondo</p>"}), encoding="utf-8")
+    with offline(SimNet(tmp_path)) as net:
+        fetcher = PageFetcher(user_agent="sim-test", impersonate="off", host_interval_seconds=0)
+        page = await fetcher.fetch("https://club.example.es/old")
+        await fetcher.aclose()
+    assert page.url == "https://club.example.es/nuevo" and "Fondo" in page.html and net.hits["page"] == 2
 
 def test_the_page_key_is_the_normalised_url() -> None:
     key = page_key("https://www.Example.es/a/?b=2&a=1#x")

@@ -71,7 +71,7 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 | LLM | `pending/<ключ>.json`: `stage`, `caller`, `model`, `system`, `user`, `schema` | `cassette/<ключ>.json` | `{"content": "<JSON-ответ модели строкой>"}` или `{"tool_call": {"name": "...", "input": {...}}}`; `{"error_status": 503}` — записанный сбой |
 | Apify | `pending_apify/<актор>__<хэш>.json`: `actor`, `input`, `params` | `apify/<актор>/<хэш>.json` (`<актор>` в форме `owner~name`) | `[<строки датасета>]` или `{"items": [...], "usage_usd": 0.0}`; `apify/<актор>/_default.json` — для любого входа |
 | веб-поиск (SearXNG) | `pending_web/<ключ>.json`: `query`, `params` (`engines`, `language`, `pageno`, `categories`), `host`, `stage`, `answer_to` | `web/<ключ>.json` | JSON SearXNG: `{"query": "...", "request": {"query": ..., "params": ...}, "results": [{"url": "...", "title": "...", "content": "..."}]}`; `{"results": []}` — поиск ничего не нашёл; `{"error_status": 503}` — записанный сбой |
-| страница сайта | `pending_page/<ключ>.json`: `url`, `host`, `path`, `stage`, `speculative`, `answer_to` | `page/<ключ>.json` | `{"status": 200, "content_type": "text/html", "body": "<текст страницы>"}`; `{"status": 404}` — страницы нет; `{"status": 503}` — недоступна |
+| страница сайта | `pending_page/<ключ>.json`: `url`, `host`, `path`, `stage`, `speculative`, `answer_to` | `page/<ключ>.json` | `{"status": 200, "content_type": "text/html", "body": "<текст страницы>"}`; `{"status": 301, "location": "<куда>"}` (или 302, 303, 307, 308) — редирект; `{"status": 404}` — страницы нет; `{"status": 503}` — недоступна |
 | пользователь | `pending_answers/<run>.json`: `question`, `buttons`, `keyboard`, `dialogue` | `answers/<run>.json` | `{"answers": [{"text": "до 3 млн евро"}, {"press": "<текст или data кнопки>"}, ...]}` — дописать следующий |
 
 - **Ключ LLM** = sha256 от (провайдер, модель, сообщения с system, схема `response_format` или `tools`) после
@@ -137,8 +137,16 @@ Orchestra → кампания (web-этап с порталами Apify, соц
   DNS на стенде нет: под `cassette.offline` резолвер фетчера по умолчанию — `cassette.sim_resolve`, любой хост
   получает публичный `SIM_ADDRESS`, проверка приватных адресов проходит, запрос идёт через httpx в `SimNet`
   (заголовки, robots, редиректы — как в проде). IP-литералы проверяются как раньше. Ответ — `page/<ключ>.json`;
-  нет ответа — pending в `pending_page/`, бот получает 503 (`http_503`, страница не прочитана) и идёт дальше, прогон
-  кончается кодом `3`; `--step` — стоп на первом (`stop_reason: page: …`). `robots.txt` без ответа — 404 без
+  редирект (`status` 301/302/303/307/308 с `location`) отдаётся заголовком `Location`, бот идёт по нему (не больше
+  4 переходов, адрес назначения — своя страница со своим ключом и своим pending).
+  - **Промах** (ответа нет): pending в `pending_page/` (одна страница за проход — один pending), а бот получает не
+    503, а сбой соединения `httpx.ConnectError` → `network_error:ConnectError`. Страница не прочитана
+    (`failed`, входит в лимит страниц кампании), но сайт не считается отказавшим: 503 бот засчитал бы как отказ
+    (`_REFUSALS` в `bot/web_search/store.py`, предохранитель `host_breaker` после 3 подряд в
+    `bot/web_search/worker.py`, переход к браузеру и scrape API), и остальные URL сайта ушли бы в `skipped`, не
+    попав в pending. Так все страницы сайта, до которых дошёл бот, попадают в pending за один проход. Прогон
+    кончается кодом `3`; `--step` — стоп на первом (`stop_reason: page: …`). Записанный `{"status": 503}` — это
+    уже отказ сайта, как в проде. `robots.txt` без ответа — 404 без
   pending (у большинства сайтов его нет, всё разрешено); записанный `page/<ключ>.json` для `robots.txt`
   (`content_type: text/plain`) отдаётся как есть.
   - **Ключ страницы** = sha256 (`cassette.page_key`) от `bot.utils.urls.normalize_url`: без фрагмента, хост в
