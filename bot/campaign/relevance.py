@@ -113,12 +113,12 @@ SELLER_PROMPT_VERSION = f"{PROMPT_VERSION}-sell"
 SELLER_RULES = """Investor findings of a seller (task.user_role "selling": the person has ONE property to sell, described
 in task, and looks for its buyers or investors): "match" only for a person or organisation that wants to BUY or invest
 in a property of that kind in or around the place: a buyer who says what they look for («looking to buy a villa in
-…», «busco comprar casa en …»), a buyer's agent or property finder with clients for such properties, a family office,
-fund or private investor buying such residential property there. When task.ticket or the task names a price, the
-buyer's stated budget must reach it (about 10 % less is "near"); a clearly smaller budget is "reject"; no budget
-stated is not a reason to reject. "reject": another agent, agency or developer that offers or sells property, a
-listing or a property for sale, a seller, a startup investor, business angel, venture fund or crowdfunding that
-invests in companies, someone looking for a rental or for something much cheaper, news, articles and directories.
+…», «busco comprar casa en …»), a family office, fund or private investor buying such residential property there.
+When task.ticket or the task names a price, the buyer's stated budget must reach it (about 10 % less is "near"); a
+clearly smaller budget is "reject"; no budget stated is not a reason to reject. "reject": another agent, agency or
+developer that offers or sells property, a buyer's agent or property finder, a listing or a property for sale, a
+seller, a startup investor, business angel, venture fund or crowdfunding that invests in companies, someone looking
+for a rental or for something much cheaper, news, articles and directories.
 
 """
 SYSTEM_SELLER = SYSTEM.replace(_REASON_LINE, SELLER_RULES + _REASON_LINE)

@@ -1,14 +1,31 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from .filters import filter_evidence
 from .formatters import investors, real_estate
-from .models import AnalysisResult, Evidence
+from .models import AnalysisResult, Evidence, FilterDecision
 from .openrouter import prompt_version, seller_rule
 from .prefilter import news_page
+
+# INVESTOR_SELLER_ROLE (Q63): for a seller's task a post without investor words still goes to the model when it is a
+# buyer's: a buy word and a property word, whole words (not the whole real-estate keyword list).
+_BUY_WORD = re.compile(r"\b(?:buy|buying|buyers?|comprar|compra|compradore?s?|looking\s+for|busco|buscamos)\b|"
+                       r"(?<!\w)(?:купить|куплю|купим|купити|ищу|ищем|шукаю)(?!\w)", re.IGNORECASE)
+_PROPERTY_WORD = re.compile(
+    r"(?<!\w)(?:villas?|casas?|chalets?|pisos?|apartamentos?|áticos?|terrenos?|parcelas?|fincas?|viviendas?|"
+    r"apartments?|houses?|homes?|flats?|plots?|land|penthouses?|townhouses?|property|properties|propiedad\w*|"
+    r"вилл\w*|вілл\w*|квартир\w*|дом|дома|домик|будин\w*|участ\w*|ділянк\w*|коттедж\w*|таунхаус\w*|"
+    r"апартамент\w*|недвижимост\w*|нерухом\w*)(?!\w)", re.IGNORECASE)
+
+
+def buyer_post(text: str) -> bool:
+    """INVESTOR_SELLER_ROLE: the text has a buy word and a property word (a buyer of the seller's property may)."""
+    return bool(_BUY_WORD.search(text or "") and _PROPERTY_WORD.search(text or ""))
+
 
 INVESTOR_NEWS = "investor_news_page"  # INVESTOR_LEAD_SOURCE_CHECK (Q53): booked as the skip «prefilter_investor_news_page»
 
@@ -36,8 +53,8 @@ class AnalysisPipeline:
     ) -> PipelineOutcome:
         decision = filter_evidence(evidence, vertical)
         seller = seller_rule(self.analyzer, vertical, task_hint)
-        if seller and decision.reason == "irrelevant_keywords":  # INVESTOR_SELLER_ROLE: a buyer names the property
-            decision = filter_evidence(evidence, "real_estate")
+        if seller and decision.reason == "irrelevant_keywords" and buyer_post(evidence.text):
+            decision = FilterDecision(accepted=True, reason="seller_buyer_words", language=decision.language)
         if not decision.accepted:
             return PipelineOutcome(False, decision.reason, decision.language)
         investor_rule = vertical == "investors" and getattr(self.analyzer, "investor_lead_check", False) is True

@@ -179,9 +179,10 @@ SELLER_LEAD_RULE = (
     "for its buyers. For the vertical investors a lead (relevant=true, category investors, listing_kind wanted) is ONLY "
     "a named or identifiable person or organisation that wants to BUY or invest in that kind of property in or around "
     "task_hint.place: a buyer who writes what they look for ('looking to buy a villa in ...', 'busco comprar casa en "
-    "...'), a buyer's agent or property finder with buying clients, a family office, fund or private investor buying "
+    "...'), a family office, fund or private investor buying "
     "such residential property there; who is that buyer and price_amount its stated budget (with its quote), else "
     "null. Not a lead (relevant=false, listing_kind other): another agent, agency or developer that offers property, "
+    "a buyer's agent or property finder, "
     "any property for sale or rent, a seller, startup investors, business angels, venture funds and crowdfunding that "
     "invest in companies, someone looking for a rental, news, blogs and directories. "
 )

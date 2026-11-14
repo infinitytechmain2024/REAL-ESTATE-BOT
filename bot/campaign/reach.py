@@ -85,11 +85,11 @@ SELLER_TEMPLATES: tuple[tuple[str, str, str], ...] = (
     ("web", "es", "busco comprar {obj} {city}"),
     ("telegram", "ru", "site:t.me купить {obj} {city}"),
     ("web", "en", "relocating to {city} buying {obj} forum"),
-    ("linkedin", "en", 'site:linkedin.com/in "buyer\'s agent" {city}'),
+    ("reddit", "en", "site:reddit.com moving to {city} buy {obj}"),
     ("web", "es", "inversores inmobiliarios {obj} {city}"),
     ("web", "en", "family office real estate {city}"),
     ("web", "ru", "хочу купить {obj} {city}"),
-    ("linkedin", "es", 'site:linkedin.com/in "property finder" {city}'),
+    ("web", "es", "busco {obj} para comprar {city}"),
     ("web", "uk", "купити {obj} {city}"),
 )
 _SELLER_OBJECTS = {
@@ -317,11 +317,19 @@ _RULES: tuple[tuple[Kind, re.Pattern[str]], ...] = (
 )
 
 
-_BUYER = re.compile(r"(looking to buy|want(?:s|ed)? to buy|buyer'?s agent|property finder|busco comprar|"
-                    r"quiero comprar|comprador|хочу купить|ищу купить|хочу купити)", re.I)
-# INVESTOR_SELLER_ROLE: who a seller's property is not for (another seller, a startup investor, a renter)
-_NOT_BUYER = re.compile(r"(for sale|en venta|se vende|продаж|продаю|startup|business angels?|venture|crowdfunding|"
-                        r"for rent|alquiler|аренд)", re.I)
+# INVESTOR_SELLER_ROLE: a buyer who says what they want («looking to buy a villa», «busco casa para comprar»)
+_BUYER = re.compile(
+    r"\b(?:looking\s+to\s+buy|want(?:s|ed)?\s+to\s+buy|buying\s+an?\s+(?:villa|house|home|property|apartment|flat|"
+    r"plot)|moving\s+to\b.{0,60}?\bbuy(?:ing)?|busco\s+comprar|busco\b.{0,60}?\bpara\s+comprar|"
+    r"quiero\s+comprar|queremos\s+comprar)\b|(?<!\w)(?:хочу|хотим|ищу|ищем)\s+(?:\w+\s+){0,2}купи(?:ть|ти)(?!\w)",
+    re.IGNORECASE)
+# ... who a seller's property is not for, anywhere: a startup investor or a buyer's agent (rejected here and by the
+# model's SELLER_RULES alike)
+_NOT_BUYER = re.compile(r"\b(?:startups?|business\s+angels?|venture|crowdfunding|buyer's\s+agents?|property\s+finders?)\b",
+                        re.IGNORECASE)
+# ... and in the title only (a buyer's snippet may well mention «villas for sale» or a current rental): an offer
+_OFFER_TITLE = re.compile(r"\b(?:for\s+sale|en\s+venta|se\s+vende|for\s+rent|alquiler)\b|(?<!\w)(?:продаж\w*|продаю|"
+                          r"продаётся|продается|аренд\w*)(?!\w)", re.IGNORECASE)
 
 
 def rule_judge(candidate: Candidate, campaign: ReachCampaign) -> Judged:
@@ -336,8 +344,10 @@ def rule_judge(candidate: Candidate, campaign: ReachCampaign) -> Judged:
     kind: Kind = next((k for k, pattern in _RULES if pattern.search(text)), "other")
     name = re.split(r"\s[-|–·]\s", candidate.title, maxsplit=1)[0].strip()[:200] or None
     if campaign.seller:
-        kind = "investor" if _BUYER.search(text) else kind
-        wanted = kind in ("investor", "fund") and not _NOT_BUYER.search(text)
+        title, folded = candidate.title.replace("\u2019", "'"), text.replace("\u2019", "'")
+        kind = "investor" if _BUYER.search(folded) else kind
+        offer = _OFFER_TITLE.search(title) and not _BUYER.search(title)
+        wanted = kind in ("investor", "fund") and not _NOT_BUYER.search(folded) and not offer
         return Judged(kind, in_city and wanted, 0.6 if in_city else 0.4, name)
     return Judged(kind, in_city and kind != "other", 0.6 if in_city else 0.4, name)
 
@@ -382,11 +392,10 @@ SELLER_RULES = """
 
 SELLER (data.investor.user_role is "selling"): the person has ONE property to sell (described in TASK) and wants its
 buyers. relevant=true only for someone who wants to BUY or invest in that kind of property in or around PLACE: a buyer
-who says what they look for («looking to buy a villa in …», «busco comprar casa en …»: kind investor), a buyer's agent
-or property finder with buying clients (kind agent), a family office, fund or private investor that buys such
-residential property there (kind fund or investor). When data.investor.ticket or TASK names a price, a buyer whose
+who says what they look for («looking to buy a villa in …», «busco comprar casa en …»: kind investor), a family office,
+fund or private investor that buys such residential property there (kind fund or investor). When data.investor.ticket or TASK names a price, a buyer whose
 stated budget is clearly below it is relevant=false. relevant=false: another agent or agency that sells or lists
-property, a developer, a listing or a property for sale, a seller, startup investors, business angels, venture funds
+property, a buyer's agent or property finder (they sell their search, not buy), a developer, a listing or a property for sale, a seller, startup investors, business angels, venture funds
 and crowdfunding (they invest in companies), investor clubs that seek projects, someone looking for a rental or for
 something much cheaper, news and directories."""
 
@@ -460,8 +469,7 @@ in those languages, around that geography and asset class."""
 QUERY_SELLER_RULES = """
 The person SELLS one property (data.investor.user_role "selling", described in TASK): write queries that find its
 BUYERS and investors in that kind of property in PLACE: buyers who post what they want to buy («looking to buy a villa
-<place>», «busco comprar villa <region>»), relocation and expat forums and groups, buyer's agents and property finders,
-family offices and real estate investors buying there. Never startup, business angel, venture, crowdfunding or
+<place>», «busco comprar villa <region>»), relocation and expat forums and groups, family offices and real estate investors buying there. Never startup, business angel, venture, crowdfunding or
 entrepreneur words, never listings or properties for sale, never rentals."""
 
 QUERY_SCHEMA: dict[str, Any] = {

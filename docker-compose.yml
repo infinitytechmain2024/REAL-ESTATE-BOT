@@ -138,6 +138,7 @@ services:
       INTAKE_ROLE_CONFLICT_CHECK: ${INTAKE_ROLE_CONFLICT_CHECK:-false}
       # Q62: a bare province capital («участок в Мадриде») is asked «only the city or the whole province?» once.
       INTAKE_ASK_CITY_OR_PROVINCE: ${INTAKE_ASK_CITY_OR_PROVINCE:-false}
+      # Q63: the investor role «selling» (has a property, seeks its buyers) in the interview and on the card
       INVESTOR_SELLER_ROLE: ${INVESTOR_SELLER_ROLE:-false}
       # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
       ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}

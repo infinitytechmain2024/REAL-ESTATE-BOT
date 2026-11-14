@@ -749,10 +749,11 @@ class TaskIntake:
                 turn.understood_ru = f"радиус {draft.spec.place.radius_km:g} км"
             elif draft.spec.place.districts != spec.place.districts:
                 turn.understood_ru = "пригороды: " + ", ".join(draft.spec.place.districts)
-        if (self.seller_role and mode in ("investors", "both") and not editing
+        if (self.seller_role and mode in ("investors", "both") and not editing and draft.role_check != "asking"
                 and (message == draft.task or draft.asking == "investor.user_role") and selling_in_text(message)
-                and draft.spec.investor.user_role != "selling"):
-            # INVESTOR_SELLER_ROLE (Q63): «have a villa … need buyers» is selling whatever the model read (b5-n2-s6)
+                and draft.spec.investor.user_role in (None, "raising")):
+            # INVESTOR_SELLER_ROLE (Q63): «have a villa … need buyers» is selling where the model read no role or raising
+            # (b5-n2-s6); a model's «deploying» and the role-conflict answer (Q52) are never overridden
             draft.spec.investor.user_role = "selling"
             log.info("telegram.intake.role_selling", extra={"user_id": draft.user_id})
         draft.dialogue = [*draft.dialogue, {"role": "user", "text": message[:600]}][-MAX_DIALOGUE:]

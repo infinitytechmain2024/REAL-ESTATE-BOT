@@ -135,7 +135,17 @@ def test_the_seller_words_are_recognised(text: str) -> None:
 
 @pytest.mark.parametrize("text", [
     "ищу инвесторов для стартапа в Барселоне", "хочу вложить 200 тыс в Малаге", "не продаю, ищу инвесторов в проект",
-    "looking for investors for my project", "I want to buy a villa in Estepona", "busco inversores para mi proyecto"])
+    "looking for investors for my project", "I want to buy a villa in Estepona", "busco inversores para mi proyecto",
+    # the review's false positives: someone else's sale, a share or a business, a sale to invest, a buyer's agent
+    "ищу виллу, продавцы пишите", "ищу виллу в Марбелье, которую продаёт собственник",
+    "Хочу купить квартиру, продаётся рядом с морем", "продаю долю в проекте, ищу инвестора",
+    "выход из проекта, ищу инвестора на мою долю", "агент ищет объекты для покупателя",
+    "ищу объекты для покупателя в Малаге", "ищу виллу для покупателя", "looking for villas for buyers in Marbella",
+    "I'm a buyer's agent, looking for villas for my buyers", "we are selling our startup, need investors",
+    "I'm selling my apartment to invest, looking for projects in Malaga",
+    "продаю квартиру в Киеве, хочу вложить деньги в проект в Малаге",
+    "vendo participaciones de mi empresa, busco inversores", "sell-side advisory, looking for investors",
+    "не продаю, ищу деньги на проект", "I have buyers looking for villas in Estepona", "продаю бизнес в Малаге"])
 def test_other_tasks_are_not_selling(text: str) -> None:
     assert not selling_in_text(text)
 
@@ -148,6 +158,14 @@ async def test_the_rules_read_selling_only_with_the_flag() -> None:
     off = await RuleInterviewer().interview(mode="investors", spec=spec, dialogue=[],
                                             message="продаю виллу в Марбелье, ищу покупателя")
     assert on.spec.investor.user_role == "selling" and off.spec.investor.user_role is None
+    later = await RuleInterviewer(seller_role=True).interview(  # not the task, not the role question: not read
+        mode="investors", spec=spec, dialogue=[{"role": "user", "text": "инвесторы в Малаге"}],
+        message="продаю виллу, ищу покупателя", asking="context.answers")
+    assert later.spec.investor.user_role is None
+    asked = await RuleInterviewer(seller_role=True).interview(
+        mode="investors", spec=spec, dialogue=[{"role": "user", "text": "инвесторы в Малаге"}],
+        message="продаю виллу, ищу покупателя", asking="investor.user_role")
+    assert asked.spec.investor.user_role == "selling"
     assert options_for("investor.user_role") == (("Ищу деньги", "role:raising"), ("Хочу вкладывать", "role:deploying"))
     assert options_for("investor.user_role", seller=True)[-1] == ("Продаю объект, ищу покупателя", "role:selling")
     assert "продаёте объект" in question_for(spec, "investor.user_role", seller=True)
@@ -185,6 +203,16 @@ async def test_the_sim_task_is_selling_on_the_card_with_the_flag_and_raising_wit
     on, off = await _card(True), await _card(False)
     assert "Ваша роль: продаю объект, ищу покупателя" in on and "привлекаю деньги" not in on
     assert "Ваша роль: привлекаю деньги" in off and "продаю объект" not in off
+
+
+@pytest.mark.asyncio
+async def test_the_model_s_deploying_is_never_overridden() -> None:
+    deploying = {"place": ESTEPONA, "investor": {"who": ["private"], "user_role": "deploying"}}
+    control, _, _ = with_fake(SellerFake(ask(TICKET_Q, "investor.ticket", deploying)))
+    control.intake.seller_role = True
+    await press(control, USER, "mode:investors")
+    await say(control, USER, TASK)
+    assert "Ваша роль: вкладываю деньги" in (await enough(control, USER)).text
 
 
 @pytest.mark.asyncio
@@ -307,6 +335,22 @@ def test_the_reach_queries_of_a_seller_look_for_buyers() -> None:
 
 def _fields(campaign: ReachCampaign) -> dict[str, Any]:
     return {k: getattr(campaign, k) for k in campaign.__dataclass_fields__}
+
+
+@pytest.mark.parametrize(("title", "snippet", "relevant"), [
+    ("Looking to buy a villa in Estepona", "Checked villas for sale in Estepona, budget 1.5M", True),
+    ("Looking to buy a villa in Estepona", "Currently in alquiler, want to own", True),
+    ("Looking to buy a villa in Estepona", "Our next adventure: moving to Spain", True),
+    ("Want to buy a house in Estepona", "Selling our UK home first, budget 1.3M", True),
+    ("Busco casa en Estepona para comprar", "presupuesto 1,2M", True),
+    ("Moving to Estepona, buying a villa", "budget 1.5M EUR", True),
+    ("Хочу купить виллу, Estepona", "рассматриваю предложения о продаже от собственников", True),
+    ("Buyer\u2019s agent Estepona", "We find homes for our clients", False),
+    ("Villas for sale in Estepona", "Looking to buy? Call us", False),
+    ("Estepona startups looking to buy", "seed round", False)])
+def test_the_review_cases_of_the_seller_rules(title: str, snippet: str, relevant: bool) -> None:
+    judged = rule_judge(Candidate("https://x.test/a", "web", "page", title, snippet), SELLER)
+    assert judged.relevant is relevant
 
 
 def test_the_rules_take_a_buyer_and_not_an_agent_for_a_seller() -> None:
@@ -441,6 +485,13 @@ async def test_a_buyers_post_is_read_with_the_seller_rule(monkeypatch) -> None:
     off = await AnalysisPipeline(OpenRouterAnalyzer("k", "m", investor_lead_check=True)).process(
         ev("https://www.reddit.com/r/Spain/comments/1/villa/", BUYER_TEXT), "investors", task_hint=hint)
     assert (off.accepted, off.reason, off.seller_rule, len(sent)) == (False, "irrelevant_keywords", False, 1)  # as before
+    # a seller's post without a buy word, or without a property word, is still dropped before the model
+    seller = AnalysisPipeline(OpenRouterAnalyzer("k", "m", seller_role=True))
+    for text in ("Estepona sunset photos from our terrace, amazing evening with friends",
+                 "We are looking for a babysitter in Estepona for the summer, please write"):
+        outcome = await seller.process(ev("https://example.com/p", text), "investors", task_hint=hint)
+        assert outcome.reason == "irrelevant_keywords"
+    assert len(sent) == 1
     assert answer(True)["category"] == "investors"
 
 

@@ -283,6 +283,8 @@ class Investor(_Model):
     @classmethod
     def _role(cls, value: Any) -> str | None:
         text = str(value or "").strip().casefold()
+        # «selling» (Q63) is accepted whatever INVESTOR_SELLER_ROLE says: the spec is shared by every service; without
+        # the flag no interviewer or rule writes it (``parse_turn`` drops it) and no stage reads it.
         return text if text in ("raising", "deploying", "selling") else None
 
     @field_validator("yield_min", mode="before")
