@@ -37,10 +37,15 @@ def barcelona(monkeypatch, flag: bool, answer: str | None = "от 6 месяце
 
 
 @pytest.mark.parametrize(("answer", "short"), [
-    ("от 6 месяцев", False), ("на 6 месяцев", False), ("на полгода", False), ("от полугода", False),
-    ("минимум 8 месяцев", False), ("на год", False), ("не знаю", False), ("долгосрочно", False),
-    ("на 3 месяца", True), ("на сезон", True), ("посуточно", True), ("на лето", True),
-    ("на 6 месяцев или на лето", True),
+    # open terms, long terms, none: no short let
+    ("от 6 месяцев", False), ("от полугода", False), ("минимум 8 месяцев", False), ("8 месяцев минимум", False),
+    ("не менее 3 месяцев", False), ("на год", False), ("на 12 месяцев", False), ("не знаю", False),
+    ("долгосрочно", False),
+    # a fixed term under a year is an «alquiler de temporada»; a short term beside a long one allows it too
+    ("на 6 месяцев", True), ("на 10 месяцев", True), ("на полгода", True), ("на 3 месяца", True), ("на сезон", True),
+    ("посуточно", True), ("на лето", True), ("на 6 месяцев или на лето", True), ("на год или на лето", True),
+    # «temporada» in the person's words is read as a short sign, «larga temporada» too: the safe side, not excluded
+    ("alquiler de larga temporada", True),
 ])
 def test_task_asks_short(answer, short):
     assert task_asks_short(_spec(answer), SOURCE_TEXT) is short
@@ -61,22 +66,26 @@ def test_excluded_without_q49_too(monkeypatch, q49):
     assert classify(found, request).bucket == "excluded"
 
 
-@pytest.mark.parametrize("answer", ["на 6 месяцев", "не знаю", None, "на год"])
+@pytest.mark.parametrize("answer", ["от 6 месяцев", "минимум 8 месяцев", "не знаю", None, "на год", "долгосрочно"])
 def test_no_short_term_excludes(monkeypatch, answer):
     request = barcelona(monkeypatch, True, answer)
     assert classify({**FLAT, "rental_term": "temporary"}, request).bucket == "excluded"
 
 
-@pytest.mark.parametrize("answer", ["на сезон", "на 1–3 месяца", "посуточно", "на 6 месяцев или на лето"])
+@pytest.mark.parametrize("answer", ["на сезон", "на 1–3 месяца", "посуточно", "на 6 месяцев", "на 10 месяцев",
+                                    "на полгода", "на год или на лето", "larga temporada"])
 def test_a_short_term_asked_for_keeps_the_old_bucket(monkeypatch, answer):
     request = barcelona(monkeypatch, True, answer)
     assert request.seasonal_excluded is False
-    assert classify({**FLAT, "rental_term": "temporary", "summary": "alquiler de temporada"}, request).bucket == "exact"
+    found = {**FLAT, "rental_term": "temporary", "summary": "alquiler de temporada"}
+    before = classify(found, barcelona(monkeypatch, False, answer))  # Q49 as before: exact or similar, never excluded
+    assert classify(found, barcelona(monkeypatch, True, answer)) == before and before.bucket != "excluded"
 
 
 def test_long_lets_stay_exact(monkeypatch):
     request = barcelona(monkeypatch, True)
     assert classify({**FLAT, "rental_term": "long", "summary": "Alquiler de larga temporada"}, request).bucket == "exact"
+    assert classify({**FLAT, "summary": "Piso en alquiler de larga temporada"}, request).bucket == "exact"
     assert classify(FLAT, request).bucket == "exact"
 
 

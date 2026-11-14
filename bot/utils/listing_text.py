@@ -180,20 +180,35 @@ def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] |
     return "long" if long and not short else "short" if short and not long else None
 
 
-# RENT_SEASONAL_EXCLUDED (Q59). A lease of six months or more in the person's words («на 6 месяцев», «от 6 месяцев»,
-# «на полгода», «минимум 8 месяцев»): ``_SHORT_TERM`` reads «на 6 месяцев» as short (any 1–11 months), yet a seasonal
-# let does not fit it. Sim b5-g5-s6 answered «от 6 месяцев».
-_HALF_YEAR_PLUS = re.compile(
-    r"(?<!\w)(?:(?:на|от|від|минимум|не\s+менее|мінімум|хотя\s+бы)\s+"
-    r"(?:(?:[6-9]|1[01])(?!\d)|шесть|семь|восемь|девять|десять|одиннадцать|шість|сім|вісім|дев'ять)\s+"
-    r"(?:месяц|місяц)\w*|(?:на|от|від)\s+(?:полгода|пол\s+года|полугода|півроку|пів\s+року)(?!\w))")
+# RENT_SEASONAL_EXCLUDED (Q59). An open lease term in the person's words: «от 6 месяцев», «минимум 8 месяцев», «не менее
+# 3 месяцев», «8 месяцев минимум», «от полугода». It sets a floor, not an end, so it is no short term (sim b5-g5-s6
+# answered «от 6 месяцев»). A fixed term under a year («на 6 месяцев», «на 10 месяцев», «на полгода») is short: in
+# Spain that is what an «alquiler de temporada» is for.
+_MONTHS = r"(?:\d+|один|одного|два|двух|три|трех|четыре|четырех|пять|пяти|шесть|шести|семь|семи|восемь|восьми|девять|девяти" \
+    r"|десять|десяти|одиннадцать|одиннадцати|пару|нескольких|несколько)\s+(?:месяц|місяц)\w*"
+_OPEN_TERM = re.compile(
+    rf"(?<!\w)(?:(?:на\s+)?{_MONTHS}\s+(?:минимум|мінімум|и\s+(?:более|больше|дольше)|или\s+(?:больше|дольше))(?!\w)"
+    rf"|(?:от|від|минимум|мінімум|не\s+менее|не\s+меньше|хотя\s+бы)\s+(?:на\s+)?{_MONTHS}"
+    r"|(?:от|від)\s+(?:полугода|пол\s+года|півроку|пів\s+року)(?!\w))")
+_HALF_YEAR = re.compile(r"(?<!\w)на\s+(?:полгода|пол\s+года|півроку|пів\s+року)(?!\w)")
 
 
 def task_asks_short(spec: object, *texts: object) -> bool:
-    """Q59: ``task_rental_term`` is «short» once a lease of six months or more is not counted as a short term: «на
-    6 месяцев» or «на полгода» alone is no short term, «на 6 месяцев или на лето» still is."""
-    folded = _HALF_YEAR_PLUS.sub(" | ", _task_words(spec, texts))
-    return _term_named(_SHORT_TERM, folded) and not _term_named(_LONG_TERM, folded)
+    """Q59: the person's words allow a short let: a short term is named («на сезон», «на 1–3 месяца», «на 6 месяцев»,
+    «на полгода», «посуточно»), alone or beside a long one («на год или на лето»). An open term («от 6 месяцев»,
+    «минимум 8 месяцев», «от полугода») is not counted as short."""
+    folded = _OPEN_TERM.sub(" | ", _task_words(spec, texts))
+    return _term_named(_SHORT_TERM, folded) or _term_named(_HALF_YEAR, folded)
+
+
+# STUDIO_ZERO_BEDROOMS (Q59). The person asked for a studio themselves («студия», «estudio», «studio», «loft»; the
+# interview's rooms answer «студия» sets rooms.min=1, bot/control_plane/rules.py): a studio is then what they want.
+_STUDIO_ASKED = re.compile(r"(?<!\w)(?:студи\w*|estudios?|studios?|lofts?|лофт\w*)(?!\w)")
+
+
+def task_names_studio(spec: object, *texts: object) -> bool:
+    """Q59: the person's words name a studio, not negated («не студия», «без студий» are none)."""
+    return _term_named(_STUDIO_ASKED, _task_words(spec, texts))
 
 
 def _task_words(spec: object, texts: tuple[object, ...]) -> str:

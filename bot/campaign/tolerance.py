@@ -69,9 +69,11 @@ Other constraints
   for a short term («на сезон», «на пару месяцев», «посуточно»; ``task_rental_term`` «short»): unchanged.
 * Seasonal let excluded (Q59, ``RENT_SEASONAL_EXCLUDED``; ``Request.seasonal_excluded``) -> excluded (``seasonal``,
   «сезонная аренда»), never offered with «Показать?»: the same home rent and the same listing signs as Q49, but the
-  person does not want a seasonal let at all. A lease of six months or more («на 6 месяцев», «на полгода»;
-  ``bot/utils/listing_text.py`` ``task_asks_short``) is no short term here. Sim b5-g5-s6 («от 6 месяцев»): 12 seasonal
-  lets were offered as similar and approved. A task that asks for a short term: unchanged.
+  person does not want a seasonal let at all. An open term («от 6 месяцев», «минимум 8 месяцев», «от полугода»;
+  ``bot/utils/listing_text.py`` ``task_asks_short``) is no short term; a fixed one under a year («на 6 месяцев», «на
+  полгода»), a short one beside a long one («на год или на лето») or the word «temporada» in the task («larga
+  temporada» too) allows a short let: unchanged. Sim b5-g5-s6 («от 6 месяцев»): 12 seasonal lets were offered as
+  similar and approved.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
   (Москва, Минск ...), its link is under another country's TLD (``.ru``,
@@ -93,10 +95,13 @@ Other constraints
   excluded; room, other and an unknown type are lenient.
 * Rooms: when the task names a number of rooms and the listing's known count is
   lower, it is other; an unknown count (or more rooms) changes nothing.
-* Studio (Q59, ``STUDIO_ZERO_BEDROOMS``; ``Request.studio_zero``): a listing of type ``studio`` with no rooms or one
-  (the studio's own room, «dispone de una habitación») has 0 bedrooms against the task's rooms, so «от 1 спальни» makes
-  it other (a ``rooms_delta`` that reaches 0 still approves it). A studio naming 2+ rooms, any other type with an
-  unknown count, or no rooms in the task: unchanged. Sim b5-g5-s6: «Estudio a estrenar», rooms 1, went out as exact.
+* Studio (Q59, ``STUDIO_ZERO_BEDROOMS``; ``Request.studio_zero``): a listing of type ``studio`` with no rooms (or 0)
+  has 0 bedrooms against the task's rooms, so «от 1 спальни» makes it other; with one room («dispone de una
+  habitación»: the studio's own room, or a real bedroom of a «piso con estudio») its bedrooms are unconfirmed:
+  similar (``unverified``, «Не подтверждено: число спален (студия)»); against 2+ rooms the one room is the ordinary
+  rooms rule. A ``rooms_delta`` that reaches 0 still approves it. A studio naming 2+ rooms, any other type with an unknown count, no rooms in the task, or a task whose own words
+  ask for a studio («студия», «estudio», «loft»; ``bot/utils/listing_text.py`` ``task_names_studio``): unchanged. Sim
+  b5-g5-s6: «Estudio a estrenar», rooms 1, went out as exact.
 * A budget with an unknown listing price is other (see Budget).
 * Findings of the investors vertical carry no prices; they are always exact.
 """
@@ -114,6 +119,7 @@ from bot.utils.listing_text import (
     auction_named,
     seasonal_let_named,
     task_asks_short,
+    task_names_studio,
     task_rental_term,
 )
 
@@ -173,7 +179,7 @@ class Request:
     seasonal_guard: bool = False
     # RENT_SEASONAL_EXCLUDED (Q59): a home rent that asked for no short term; a seasonal let is excluded
     seasonal_excluded: bool = False
-    # STUDIO_ZERO_BEDROOMS (Q59): a studio with no rooms or one has 0 bedrooms against the task's rooms
+    # STUDIO_ZERO_BEDROOMS (Q59), unless the task asks for a studio: a studio's bedrooms are 0 (no rooms) or unconfirmed
     studio_zero: bool = False
 
     @property
@@ -353,6 +359,7 @@ def facts_from_row_enabled() -> bool:
 AUCTION_NOTE = "аукцион, не обычная продажа"
 TEMPORARY_NOTE = "временная аренда"
 SEASONAL_NOTE = "сезонная аренда"
+STUDIO_ROOMS_NOTE = "Не подтверждено: число спален (студия)"  # Q59; the prefix is offers.UNKNOWN_PREFIX
 
 
 def rental_term_enabled() -> bool:
@@ -382,7 +389,7 @@ def studio_zero_enabled() -> bool:
 
 
 def _seasonal_excluded(deal: object, kind: str | None, spec: dict[str, Any] | None, text: str | None) -> bool:
-    """RENT_SEASONAL_EXCLUDED (Q59): a rent of a home whose words name no short term (six months or more is none)."""
+    """RENT_SEASONAL_EXCLUDED (Q59): a rent of a home whose words allow no short let (an open term «от 6 месяцев» is none)."""
     return (deal == "rent" and kind in (None, "apartment", "house") and seasonal_excluded_enabled()
             and not task_asks_short(spec, text))
 
@@ -425,7 +432,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         rental_term=task_rental_term(spec, text) if deal == "rent" and rental_term_enabled() else None,
         seasonal_guard=_seasonal_guard(deal, kind, spec, text),
         seasonal_excluded=_seasonal_excluded(deal, kind, spec, text),
-        studio_zero=studio_zero_enabled(),
+        studio_zero=studio_zero_enabled() and not task_names_studio(spec, text),
     )
 
 
@@ -491,11 +498,14 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
             covers.append("area")
     listed = payload.get("rooms")
     if (request.studio_zero and request.rooms and payload.get("property_type") == "studio"
-            and (listed is None or (isinstance(listed, int | float) and not isinstance(listed, bool) and listed <= 1))):
-        # Q59: a studio's one room is not a bedroom, it has 0 against the task's rooms
+            and (listed is None or (isinstance(listed, int | float) and not isinstance(listed, bool)
+                                    and (listed <= 0 or (listed == 1 and request.rooms == 1))))):
+        # Q59: a studio without rooms has 0 bedrooms; its one room may be the studio itself: unconfirmed
         if request.rooms_delta and request.rooms - request.rooms_delta <= 0:
             notes.append(f"студия при запросе от {request.rooms} комн.")
             covers.append("rooms")
+        elif listed == 1:
+            result = worse(result, Match("similar", 0.0, "unverified", note=STUDIO_ROOMS_NOTE))
         else:
             result = worse(result, Match("other", math.inf, "rooms"))
     elif (request.rooms and isinstance(listed, int | float) and not isinstance(listed, bool)
