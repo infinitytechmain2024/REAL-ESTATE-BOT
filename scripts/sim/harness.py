@@ -108,6 +108,7 @@ BASE_ENV: dict[str, str] = {
     "INVESTOR_LEAD_SOURCE_CHECK": "true",  # Q53
     "INTAKE_ROLE_CONFLICT_CHECK": "true",  # Q52
     "BOTH_MODE_PORTALS": "true",  # Q54
+    "HELD_OFFER_QUALITY": "true",  # Q55
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")
