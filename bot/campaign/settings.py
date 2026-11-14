@@ -206,6 +206,10 @@ class CampaignRunnerSettings(BaseSettings):
     # Q44: «📋 Отчёт по поиску» waits for the answer to «Показать?» and the approved similar cards (at most 10 min after
     # the campaign ended), so it counts what the chat got; no answer in time: the report goes as before.
     report_after_offer: bool = Field(default=False, validation_alias="REPORT_AFTER_OFFER")
+    # Q55: a listing the reviewer failed on budget or area (outside the tolerance) is excluded, not held for
+    # «Показать?»; one plot with the same cadastral references, or one portal's lot at one address with one
+    # description and price, is one card (bot/campaign/dedup.py ``same_lot``).
+    held_offer_quality: bool = Field(default=False, validation_alias="HELD_OFFER_QUALITY")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -504,7 +508,8 @@ class CampaignRunnerSettings(BaseSettings):
                             empty_report=self.empty_report,
                             status_counts_all_deliveries=self.status_counts_all_deliveries,
                             report_precise_reasons=self.report_precise_reasons,
-                            report_after_offer=self.report_after_offer)
+                            report_after_offer=self.report_after_offer,
+                            held_offer_quality=self.held_offer_quality)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

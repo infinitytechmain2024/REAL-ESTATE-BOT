@@ -507,14 +507,17 @@ def _criterion_label(name: str) -> str:
     return CRITERION_RU.get(name) or (f"{'обязательно' if head == 'must_have' else 'исключить'}: {tail}" if tail else name)
 
 
-def review_match(rules: Match, review: dict[str, Any], *, hold_mandatory: bool = False) -> Match:
+def review_match(rules: Match, review: dict[str, Any], *, hold_mandatory: bool = False,
+                 strict_fail: bool = False) -> Match:
     """The bucket of a finding from the rules' bucket and the reviewer's matrix (``review.to_dict``).
 
     * an approved deviation (``rules.why == "approved_deviation"``) is not a fail: a failed criterion the deviation
       covers (``rules.covers``) is ignored; the result stays ``exact`` with its note;
     * any hard ``fail`` -> excluded (its quote is in the stored matrix), except when the failed criteria are exactly
       the one number the rules had measured and placed in their «similar» band (budget for ``price``, area for
-      ``area``): the near-match question is kept; a second or another failed criterion excludes;
+      ``area``): the near-match question is kept; a second or another failed criterion excludes; ``strict_fail``
+      (``HELD_OFFER_QUALITY``, Q55): no exception, the reviewer's fail is outside the tolerance and excludes (a plot
+      of 1 500 m² for «от 2000 м²» is not offered with «Показать?» nor sent after «Одобрить»);
     * the reviewer's ``reject`` without a failed criterion (not one concrete offer) -> excluded;
     * any hard ``unknown`` -> not exact: held as similar, «Не подтверждено: <criteria>»;
     * ``hold_mandatory`` (H11): a ``must_have:`` criterion among the unknown ones -> ``MANDATORY_UNKNOWN``: the finding
@@ -533,7 +536,7 @@ def review_match(rules: Match, review: dict[str, Any], *, hold_mandatory: bool =
     unknown = [str(c.get("name")) for c in criteria if c.get("verdict") == "unknown"]
     if fails:
         measured = {"price": "budget", "area": "area"}.get(rules.why or "")
-        if rules.bucket == "similar" and measured is not None and set(fails) == {measured}:
+        if not strict_fail and rules.bucket == "similar" and measured is not None and set(fails) == {measured}:
             return rules
         name = fails[0]
         return Match("excluded", float("inf"), CRITERION_WHY.get(name, "criteria"),
