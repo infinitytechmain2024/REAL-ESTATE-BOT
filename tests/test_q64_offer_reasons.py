@@ -12,6 +12,7 @@ import pytest
 
 from bot.agents.reviewer import OpenRouterReviewer, parse_review
 from bot.campaign import offers
+from bot.campaign.offers import MAX_REASONS as MAX
 from bot.campaign.offers import Deviation
 from bot.campaign.relevance import (
     OpenRouterRelevanceJudge,
@@ -150,3 +151,57 @@ def test_the_setting_is_off_by_default_and_reaches_the_runner_and_both_judges(mo
     assert on.runner_config().offer_reasons_from_review is True
     judge = on.relevance_judge()
     assert judge.reviewer.phrase_land_terms is True and judge.fallback.phrase_land_terms is True
+
+
+def test_no_and_solar_pass_only_with_another_land_word() -> None:
+    for phrase in ("земля no urbanizable", "suelo no urbanizable, дальше от трассы", "земля urbano, no rústico",
+                   "сельхозучасток, а не solar urbano", "участок solar, suelo urbano"):
+        assert user_phrase(phrase, land_terms=True) == phrase, phrase
+    for phrase in ("no, участок занят", "участок занят, no", "участок no занят urbano", "это solar", "solar, no",
+                   "solar занят"):
+        assert user_phrase(phrase, land_terms=True) is None, phrase
+
+
+def test_only_unnamed_differences_keep_the_old_question() -> None:
+    assert offers.counted_reasons([Deviation("other"), Deviation("other", phrase=" ")]) == []
+    assert offers.counted_reasons([Deviation("other"), Deviation("other", phrase=RUSTICO)]) == [
+        f"{RUSTICO} — 1", "другие отличия — 1"]
+
+
+async def test_the_runner_keeps_the_old_question_when_no_difference_is_named() -> None:
+    judge = FakeJudge(Relevance("near", "Отличие.", None), Relevance("near", "Отличие.", None))
+    _, store, messenger, runner, cid = await setup(judge, offer_reasons_from_review=True)
+    _, _, old_messenger, old_runner, old_cid = await setup(
+        FakeJudge(Relevance("near", "Отличие.", None), Relevance("near", "Отличие.", None)))
+    for fid in ("a", "b"):
+        add(store, cid, fid, plot(2500))
+    await runner.tick()
+    old_store = old_runner.store
+    for fid in ("a", "b"):
+        add(old_store, old_cid, fid, plot(2500))
+    await old_runner.tick()
+    assert [t for _, t, _ in messenger.asks] == [t for _, t, _ in old_messenger.asks] and len(messenger.asks) == 1
+    assert "другие отличия" not in messenger.asks[0][1]
+
+
+def test_the_rest_is_named_as_kinds_of_differences_only_when_counted() -> None:
+    many = [f"отличие {i} — 1" for i in range(MAX + 1)]
+    assert offers.reasons_question(many, exact_found=True).endswith(" и ещё 1. Показать?")  # Q25 as before
+    assert offers.reasons_question(many, exact_found=True, counted=True).endswith(
+        " и ещё 1 другое отличие. Показать?")
+    for n, tail in ((2, "других отличия"), (4, "других отличия"), (5, "других отличий"), (11, "других отличий"),
+                    (12, "других отличий"), (21, "другое отличие"), (22, "других отличия")):
+        reasons = [f"отличие {i} — 1" for i in range(MAX + n)]
+        assert offers.reasons_question(reasons, exact_found=False, counted=True).endswith(
+            f" и ещё {n} {tail}. Показать?"), n
+
+
+async def test_the_runner_question_names_the_rest_as_kinds() -> None:
+    phrases = tuple(f"отличие номер {i}" for i in range(MAX + 2))
+    judge = FakeJudge(*(Relevance("near", "Отличие.", p) for p in phrases))
+    _, store, messenger, runner, cid = await setup(judge, offer_reasons_from_review=True)
+    for i in range(len(phrases)):
+        add(store, cid, f"p{i}", plot(2500))
+    await runner.tick()
+    (text,) = [t for _, t, _ in messenger.asks]
+    assert text.endswith(" и ещё 2 других отличия. Показать?")

@@ -1254,7 +1254,8 @@ class CampaignRunner:
                     log.warning("campaign.offer_reasons_failed", extra={"campaign_id": campaign.id})
                     reasons = []
                 if reasons:
-                    text = offers.reasons_question(reasons, land=deviation.land, exact_found=exact_found)
+                    text = offers.reasons_question(reasons, land=deviation.land, exact_found=exact_found,
+                                                   counted=True)
             elif self.config.offer_all_reasons:  # Q25: one «Одобрить» sends them all, so the question names them all
                 try:
                     reasons = await self._reasons(campaign, request, deviation)

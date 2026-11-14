@@ -276,7 +276,8 @@ _LATIN_WORD = re.compile(r"[a-zà-öø-ÿ][a-zà-öø-ÿ'’·-]*", re.IGNORECAS
 _PLACE_LINKS = frozenset({"de", "del", "la", "las", "los", "el", "y", "i", "d", "l", "dels", "les"})
 _ARTICLES = frozenset({"a", "o"})  # Galician articles: «A Coruña», «O Grove»
 # OFFER_REASONS_FROM_REVIEW (Q64): the Spanish land-status words the reviewer keeps in its Russian phrase (the person
-# wrote «urbano» in the task): «земля rústico, не urbano», «сельхозучасток (rústica), а не solar urbano».
+# wrote «urbano» in the task): «земля rústico, не urbano», «сельхозучасток (rústica), а не solar urbano». «no» only next
+# to another of them («no urbanizable»), «solar» only with another one in the phrase («solar urbano»).
 _LAND_TERMS = frozenset({
     "urbano", "urbana", "urbanos", "urbanas", "urbanizable", "urbanizables", "urbanizado", "urbanizada",
     "rústico", "rústica", "rústicos", "rústicas", "rustico", "rustica", "rusticos", "rusticas",
@@ -335,8 +336,25 @@ def _latin_is_places(phrase: str) -> bool:
 
 
 def _latin_is_land_terms(phrase: str, *, places: bool) -> bool:
-    """Q64: every Latin word is a land-status word (``_LAND_TERMS``) or, with ``places``, a capitalised name."""
-    return all(word.casefold() in _LAND_TERMS or (places and _is_name(word)) for word in _LATIN_WORD.findall(phrase))
+    """Q64: every Latin word is a land-status word (``_LAND_TERMS``) or, with ``places``, a capitalised name; «no» only
+    right before or after another land word, «solar» only with a land word other than «no» / «solar» in the phrase."""
+    found = list(_LATIN_WORD.finditer(phrase))
+    words = [m.group() for m in found]
+    folded = [w.casefold() for w in words]
+    strong = _LAND_TERMS - {"no", "solar"}
+
+    def next_to(i: int, j: int) -> bool:  # only spaces between the two words
+        a, b = sorted((i, j))
+        return a >= 0 and b < len(found) and not phrase[found[a].end():found[b].start()].strip()
+
+    def land(i: int) -> bool:
+        if folded[i] == "no":
+            return any(next_to(i, j) and folded[j] in _LAND_TERMS - {"no"} for j in (i - 1, i + 1))
+        if folded[i] == "solar":
+            return any(f in strong for f in folded)
+        return folded[i] in _LAND_TERMS
+
+    return all(land(i) or (places and _is_name(word)) for i, word in enumerate(words))
 
 
 def user_phrase(text: object, *, places: bool = False, land_terms: bool = False) -> str | None:
