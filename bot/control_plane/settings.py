@@ -40,6 +40,9 @@ class ControlPlaneSettings:
     intake_skip_widens_place: bool = False
     # INTAKE_ROLE_CONFLICT_CHECK (Q52): a role answer against the task's words is asked about once (off: taken as is).
     intake_role_conflict_check: bool = False
+    # INTAKE_ASK_CITY_OR_PROVINCE (Q62): a bare province capital («в Мадриде») is asked «only the city or the whole
+    # province?» once (off: nothing is asked, the place stays the city).
+    intake_ask_city_or_province: bool = False
     # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
     # OpenRouter stays its fallback. The key is never logged or echoed.
     architect_provider: str = "openrouter"
@@ -101,6 +104,7 @@ class ControlPlaneSettings:
             intake_both_mode=os.environ.get("INTAKE_BOTH_MODE", "").strip().lower() in {"1", "true", "yes", "on"},
             intake_skip_widens_place=os.environ.get("INTAKE_SKIP_WIDENS_PLACE", "").strip().lower() in {"1", "true", "yes", "on"},
             intake_role_conflict_check=os.environ.get("INTAKE_ROLE_CONFLICT_CHECK", "").strip().lower() in {"1", "true", "yes", "on"},
+            intake_ask_city_or_province=os.environ.get("INTAKE_ASK_CITY_OR_PROVINCE", "").strip().lower() in {"1", "true", "yes", "on"},
             architect_provider=_architect_provider(os.environ.get("ARCHITECT_PROVIDER", "openrouter")),
             anthropic_api_key=anthropic_key,
             anthropic_interview_model=os.environ.get("ANTHROPIC_INTERVIEW_MODEL", "").strip() or "claude-sonnet-5-5",

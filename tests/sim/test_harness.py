@@ -1017,10 +1017,11 @@ async def test_a_land_search_in_madrid_reaches_a_card_and_a_replay_gives_the_sam
     assert first["campaign"]["state"] == "completed" and any("Отчёт по поиску" in r for r in first["report"])
     answers = [q["answer"] for q in first["questions"]]
     start = answers.index("до 3 млн евро")
-    assert answers[start:start + 2] == ["до 3 млн евро", "[task:launch]"]
+    # Q62 (INTAKE_ASK_CITY_OR_PROVINCE): «only the city of Madrid or the whole province?» - the city, as before
+    assert answers[start:start + 3] == ["до 3 млн евро", "[task:scope:city]", "[task:launch]"]
     # «Показать?» after the card (similar, then the farther ones), if the run held any: the fixture says «Нет»
-    assert all(a.startswith("[near:no:") for a in answers[start + 2:]) and len(first["offers"]) <= 2
-    assert [o["press"] for o in first["offers"]] == [a.strip("[]") for a in answers[start + 2:]]
+    assert all(a.startswith("[near:no:") for a in answers[start + 3:]) and len(first["offers"]) <= 2
+    assert [o["press"] for o in first["offers"]] == [a.strip("[]") for a in answers[start + 3:]]
     assert {c["provider"] for c in first["campaign_costs"] if c["stage"] == "llm" and c["kind"] == "cost"} == \
         {"claude_cassette"} and first["costs_total_usd"] == 0
     assert first["pending"] == {"llm": [], "apify": [], "apify_blocked": [], "web": [], "page": []}
@@ -1049,7 +1050,8 @@ async def test_without_answers_the_run_waits_with_pending_files_and_no_secret_in
 async def test_the_card_is_launched_from_the_bottom_keyboard(tmp_path: Path) -> None:
     root = sim_root(tmp_path)
     (root / "answers" / "land.json").write_text(json.dumps(
-        {"answers": [{"text": "до 3 млн евро"}, {"press": "▶️ Запустить"}, {"press": "Нет"}, {"press": "Нет"}]},
+        {"answers": [{"text": "до 3 млн евро"}, {"press": "Только в городе"}, {"press": "▶️ Запустить"},
+                     {"press": "Нет"}, {"press": "Нет"}]},
         ensure_ascii=False), encoding="utf-8")
     code, result = await run(root, responder=model.answer, confirm_card=True)  # the card reads its answer
     assert code == 0 and result["status"] == "done", result["stop_reason"]
