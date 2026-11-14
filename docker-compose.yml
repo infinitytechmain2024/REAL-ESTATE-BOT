@@ -781,6 +781,7 @@ services:
       HELD_FINDINGS_NULL_WHY: ${HELD_FINDINGS_NULL_WHY:-false}
       REPORT_PRECISE_REASONS: ${REPORT_PRECISE_REASONS:-false}
       REPORT_AFTER_OFFER: ${REPORT_AFTER_OFFER:-false}
+      HELD_OFFER_QUALITY: ${HELD_OFFER_QUALITY:-false}
       # Investor leads from the comments under sent objects (bot/campaign/leads.py), and dead groups.
       CAMPAIGN_COMMENT_LEADS: ${CAMPAIGN_COMMENT_LEADS:-investors}
       CAMPAIGN_COMMENT_MAX_POSTS: ${CAMPAIGN_COMMENT_MAX_POSTS:-15}
