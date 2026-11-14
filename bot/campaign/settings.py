@@ -166,7 +166,8 @@ class CampaignRunnerSettings(BaseSettings):
                                              timeout_seconds=float(self.final_timeout_seconds))
                        if self.openrouter_api_key else None)
         return FinalReporter(recommender, every_portal=self.report_every_portal,
-                             precise_reasons=self.report_precise_reasons)
+                             precise_reasons=self.report_precise_reasons,
+                             exact_first=self.report_top_exact_first)
 
     # Tell the chat about closed Facebook groups (Apify group_private) and read them after «Вступил».
     join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
@@ -195,6 +196,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q37: «По источникам» in the final report shows every portal source that ran, also one that found nothing
     # («Habitaclia — объявлений не найдено»); bot/web_search/settings.py reads the same flag.
     report_every_portal: bool = Field(default=False, validation_alias="REPORT_EVERY_PORTAL")
+    # Q58: «Лучшие варианты» of the final report list the cards sent as exact first, then the similar/other ones sent
+    # after «Одобрить» (shares, lots); the previous order (score, price, number) within each group.
+    report_top_exact_first: bool = Field(default=False, validation_alias="REPORT_TOP_EXACT_FIRST")
     # Q40: a finished search's last status line counts every delivery (cards, people, post leads, reach contacts).
     status_counts_all_deliveries: bool = Field(default=False, validation_alias="STATUS_COUNTS_ALL_DELIVERIES")
     # Q41: held findings with no recorded why (why IS NULL) are listed too when an exclude_why is not given
