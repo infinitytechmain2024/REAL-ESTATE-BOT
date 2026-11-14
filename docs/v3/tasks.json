@@ -1325,6 +1325,138 @@
       "status": "done",
       "day": "",
       "hours": 0
+    },
+    {
+      "id": "Q44",
+      "title": "Отчёт ждёт ответа на «Показать?»",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q45",
+      "title": "Жилец и аукцион для покупателя жилья",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q46",
+      "title": "Точность правила о жильце",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q47",
+      "title": "Копия объявления на одном портале",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q48",
+      "title": "Двойное «Готово» (артефакт стенда, без правки)",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "cut",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q49",
+      "title": "Сезонная аренда — похожая, если не просили",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q50",
+      "title": "Повторы аренды с обёрткой «Ref:»",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q51",
+      "title": "Веб-этап инвестора ищет инвесторов",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q52",
+      "title": "Переспрос роли инвестора при противоречии",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q53",
+      "title": "Лиды только со страниц инвесторов, не новости",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q54",
+      "title": "Порталы для объектной части режима both",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
     }
   ]
 }
