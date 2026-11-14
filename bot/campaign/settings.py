@@ -210,6 +210,10 @@ class CampaignRunnerSettings(BaseSettings):
     # «Показать?»; one plot with the same cadastral references, or one portal's lot at one address with one
     # description and price, is one card (bot/campaign/dedup.py ``same_lot``).
     held_offer_quality: bool = Field(default=False, validation_alias="HELD_OFFER_QUALITY")
+    # Q58: one long description (the same small numbers) at one exact price and area is one card even under two
+    # addresses or municipalities, or with a repost suffix of the agency reference («E18484R»); never a new
+    # development, two other references, or a round plot area without references (bot/campaign/dedup.py ``_same_twin``).
+    dedup_twin_listings: bool = Field(default=False, validation_alias="DEDUP_TWIN_LISTINGS")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -509,7 +513,8 @@ class CampaignRunnerSettings(BaseSettings):
                             status_counts_all_deliveries=self.status_counts_all_deliveries,
                             report_precise_reasons=self.report_precise_reasons,
                             report_after_offer=self.report_after_offer,
-                            held_offer_quality=self.held_offer_quality)
+                            held_offer_quality=self.held_offer_quality,
+                            dedup_twin_listings=self.dedup_twin_listings)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")
