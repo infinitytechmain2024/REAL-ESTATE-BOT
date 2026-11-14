@@ -525,10 +525,10 @@ _LEGAL = re.compile(r"застрой|строительств|разрешен|�
 # Reviewer prompts that already carry the legal-buildability rule (a «pass» of such a must-have is trusted);
 # reviewer-v3-soft is reviewer-v3 with the soft wishes apart (RELEVANCE_SOFT_WISHES); the -th ones add the townhouse
 # rule (REVIEW_TOWNHOUSE_IS_HOUSE, Q18), the -nr ones the non-residential rule (REVIEW_NON_RESIDENTIAL, Q22), the
-# -tn ones the tenant / auction rule (REVIEW_TENANT_HITS, Q45), the -hits ones the quotable «hits»
-# (PORTAL_DESCRIPTION_FULL, Q18); all keep the legal one.
-_LEGAL_RULE_PROMPTS = tuple(f"reviewer-v3{soft}{th}{nr}{tn}{hits}" for soft in ("", "-soft") for th in ("", "-th")
-                            for nr in ("", "-nr") for tn in ("", "-tn") for hits in ("", "-hits"))
+# -tn ones the tenant / auction rule (REVIEW_TENANT_HITS, Q45), the -lt ones the seasonal-let rule
+# (RENT_DEFAULT_LONG_TERM, Q49), the -hits ones the quotable «hits» (PORTAL_DESCRIPTION_FULL, Q18); all keep the legal one.
+_LEGAL_RULE_PROMPTS = tuple(f"reviewer-v3{soft}{th}{nr}{tn}{lt}{hits}" for soft in ("", "-soft") for th in ("", "-th")
+                            for nr in ("", "-nr") for tn in ("", "-tn") for lt in ("", "-lt") for hits in ("", "-hits"))
 
 
 def _criterion_label(name: str) -> str:

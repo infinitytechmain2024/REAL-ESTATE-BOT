@@ -109,6 +109,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q45 (rubric «Жилец»): for a home purchase a tenanted / occupied / bare-ownership flat or an auction is similar, not
     # exact (prompts «-tn»); with PORTAL_DESCRIPTION_FULL the «hits» also show those words. false: as before.
     review_tenant_hits: bool = Field(default=False, validation_alias="REVIEW_TENANT_HITS")
+    # Q49: for a home rent that asked for no short term («не знаю» included) a seasonal / temporary / holiday let is
+    # similar, «сезонная аренда» (bot/campaign/tolerance.py, reviewer prompts «-lt»). false (default): as before.
+    rent_default_long_term: bool = Field(default=False, validation_alias="RENT_DEFAULT_LONG_TERM")
     # Q18, the same variable as bot/web_search/settings.py: the reviewer also gets «hits», windows of the whole
     # listing text around the must-have words, and may quote them (prompt «-hits»). Off: as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")
@@ -145,6 +148,7 @@ class CampaignRunnerSettings(BaseSettings):
                                                 quote_hits=self.portal_description_full,
                                                 non_residential=self.review_non_residential,
                                                 tenant=self.review_tenant_hits,
+                                                seasonal=self.rent_default_long_term,
                                                 phrase_places=self.user_phrase_places), legacy,
                              max_calls=self.review_max_calls)
 
