@@ -152,7 +152,7 @@ class CampaignRunnerSettings(BaseSettings):
         recommender = (OpenRouterRecommender(api_key=self.openrouter_api_key, model=self.final_model,
                                              timeout_seconds=float(self.final_timeout_seconds))
                        if self.openrouter_api_key else None)
-        return FinalReporter(recommender)
+        return FinalReporter(recommender, every_portal=self.report_every_portal)
 
     # Tell the chat about closed Facebook groups (Apify group_private) and read them after «Вступил».
     join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
@@ -173,6 +173,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q33: an investor search that completed with nobody found gets «📋 Отчёт по поиску» with why (the sites' and the
     # reach's queries, their errors, no Facebook group read), even without CAMPAIGN_INVESTOR_REPORT or any spend.
     empty_report: bool = Field(default=False, validation_alias="CAMPAIGN_EMPTY_REPORT")
+    # Q37: «По источникам» in the final report shows every portal source that ran, also one that found nothing
+    # («Habitaclia — объявлений не найдено»); bot/web_search/settings.py reads the same flag.
+    report_every_portal: bool = Field(default=False, validation_alias="REPORT_EVERY_PORTAL")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")

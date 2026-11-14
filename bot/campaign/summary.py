@@ -118,10 +118,15 @@ def _site_line(site: Site) -> str:
     return f"{name} — {' · '.join(parts) or 'ничего'} {_cards(site.sent, site.held)}"
 
 
-def _nothing_line(site: Site) -> str:
+def _ran(site: Site) -> bool:
+    """Its API source run ended: completed empty, failed on the provider's side, or only objects from elsewhere."""
+    return site.api_empty or site.api_failed or site.api_wrong_place
+
+
+def _nothing_line(site: Site, every_portal: bool = False) -> str:
     """A portal with no links: why, from its ``site:`` queries."""
     if site.api_empty:
-        why = "0 объявлений по запросу"
+        why = "объявлений не найдено" if every_portal else "0 объявлений по запросу"
     elif site.api_failed:
         why = "портал вернул ошибку"
     elif site.api_wrong_place:
@@ -136,9 +141,11 @@ def _nothing_line(site: Site) -> str:
 
 
 def site_lines(sources: Sequence[SourceCount], reports: Sequence[object],
-               portals: Sequence[str] = ()) -> tuple[list[str], list[Site]]:
+               portals: Sequence[str] = (), *, every_portal: bool = False) -> tuple[list[str], list[Site]]:
     """One line per site (the known portals in priority order, then the busiest others, the rest summed) and the
-    portals the search found nothing on. Shared by the owners' summary and the user's final report."""
+    portals the search found nothing on. Shared by the owners' summary and the user's final report.
+    ``every_portal`` (REPORT_EVERY_PORTAL, Q37): a portal whose API source ran gets a line even when it gave nothing
+    and is not one of ``ALWAYS_SHOWN`` or of ``portals`` («Habitaclia — объявлений не найдено»)."""
     lines: list[str] = []
     sites = _sites(sources, reports, portals)
     shown: set[str] = set()
@@ -148,11 +155,16 @@ def site_lines(sources: Sequence[SourceCount], reports: Sequence[object],
         if site.links or site.posts:
             lines.append(_site_line(site))
             shown.add(portal)
-        elif portal in ALWAYS_SHOWN:
-            lines.append(_nothing_line(site))
+        elif portal in ALWAYS_SHOWN or (every_portal and _ran(site)):
+            lines.append(_nothing_line(site, every_portal))
             shown.add(portal)
         else:
             nothing.append(site)
+    if every_portal:
+        for host, site in sorted(sites.items()):
+            if host not in shown and host not in portals and _ran(site) and not (site.links or site.posts):
+                lines.append(_nothing_line(site, every_portal))
+                shown.add(host)
     others = sorted((s for h, s in sites.items() if h not in shown and h not in portals and (s.links or s.posts)),
                     key=lambda s: (-s.sent, -s.held, -(s.read + s.from_search), s.host))
     for site in others[:MAX_SITE_LINES]:
