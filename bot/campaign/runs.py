@@ -185,6 +185,20 @@ class PostReadSummary:
         return self.state in ("queued", "reading")
 
 
+@dataclass(frozen=True, slots=True)
+class SearchOutcome:
+    """What the campaign's search queries gave (Q33, the «nothing found» report): the web stage's
+    (``web_search_queries``, searched or failed) and the investor reach's (``reach_queries``)."""
+
+    web_queries: int = 0
+    web_hits: int = 0  # queries with at least one result
+    web_failed: int = 0
+    reach_queries: int = 0
+    reach_hits: int = 0
+    reach_failed: int = 0
+    errors: tuple[tuple[str, int], ...] = ()  # (error code, failed queries), most frequent first
+
+
 _GROUP_PATH = re.compile(r"^/groups/([A-Za-z0-9_.-]{1,100})(?:/|$)")
 
 
@@ -281,6 +295,7 @@ class RunStore(Protocol):
     async def outcome_counts(self, campaign_id: str) -> list[OutcomeCount]: ...
     async def claim_final_report(self, campaign_id: str) -> bool: ...
     async def release_final_report(self, campaign_id: str) -> None: ...
+    async def search_outcome(self, campaign_id: str) -> SearchOutcome: ...
 
 
 def _distance(value: float | None) -> float | None:
@@ -680,6 +695,27 @@ class PostgresRunStore:
     async def release_final_report(self, campaign_id: str) -> None:
         await self.pool.execute("update campaign_runs set final_report_sent_at = null where campaign_id = $1::uuid",
                                 campaign_id)
+
+    async def search_outcome(self, campaign_id: str) -> SearchOutcome:
+        row = await self.pool.fetchrow(
+            """select (select count(*) from web_search_queries
+                        where campaign_id = $1::uuid and state in ('searched', 'failed')) as web,
+                      (select count(*) from web_search_queries where campaign_id = $1::uuid and result_count > 0) as web_hits,
+                      (select count(*) from web_search_queries where campaign_id = $1::uuid and state = 'failed') as web_failed,
+                      (select count(*) from reach_queries where campaign_id = $1::uuid) as reach,
+                      (select count(*) from reach_queries where campaign_id = $1::uuid and hits > 0) as reach_hits,
+                      (select count(*) from reach_queries where campaign_id = $1::uuid and error_code is not null) as reach_failed""",
+            campaign_id)
+        errors = await self.pool.fetch(
+            """select code, count(*) as n from (
+                   select coalesce(error_code, 'error') as code from web_search_queries
+                    where campaign_id = $1::uuid and state = 'failed'
+                   union all
+                   select error_code from reach_queries where campaign_id = $1::uuid and error_code is not null) e
+                group by code order by n desc, code limit 4""", campaign_id)
+        return SearchOutcome(int(row["web"]), int(row["web_hits"]), int(row["web_failed"]), int(row["reach"]),
+                             int(row["reach_hits"]), int(row["reach_failed"]),
+                             tuple((r["code"], int(r["n"])) for r in errors))
 
     async def recent_sent_findings(self, campaign_id: str, limit: int = 200) -> list[SentFinding]:
         """The campaign's newest sent listing cards (exact, and similar/other after approval: cluster heads), with their listing fields and links.
@@ -1152,6 +1188,7 @@ class MemoryRunStore:
         self.hold_reasons: dict[str, str | None] = {}  # finding -> why it was held unverified
         self.whys: dict[str, str | None] = {}  # finding -> its reason category (held / excluded ones)
         self.final_reports: set[str] = set()  # campaigns whose final report was claimed
+        self.search_outcomes: dict[str, SearchOutcome] = {}  # cid -> what its queries gave (Q33), set by tests
         self.held: dict[str, dict[str, None]] = {}  # cid -> held finding ids, in filing order
         self.desk = MemoryOfferDesk()  # the control plane's side of campaign_offers
         self.social: dict[str, SocialActivity] = {}  # cid -> social search activity
@@ -1408,6 +1445,9 @@ class MemoryRunStore:
 
     async def release_final_report(self, campaign_id: str) -> None:
         self.final_reports.discard(campaign_id)
+
+    async def search_outcome(self, campaign_id: str) -> SearchOutcome:
+        return self.search_outcomes.get(campaign_id, SearchOutcome())
 
     async def recent_sent_findings(self, campaign_id: str, limit: int = 200) -> list[SentFinding]:
         by_id = {f.id: f for f in self.findings.get(campaign_id, [])}

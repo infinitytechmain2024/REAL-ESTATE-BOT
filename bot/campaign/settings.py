@@ -170,6 +170,9 @@ class CampaignRunnerSettings(BaseSettings):
     # the other links in «Также на»); the «Показать?» question waits until the search and the checks are over.
     dedup_held_findings: bool = Field(default=False, validation_alias="DEDUP_HELD_FINDINGS")
     offer_after_search: bool = Field(default=False, validation_alias="OFFER_AFTER_SEARCH")
+    # Q33: an investor search that completed with nobody found gets «📋 Отчёт по поиску» with why (the sites' and the
+    # reach's queries, their errors, no Facebook group read), even without CAMPAIGN_INVESTOR_REPORT or any spend.
+    empty_report: bool = Field(default=False, validation_alias="CAMPAIGN_EMPTY_REPORT")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -462,7 +465,8 @@ class CampaignRunnerSettings(BaseSettings):
                             dedup_cross_portal_facts=self.dedup_cross_portal_facts,
                             offer_all_reasons=self.offer_all_reasons,
                             dedup_held_findings=self.dedup_held_findings,
-                            offer_after_search=self.offer_after_search)
+                            offer_after_search=self.offer_after_search,
+                            empty_report=self.empty_report)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

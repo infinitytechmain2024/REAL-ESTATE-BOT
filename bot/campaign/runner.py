@@ -63,7 +63,14 @@ from bot.utils import costs
 from . import offers, people
 from .dedup import Listing, listing_of, same_object, site_of
 from .fblinks import post_link_only
-from .final_report import FinalReporter, HeldEvidence, LeadsSummary, place_scope_of, task_title
+from .final_report import (
+    FinalReporter,
+    HeldEvidence,
+    LeadsSummary,
+    empty_reasons,
+    place_scope_of,
+    task_title,
+)
 from .leads import MODES as COMMENT_MODES
 from .leads import is_facebook_post, person_card
 from .models import TERMINAL_STATES, WINDOW_SIZE, Campaign
@@ -305,6 +312,8 @@ class RunnerConfig:
     dedup_held_findings: bool = False
     # The similar question is asked once the search and the checks are over, not at the first held finding (Q27).
     offer_after_search: bool = False
+    # An investor search that completed with nobody found gets the report with why (web empty, search errors) (Q33).
+    empty_report: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -1212,27 +1221,43 @@ class CampaignRunner:
         ``investor_report`` an ``investors`` search gets the investor section only (people and reach deliveries sent,
         every post read incl. a failed one, the money); it is skipped when it found and spent nothing. Without the
         flag an ``investors`` search has no report (a post sent by link: the short count) and ``both`` the property one.
+        ``empty_report`` (Q33): an ``investors`` search (not a post link) that completed with nobody sent gets the
+        investor report with why it found nobody, even without ``investor_report`` and when it spent nothing.
         """
         if ((self.final_report is None or not self.config.investor_report) and post_link_only(campaign)
                 and campaign.state in SUMMARY_STATES and campaign.finished_at is not None
                 and await self.store.post_reads(campaign.id)):
             return await self._post_report(campaign)  # no reporter: a post sent by link gets a short count
+        empty_report = (self.config.empty_report and campaign.plan.vertical == "investors"
+                        and campaign.state == "completed" and not post_link_only(campaign))
         if (self.final_report is None or campaign.state not in SUMMARY_STATES or campaign.finished_at is None
-                or (campaign.plan.vertical == "investors" and not self.config.investor_report)):
+                or (campaign.plan.vertical == "investors" and not self.config.investor_report and not empty_report)):
             return
-        if self.now() - campaign.finished_at > SUMMARY_WINDOW or not await self.store.claim_final_report(campaign.id):
+        if self.now() - campaign.finished_at > SUMMARY_WINDOW:
+            return
+        if empty_report and not self.config.investor_report:
+            try:  # Q33 alone: only the «nothing found» report, never one with people
+                if not (await self._leads_summary(campaign)).empty:
+                    return
+            except Exception:  # noqa: BLE001 - store down: try again next tick
+                log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})
+                return
+        if not await self.store.claim_final_report(campaign.id):
             return
         try:
-            vertical = campaign.plan.vertical if self.config.investor_report else "real_estate"
+            vertical = campaign.plan.vertical if self.config.investor_report or empty_report else "real_estate"
             leads = await self._leads_summary(campaign) if vertical != "real_estate" else None
             if vertical == "investors":
                 sink = costs.ledger()
                 spent = await sink.summary(campaign.id) if sink is not None else None
-                if leads is not None and leads.empty and not (spent is not None and spent.total > 0):
+                empty = empty_report and leads is not None and leads.empty
+                if leads is not None and leads.empty and not (spent is not None and spent.total > 0) and not empty:
                     return  # nothing found and nothing spent: nothing to report
+                reasons = empty_reasons(await self.store.search_outcome(campaign.id),
+                                        facebook_windows=await self.store.windows_started(campaign.id)) if empty else []
                 text = await self.final_report.build(campaign.plan.goal, campaign_request(campaign), [], [], [], [],
                                                      costs=spent, budget=costs.budget(), leads=leads,
-                                                     vertical="investors")
+                                                     vertical="investors", empty=reasons)
                 await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
                 self._below_status.add(campaign.id)
                 log.info("campaign.final_report_sent", extra={"campaign_id": campaign.id})
