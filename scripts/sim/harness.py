@@ -74,6 +74,7 @@ BASE_ENV: dict[str, str] = {
     "IDEALISTA_UNAMBIGUOUS_PLACE": "true",  # Q17; REDIS_URL is empty here: no geocoder, so the input stays the name
     "IDEALISTA_STATIC_CENTERS": "true",  # Q30: ...except for a city of the static list (its centre and circle)
     "IDEALISTA_PROVINCE_LOCATION_ID": "true",  # Q36: a province goes as its Location ID 0-EU-ES-<INE code>
+    "PORTAL_PROVINCE_BY_CODE": "true",  # Q38: a row's province is the task's by INE code (Alacant = Alicante)
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",
     "ANALYSIS_LOCATION_FROM_TEXT": "true",
@@ -94,6 +95,7 @@ BASE_ENV: dict[str, str] = {
     "OFFER_AFTER_SEARCH": "true",  # Q27
     "CAMPAIGN_EMPTY_REPORT": "true",  # Q33
     "REPORT_EVERY_PORTAL": "true",  # Q37
+    "STATUS_COUNTS_ALL_DELIVERIES": "true",  # Q40
     # Q39: every page of the web stage is an operator's answer (pending_page); 30 per campaign, not prod's 400.
     "WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN": "30",
 }
