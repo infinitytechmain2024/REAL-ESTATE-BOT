@@ -565,6 +565,28 @@ def _district_ok(district: str, *fields: Any) -> bool:
     return False
 
 
+def _hierarchy(street: str, neighbourhood: str, district: str, municipality: str, province: str) -> list[str]:
+    """IDEALISTA_LOCATION_DISTRICT (Q57): the row's place names to add after its ``address``, in this order, each once.
+    Compared folded, by whole words (``_district_words``: case, accents, hyphens). A name is left out when it is a whole
+    comma part of the address (the first part counted after its last « en »: «Chalet en Puerto Banús» names Puerto
+    Banús, «Piso en Calle Centro Comercial» does not name «Centro»; street names are never searched inside) or a name
+    already added; a district or neighbourhood is also left out when an added district or neighbourhood holds it as
+    whole words («Nueva Andalucía - Puerto Banús» holds «Nueva Andalucía»)."""
+    parts = street.split(",")
+    named = {_district_words(parts[0].rsplit(" en ", 1)[-1]), *map(_district_words, parts[1:])}
+    added: list[str] = []
+    local: list[str] = []
+    for value, inner in ((neighbourhood, True), (district, True), (municipality, False), (province, False)):
+        words = _district_words(value)
+        if not words or words in named or (inner and any(f" {words} " in f" {other} " for other in local)):
+            continue
+        named.add(words)
+        if inner:
+            local.append(words)
+        added.append(value)
+    return added
+
+
 class ApifyIdealistaPortalSource(_PortalSource):
     """Idealista through ``igolaizola/idealista-scraper`` (``APIFY_IDEALISTA_PROVIDER=igolaizola``), any city or
     province by name; rows follow the output schema the Store infers from its recent runs (``url``, ``operation``,
@@ -623,13 +645,14 @@ class ApifyIdealistaPortalSource(_PortalSource):
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/idealista-scraper", sort_biggest: bool = False,
                  unambiguous_place: bool = False, district_search: bool = False, static_centers: bool = False,
-                 province_location_id: bool = False, **kwargs: Any) -> None:
+                 province_location_id: bool = False, location_district: bool = False, **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.sort_biggest = sort_biggest
         self.unambiguous_place = unambiguous_place  # IDEALISTA_UNAMBIGUOUS_PLACE (Q17)
         self.static_centers = static_centers  # IDEALISTA_STATIC_CENTERS (Q30)
         self.district_search = district_search  # PORTAL_DISTRICT_SEARCH (Q26)
         self.province_location_id = province_location_id  # IDEALISTA_PROVINCE_LOCATION_ID (Q36)
+        self.location_district = location_district  # IDEALISTA_LOCATION_DISTRICT (Q57)
 
     def _sort(self, min_area: int | None, max_area: int | None) -> str:
         """``biggest`` when the flag is on, ``min_area`` is above the actor's largest ``minSize`` and there is no
@@ -775,6 +798,12 @@ class ApifyIdealistaPortalSource(_PortalSource):
         phone = contact.get("phone1") if isinstance(contact.get("phone1"), dict) else {}
         texts = item.get("suggestedTexts") if isinstance(item.get("suggestedTexts"), dict) else {}
         street = _text(item.get("address"))  # already "Terreno en <calle>, <barrio>, <municipio>"
+        places = [p for p in (municipality, province) if _fold(p) not in _fold(street)]
+        if self.location_district:
+            # Q57: the address names the neighbourhood only («Chalet pareado en Puerto Banús, Marbella»); the row's
+            # ``district`` («Nueva Andalucía») is what a task names, so the place the reviewer sees carries it too.
+            places = _hierarchy(street, _text(item.get("neighborhood")), _text(item.get("district")),
+                                municipality, province)
         shown = (item.get("priceInfo") or {}).get("price") if isinstance(item.get("priceInfo"), dict) else None
         shown = shown if isinstance(shown, dict) else {}
         suffix = _text(shown.get("currencySuffix")).casefold()
@@ -784,7 +813,7 @@ class ApifyIdealistaPortalSource(_PortalSource):
         return self._listing(
             task, url=url, title=_text(texts.get("title")) or f"Inmueble en {municipality}".strip(),
             price=price, area=item.get("size"), rooms=item.get("rooms"),
-            address=[street, *(p for p in (municipality, province) if _fold(p) not in _fold(street))],
+            address=[street, *places],
             description=_text(item.get("description")),
             phone=(phone.get("phoneNumberForMobileDialing") or phone.get("phoneNumber")
                    or phone.get("formattedPhone")),

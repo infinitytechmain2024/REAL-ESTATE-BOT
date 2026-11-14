@@ -70,6 +70,9 @@ class WebSearchSettings(BaseSettings):
     # Q36, igolaizola only: a province task (SEARCH_PLACE_LEVEL_FROM_SPEC) goes as Idealista's Location ID
     # 0-EU-ES-<INE code> (bot/web_search/provinces.py), not by name (the actor ran «Madrid» as the city only).
     idealista_province_location_id: bool = Field(default=False, validation_alias="IDEALISTA_PROVINCE_LOCATION_ID")
+    # Q57, igolaizola only: a row's neighborhood and district (not already in its address) go into the listing's place,
+    # so a task naming the district («Nueva Andalucía») sees it confirmed (the address names only «Puerto Banús»).
+    idealista_location_district: bool = Field(default=False, validation_alias="IDEALISTA_LOCATION_DISTRICT")
     # Q38: a province task keeps a portal row (Idealista, Fotocasa, Pisos, Habitaclia, Milanuncios) whose province has
     # the task's INE code (bot/web_search/provinces.py: «Alacant» = «Alicante»); unlisted names: compared by name.
     portal_province_by_code: bool = Field(default=False, validation_alias="PORTAL_PROVINCE_BY_CODE")
@@ -283,6 +286,7 @@ class WebSearchSettings(BaseSettings):
                                                     unambiguous_place=self.idealista_unambiguous_place,
                                                     static_centers=self.idealista_static_centers,
                                                     province_location_id=self.idealista_province_location_id,
+                                                    location_district=self.idealista_location_district,
                                                     province_by_code=self.portal_province_by_code,
                                                     district_search=self.portal_district_search,
                                                     geocoder=geocoder()))
