@@ -172,27 +172,58 @@ def _with_investor_rule(text: str) -> str:
     return text.replace(_NEVER_INVENT, INVESTOR_LEAD_RULE + _NEVER_INVENT)
 
 
+# ANALYSIS_FACT_CONFLICT_NULL (Q56): the JSON-LD line of a portal may carry a wrong count («rooms: 1» on fotocasa and
+# habitaclia for a flat whose description says «Piso de 3 habitaciones»); the JSON-LD rule made it authoritative and
+# the card showed one of the two numbers. With the flag a number the title or description explicitly contradict is
+# null (rule 9 of CLAUDE.md), so the reviewer gets «unknown». The prompt only: no text regexes (Q29). Inserted before
+# the «Otherwise ... need an evidence quote» sentence, so it follows the JSON-LD rule of every variant (-loc, -agency).
+FACT_CONFLICT_RULE = (
+    "Conflicting numbers: when the title or the description explicitly states another number of bedrooms than the "
+    "JSON-LD rooms, or another area of the same kind than the JSON-LD (a built area against the JSON-LD built area, a "
+    "plot area against the JSON-LD plot_m2 or a land's area), that JSON-LD value is NOT authoritative and is not "
+    "copied: the field (rooms or area_m2) is null, its evidence is null, and reason names both numbers, e.g. "
+    "'JSON-LD rooms 1 vs text 3 habitaciones' or 'JSON-LD area 90 vs text 120 m2 construidos'. Never pick one of the "
+    "two numbers. Areas of different kinds (a plot against a built area, a terrace, a garden, a room) are no "
+    "conflict. Price: the same only when the text explicitly states another total amount for this property in the "
+    "same currency and the same deal; a price in another currency, a price per m2, a former or reduced price, a fee, "
+    "a deposit or a range of other ads is no conflict. When the text states the same number or none, copy the "
+    "JSON-LD value as before. "
+)
+_EVIDENCE_QUOTE = "Otherwise price_amount, area_m2 and rooms need an evidence quote"
+assert INSTRUCTIONS.count(_EVIDENCE_QUOTE) == 1
+
+
+def _with_fact_conflict_rule(text: str) -> str:
+    return text.replace(_EVIDENCE_QUOTE, FACT_CONFLICT_RULE + _EVIDENCE_QUOTE)
+
+
 LOCATION_PROMPT_VERSION = f"{PROMPT_VERSION}-loc"  # findings analysed with ANALYSIS_LOCATION_FROM_TEXT=true
 AGENCY_PROMPT_VERSION = f"{LOCATION_PROMPT_VERSION}-agency"  # ... and PORTAL_DESCRIPTION_FULL=true (Q18)
 INVESTOR_SUFFIX = "-isrc"  # INVESTOR_LEAD_SOURCE_CHECK=true, investor posts only (Q53): «analysis-v6-isrc», «…-loc-isrc»
+FACT_CONFLICT_SUFFIX = "-fc"  # ANALYSIS_FACT_CONFLICT_NULL=true (Q56): «analysis-v6-fc», «…-loc-agency-fc-isrc»
 
 
-def prompt_version(location_from_text: bool = False, agency_rule: bool = False, investor_rule: bool = False) -> str:
+def prompt_version(location_from_text: bool = False, agency_rule: bool = False, investor_rule: bool = False,
+                   fact_conflict: bool = False) -> str:
     if not location_from_text:
         version = PROMPT_VERSION
     else:
         version = AGENCY_PROMPT_VERSION if agency_rule else LOCATION_PROMPT_VERSION
+    version = version + FACT_CONFLICT_SUFFIX if fact_conflict else version
     return version + INVESTOR_SUFFIX if investor_rule else version
 
 
-def instructions(location_from_text: bool = False, agency_rule: bool = False, investor_rule: bool = False) -> str:
+def instructions(location_from_text: bool = False, agency_rule: bool = False, investor_rule: bool = False,
+                 fact_conflict: bool = False) -> str:
     """The analysis prompt: the old one, or (ANALYSIS_LOCATION_FROM_TEXT) the one with the place taken from the text;
     ``agency_rule`` (PORTAL_DESCRIPTION_FULL, Q18, only with it) adds that an agency's office is not the place;
-    ``investor_rule`` (INVESTOR_LEAD_SOURCE_CHECK, Q53, investor posts only) adds what an investor lead is."""
+    ``investor_rule`` (INVESTOR_LEAD_SOURCE_CHECK, Q53, investor posts only) adds what an investor lead is;
+    ``fact_conflict`` (ANALYSIS_FACT_CONFLICT_NULL, Q56) nulls a JSON-LD rooms / area / price the text contradicts."""
     if not location_from_text:
         text = INSTRUCTIONS
     else:
         text = INSTRUCTIONS_LOCATION_AGENCY if agency_rule else INSTRUCTIONS_LOCATION_FROM_TEXT
+    text = _with_fact_conflict_rule(text) if fact_conflict else text
     return _with_investor_rule(text) if investor_rule else text
 
 
@@ -482,13 +513,15 @@ INVALID = "invalid_structured_model_response"
 class OpenRouterAnalyzer:
     def __init__(self, api_key: str, model: str, *, timeout_seconds: int = 30, invalid_retry: bool = False,
                  fallback_model: str = "", location_from_text: bool = False, area_text_check: bool = False,
-                 place_description_chars: int | None = None, investor_lead_check: bool = False) -> None:
+                 place_description_chars: int | None = None, investor_lead_check: bool = False,
+                 fact_conflict_null: bool = False) -> None:
         self.api_key, self.model, self.timeout_seconds = api_key, model, timeout_seconds
         # INVESTOR_LEAD_SOURCE_CHECK (Q53): the investor lead rule in the prompt; the pipeline drops news pages
         self.investor_lead_check = investor_lead_check
         self.invalid_retry, self.fallback_model = invalid_retry, fallback_model.strip()
         self.location_from_text = location_from_text  # ANALYSIS_LOCATION_FROM_TEXT (Q4)
         self.area_text_check = area_text_check  # ANALYSIS_AREA_TEXT_CHECK (Q13)
+        self.fact_conflict_null = fact_conflict_null  # ANALYSIS_FACT_CONFLICT_NULL (Q56): the «-fc» prompt rule
         # PORTAL_DESCRIPTION_FULL (Q18): the place check reads this much of a source listing's description (None: all)
         self.place_description_chars = place_description_chars
         self.agency_rule = place_description_chars is not None  # the same flag: the agency sentence in the Q4 rule
@@ -543,7 +576,8 @@ class OpenRouterAnalyzer:
             "messages": [
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": instructions(self.location_from_text, self.agency_rule,
-                                                         self.investor_lead_check and vertical == "investors")
+                                                         self.investor_lead_check and vertical == "investors",
+                                                         self.fact_conflict_null)
                  + json.dumps(data, ensure_ascii=False)},
             ],
         }

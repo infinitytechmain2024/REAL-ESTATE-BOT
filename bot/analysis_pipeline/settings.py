@@ -27,6 +27,10 @@ class AnalysisSettings(BaseSettings):
     # or blog address (/noticias/, /news/, a date) is dropped before the model; a project that seeks money is no lead
     # when the requester raises money (task_hint.user_role). false (default): the prompt and the hint as before.
     investor_lead_source_check: bool = Field(default=False, validation_alias="INVESTOR_LEAD_SOURCE_CHECK")
+    # Q56: true = when the title or description explicitly state another bedroom count, area of the same kind or price
+    # (same currency) than the JSON-LD line, the prompt («-fc») makes that field null with both numbers in reason, so
+    # the reviewer gets «unknown». Prompt only, unlike Q13 (deterministic, area only). false (default): byte for byte.
+    fact_conflict_null: bool = Field(default=False, validation_alias="ANALYSIS_FACT_CONFLICT_NULL")
     batch_size: PositiveInt = Field(default=10, ge=1, le=50, validation_alias="ANALYSIS_BATCH_SIZE")
     timeout_seconds: PositiveInt = Field(
         default=60, ge=5, le=120, validation_alias="OPENROUTER_ANALYSIS_TIMEOUT_SECONDS"

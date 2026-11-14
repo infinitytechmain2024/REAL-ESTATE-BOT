@@ -125,7 +125,8 @@ class PostgresAnalysisStore:
                 json.dumps(metadata(outcome.language, model,
                                     location_from_text=getattr(outcome, "location_from_text", False) is True,
                                     agency_rule=getattr(outcome, "agency_rule", False) is True,
-                                    investor_rule=getattr(outcome, "investor_rule", False) is True)),
+                                    investor_rule=getattr(outcome, "investor_rule", False) is True,
+                                    fact_conflict=getattr(outcome, "fact_conflict", False) is True)),
             )
             return str(row["id"])
 

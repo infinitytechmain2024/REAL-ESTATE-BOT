@@ -23,6 +23,7 @@ class PipelineOutcome:
     location_from_text: bool = False  # ANALYSIS_LOCATION_FROM_TEXT of the analyzer: its own prompt version
     agency_rule: bool = False  # PORTAL_DESCRIPTION_FULL (Q18) of the analyzer: «-agency» on the «-loc» version
     investor_rule: bool = False  # INVESTOR_LEAD_SOURCE_CHECK (Q53), an investor post: «-isrc» on the version
+    fact_conflict: bool = False  # ANALYSIS_FACT_CONFLICT_NULL (Q56) of the analyzer: «-fc» on the version
 
 
 class AnalysisPipeline:
@@ -51,6 +52,7 @@ class AnalysisPipeline:
             True, "accepted", decision.language, result, formatter(result, evidence, decision.language),
             location_from_text=getattr(self.analyzer, "location_from_text", False) is True,
             agency_rule=getattr(self.analyzer, "agency_rule", False) is True, investor_rule=investor_rule,
+            fact_conflict=getattr(self.analyzer, "fact_conflict_null", False) is True,
         )
 
 
@@ -59,8 +61,10 @@ def finding_key(evidence: Evidence, vertical: str) -> str:
 
 
 def metadata(language: str, model: str, *, location_from_text: bool = False,
-             agency_rule: bool = False, investor_rule: bool = False) -> dict[str, str]:
+             agency_rule: bool = False, investor_rule: bool = False, fact_conflict: bool = False) -> dict[str, str]:
     """``analysis_metadata`` of a finding; ``location_from_text`` (ANALYSIS_LOCATION_FROM_TEXT), ``agency_rule``
-    (PORTAL_DESCRIPTION_FULL) and ``investor_rule`` (INVESTOR_LEAD_SOURCE_CHECK) mark its prompt."""
-    return {"prompt_version": prompt_version(location_from_text, agency_rule, investor_rule), "model": model,
+    (PORTAL_DESCRIPTION_FULL), ``investor_rule`` (INVESTOR_LEAD_SOURCE_CHECK) and ``fact_conflict``
+    (ANALYSIS_FACT_CONFLICT_NULL) mark its prompt."""
+    return {"prompt_version": prompt_version(location_from_text, agency_rule, investor_rule, fact_conflict),
+            "model": model,
             "language": language}
