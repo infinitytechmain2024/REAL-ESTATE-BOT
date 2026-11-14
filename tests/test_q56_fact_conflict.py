@@ -104,6 +104,20 @@ def test_flag_on_adds_the_rule_to_every_variant_and_a_new_version() -> None:
         version = prompt_version(loc, agency, investor, fact_conflict=True)
         assert version != old_version and "-fc" in version and len(version) <= 40
     assert "JSON-LD rooms 1 vs text 3 habitaciones" in openrouter.FACT_CONFLICT_RULE
+
+
+def test_the_rule_names_its_exceptions_and_hands_over_to_the_otherwise_sentence() -> None:
+    rule = openrouter.FACT_CONFLICT_RULE
+    # review of Q56: built against useful area, the JSON-LD number also in the text, split rooms, extra rooms,
+    # numbers of other properties
+    for words in ("construidos, útiles, útil", "never a conflict with each other",
+                  "when the text also states the JSON-LD number, there is no conflict",
+                  "'2 dobles y 1 individual' is 3", "despacho", "estudio", "'hab. auxiliar'",
+                  "THIS property", "an agency's other ads", "same currency"):
+        assert words in rule, words
+    text = instructions(fact_conflict=True)
+    handover = "the next sentence is about a text without a JSON-LD line. " + openrouter._EVIDENCE_QUOTE
+    assert text.count(handover) == 1
     assert prompt_version(fact_conflict=True) == "analysis-v6-fc"
     assert prompt_version(True, True, True, True) == "analysis-v6-loc-agency-fc-isrc"
     assert prompt_version(True, False, False, True) == "analysis-v6-loc-fc"
