@@ -98,6 +98,9 @@ class WebSearchSettings(BaseSettings):
     # ``rental_term`` («long»/«temporary»; none when the row has none), and a rent «на год» asks Idealista igolaizola
     # for ``rentalTypes: ["longTerm"]``; campaign/tolerance.py files a temporary let of a long-term task as similar.
     portal_rental_term: bool = Field(default=False, validation_alias="PORTAL_RENTAL_TERM")
+    # Q37: true = the Habitaclia actor's ``noResults`` marker row is an empty output, not an «apify_invalid_listing»
+    # skip, and the final report shows every portal source that ran (bot/campaign/settings.py, the same flag).
+    report_every_portal: bool = Field(default=False, validation_alias="REPORT_EVERY_PORTAL")
     apify_yaencontre_enabled: bool = Field(default=False, validation_alias="APIFY_YAENCONTRE_ENABLED")
     apify_yaencontre_actor: str = Field(default="igolaizola/yaencontre-scraper", validation_alias="APIFY_YAENCONTRE_ACTOR")
     apify_yaencontre_max_results: int = Field(default=20, ge=1, le=50, validation_alias="APIFY_YAENCONTRE_MAX_RESULTS")
@@ -332,7 +335,8 @@ class WebSearchSettings(BaseSettings):
                                                facts_from_row=self.portal_facts_from_row,
                                                agency_ref=self.portal_agency_ref,
                                                description_full=self.portal_description_full,
-                                               province_by_code=self.portal_province_by_code))
+                                               province_by_code=self.portal_province_by_code,
+                                               no_results_empty=self.report_every_portal))
         if self.apify_milanuncios_enabled:
             from .sources.portals import ApifyMilanunciosSource
 

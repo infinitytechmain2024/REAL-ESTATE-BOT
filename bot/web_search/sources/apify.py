@@ -242,11 +242,14 @@ class ApifyListingSource:
             center = await self._center(task)
         rows = self._refine(items[:amount], [self._normalize(item, task, center) for item in items[:amount]],
                             task, center)
+        # REPORT_EVERY_PORTAL (Q37): the actor's «no results» marker row is an empty output, not a bad listing: it is
+        # dropped and booked nowhere.
+        empty = [row is None and self._empty_marker(item) for item, row in zip(items[:amount], rows, strict=True)]
         # IDEALISTA_UNAMBIGUOUS_PLACE (Q17): a dropped row that names another municipality/province (or lies outside
         # the circle) is booked as ``apify_wrong_place``; the rest as before.
-        wrong = sum(row is None and self._wrong_place(item, task, center)
-                    for item, row in zip(items[:amount], rows, strict=True))
-        invalid = sum(row is None for row in rows) - wrong
+        wrong = sum(row is None and not marker and self._wrong_place(item, task, center)
+                    for item, row, marker in zip(items[:amount], rows, empty, strict=True))
+        invalid = sum(row is None for row in rows) - wrong - sum(empty)
         if invalid:
             await costs.record("api", kind="skip", provider="apify", item=actor,
                                code="apify_invalid_listing", units=invalid, campaign_id=context.campaign_id)
@@ -266,6 +269,10 @@ class ApifyListingSource:
 
     def _wrong_place(self, item: Any, task: QueryTask, center: tuple[float, float] | None) -> bool:
         """True when a row ``_normalize`` dropped is from another place; off unless a source says how to tell."""
+        return False
+
+    def _empty_marker(self, item: Any) -> bool:
+        """True when a row is the actor's «nothing found» marker, not a listing; off unless a source says how to tell."""
         return False
 
     async def _bill(self, context: SourceRunContext, run_id: str, run: dict[str, Any], cap: float) -> None:
