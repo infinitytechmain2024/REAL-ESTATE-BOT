@@ -182,6 +182,11 @@ class WebSearchConfig:
     # imported rows are fetched as ``real_estate`` (analysed once). Off: portals never
     # take a ``both`` task, as before.
     both_mode_portals: bool = False
+    # BOTH_MODE_INVESTOR_QUERIES (Q61): a ``both`` campaign's query rounds alternate -- odd rounds search objects as
+    # before, even rounds are the INVESTOR_WEB_QUERIES investor round (``investor_part``) and a page one of their
+    # queries found is fetched as ``investors``. ``max_queries_per_campaign`` caps all rounds together. Off: every
+    # round of a ``both`` campaign searches objects, as before.
+    both_mode_investor_queries: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -265,6 +270,20 @@ def object_part(task: QueryTask) -> QueryTask:
     if task.vertical != "both":
         return task
     return replace(task, vertical="real_estate", goal=re.sub(r"^both\b", "real_estate", task.goal))
+
+
+def investor_part(task: QueryTask) -> QueryTask:
+    """BOTH_MODE_INVESTOR_QUERIES (Q61): the investor half of a ``both`` task, as the INVESTOR_WEB_QUERIES round takes
+    an ``investors`` one (no listing search plan, no portals, investor prompt and terms). Any other task: unchanged."""
+    if task.vertical != "both":
+        return task
+    return replace(task, vertical="investors", goal=re.sub(r"^both\b", "investors", task.goal), search_plan=None,
+                   required_portals=(), investor_queries=True)
+
+
+def investor_round(round_no: int | None) -> bool:
+    """BOTH_MODE_INVESTOR_QUERIES: the even rounds of a ``both`` campaign are its investor rounds."""
+    return round_no is not None and round_no % 2 == 0
 
 
 class WebSearchWorker:
@@ -441,9 +460,14 @@ class WebSearchWorker:
         await self.store.set_progress(campaign.id, None, self._line(used_count, None, "составляю запросы"))
         task = query_task(campaign, hygiene=cfg.query_hygiene, spec_level=cfg.place_level_from_spec,
                           investor_queries=cfg.investor_web_queries)
+        investors = False  # BOTH_MODE_INVESTOR_QUERIES: this round of a both campaign asks for investors
+        if self._both_investors(campaign):
+            run = await self.store.get_run(campaign.id)
+            investors = investor_round((run.rounds if run is not None else 0) + 1)
+            task = investor_part(task) if investors else task
         # The known portals (Idealista, Fotocasa first) are always searched: the ones not yet
         # searched take up to half of this round, written by the model or, if it skips one, from the task.
-        if cfg.cover_portals and not portals_done:
+        if cfg.cover_portals and not portals_done and not investors:
             task = replace(task, required_portals=missing_portals(task, used)[:portal_quota(want)])
         # Whatever generated them, every query names the campaign's place (``localise``).
         queries = localise(await self.generator.generate(task, used=used, count=want), task)
@@ -468,6 +492,17 @@ class WebSearchWorker:
             await self._done(campaign, "apify_enough")
             return True
         return False  # too few listings (or no portal source at all): the search engine takes over
+
+    def _both_investors(self, campaign: Campaign) -> bool:
+        """BOTH_MODE_INVESTOR_QUERIES (Q61) is on and the campaign is ``both``."""
+        return self.config.both_mode_investor_queries and campaign.plan.vertical == "both"
+
+    async def _url_vertical(self, campaign: Campaign, url: QueuedUrl) -> str:
+        """The vertical a page is fetched as: an investor round's hit of a both campaign is ``investors``
+        (BOTH_MODE_INVESTOR_QUERIES); anything else the campaign's own, as before."""
+        if self._both_investors(campaign) and investor_round(await self.store.url_round(campaign.id, url.url_key)):
+            return "investors"
+        return campaign.plan.vertical
 
     def _both_portals(self, campaign: Campaign) -> bool:
         """BOTH_MODE_PORTALS (Q54) is on and the campaign is ``both``."""
@@ -755,6 +790,8 @@ class WebSearchWorker:
                         and await self._portals_enough(campaign))
         for query in await self.store.pending_queries(campaign.id, self.config.queries_per_tick):
             await self.store.set_progress(campaign.id, None, self._line(query_count, pages, "поиск"))
+            # BOTH_MODE_INVESTOR_QUERIES: an investor round's query of a both campaign is filtered as Q51's
+            investors = self._both_investors(campaign) and investor_round(await self.store.query_round(query.id))
             try:
                 # A Spanish campaign searches Spain (es-ES) whatever the query's language.
                 hits = await self.searcher.search(query.text, language=task.search_language or query.language)
@@ -770,13 +807,13 @@ class WebSearchWorker:
                 if not fetchable(hit.url, blocked):
                     continue
                 host = host_of(hit.url)
-                if task.investor_web and listing_portal_host(host):
+                if (task.investor_web or investors) and listing_portal_host(host):
                     dropped += 1  # INVESTOR_WEB_QUERIES: a listing portal's page is no investor
                     continue
                 if portals_done and listing_portal_host(host):
                     dropped += 1  # BOTH_MODE_PORTALS: the portal's objects came through Apify already
                     continue
-                if deal and (deal_conflict(hit.url, deal) or deal_of(hit.title) not in (None, deal)):
+                if deal and not investors and (deal_conflict(hit.url, deal) or deal_of(hit.title) not in (None, deal)):
                     dropped += 1  # a rent page for a sale campaign (and vice versa): its path or its title says so
                     continue
                 if real_estate and not self._host_allowed(host, known, allowed, hit.title, hit.snippet):
@@ -877,7 +914,7 @@ class WebSearchWorker:
                 await self.store.mark_url(campaign.id, url.url_key, "skipped", HOST_BLOCKED)
                 await self._keep_search_result(campaign, url, None)
                 continue
-            ticket = await self.store.begin_fetch(campaign.id, url, vertical=campaign.plan.vertical,
+            ticket = await self.store.begin_fetch(campaign.id, url, vertical=await self._url_vertical(campaign, url),
                                                   lease_seconds=cfg.lease_seconds,
                                                   max_runtime_seconds=cfg.page_runtime_seconds,
                                                   render_layer=render_ok, scrape_layer=scrape_ok)
@@ -932,7 +969,7 @@ class WebSearchWorker:
         result = search_result(url, error)
         if result is None:
             return False
-        ticket = await self.store.begin_fetch(campaign.id, url, vertical=campaign.plan.vertical,
+        ticket = await self.store.begin_fetch(campaign.id, url, vertical=await self._url_vertical(campaign, url),
                                               lease_seconds=self.config.lease_seconds,
                                               max_runtime_seconds=self.config.page_runtime_seconds,
                                               contact_site=False)

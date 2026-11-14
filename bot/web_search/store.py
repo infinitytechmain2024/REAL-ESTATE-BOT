@@ -91,6 +91,8 @@ class WebStore(Protocol):
     async def add_queries(self, campaign_id: str, round_no: int, queries: list[GeneratedQuery], *,
                           reuse_hours: int) -> int: ...
     async def pending_queries(self, campaign_id: str, limit: int) -> list[PendingQuery]: ...
+    async def query_round(self, query_id: str) -> int | None: ...
+    async def url_round(self, campaign_id: str, url_key: str) -> int | None: ...
     async def query_done(self, query_id: str, *, ok: bool, results: int, new_urls: int,
                          error: str | None = None) -> None: ...
     async def enqueue(self, campaign_id: str, candidates: list[Candidate], *,
@@ -450,6 +452,18 @@ class PostgresWebStore:
                 where campaign_id = $1::uuid and state = 'pending' order by created_at, id limit $2""",
             campaign_id, limit)
         return [PendingQuery(r["id"], r["query_text"], r["language"]) for r in rows]
+
+    async def query_round(self, query_id: str) -> int | None:
+        """BOTH_MODE_INVESTOR_QUERIES: the round a query was written in (None: no such query)."""
+        value = await self.pool.fetchval("select round_no from web_search_queries where id = $1::uuid", query_id)
+        return None if value is None else int(value)
+
+    async def url_round(self, campaign_id: str, url_key: str) -> int | None:
+        """BOTH_MODE_INVESTOR_QUERIES: the round of the query that queued the URL (None: not from a search hit)."""
+        value = await self.pool.fetchval(
+            """select q.round_no from web_campaign_urls u join web_search_queries q on q.id = u.query_id
+                where u.campaign_id = $1::uuid and u.url_key = $2""", campaign_id, url_key)
+        return None if value is None else int(value)
 
     async def query_done(self, query_id: str, *, ok: bool, results: int, new_urls: int,
                          error: str | None = None) -> None:
@@ -1185,6 +1199,15 @@ class MemoryWebStore:
     async def pending_queries(self, campaign_id: str, limit: int) -> list[PendingQuery]:
         return [PendingQuery(q.id, q.text, q.language) for q in self.queries.get(campaign_id, [])
                 if q.state == "pending"][:limit]
+
+    async def query_round(self, query_id: str) -> int | None:
+        return next((q.round_no for qs in self.queries.values() for q in qs if q.id == query_id), None)
+
+    async def url_round(self, campaign_id: str, url_key: str) -> int | None:
+        row = self.urls.get(campaign_id, {}).get(url_key)
+        if row is None or row.query_id is None:
+            return None
+        return next((q.round_no for q in self.queries.get(campaign_id, []) if q.id == row.query_id), None)
 
     async def query_done(self, query_id: str, *, ok: bool, results: int, new_urls: int,
                          error: str | None = None) -> None:
