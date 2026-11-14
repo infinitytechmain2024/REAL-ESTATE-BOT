@@ -11,6 +11,11 @@ the transport every client of the bot ends up on, so no production constructor c
 * ``api.telegram.org``: every sendMessage / editMessageText / deleteMessage is kept (what the user saw);
 * SearXNG (``GET .../search?q=`` on the host of ``WEB_SEARCH_SEARXNG_URL``): key = hash(query, engines,
   language, pageno, categories) -> ``sim/web/<key>.json`` (SearXNG JSON); a miss writes ``sim/pending_web/<key>.json``, the bot gets a 503;
+* pages of the web fetcher (``bot.web_search.fetcher.PageFetcher``, a page or its ``robots.txt``): key = hash of
+  the normalised URL (``page_key``) -> ``sim/page/<key>.json`` (``{"status": 200, "content_type": "text/html", "body":
+  "..."}`` or ``{"status": 404}``); a missing page writes ``sim/pending_page/<key>.json``, the bot gets a 503; a
+  missing ``robots.txt`` is a 404 (no robots.txt), never pending. ``offline`` resolves every host of the fetcher to
+  ``SIM_ADDRESS`` (no DNS on the bench), so its public-address check passes and the request reaches ``SimNet``;
 * any other host (sites): ``sim/http/<host>/<hash>.json`` if recorded, else a 503, listed in ``offline``.
 
 Headers are never read or written: no key or token reaches a file. Hashes are taken after ``normalize``: UUIDs and
@@ -43,8 +48,11 @@ _UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 _DATETIME = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b")
 _DATE = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
 # The modules that only carry a call (the stage is their caller).
+# What every host resolves to for the web fetcher under ``offline``: a public address (its private-target check
+# passes), never connected to (every request is answered by ``SimNet``).
+SIM_ADDRESS = "93.184.215.14"
 _CARRIERS = ("bot.agents.llm", "bot.acquisition.apify_client", "bot.acquisition.apify_source",
-             "bot.web_search.searxng", "bot.web_search.search_backends")
+             "bot.web_search.searxng", "bot.web_search.search_backends", "bot.web_search.fetcher")
 STAGES = {"interviewer": "interview", "anthropic_interviewer": "interview", "openrouter": "analysis",
           "queries": "queries"}
 
@@ -113,6 +121,32 @@ def is_search(request: httpx.Request) -> bool:
     (Nominatim's or a site's ``/search?q=`` is not one)."""
     return (request.method == "GET" and (request.url.host or "").lower() == searxng_host()
             and request.url.path.rstrip("/").endswith("/search") and "q" in request.url.params)
+
+
+def page_key(url: str) -> str:
+    """The key of a page: the normalised URL (``bot.utils.urls.normalize_url``: no fragment, lower-case host without
+    ``www.``, sorted query without tracking parameters, ``http`` as ``https``); stable from run to run."""
+    from bot.utils.urls import normalize_url
+
+    return hashlib.sha256(normalize_url(url).encode()).hexdigest()[:16]
+
+
+def fetched_page() -> bool:
+    """The request is made by the web fetcher (``PageFetcher`` of ``bot/web_search/fetcher.py``) for a page or its
+    ``robots.txt``; any other client (Nominatim, a direct transport call) is not."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        if (frame.f_globals.get("__name__") == "bot.web_search.fetcher"
+                and frame.f_code.co_qualname.startswith("PageFetcher.")):
+            return True
+        frame = frame.f_back
+    return False
+
+
+async def sim_resolve(host: str) -> list[str]:
+    """The fetcher's resolver on the bench: no DNS, every host is ``SIM_ADDRESS``."""
+    del host
+    return [SIM_ADDRESS]
 
 
 def llm_request(host: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -214,8 +248,9 @@ class SimNet:
         self.pending_llm: list[str] = []
         self.pending_apify: list[str] = []
         self.pending_web: list[str] = []
+        self.pending_page: list[str] = []
         self.blocked_apify: list[str] = []  # misses after an unanswered LLM call: their input may be a fallback's
-        self.hits: dict[str, int] = {"llm": 0, "apify": 0, "web": 0, "http": 0}
+        self.hits: dict[str, int] = {"llm": 0, "apify": 0, "web": 0, "page": 0, "http": 0}
         self.llm_calls: list[dict[str, Any]] = []
         self.offline: list[dict[str, Any]] = []
         self.unhandled: list[str] = []
@@ -392,6 +427,36 @@ class SimNet:
             raise SimStop("web", pending)
         return httpx.Response(503, text="sim: waiting for a search answer")
 
+    # -- pages of the web fetcher --
+
+    def _page(self, host: str, request: httpx.Request) -> httpx.Response:
+        url = str(request.url.copy_with(fragment=None))
+        key = page_key(url)
+        path = self.root / "page" / f"{key}.json"
+        robots = request.url.path == "/robots.txt"
+        if path.is_file():
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            self.hits["page"] += 1
+            self.calls += 1
+            status = int(entry.get("status", 200))
+            if status >= 300:
+                return httpx.Response(status, text="sim: recorded status")
+            return httpx.Response(status, text=str(entry.get("body", "")),
+                                  headers={"content-type": entry.get("content_type") or "text/html; charset=utf-8"})
+        if robots:  # most sites have none: not worth an operator's answer
+            return httpx.Response(404, text="sim: no robots.txt")
+        pending = self.root / "pending_page" / f"{key}.json"
+        if key not in self.pending_page:  # one page asked twice in a pass: one pending
+            _write(pending, {"kind": "page", "key": key, "run": self.run_id, "stage": stage_of(caller()),
+                             "speculative": self.speculative(), "url": url, "host": host,
+                             "path": request.url.path, "answer_to": f"sim/page/{key}.json",
+                             "answer_format": '{"status": 200, "content_type": "text/html", "body": "..."} '
+                                              '(the real public page, at most ~20 KB) or {"status": 404}'})
+            self.pending_page.append(key)
+        if self.strict:
+            raise SimStop("page", pending)
+        return httpx.Response(503, text="sim: waiting for a page answer")
+
     # -- everything else --
 
     def _other(self, host: str, request: httpx.Request, raw: bytes) -> httpx.Response:
@@ -408,6 +473,8 @@ class SimNet:
                                   headers={"content-type": entry.get("content_type", "text/html; charset=utf-8")})
         if is_search(request):
             return self._web(host, request)
+        if request.method == "GET" and fetched_page():
+            return self._page(host, request)
         self.offline.append({"host": host, "method": request.method, "path": request.url.path, "key": key})
         return httpx.Response(503, text="sim: offline")
 
@@ -476,10 +543,13 @@ class _NoCurl:
 @contextlib.contextmanager
 def offline(net: SimNet) -> Iterator[SimNet]:
     """Every ``httpx`` request of the process goes to ``net``; a socket may connect to the loopback only; the web
-    fetcher's curl_cffi transport is replaced by httpx (``_NoCurl``)."""
+    fetcher's curl_cffi transport is replaced by httpx (``_NoCurl``); its default resolver by ``sim_resolve`` (no DNS
+    on the bench: every host is public ``SIM_ADDRESS``, the request goes on to ``net``)."""
     from bot.web_search import fetcher
 
     curl = fetcher.CurlTransport
+    defaults = fetcher.PageFetcher.__init__.__kwdefaults__
+    resolver = defaults["resolver"]
     async_send = httpx.AsyncHTTPTransport.handle_async_request
     sync_send = httpx.HTTPTransport.handle_request
     connect, connect_ex = socket.socket.connect, socket.socket.connect_ex
@@ -507,10 +577,12 @@ def offline(net: SimNet) -> Iterator[SimNet]:
     socket.socket.connect = checked_connect  # type: ignore[method-assign]
     socket.socket.connect_ex = checked_connect_ex  # type: ignore[method-assign]
     fetcher.CurlTransport = _NoCurl  # type: ignore[assignment,misc]
+    defaults["resolver"] = sim_resolve
     try:
         yield net
     finally:
         fetcher.CurlTransport = curl  # type: ignore[misc]
+        defaults["resolver"] = resolver
         httpx.AsyncHTTPTransport.handle_async_request = async_send  # type: ignore[method-assign]
         httpx.HTTPTransport.handle_request = sync_send  # type: ignore[method-assign]
         socket.socket.connect, socket.socket.connect_ex = connect, connect_ex  # type: ignore[method-assign]

@@ -24,6 +24,7 @@ from scripts.sim.cassette import (
     llm_request,
     mark_now,
     offline,
+    page_key,
     web_request,
 )
 from scripts.sim.fixtures import answer as answer_apify
@@ -814,6 +815,85 @@ async def test_an_impersonating_fetcher_reads_through_simnet_not_curl(tmp_path: 
     assert any(o["host"] == "www.idealista.com" for o in net.offline)
 
 
+
+def _no_dns(*_args: object, **_kwargs: object) -> object:
+    raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")  # the bench's container: no DNS
+
+
+@pytest.mark.asyncio
+async def test_the_fetcher_resolves_without_dns_and_reaches_simnet(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    from bot.web_search.fetcher import FetchError, PageFetcher, resolve_public_addresses
+
+    monkeypatch.setattr(socket, "getaddrinfo", _no_dns)
+    url = "https://www.inversores-malaga.es/club/"
+    (tmp_path / "page").mkdir()
+    (tmp_path / "page" / f"{page_key(url)}.json").write_text(json.dumps(
+        {"status": 200, "content_type": "text/html", "body": "<html><body>Club de inversores</body></html>"}),
+        encoding="utf-8")
+    with offline(SimNet(tmp_path)) as net:
+        fetcher = PageFetcher(user_agent="sim-test", impersonate="off", host_interval_seconds=0)
+        assert await fetcher.allowed(url)  # robots.txt reached SimNet: no answer, a 404, every path allowed
+        page = await fetcher.fetch(url)
+        with pytest.raises(FetchError, match="private_target_forbidden"):  # an address literal is still checked
+            await fetcher.fetch("http://10.0.0.1/")
+        await fetcher.aclose()
+    assert "Club de inversores" in page.html and net.hits["page"] == 1 and net.offline == []
+    assert PageFetcher.__init__.__kwdefaults__["resolver"] is resolve_public_addresses  # given back
+    fetcher = PageFetcher(user_agent="sim-test", impersonate="off")
+    with pytest.raises(FetchError, match="dns_failed"):  # outside the bench the real resolver is used again
+        await fetcher.fetch(url)
+    await fetcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_page_without_an_answer_is_pending_and_robots_txt_is_absent(tmp_path: Path) -> None:
+    from bot.web_search.fetcher import FetchError, PageFetcher
+
+    url = "https://inversores.example.es/socios?b=2&a=1#equipo"
+    with offline(SimNet(tmp_path, run_id="r1")) as net:
+        fetcher = PageFetcher(user_agent="sim-test", impersonate="off", host_interval_seconds=0)
+        assert await fetcher.allowed(url)
+        for _ in range(2):  # the same page twice in a pass: one pending
+            with pytest.raises(FetchError, match="http_503"):
+                await fetcher.fetch(url)
+        await fetcher.aclose()
+    [path] = (tmp_path / "pending_page").glob("*.json")
+    pending = json.loads(path.read_text(encoding="utf-8"))
+    assert net.pending_page == [path.stem] == [pending["key"]] == [page_key(url)] and net.offline == []
+    assert pending["url"] == url.split("#")[0] and pending["host"] == "inversores.example.es"
+    assert pending["path"] == "/socios" and pending["run"] == "r1" and pending["speculative"] is False
+    assert pending["answer_to"] == f"sim/page/{path.stem}.json"
+    with offline(SimNet(tmp_path, strict=True)), pytest.raises(SimStop) as stop:
+        fetcher = PageFetcher(user_agent="sim-test", impersonate="off", host_interval_seconds=0)
+        await fetcher.fetch(url)
+    assert stop.value.kind == "page"
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_robots_txt_and_a_missing_page_are_served(tmp_path: Path) -> None:
+    from bot.web_search.fetcher import FetchError, PageFetcher
+
+    (tmp_path / "page").mkdir()
+    (tmp_path / "page" / f"{page_key('https://club.example.es/robots.txt')}.json").write_text(json.dumps(
+        {"status": 200, "content_type": "text/plain", "body": "User-agent: *\nDisallow: /privado/"}), encoding="utf-8")
+    (tmp_path / "page" / f"{page_key('https://club.example.es/gone')}.json").write_text(json.dumps({"status": 404}),
+                                                                                        encoding="utf-8")
+    with offline(SimNet(tmp_path)) as net:
+        fetcher = PageFetcher(user_agent="sim-test", impersonate="off", host_interval_seconds=0)
+        assert not await fetcher.allowed("https://club.example.es/privado/1")
+        assert await fetcher.allowed("https://club.example.es/socios")
+        with pytest.raises(FetchError, match="http_404"):
+            await fetcher.fetch("https://club.example.es/gone")
+        await fetcher.aclose()
+    assert net.hits["page"] == 2 and net.pending_page == [] and not (tmp_path / "pending_page").exists()
+
+
+def test_the_page_key_is_the_normalised_url() -> None:
+    key = page_key("https://www.Example.es/a/?b=2&a=1#x")
+    assert key == page_key("https://example.es/a?a=1&b=2") == page_key("http://example.es/a?a=1&b=2&utm_source=q")
+    assert key != page_key("https://example.es/b?a=1&b=2") and len(key) == 16
+
 def test_the_persona_cannot_turn_curl_on_and_the_process_is_given_back(tmp_path: Path,
                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
     import random
@@ -906,7 +986,7 @@ async def test_a_land_search_in_madrid_reaches_a_card_and_a_replay_gives_the_sam
     assert [o["press"] for o in first["offers"]] == [a.strip("[]") for a in answers[start + 2:]]
     assert {c["provider"] for c in first["campaign_costs"] if c["stage"] == "llm" and c["kind"] == "cost"} == \
         {"claude_cassette"} and first["costs_total_usd"] == 0
-    assert first["pending"] == {"llm": [], "apify": [], "apify_blocked": [], "web": []}
+    assert first["pending"] == {"llm": [], "apify": [], "apify_blocked": [], "web": [], "page": []}
 
     code, again = await run(root)  # the cassette alone, no model: the same file
     assert code == 0 and again == first
