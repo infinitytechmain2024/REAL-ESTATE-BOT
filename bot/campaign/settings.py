@@ -176,6 +176,8 @@ class CampaignRunnerSettings(BaseSettings):
     # Q47: one ad filed twice on one portal (other address) is one object: the same description, phone or agency,
     # exact price, area (±1 %), type and deal; never a new development.
     dedup_same_host_copy: bool = Field(default=False, validation_alias="DEDUP_SAME_HOST_COPY")
+    # Q50: across two sites one description under a «Ref: ...» wrapper (Milanuncios) with exact facts is one object.
+    dedup_description_normalize: bool = Field(default=False, validation_alias="DEDUP_DESCRIPTION_NORMALIZE")
     # Q25: the «Показать?» question names every distinct difference of the held similar listings (at most 5).
     offer_all_reasons: bool = Field(default=False, validation_alias="OFFER_ALL_REASONS")
     # Q27: a held similar/other listing is merged with the same object already held or sent (one card after «Одобрить»,
@@ -490,6 +492,7 @@ class CampaignRunnerSettings(BaseSettings):
                             dedup_district_not_street=self.dedup_district_not_street,
                             dedup_cross_portal_facts=self.dedup_cross_portal_facts,
                             dedup_same_host_copy=self.dedup_same_host_copy,
+                            dedup_description_normalize=self.dedup_description_normalize,
                             offer_all_reasons=self.offer_all_reasons,
                             dedup_held_findings=self.dedup_held_findings,
                             offer_after_search=self.offer_after_search,
