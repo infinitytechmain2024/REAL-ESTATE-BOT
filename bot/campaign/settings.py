@@ -118,6 +118,10 @@ class CampaignRunnerSettings(BaseSettings):
     # Q28: the deviation phrase users see («Показать?», cards) may keep Latin place names («не в центре (Vista
     # Alegre)»); English or Spanish prose is still dropped. false (default): any Latin letter drops the phrase.
     user_phrase_places: bool = Field(default=False, validation_alias="USER_PHRASE_PLACES")
+    # Q53, the same variable as bot/analysis_pipeline/settings.py: the AI check of an investor finding knows what a lead
+    # is (an investor's own page or «we invest in …»; news about a deal is not) and the person's role (prompt
+    # relevance-v3-isrc). false (default): the relevance-v3 prompt and task as before.
+    investor_lead_source_check: bool = Field(default=False, validation_alias="INVESTOR_LEAD_SOURCE_CHECK")
     # The most one campaign may spend in USD (LLM, scrape API, paid search, listing APIs), summed over every service
     # from the campaign_costs ledger (bot/utils/costs.py). Reached: the web stage stops (budget_cap), the analysis
     # worker and the AI check skip the campaign's findings, the report says so. 0: no limit.
@@ -136,7 +140,8 @@ class CampaignRunnerSettings(BaseSettings):
             return None
         legacy = OpenRouterRelevanceJudge(api_key=self.openrouter_api_key, model=self.relevance_model,
                                           timeout_seconds=self.relevance_timeout_seconds,
-                                          phrase_places=self.user_phrase_places)
+                                          phrase_places=self.user_phrase_places,
+                                          investor_leads=self.investor_lead_source_check)
         if self.judge == "legacy":
             return legacy
         from bot.agents.reviewer import OpenRouterReviewer

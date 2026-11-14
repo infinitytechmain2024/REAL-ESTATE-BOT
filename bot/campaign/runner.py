@@ -967,7 +967,8 @@ class CampaignRunner:
                     if home_purchase(hard, campaign.plan.vertical):
                         terms = [*tenant_terms(), *terms]  # Q46: first, so they get the first windows
             verdict = await self.relevance.judge(
-                task_data(campaign, review=review, soft_wishes=soft),
+                task_data(campaign, review=review, soft_wishes=soft,
+                          user_role=bool(getattr(self.relevance, "investor_leads", False))),  # Q53
                 finding_data(finding.payload, fallback_text=finding.text, original=finding.original, review=review,
                              vertical=finding.vertical, hit_terms=terms))
         except Exception as exc:  # noqa: BLE001 - fail open to the deterministic rules (or closed, see ``_judge``)

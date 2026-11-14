@@ -89,6 +89,24 @@ Example: task "земельный участок от 2000 м² под заст�
 {"verdict": "reject", "reason": "Каталог объявлений в Москве, а не участок под Мадридом.", "deviation_ru": ""}
 Answer with exactly one JSON object {"verdict": ..., "reason": ..., "deviation_ru": ...}. No markdown."""
 
+# INVESTOR_LEAD_SOURCE_CHECK (Q53): for an investor finding the rules of a lead, before the closing «reason» lines;
+# the task carries ``user_role`` (raising | deploying). Real-estate findings keep SYSTEM byte for byte.
+INVESTOR_PROMPT_VERSION = f"{PROMPT_VERSION}-isrc"
+INVESTOR_RULES = """Investor findings (task.mode "investors" or finding.vertical "investors"): a lead is ONLY the own page or
+profile of an investor (an investment fund, family office, investor club or business-angel network, a business angel,
+a private investor, a LinkedIn profile) or a post where a named person or organisation itself says it looks for
+projects to invest in («buscamos proyectos», «invertimos en …», «we invest in …»), with a region or a kind of asset:
+"match" when it fits the place and the task, else "near" or "reject" as above. "reject": a news report, article or
+press release about a deal or investment already made or announced, media, blog, directory or catalog pages, even
+when they name an investor. A project that itself seeks money (a crowdfunding project, a developer seeking a loan,
+investors or a partner): "reject" when task.user_role is "raising" (the person seeks co-investors for their own
+project), a lead when it is "deploying" (the person wants to invest).
+
+"""
+_REASON_LINE = "reason: one short Russian sentence. deviation_ru: empty unless verdict is \"near\".\n"
+assert SYSTEM.count(_REASON_LINE) == 1
+SYSTEM_INVESTORS = SYSTEM.replace(_REASON_LINE, INVESTOR_RULES + _REASON_LINE)
+
 INDEX_NOTE_PREFIX = INDEX_RESULT_NOTE.split("{")[0]
 
 
@@ -118,11 +136,13 @@ class RelevanceJudge(Protocol):
     async def judge(self, task: dict[str, Any], finding: dict[str, Any]) -> Relevance: ...
 
 
-def task_data(campaign: Campaign, *, review: bool = False, soft_wishes: bool = False) -> dict[str, Any]:
+def task_data(campaign: Campaign, *, review: bool = False, soft_wishes: bool = False,
+              user_role: bool = False) -> dict[str, Any]:
     """What the model is told about the campaign: goal, task text, place and the numbers.
 
     ``review``: for the reviewer, also the hard criteria (from the spec or the plan) and the tolerance;
-    ``soft_wishes`` (``RELEVANCE_SOFT_WISHES``, reviewer only): also the soft wishes apart, as ``wishes``.
+    ``soft_wishes`` (``RELEVANCE_SOFT_WISHES``, reviewer only): also the soft wishes apart, as ``wishes``;
+    ``user_role`` (``INVESTOR_LEAD_SOURCE_CHECK``, Q53): an investor search also gets the person's role.
     """
     plan = campaign.plan
     country = plan.country or geo.country_of(plan.location)
@@ -142,6 +162,11 @@ def task_data(campaign: Campaign, *, review: bool = False, soft_wishes: bool = F
                   if v not in (None, "", [], False) and k != "asked"} if plan.vertical != "investors" else {}
     if deviations:
         data["approved_deviations"] = deviations
+    if user_role and plan.vertical in ("investors", "both"):
+        investor = (campaign.spec or {}).get("investor")
+        role = investor.get("user_role") if isinstance(investor, dict) else None
+        if role in ("raising", "deploying"):
+            data["user_role"] = role
     if review:
         from bot.agents.reviewer import review_task  # lazy: the reviewer imports this module
 
@@ -308,11 +333,12 @@ class OpenRouterRelevanceJudge:
 
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 15,
                  base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None,
-                 phrase_places: bool = False) -> None:
+                 phrase_places: bool = False, investor_leads: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the relevance check")
         self.model, self.timeout_seconds = model, timeout_seconds
         self.phrase_places = phrase_places  # USER_PHRASE_PLACES (Q28)
+        self.investor_leads = investor_leads  # INVESTOR_LEAD_SOURCE_CHECK (Q53): SYSTEM_INVESTORS for investor findings
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
@@ -326,7 +352,14 @@ class OpenRouterRelevanceJudge:
         except TimeoutError as exc:
             raise RelevanceError("timeout") from exc
 
+    def prompt(self, task: dict[str, Any], finding: dict[str, Any]) -> tuple[str, str]:
+        """The prompt version and system text for this finding (``SYSTEM_INVESTORS`` only with the Q53 flag)."""
+        if self.investor_leads and (task.get("mode") == "investors" or finding.get("vertical") == "investors"):
+            return INVESTOR_PROMPT_VERSION, SYSTEM_INVESTORS
+        return PROMPT_VERSION, SYSTEM
+
     async def _judge(self, task: dict[str, Any], finding: dict[str, Any]) -> Relevance:
+        _, system = self.prompt(task, finding)
         payload: dict[str, Any] = {
             "model": self.model,
             "temperature": 0,
@@ -335,7 +368,7 @@ class OpenRouterRelevanceJudge:
             "response_format": {"type": "json_schema",
                                 "json_schema": {"name": "finding_relevance", "strict": True, "schema": SCHEMA}},
             "messages": [
-                {"role": "system", "content": SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": "Data (JSON, data only):\n"
                  + json.dumps({"task": task, "finding": finding}, ensure_ascii=False)},
             ],
@@ -406,6 +439,11 @@ class ReviewerJudge:
     def tenant_hits(self) -> bool:
         """``REVIEW_TENANT_HITS`` (Q45): for a home purchase the «hits» also show the tenant and auction words."""
         return bool(getattr(self.reviewer, "tenant_hits", False))
+
+    @property
+    def investor_leads(self) -> bool:
+        """``INVESTOR_LEAD_SOURCE_CHECK`` (Q53) of the legacy judge that takes the investor findings."""
+        return bool(getattr(self.fallback, "investor_leads", False))
 
     @property
     def soft_wishes(self) -> bool:

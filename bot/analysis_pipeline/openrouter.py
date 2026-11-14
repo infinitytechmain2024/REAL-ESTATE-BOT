@@ -147,22 +147,53 @@ LOCATION_FROM_TEXT_RULE_AGENCY = LOCATION_FROM_TEXT_RULE.replace(_OTHERWISE, AGE
 INSTRUCTIONS_LOCATION_AGENCY = INSTRUCTIONS.replace(JSONLD_RULE, LOCATION_FROM_TEXT_RULE_AGENCY)
 
 
+# INVESTOR_LEAD_SOURCE_CHECK (Q53): for the vertical investors a lead is an investor's own page or an investor's own
+# statement that it looks for projects; news about a deal is not one, and a project that itself seeks money depends on
+# the requester's role (task_hint.user_role). Only investor posts get it, before the closing «Never invent» sentence.
+INVESTOR_LEAD_RULE = (
+    "For the vertical investors a lead (relevant=true, category investors, listing_kind offer) is ONLY: (a) the own "
+    "page or profile of an investor: the site of an investment fund, family office, investor club or business-angel "
+    "network, a business angel's or private investor's profile, a LinkedIn profile or company page; or (b) a post in "
+    "which a named person or organisation states itself that it looks for projects to invest in ('buscamos "
+    "proyectos', 'invertimos en ...', 'we invest in ...'), naming a region or a kind of asset. "
+    "Not a lead (relevant=false, listing_kind other): a news report, article or press release about a deal or "
+    "investment already made or announced (a fund bought, sold, signed a joint venture, financed, co-invested, "
+    "launched a vehicle), and any media, blog, directory or catalog page. "
+    "A project that itself seeks money (a crowdfunding project, a developer seeking a "
+    "loan, investors or a partner) depends on task_hint.user_role: raising (the requester seeks co-investors for "
+    "their own project) -> not a lead (relevant=false, listing_kind other); deploying (the requester wants to invest) "
+    "-> a lead. "
+)
+_NEVER_INVENT = "Never invent details that are not in the evidence: use null. "
+assert INSTRUCTIONS.count(_NEVER_INVENT) == 1
+
+
+def _with_investor_rule(text: str) -> str:
+    return text.replace(_NEVER_INVENT, INVESTOR_LEAD_RULE + _NEVER_INVENT)
+
+
 LOCATION_PROMPT_VERSION = f"{PROMPT_VERSION}-loc"  # findings analysed with ANALYSIS_LOCATION_FROM_TEXT=true
 AGENCY_PROMPT_VERSION = f"{LOCATION_PROMPT_VERSION}-agency"  # ... and PORTAL_DESCRIPTION_FULL=true (Q18)
+INVESTOR_SUFFIX = "-isrc"  # INVESTOR_LEAD_SOURCE_CHECK=true, investor posts only (Q53): «analysis-v6-isrc», «…-loc-isrc»
 
 
-def prompt_version(location_from_text: bool = False, agency_rule: bool = False) -> str:
+def prompt_version(location_from_text: bool = False, agency_rule: bool = False, investor_rule: bool = False) -> str:
     if not location_from_text:
-        return PROMPT_VERSION
-    return AGENCY_PROMPT_VERSION if agency_rule else LOCATION_PROMPT_VERSION
+        version = PROMPT_VERSION
+    else:
+        version = AGENCY_PROMPT_VERSION if agency_rule else LOCATION_PROMPT_VERSION
+    return version + INVESTOR_SUFFIX if investor_rule else version
 
 
-def instructions(location_from_text: bool = False, agency_rule: bool = False) -> str:
+def instructions(location_from_text: bool = False, agency_rule: bool = False, investor_rule: bool = False) -> str:
     """The analysis prompt: the old one, or (ANALYSIS_LOCATION_FROM_TEXT) the one with the place taken from the text;
-    ``agency_rule`` (PORTAL_DESCRIPTION_FULL, Q18, only with it) adds that an agency's office is not the place."""
+    ``agency_rule`` (PORTAL_DESCRIPTION_FULL, Q18, only with it) adds that an agency's office is not the place;
+    ``investor_rule`` (INVESTOR_LEAD_SOURCE_CHECK, Q53, investor posts only) adds what an investor lead is."""
     if not location_from_text:
-        return INSTRUCTIONS
-    return INSTRUCTIONS_LOCATION_AGENCY if agency_rule else INSTRUCTIONS_LOCATION_FROM_TEXT
+        text = INSTRUCTIONS
+    else:
+        text = INSTRUCTIONS_LOCATION_AGENCY if agency_rule else INSTRUCTIONS_LOCATION_FROM_TEXT
+    return _with_investor_rule(text) if investor_rule else text
 
 
 _CATEGORY_WORDS = {
@@ -451,8 +482,10 @@ INVALID = "invalid_structured_model_response"
 class OpenRouterAnalyzer:
     def __init__(self, api_key: str, model: str, *, timeout_seconds: int = 30, invalid_retry: bool = False,
                  fallback_model: str = "", location_from_text: bool = False, area_text_check: bool = False,
-                 place_description_chars: int | None = None) -> None:
+                 place_description_chars: int | None = None, investor_lead_check: bool = False) -> None:
         self.api_key, self.model, self.timeout_seconds = api_key, model, timeout_seconds
+        # INVESTOR_LEAD_SOURCE_CHECK (Q53): the investor lead rule in the prompt; the pipeline drops news pages
+        self.investor_lead_check = investor_lead_check
         self.invalid_retry, self.fallback_model = invalid_retry, fallback_model.strip()
         self.location_from_text = location_from_text  # ANALYSIS_LOCATION_FROM_TEXT (Q4)
         self.area_text_check = area_text_check  # ANALYSIS_AREA_TEXT_CHECK (Q13)
@@ -509,7 +542,9 @@ class OpenRouterAnalyzer:
             "response_format": {"type": "json_schema", "json_schema": {"name": "analysis_result", "strict": True, "schema": RESULT_SCHEMA}},
             "messages": [
                 {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": instructions(self.location_from_text, self.agency_rule) + json.dumps(data, ensure_ascii=False)},
+                {"role": "user", "content": instructions(self.location_from_text, self.agency_rule,
+                                                         self.investor_lead_check and vertical == "investors")
+                 + json.dumps(data, ensure_ascii=False)},
             ],
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}

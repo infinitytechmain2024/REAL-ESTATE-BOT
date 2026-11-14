@@ -23,6 +23,10 @@ class AnalysisSettings(BaseSettings):
     # check of Q4 (source_place.conflict) still reads only their first 1500, as before (an agency's «oficina en
     # Madrid» at the end of a long text is no conflict). The model reads the whole text. Off: as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")
+    # Q53: for an investor post a lead is an investor's own page or its own «we invest in …» (prompt «-isrc»); a news
+    # or blog address (/noticias/, /news/, a date) is dropped before the model; a project that seeks money is no lead
+    # when the requester raises money (task_hint.user_role). false (default): the prompt and the hint as before.
+    investor_lead_source_check: bool = Field(default=False, validation_alias="INVESTOR_LEAD_SOURCE_CHECK")
     batch_size: PositiveInt = Field(default=10, ge=1, le=50, validation_alias="ANALYSIS_BATCH_SIZE")
     timeout_seconds: PositiveInt = Field(
         default=60, ge=5, le=120, validation_alias="OPENROUTER_ANALYSIS_TIMEOUT_SECONDS"

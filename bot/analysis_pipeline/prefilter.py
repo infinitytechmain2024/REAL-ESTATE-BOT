@@ -133,3 +133,27 @@ def prefilter(evidence: Evidence, context: TaskContext | None) -> str | None:
         if area is not None and area < context.min_area * floor - 1e-9:
             return "area"
     return None
+
+
+# INVESTOR_LEAD_SOURCE_CHECK (Q53): a page whose address says it is news, a press release or a blog post is not an
+# investor lead (docs/v3/SIM_RUBRIC.md §3: media and blogs are junk leads); the model is not paid to read it.
+_NEWS_SEGMENTS = frozenset({
+    "noticias", "noticia", "noticia_amp", "news", "actualidad", "article", "articles", "articulo", "articulos",
+    "prensa", "press", "press-release", "press-releases", "sala-de-prensa", "nota-de-prensa", "notas-de-prensa",
+    "blog", "blogs",
+})
+_DATE_PATH = re.compile(r"/(?:19|20)\d\d/(?:0[1-9]|1[0-2])(?:/(?:0[1-9]|[12]\d|3[01]))?/")
+_DATE_SEGMENT = re.compile(r"(?:19|20)\d\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])")
+
+
+def news_page(url: str | None) -> bool:
+    """True when the URL path is a news or blog page: a news segment (``/noticias/``, ``/news/``, ``/actualidad/``,
+    ``/noticia_amp/``, ``/article/``, ``/blog/`` ...), a date (``/2026/06/20/``, ``/20251020/``) or ``….article``."""
+    try:
+        path = unquote(urlsplit(url or "").path or "/").lower()
+    except ValueError:
+        return False
+    segments = [s for s in path.split("/") if s]
+    if any(s in _NEWS_SEGMENTS for s in segments) or path.endswith(".article"):
+        return True
+    return bool(_DATE_PATH.search(path + "/") or any(_DATE_SEGMENT.fullmatch(s) for s in segments))
