@@ -193,3 +193,35 @@ def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] |
     folded = " ".join(_fold(" | ".join(parts)).split())
     long, short = _term_named(_LONG_TERM, folded), _term_named(_SHORT_TERM, folded)
     return "long" if long and not short else "short" if short and not long else None
+
+
+# RENT_DEFAULT_LONG_TERM (Q49). A listing that says it is a seasonal, temporary or holiday let, read from its own
+# words (folded text, ``_fold``). Sim b4-g5-s5 («снять piso в Барселоне до 1500», term «не знаю пока»): «alquiler de
+# temporada», «alquiler temporal (máximo 11 meses)», «uso exclusivo vacaciones/ocio», «estancias vacacionales» went out
+# as exact. «larga temporada» / «larga estancia» / «larga duración» are long lets: «temporada» right after «larga» is no
+# sign, and a negation among the 4 words before the sign in its clause («no temporal», «no se alquila por temporada»,
+# «sin temporada») is none either.
+_SEASONAL_LET = re.compile(
+    r"(?<!\w)(?:temporadas?|temporal(?:es)?|temporalidad|vacacional(?:es)?"
+    r"|(?:uso|para|ocio\s+[oy])\s+(?:exclusivo\s+)?(?:de\s+|para\s+)?vacaciones|vacaciones\s*/\s*ocio"
+    r"|por\s+meses|(?:hasta|maximo|max\.?)\s+(?:de\s+)?(?:[1-9]|1[01])\s+meses"
+    r"|estancias?\s+cortas?|cortas?\s+estancias?|media\s+estancia"
+    r"|vacation\s+rentals?|holiday\s+(?:rentals?|lets?)|seasonal\s+(?:rentals?|lets?)"
+    r"|short[\s-]?term\s+(?:rentals?|lets?|stays?)|temporary\s+(?:rentals?|lets?|stays?)"
+    r"|(?:временн|сезонн|посуточн|краткосрочн)\w*\s+аренд\w*|посуточн\w*|аренд\w*\s+(?:только\s+)?для\s+отдыха)(?!\w)")
+_SEASONAL_NEGATIONS = frozenset({"no", "sin", "ni", "nunca", "not", "non", "never", "не", "без"})
+
+
+def seasonal_let_named(*texts: object) -> bool:
+    """True when the texts say the let is seasonal, temporary or for holidays («alquiler de temporada», «temporal»,
+    «vacacional», «por meses», «hasta 11 meses», «estancias cortas», «vacation rental», «временная аренда»); never
+    for «larga temporada» or a sign with a negation among the 4 words before it in its clause («no temporal»)."""
+    folded = " ".join(_fold(" ".join(str(t or "") for t in texts)).split())
+    for hit in _SEASONAL_LET.finditer(folded):
+        clause = _CLAUSE_END.split(folded[:hit.start()])[-1]
+        words = re.findall(r"\w+", clause)
+        if hit.group(0).startswith("temporada") and words and words[-1] in ("larga", "largas"):
+            continue
+        if not _SEASONAL_NEGATIONS.intersection(words[-4:]):
+            return True
+    return False

@@ -47,6 +47,14 @@ or by auction («subasta», «pujas») is a similar variant, not an exact one: `
 ``overall`` ``near``. With ``PORTAL_DESCRIPTION_FULL`` the runner also adds those words to the «hits» terms
 (``quote_hits.tenant_terms``). The version gets ``-tn`` after ``-nr`` and before ``-hits`` (``reviewer-v3-tn``,
 ``reviewer-v3-soft-th-nr-tn-hits`` ...). Off: the prompts are byte for byte the ones above.
+
+``RENT_DEFAULT_LONG_TERM`` (Q49, off by default): for a person renting a home (deal rent, type apartment, house or no
+type) who did not ask for a short stay («на сезон», «на пару месяцев», «посуточно»; «не знаю» / «не важно» is no such
+request) a seasonal, temporary or holiday let («alquiler de temporada», «temporal», «vacacional», «por meses»,
+«estancias cortas», «vacation rental») is a similar variant: ``deal`` is ``unknown`` with the quote, ``overall``
+``near``, deviation «сезонная аренда»; «larga temporada», «larga estancia», «no temporal» are no sign. The version gets
+``-lt`` after ``-tn`` and before ``-hits`` (``reviewer-v3-lt``, ``reviewer-v3-soft-th-nr-tn-lt-hits`` ...). Off: the
+prompts are byte for byte the ones above.
 """
 
 from __future__ import annotations
@@ -74,6 +82,7 @@ PROMPT_VERSION_SOFT_TH = "reviewer-v3-soft-th"  # both flags
 HITS_SUFFIX = "-hits"  # PORTAL_DESCRIPTION_FULL=true: «hits» may be quoted
 NON_RESIDENTIAL_SUFFIX = "-nr"  # REVIEW_NON_RESIDENTIAL=true: a non-residential unit is not a home
 TENANT_SUFFIX = "-tn"  # REVIEW_TENANT_HITS=true: a tenanted, occupied or auctioned home is only similar for a buyer
+SEASONAL_SUFFIX = "-lt"  # RENT_DEFAULT_LONG_TERM=true: a seasonal let is only similar for a home rent without a short term
 MAX_WISHES = 8
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 MAX_QUOTE_CHARS = 200
@@ -289,9 +298,28 @@ _TENANT = """- Not free to move in: when "task.hard.deal" is "sale" and "type" i
 """
 
 
+# RENT_DEFAULT_LONG_TERM (Q49). Sim b4-g5-s5 («снять piso в Барселоне до 1500», term «не знаю пока»): 13 seasonal,
+# temporary or holiday lets («alquiler de temporada», «uso exclusivo vacaciones», Fotocasa TEMPORARY) went out as exact.
+_SEASONAL = """- Seasonal let: when "task.hard.deal" is "rent" and "type" is apartment, house or not given (a person renting a home to
+  live in), and neither the task text nor "task.context" asks for a short stay («на сезон», «на лето», «на пару
+  месяцев», «на 1–3 месяца», «посуточно», «краткосрочно», «temporada», «vacaciones»), a seasonal, temporary or holiday
+  let is a compromise, not an exact match. Then "deal" is "unknown" with that quote (never "fail": it is still a
+  rent), "overall" is "near", near_reason, when asked, is "other", and deviation_ru is «сезонная аренда». An answer
+  «не знаю», «не важно», «пока не знаю» about the term is no request for a short stay. Signs: «alquiler de
+  temporada», «de temporada», «alquiler temporal», «temporal», «temporalidad», «vacacional», «uso exclusivo
+  vacaciones», «estancias vacacionales», «por meses», «hasta 11 meses», «máximo 11 meses», «estancias cortas», «media
+  estancia», «vacation rental», «holiday let», «short-term rental», «seasonal rental», the label «Alquiler de
+  temporada». These words may also be in "hits". No sign: a long let or a negation («larga temporada», «alquiler de
+  larga temporada», «larga estancia», «larga duración», «no temporal», «no se alquila por temporada», «sin
+  temporada»); a holiday or a season named for something else («temporada alta» of a nearby beach, «ideal para
+  vacaciones» about the area without a short let).
+"""
+
+
 def prompt_of(*, soft_wishes: bool = False, townhouse_is_house: bool = False,
-              quote_hits: bool = False, non_residential: bool = False, tenant: bool = False) -> tuple[str, str]:
-    """The (version, system prompt) the flags select: ``reviewer-v3{-soft}{-th}{-nr}{-tn}{-hits}``."""
+              quote_hits: bool = False, non_residential: bool = False, tenant: bool = False,
+              seasonal: bool = False) -> tuple[str, str]:
+    """The (version, system prompt) the flags select: ``reviewer-v3{-soft}{-th}{-nr}{-tn}{-lt}{-hits}``."""
     if townhouse_is_house:
         version, system = (PROMPT_VERSION_SOFT_TH, SYSTEM_SOFT_TH) if soft_wishes else (PROMPT_VERSION_TH, SYSTEM_TH)
     else:
@@ -301,6 +329,8 @@ def prompt_of(*, soft_wishes: bool = False, townhouse_is_house: bool = False,
                                                                            _NON_RESIDENTIAL + _BEFORE_NUMBERS, 1)
     if tenant:
         version, system = version + TENANT_SUFFIX, system.replace(_BEFORE_NUMBERS, _TENANT + _BEFORE_NUMBERS, 1)
+    if seasonal:
+        version, system = version + SEASONAL_SUFFIX, system.replace(_BEFORE_NUMBERS, _SEASONAL + _BEFORE_NUMBERS, 1)
     if quote_hits:
         return version + HITS_SUFFIX, system.replace(_QUOTABLE_V3, _QUOTABLE_HITS)
     return version, system
@@ -533,7 +563,7 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
                  tolerance: float | None = None, soft_wishes: bool = False,
                  task_wishes: Sequence[Any] = (), townhouse_is_house: bool = False,
                  quote_hits: bool = False, non_residential: bool = False, places: bool = False,
-                 tenant: bool = False) -> Review:
+                 tenant: bool = False, seasonal: bool = False) -> Review:
     """The model's answer after harmless drift is fixed and the rules above are enforced.
 
     ``ValueError``: not a JSON object. ``expected``: the criteria asked for (an unanswered one is ``unknown``,
@@ -545,7 +575,7 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     task wish as not ``pass`` and no wish of weight 3 lacks a ``pass`` (``_only_soft_wishes_unmet``). Any other
     ``near`` (a suburb, a promotion of several flats; a townhouse for a house without ``REVIEW_TOWNHOUSE_IS_HOUSE``,
     with it only when the task asks for a detached house) stays ``near`` with its deviation. ``townhouse_is_house``,
-    ``quote_hits``, ``non_residential`` and ``tenant`` only name the prompt version stored with the review; ``places``
+    ``quote_hits``, ``non_residential``, ``tenant`` and ``seasonal`` only name the prompt version stored with the review; ``places``
     (``USER_PHRASE_PLACES``, Q28) keeps Latin place names in the deviation phrase.
     """
     data = json.loads(_FENCE.sub("", content))
@@ -588,7 +618,7 @@ def parse_review(content: str, *, expected: Sequence[str], haystack: str = "", m
     deviation = (user_phrase(data.get("deviation_ru") or data.get("deviation"), places=places)
                  if overall == "near" else None)
     prompt = prompt_of(soft_wishes=soft_wishes, townhouse_is_house=townhouse_is_house, quote_hits=quote_hits,
-                       non_residential=non_residential, tenant=tenant)[0]
+                       non_residential=non_residential, tenant=tenant, seasonal=seasonal)[0]
     if not soft_wishes:
         return Review(criteria, overall, deviation, confidence, model, tolerance, prompt)  # type: ignore[arg-type]
     return Review(criteria, overall, deviation, confidence, model, tolerance,  # type: ignore[arg-type]
@@ -668,7 +698,8 @@ class OpenRouterReviewer:
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 45,
                  client: httpx.AsyncClient | None = None, soft_wishes: bool = False,
                  townhouse_is_house: bool = False, quote_hits: bool = False,
-                 non_residential: bool = False, phrase_places: bool = False, tenant: bool = False) -> None:
+                 non_residential: bool = False, phrase_places: bool = False, tenant: bool = False,
+                 seasonal: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the reviewer")
         self.model = model
@@ -677,6 +708,7 @@ class OpenRouterReviewer:
         self.quote_hits = quote_hits  # PORTAL_DESCRIPTION_FULL (Q18): the finding's «hits» may be quoted
         self.non_residential = non_residential  # REVIEW_NON_RESIDENTIAL (Q22): a non-residential unit is not a home
         self.tenant_hits = tenant  # REVIEW_TENANT_HITS (Q45): a tenanted / auctioned home is similar for a buyer
+        self.seasonal = seasonal  # RENT_DEFAULT_LONG_TERM (Q49): a seasonal let is similar for a home rent
         self.phrase_places = phrase_places  # USER_PHRASE_PLACES (Q28): Latin place names in the deviation phrase
         self._llm = OpenRouterJSON(api_key, timeout_seconds=timeout_seconds, client=client)
 
@@ -689,7 +721,7 @@ class OpenRouterReviewer:
         try:
             system = prompt_of(soft_wishes=self.soft_wishes, townhouse_is_house=self.townhouse_is_house,
                                quote_hits=self.quote_hits, non_residential=self.non_residential,
-                               tenant=self.tenant_hits)[1]
+                               tenant=self.tenant_hits, seasonal=self.seasonal)[1]
             content = await self._llm.complete(self.model, system, user,
                                                schema=SCHEMA_SOFT if self.soft_wishes else SCHEMA,
                                                name="finding_review", max_tokens=1200)
@@ -700,7 +732,7 @@ class OpenRouterReviewer:
                                 tolerance=_number(task.get("tolerance_pct")), soft_wishes=self.soft_wishes,
                                 task_wishes=task.get("wishes") or (), townhouse_is_house=self.townhouse_is_house,
                                 quote_hits=self.quote_hits, non_residential=self.non_residential,
-                                places=self.phrase_places, tenant=self.tenant_hits)
+                                places=self.phrase_places, tenant=self.tenant_hits, seasonal=self.seasonal)
         except Exception as exc:
             log.warning("campaign.review_unreadable %s", type(exc).__name__)
             raise RelevanceError("invalid_response") from exc

@@ -60,6 +60,13 @@ Other constraints
   «long term»; ``bot/utils/listing_text.py`` ``task_rental_term`` over the task text and the interview answers) and
   the portal row itself says temporary (``rental_term`` in the payload: Fotocasa ``rentalType=TEMPORARY``, Idealista
   label ``seasonalRental``). No term in the task, or none in the row: unchanged.
+* Seasonal let of a home rent without a short term (Q49, ``RENT_DEFAULT_LONG_TERM``; ``Request.seasonal_guard``)
+  -> similar (``deal_kind``, «сезонная аренда»), never exact: a person renting a home (deal rent, type apartment,
+  house or unknown) lives there, so a term not asked for or answered «не знаю» / «не важно» means a long lease. The
+  portal row says temporary (``rental_term``, written with ``PORTAL_RENTAL_TERM``) or the listing's summaries name a
+  seasonal, temporary or holiday let (``bot/utils/listing_text.py`` ``seasonal_let_named``: «alquiler de temporada»,
+  «temporal», «vacacional», «por meses», «estancias cortas»; not «larga temporada», «no temporal»). A task that asks
+  for a short term («на сезон», «на пару месяцев», «посуточно»; ``task_rental_term`` «short»): unchanged.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
   (Москва, Минск ...), its link is under another country's TLD (``.ru``,
@@ -94,7 +101,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from bot.utils.listing_text import auction_named, task_rental_term
+from bot.utils.listing_text import auction_named, seasonal_let_named, task_rental_term
 
 from . import geo
 from .architect import find_places
@@ -148,6 +155,8 @@ class Request:
     auction_guard: bool = False  # PORTAL_FACTS_FROM_ROW (Q16): a purchase's payload ``auction`` is never exact
     # PORTAL_RENTAL_TERM (Q20): the rent term the person asked for («long»/«short»); None without the flag or a term
     rental_term: str | None = None
+    # RENT_DEFAULT_LONG_TERM (Q49): a home rent that asked for no short term; a seasonal let is never exact
+    seasonal_guard: bool = False
 
     @property
     def country_code(self) -> str | None:
@@ -325,6 +334,7 @@ def facts_from_row_enabled() -> bool:
 
 AUCTION_NOTE = "аукцион, не обычная продажа"
 TEMPORARY_NOTE = "временная аренда"
+SEASONAL_NOTE = "сезонная аренда"
 
 
 def rental_term_enabled() -> bool:
@@ -332,12 +342,24 @@ def rental_term_enabled() -> bool:
     return os.environ.get("PORTAL_RENTAL_TERM", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def rent_default_long_enabled() -> bool:
+    """RENT_DEFAULT_LONG_TERM (default off): a seasonal let is not exact for a home rent without a short term (Q49)."""
+    return os.environ.get("RENT_DEFAULT_LONG_TERM", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _seasonal_guard(deal: object, kind: str | None, spec: dict[str, Any] | None, text: str | None) -> bool:
+    """RENT_DEFAULT_LONG_TERM (Q49): a rent of a home (apartment, house or no type) whose words name no short term."""
+    return (deal == "rent" and kind in (None, "apartment", "house") and rent_default_long_enabled()
+            and task_rental_term(spec, text) != "short")
+
+
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
                 text: str | None = None, country: str | None = None,
                 deviations: dict[str, Any] | None = None, spec: dict[str, Any] | None = None) -> Request:
     """The bucketing request of a campaign plan (``plan.constraints``, ``plan.location``, ``plan.country``;
     ``text``: the task; ``deviations``: ``TaskSpec.deviations`` as a dict, the compromises the person approved;
-    ``spec``: the TaskSpec as a dict, whose interview answers may name the rent term, read with PORTAL_RENTAL_TERM)."""
+    ``spec``: the TaskSpec as a dict, whose interview answers may name the rent term, read with PORTAL_RENTAL_TERM
+    and RENT_DEFAULT_LONG_TERM)."""
     if vertical == "investors":
         return Request(location=location, country=country)
     dev = deviations if isinstance(deviations, dict) else {}
@@ -346,6 +368,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
     rooms = constraints.get("rooms")
     stated = currency_code(constraints.get("currency"))
     code = country or geo.country_of(location)
+    kind = _TYPE_GROUP.get(str(constraints.get("property_type") or ""))
     return Request(
         amount=amount if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0 else None,
         currency=stated or geo.CURRENCY.get(code or "") or DEFAULT_CURRENCY,
@@ -354,7 +377,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         min_area=_positive(constraints.get("min_area")) or min_area_of(text),
         max_area=_positive(constraints.get("max_area")),
         min_price=_positive(constraints.get("min_price")),
-        property_type=_TYPE_GROUP.get(str(constraints.get("property_type") or "")),
+        property_type=kind,
         rooms=rooms if isinstance(rooms, int) and not isinstance(rooms, bool) and rooms > 0 else None,
         country=country,
         budget_pct=_pct(dev.get("budget_pct")),
@@ -366,6 +389,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         place_guard=default_point_guard_enabled(),
         auction_guard=facts_from_row_enabled(),
         rental_term=task_rental_term(spec, text) if deal == "rent" and rental_term_enabled() else None,
+        seasonal_guard=_seasonal_guard(deal, kind, spec, text),
     )
 
 
@@ -453,6 +477,8 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
         result = worse(result, Match("similar", 0.0, "deal_kind", note=AUCTION_NOTE))  # Q16: not an ordinary sale
     if request.rental_term == "long" and request.deal == "rent" and payload.get("rental_term") == "temporary":
         result = worse(result, Match("similar", 0.0, "deal_kind", note=TEMPORARY_NOTE))  # Q20: not a long lease
+    if request.seasonal_guard and request.deal == "rent" and _seasonal_let(payload):
+        result = worse(result, Match("similar", 0.0, "deal_kind", note=SEASONAL_NOTE))  # Q49: not a home to live in
     if request.amount is not None:
         price = price_of(payload)
         currency = currency_code(payload.get("price_currency")) or request.currency
@@ -464,6 +490,12 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
         return Match("exact", result.distance, "approved_deviation", note="; ".join(notes),
                      covers=tuple(dict.fromkeys(covers)))
     return result
+
+
+def _seasonal_let(payload: dict[str, Any]) -> bool:
+    """Q49: the portal row says temporary, or the listing's summaries name a seasonal / temporary / holiday let."""
+    return payload.get("rental_term") == "temporary" or seasonal_let_named(payload.get("summary"),
+                                                                           payload.get("summary_ru"))
 
 
 def _fold(text: str) -> str:

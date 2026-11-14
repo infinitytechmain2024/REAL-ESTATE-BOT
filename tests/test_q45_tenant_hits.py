@@ -103,7 +103,7 @@ def test_flag_on_prompt_has_its_own_version_and_the_rule(flags) -> None:
 
 def test_all_thirty_two_versions_are_distinct_and_trusted_by_the_report() -> None:
     versions = {_prompt(flags, tn)[0] for flags in FLAGS for tn in (False, True)}
-    assert len(versions) == 32 and versions == set(final_report._LEGAL_RULE_PROMPTS)
+    assert len(versions) == 32 and versions <= set(final_report._LEGAL_RULE_PROMPTS)  # Q49 adds the -lt ones
 
 
 # --- the hits ----------------------------------------------------------------------------------------------------------
