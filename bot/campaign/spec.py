@@ -614,14 +614,20 @@ class TaskSpec(_Model):
 
     # --- the card ------------------------------------------------------------------------
 
-    def summary_ru(self) -> str:
-        """The structured task card in Russian, one fact per line."""
+    def summary_ru(self, *, province_scope: bool = False) -> str:
+        """The structured task card in Russian, one fact per line.
+
+        ``province_scope`` (``INTAKE_SKIP_WIDENS_PLACE``, Q42): a province reads «Место: Мадрид и провинция».
+        """
         lines = [f"Режим: {MODE_TITLES.get(self.mode or '', self.mode or 'не выбран')}"]
         name = self.place.names.get("ru") or self.place_name()
         place = name or "не указан"
-        if name and self.place.level != "city":
-            place += f" ({'область' if self.place.level == 'province' else 'регион'})"
-        lines.append(f"Город: {place}")
+        if name and province_scope and self.place.level == "province":
+            lines.append(f"Место: {name} и провинция")
+        else:
+            if name and self.place.level != "city":
+                place += f" ({'область' if self.place.level == 'province' else 'регион'})"
+            lines.append(f"Город: {place}")
         if self.place.districts:
             lines.append(f"Районы: {', '.join(self.place.districts)}")
         if self.place.radius_km:

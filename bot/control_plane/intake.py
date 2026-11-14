@@ -89,6 +89,11 @@ DEAL_TEXT = dict(DEAL_RU)
 EXAMPLES = {"real_estate": "«квартиры в аренду в Мадриде до 1200 €»", "investors": "«инвесторы для стартапа в Барселоне»",
             "both": "«квартиры на продажу в Валенсии до 300 тыс. € и инвесторы в недвижимость там же»"}
 _SUBURB = re.compile(r"пригород|передміст|окрестност|околиц|afueras|alrededores|suburb|outskirts", re.IGNORECASE)
+# INTAKE_SKIP_WIDENS_PLACE (Q42): the question offered the province (else «the towns around»: a circle of this size).
+_PROVINCE_WORD = re.compile(r"провинц|област|provinc", re.IGNORECASE)
+_SCOPE_AROUND = re.compile(r"провинц|област|provinc|вокруг|окрестност|пригород|alrededores|around", re.IGNORECASE)
+_SCOPE_CITY = re.compile(r"город|ciudad|city", re.IGNORECASE)
+WIDENED_RADIUS_KM = 30.0
 _RADIUS = re.compile(r"(?<!\d)(\d{1,3}(?:[.,]\d+)?)\s*(?:км|km|kilomet(?:er|re)s?)(?!\w)", re.IGNORECASE)
 # «Изменить»: callback code -> (button title, the TaskSpec field the interviewer is pointed at)
 FIELDS: dict[str, dict[str, tuple[str, str]]] = {
@@ -373,7 +378,7 @@ class TaskIntake:
                  now: Callable[[], datetime] = lambda: datetime.now(UTC),
                  technical: Callable[[int], bool] = lambda _user_id: False,
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
-                 post_links: bool = False, both_mode: bool = False) -> None:
+                 post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -381,6 +386,9 @@ class TaskIntake:
 
         ``both_mode`` (``INTAKE_BOTH_MODE``): the mode «Недвижимость + инвесторы» is offered and accepted; off,
         the menu has no such button and the choice is refused.
+
+        ``skip_widens_place`` (``INTAKE_SKIP_WIDENS_PLACE``, Q42): «Не важно» to «only the city or around it» widens
+        the place (see ``_widened_place``); off, the place stays the city.
 
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
@@ -390,6 +398,7 @@ class TaskIntake:
         self.interviewer = interviewer
         self.rules = RuleInterviewer()
         self.max_rounds, self.post_links, self.both_mode = max_rounds, post_links, both_mode
+        self.skip_widens_place = skip_widens_place
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
         return mode_menu(text, both=self.both_mode)
@@ -551,7 +560,8 @@ class TaskIntake:
         spec = draft.spec or TaskSpec(mode=draft.mode)  # type: ignore[arg-type]
         if draft.asking and draft.asking != "place":
             draft.spec = spec.mark_unspecified(draft.asking)
-        return await self._interview(draft, "Не важно")
+        widen = _widened_place(draft, spec) if self.skip_widens_place else None
+        return await self._interview(draft, "Не важно", widen=widen)
 
     async def _enough(self, draft: Draft) -> Reply:
         """«Хватит, ищи»: no more questions; only a missing place is still asked."""
@@ -560,13 +570,20 @@ class TaskIntake:
 
     # --- the interview ----------------------------------------------------------------------
 
-    async def _interview(self, draft: Draft, message: str, *, editing: bool = False) -> Reply:
-        """One user message: the interviewer updates the spec and says what to ask next, or the card is shown."""
+    async def _interview(self, draft: Draft, message: str, *, editing: bool = False,
+                         widen: dict[str, object] | None = None) -> Reply:
+        """One user message: the interviewer updates the spec and says what to ask next, or the card is shown.
+
+        ``widen`` (Q42): the place fields «Не важно» widened; applied after the model, which may resend the city.
+        """
         mode = draft.mode or "real_estate"
         spec = draft.spec or TaskSpec(mode=mode)  # type: ignore[arg-type]
         turn = await self._turn(draft, mode, spec, message, editing)
         draft.spec = _enrich(self._record_answer(draft, spec, turn.spec, message, editing,
                                                  next_question=turn.question), mode)
+        if widen:
+            draft.spec.place = draft.spec.place.model_copy(update=widen)
+            log.info("telegram.intake.place_widened", extra={"user_id": draft.user_id, **widen})
         if draft.asking == "place.districts" and _SUBURB.search(draft.task):
             if draft.spec.place.radius_km and draft.spec.place.radius_km != spec.place.radius_km:
                 turn.understood_ru = f"радиус {draft.spec.place.radius_km:g} км"
@@ -684,7 +701,7 @@ class TaskIntake:
             return Reply(f"{exc}\nОпишите задачу иначе, например {EXAMPLES.get(draft.mode or '', EXAMPLES['real_estate'])}.")
         draft.step, draft.asking, draft.editing = "summary", None, None
         await self.store.save(draft)
-        lines = ["Проверьте задачу:", draft.spec.summary_ru()]
+        lines = ["Проверьте задачу:", draft.spec.summary_ru(province_scope=self.skip_widens_place)]
         if self.technical(draft.user_id):
             limits = plan.limits
             model = getattr(self.interviewer, "model", "")
@@ -747,6 +764,26 @@ def _enrich(spec: TaskSpec, mode: str) -> TaskSpec:
         spec.place = spec.place.model_copy(update={"names": known.get("names", {}),
                                                    "country": spec.place.country or known.get("country")})
     return spec
+
+
+def _widened_place(draft: Draft, spec: TaskSpec) -> dict[str, object] | None:
+    """INTAKE_SKIP_WIDENS_PLACE (Q42): what «Не важно» to «only the city or around it» widens the place to.
+
+    The question is about the scope when it was asked for ``place.districts`` (the rules' suburb question, the
+    model's «город или провинция»), or, as a last resort, the model's task-specific question names the city and
+    the province or the towns around it. A question that offered the province widens a city to its province
+    («Мадрид и провинция»); else a city gets a circle of ``WIDENED_RADIUS_KM`` around it (the portals' radius
+    search). A place that is already wider than a city, has districts or a radius is left as it is; None: no change.
+    """
+    place = spec.place
+    if not place.name or place.level != "city" or place.districts or place.radius_km:
+        return None
+    question = next((t["text"] for t in reversed(draft.dialogue) if t.get("role") == "assistant"), "")
+    scope = draft.asking == "place.districts" or (
+        draft.asking == TASK_PATH and bool(_SCOPE_CITY.search(question)) and bool(_SCOPE_AROUND.search(question)))
+    if not scope:
+        return None
+    return {"level": "province"} if _PROVINCE_WORD.search(question) else {"radius_km": WIDENED_RADIUS_KM}
 
 
 def _cleared(spec: TaskSpec, path: str) -> TaskSpec:

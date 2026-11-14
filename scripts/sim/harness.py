@@ -96,6 +96,7 @@ BASE_ENV: dict[str, str] = {
     "CAMPAIGN_EMPTY_REPORT": "true",  # Q33
     "REPORT_EVERY_PORTAL": "true",  # Q37
     "STATUS_COUNTS_ALL_DELIVERIES": "true",  # Q40
+    "INTAKE_SKIP_WIDENS_PLACE": "true",  # Q42
     # Q39: every page of the web stage is an operator's answer (pending_page); 30 per campaign, not prod's 400.
     "WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN": "30",
 }
