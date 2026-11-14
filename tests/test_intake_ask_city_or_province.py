@@ -134,3 +134,81 @@ async def test_the_rules_ask_it_too_and_the_province_reaches_the_card() -> None:
     await press(control, USER, "task:scope:province")
     _, spec = await _launched(control, sink)
     assert spec.place.level == "province" and spec.place.name == "Madrid"
+
+
+# --- review fixes ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("typed", "level"), [
+    ("весь Мадрид", "city"), ("в любом районе", "city"), ("весь город", "city"), ("в центре", "city"),
+    ("не провинция", "city"), ("solo la ciudad", "city"), ("только Мадрид", "city"),
+    ("и город и провинция", "province"), ("не город", "province"), ("не только город", "province"),
+    ("не только в самом городе", "province"), ("везде", "province"), ("побережье", "province"),
+    ("Коста-дель-Соль", "province"), ("no solo la ciudad", "province"), ("вся провинция", "province"),
+    ("север: Алькобендас", None),
+])
+def test_scope_in_text(typed: str, level: str | None) -> None:
+    from bot.campaign.spec import Place
+    from bot.control_plane.intake import _scope_in_text
+
+    assert _scope_in_text(typed, Place.model_validate(MADRID)) == level
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task", [
+    "квартира в Мадриде как на Idealista, до 3 млн",
+    "квартира в Мадриде, Испания, до 3 млн",
+    "квартира в Мадриде рядом с метро Gran Vía до 3 млн",
+    "квартира в Мадриде, видел на Fotocasa и Airbnb",
+])
+async def test_the_country_portals_and_metro_stations_are_no_other_place(task: str) -> None:
+    _, _, _, shown = await _first(task)
+    assert shown.text.endswith(SCOPE_Q)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task", ["квартира в центре Мадрида до 3 млн", "piso en el centro de Madrid"])
+async def test_the_centre_means_the_city(task: str) -> None:
+    _, _, _, shown = await _first(task)
+    assert "по всей провинции" not in shown.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["Ceuta", "Melilla"])
+async def test_ceuta_and_melilla_are_not_asked(name: str) -> None:
+    place = {"name": name, "country": "ES", "names": {"ru": name, "es": name}}
+    _, _, _, shown = await _first(f"участок в {name} до 3 млн", place)
+    assert "по всей провинции" not in shown.text
+
+
+async def _rules_scope_question():  # type: ignore[no-untyped-def]
+    from tests.test_user_intake import plane
+
+    control, sink, _ = plane()
+    control.intake.ask_city_or_province = True
+    await press(control, USER, "mode:real_estate")
+    reply = await say(control, USER, "купить участок в Мадриде до 300000 евро")
+    for _ in range(6):
+        if "по всей провинции" in reply.text:
+            break
+        reply = await press(control, USER, "task:skip")
+    assert reply.text.endswith(SCOPE_Q)
+    return control, sink
+
+
+@pytest.mark.asyncio
+async def test_rules_the_whole_province_is_not_followed_by_a_district_question() -> None:
+    control, sink = await _rules_scope_question()
+    nxt = await press(control, USER, "task:scope:province")
+    assert "Район" not in nxt.text and "район" not in nxt.text
+    _, spec = await _launched(control, sink)
+    assert spec.place.level == "province"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed", ["нет", "-"])
+async def test_rules_no_to_the_scope_question_keeps_the_city(typed: str) -> None:
+    control, sink = await _rules_scope_question()
+    await say(control, USER, typed)
+    _, spec = await _launched(control, sink)
+    assert spec.place.level == "city"

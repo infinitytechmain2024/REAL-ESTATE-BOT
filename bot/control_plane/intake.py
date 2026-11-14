@@ -102,13 +102,25 @@ SCOPE_PATH = "place.level"
 SCOPE_QUESTION = "Искать только в самом городе {city} или по всей провинции?"
 SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (("Только в городе", "scope:city"), ("Вся провинция", "scope:province"))
 _SCOPE_CITY = re.compile(r"(?<!\w)(?:столиц|міст[оіау]?\b)|\bcapital\b", re.IGNORECASE)
+_SCOPE_CENTRE = re.compile(r"(?<!\w)центр|\b(?:centro|centre|center|downtown)\b", re.IGNORECASE)
+_SCOPE_EVERYWHERE = re.compile(r"(?<!\w)(?:везде|повсюду|скрізь)(?!\w)|\b(?:everywhere|anywhere)\b|"
+                               r"\btodas\s+partes\b", re.IGNORECASE)
+_SCOPE_NEGATED = re.compile(r"(?<!\w)(?:не|ні|no|not|без|sin|ni)\s+(?:\w+\s+){0,3}$", re.IGNORECASE)
+# Q62: no scope question for these (no province around them that the person could mean)
+_NO_SCOPE_PLACES = frozenset({"ceuta", "melilla"})
+# Q62: capitalised words that are no other place: the country, portals and brands
+_NOT_PLACE_STEMS = ("испани", "іспані", "espan", "spain", "idealist", "идеалист", "fotocas", "фотокас", "airbnb",
+                    "habitacli", "milanunci", "pisos", "kyero", "thinkspain", "yaencontre", "wallapop", "booking",
+                    "facebook", "instagram", "telegram", "whatsapp", "tiktok", "linkedin", "google", "avito",
+                    "ватсап", "телеграм", "фейсбук", "инстаграм")
+_METRO_WORDS = frozenset({"метро", "metro", "станция", "станции", "estacion", "station"})
 _SCOPE_COAST = re.compile(r"(?<!\w)(?:побережь|узбережж|коста(?!\w))|\b(?:costa|coast\w*)\b", re.IGNORECASE)
 _SCOPE_SAID = re.compile(r"(?<!\w)(?:город|провинци|провінці|област|регион|окрестност|пригород)|"
                          r"\b(?:ciudad|city|provinc\w*|comunidad|region)\b", re.IGNORECASE)
 _STREET_WORD = re.compile(r"(?<!\w)(?:улиц|ул\.|проспект|переул|бульвар|район|квартал|микрорайон|вулиц|c/)|"
                           r"\b(?:calle|avenida|avda|plaza|paseo|barrio|distrito|street|avenue|district)\b",
                           re.IGNORECASE)
-_WHOLE_WORD = re.compile(r"(?<!\w)(?:вс[яеию]|всей|весь|везде|любо\w*)(?!\w)|\b(?:toda|todo|whole|entire|all)\b",
+_WHOLE_WORD = re.compile(r"(?<!\w)(?:вс[яеию]|всей|весь|любо\w*)(?!\w)|\b(?:toda|todo|whole|entire|all|any)\b",
                          re.IGNORECASE)
 _ONLY_WORD = re.compile(r"(?<!\w)только(?!\w)|\b(?:solo|sólo|only)\b", re.IGNORECASE)
 _RADIUS = re.compile(r"(?<!\d)(\d{1,3}(?:[.,]\d+)?)\s*(?:км|km|kilomet(?:er|re)s?)(?!\w)", re.IGNORECASE)
@@ -539,8 +551,10 @@ class TaskIntake:
                 return await self._edit_value(draft, text)
             if word in ENOUGH_WORDS:
                 return await self._enough(draft)
-            if draft.asking == SCOPE_PATH and draft.scope_check == "asking" and word not in self._skip_words():
-                return await self._scope_answer(draft, _scope_in_text(text, draft.spec.place), text)
+            if draft.asking == SCOPE_PATH and draft.scope_check == "asking" and word not in AI_SKIP_WORDS:
+                # only an explicit «не важно» widens; the rules' «нет», «-», «любой» keep the city
+                level = _scope_in_text(text, draft.spec.place) or ("city" if word in SKIP_WORDS else None)
+                return await self._scope_answer(draft, level, text)
             if word in self._skip_words() and draft.asking and draft.asking != "place":
                 return await self._skip(draft)
             return await self._interview(draft, text)
@@ -673,10 +687,12 @@ class TaskIntake:
         """
         place = spec.place
         if (draft.scope_check or not place.name or place.level != "city" or place.districts or place.radius_km
-                or place.country not in (None, "ES") or not is_province(place.name)):
+                or place.country not in (None, "ES") or not is_province(place.name)
+                or _fold_text(place.name).strip() in _NO_SCOPE_PLACES):
             return False
         said = [draft.task, *(t["text"] for t in draft.dialogue if t.get("role") == "user")]
-        if any(p.search(t) for t in said for p in (_SCOPE_SAID, _SCOPE_CITY, _SCOPE_COAST, _STREET_WORD)) or _other_place(draft.task, place):
+        if any(p.search(t) for t in said for p in (_SCOPE_SAID, _SCOPE_CITY, _SCOPE_COAST, _SCOPE_CENTRE,
+                                                                _SCOPE_EVERYWHERE, _STREET_WORD)) or _other_place(draft.task, place):
             return False
         asked = [question or "", *(t["text"] for t in draft.dialogue if t.get("role") == "assistant")]
         return not any(_CITY_WORD.search(q) and _PROVINCE_WORD.search(q) for q in asked)
@@ -709,6 +725,8 @@ class TaskIntake:
         if place_level and draft.spec.place.name:
             draft.spec.place = draft.spec.place.model_copy(update={"level": place_level})
             draft.widened = place_level == "province"
+            if draft.widened and not draft.spec.place.districts:  # the whole province: no «which district?» next
+                draft.spec = draft.spec.mark_unspecified("place.districts")
             log.info("telegram.intake.place_scope", extra={"user_id": draft.user_id, "level": place_level})
         if draft.asking == "place.districts" and _SUBURB.search(draft.task):
             if draft.spec.place.radius_km and draft.spec.place.radius_km != spec.place.radius_km:
@@ -806,7 +824,8 @@ class TaskIntake:
         asking = (turn.asking if turn else None) or (missing[0] if missing else None)
         options = turn.options if turn else ()
         choices = turn.choices if turn else ()
-        if asking == "place.districts" and (spec.place.radius_km or spec.place.districts):
+        if asking == "place.districts" and (spec.place.radius_km or spec.place.districts or (
+                draft.scope_check == "done" and draft.widened and spec.is_unspecified("place.districts"))):
             asking = next_path(spec, mode)
             question = question_for(spec, asking) if asking else None
             options = options_for(asking) if asking else ()
@@ -959,29 +978,45 @@ def _widened_place(draft: Draft, spec: TaskSpec) -> dict[str, object] | None:
 def _scope_in_text(text: str, place: Place) -> str | None:
     """INTAKE_ASK_CITY_OR_PROVINCE (Q62): «city», «province» or None (neither) in a typed answer to the scope question.
 
-    «вся провинция», «Малага и Коста-дель-Соль», «везде», «не только город» -> province; «только город», «solo la
-    ciudad», «только Мадрид» -> city; both words: province with «вся/весь/toda», else city.
+    The province only by explicit words: «провинция», «область», «везде», «побережье», «Коста-дель-Соль», «и город, и
+    провинция», a negated city («не город», «не только город»). The city: «город», «только город», «solo la ciudad»,
+    «центр», «весь Мадрид», «весь город», «в любом районе», a negated province («не провинция», «без области»).
     """
-    province = bool(_PROVINCE_WORD.search(text) or _SCOPE_COAST.search(text))
-    city = bool(_CITY_WORD.search(text) or _SCOPE_CITY.search(text))
-    if re.search(r"(?<!\w)не\s+только(?!\w)|\bno\s+s[oó]lo\b|\bnot\s+only\b", text, re.IGNORECASE):
+    def hits(*patterns: re.Pattern[str]) -> list[bool]:  # one flag per match: negated or not
+        return [bool(_SCOPE_NEGATED.search(text[:m.start()])) for p in patterns for m in p.finditer(text)]
+
+    province = hits(_PROVINCE_WORD, _SCOPE_COAST, _SCOPE_EVERYWHERE)
+    city = hits(_CITY_WORD, _SCOPE_CITY, _SCOPE_CENTRE)
+    if (False in province) or (True in city):
         return "province"
-    if province and city:
-        return "province" if _WHOLE_WORD.search(text) else "city"
-    if province:
-        return "province"
-    if city or (_ONLY_WORD.search(text) and _names_place(text, place)):
+    if (True in province) or (False in city):
         return "city"
-    return "province" if _WHOLE_WORD.search(text) else None
+    if (_ONLY_WORD.search(text) or _WHOLE_WORD.search(text) or re.search(r"(?<!\w)район", text, re.IGNORECASE)) and (
+            _names_place(text, place) or re.search(r"(?<!\w)район|\bbarrio|\bzona\b", text, re.IGNORECASE)):
+        return "city"
+    return None
 
 
 def _other_place(text: str, place: Place) -> bool:
     """Q62: the task names a place besides ``place``: a capitalised word inside a sentence that is not the place
-    («в Чамбери, Мадрид», «Мадрид, Las Rozas»); the first word of a sentence and acronyms («IBI») do not count."""
+    («в Чамбери, Мадрид», «Мадрид, Las Rozas»). The first word of a sentence, acronyms («IBI»), the country
+    («Испания», «España»), portals and brands («Idealista», «Airbnb») and a metro station («рядом с метро Sol») do
+    not count."""
     for sentence in re.split(r"[.!?\n:;]", text):
         words = re.findall(r"[^\W\d_][\w'-]*", sentence)
-        if any(w[0].isupper() and not w.isupper() and not _names_place(w, place) for w in words[1:]):
-            return True
+        station = False
+        for i, w in enumerate(words):
+            folded = _fold_text(w)
+            if folded in _METRO_WORDS:
+                station = True
+                continue
+            capital = w[0].isupper() and not w.isupper()
+            if station and capital:
+                continue  # the station's name, one or more words
+            station = False
+            if (i and capital and not _names_place(w, place)
+                    and not any(folded.startswith(stem) for stem in _NOT_PLACE_STEMS)):
+                return True
     return False
 
 
