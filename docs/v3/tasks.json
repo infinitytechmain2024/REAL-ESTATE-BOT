@@ -836,7 +836,7 @@
     },
     {
       "id": "T3",
-      "title": "Цикл качества до ≥ 90 % средней по ролям (≤ $10)",
+      "title": "Цикл качества до ≥ 90 % средней по ролям (≤ $20, расширено владельцем)",
       "stream": "sim",
       "agent": "architect",
       "deps": [
@@ -1449,6 +1449,114 @@
     {
       "id": "Q54",
       "title": "Порталы для объектной части режима both",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q55",
+      "title": "Качество отложенных похожих (лоты, участки одной продажи)",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q56",
+      "title": "Противоречие фактов портала и текста → пусто",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q57",
+      "title": "Idealista: район в адресе",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q58",
+      "title": "Дедуп объявлений-двойников; точные первыми в отчёте",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q59",
+      "title": "Студия = 0 спален (сезонная аренда отложена владельцем после 3 ревью)",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q60",
+      "title": "Лиды одной организации, прошедшие события, счёт отчёта",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q61",
+      "title": "Инвесторские раунды веб-этапа в режиме both",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q62",
+      "title": "Вопрос «город или вся провинция»",
+      "stream": "sim-fix",
+      "agent": "builder",
+      "deps": [
+        "T2"
+      ],
+      "status": "done",
+      "day": "",
+      "hours": 0
+    },
+    {
+      "id": "Q63",
+      "title": "Роль «продаю объект, ищу покупателя»",
       "stream": "sim-fix",
       "agent": "builder",
       "deps": [
