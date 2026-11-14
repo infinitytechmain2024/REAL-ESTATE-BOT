@@ -109,6 +109,20 @@ plots with a round area (a multiple of 50 m², typical plots of one estate) unle
 cadastral reference (one zone covers a whole estate). A planning zone («N.Z. 8.1.A», «norma zonal 8.1.A») or a
 cadastral reference stated in both texts must agree.
 
+Twin listings (``same_object(..., twin_listings=True)``, ``DEDUP_TWIN_LISTINGS``, Q58): one object posted twice by
+its seller, once as a repost (Fotocasa references «E18484» and «E18484R», one text, 10 500 m², 90 000 €) or under two
+municipalities by two servicer offices (Idealista «Via Sense Nom, Orxeta» and «Camino de l'Ermita, Sella», one text,
+665 626 m², 15 600 €, two phones). The rules above miss both: two different agency references end the comparison
+(Q15), two addresses without a shared street need a shared phone or agency (Q47). A pair (no social network) is one
+object when all hold: the same long description (``_same_description`` with ``COPY_JACCARD``: at least 400 characters
+in common, the same small numbers, 5-word shingles Jaccard >= 0.90); the price exactly equal and the area exactly equal
+(both known; a plot's ``plot_m2`` when there is no ``area_m2``); the property type and the deal known on both sides and
+equal; the same rooms and floor (or unknown on both); the shorter description at least ``TWIN_LENGTH_RATIO`` (80 %) of
+the longer one. Never: a new development; two agency references unless equal or one is the other with a repost
+suffix («R», ``_REPOST_SUFFIXES``). A round area (rounded to 1 m², a multiple of 50 m², the typical plots of one
+estate under one template text) merges only with agency references on both sides (equal or a repost) or one
+cadastral reference stated in both texts. The addresses and the agencies may differ.
+
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
 are both unknown. ``same_object`` is the arbiter.
@@ -144,6 +158,10 @@ DESCRIPTION_MIN_CHARS = 400
 # of an agency for two units keeps its words too, so the numbers decide); stricter than ``TEXT_PRICE_JACCARD``
 COPY_JACCARD = 0.90
 COPY_AREA_TOLERANCE = 0.01
+# Q58 (``_same_twin``): a reference with this suffix is a repost of the other («E18484R» of «E18484»)
+_REPOST_SUFFIXES = ("r",)
+# Q58: the shorter description is at least this share of the longer one (a short template is a prefix of a long text)
+TWIN_LENGTH_RATIO = 0.8
 TITLE_JACCARD = 0.8
 MIN_TITLE_WORDS = 6
 
@@ -525,7 +543,7 @@ def _host(url: str | None) -> str:
 
 def same_object(a: Listing, b: Listing, *, without_address: bool = False, district_not_street: bool = False,
                 cross_portal_facts: bool = False, same_host_copy: bool = False,
-                description_normalize: bool = False, same_lot: bool = False) -> bool:
+                description_normalize: bool = False, same_lot: bool = False, twin_listings: bool = False) -> bool:
     """True only when the two listings are almost surely one property (see the module notes); ``without_address``
     (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``);
     ``district_not_street`` (``DEDUP_DISTRICT_NOT_STREET``, Q15) does not require a shared street when an address is
@@ -535,7 +553,9 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
     ``description_normalize`` (``DEDUP_DESCRIPTION_NORMALIZE``, Q50) merges one description on two sites under a
     «Ref: ...» wrapper (``_same_wrapped_description``); ``same_lot`` (``HELD_OFFER_QUALITY``, Q55) merges one plot
     with the same whole cadastral references at two prices (``_same_parcels``) and one portal's two ads of one
-    address with the same description and price while the area is unknown (``_same_listed_lot``)."""
+    address with the same description and price while the area is unknown (``_same_listed_lot``); ``twin_listings``
+    (``DEDUP_TWIN_LISTINGS``, Q58) merges one long description at one exact price and area whatever the addresses or a
+    repost suffix of the reference (``_same_twin``)."""
     if a.deal and b.deal and a.deal != b.deal:
         return False
     if a.currency and b.currency and a.currency != b.currency:
@@ -553,6 +573,8 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
     area = _close(a.area, b.area, AREA_TOLERANCE)
     if price is False or area is False:
         return False
+    if twin_listings and _same_twin(a, b):
+        return True  # Q58: one object reposted or filed under two municipalities, one text, price and area
     street_a, street_b = tokens(a.address), tokens(b.address)
     both_addressed = bool(a.address.strip() and b.address.strip())
     stop = _DISTRICT_STOP if district_not_street else _PLACE_STOP
@@ -716,6 +738,37 @@ def _same_host_copy(a: Listing, b: Listing) -> bool:
         return False  # one street or district: typical plots or units of one estate (the rule of one host decides)
     if _named_street(a) and _named_street(b):
         return False  # two streets that differ: two objects (units of a development not named one)
+    return _same_description(a, b, COPY_JACCARD)
+
+
+def _repost_refs(a: str, b: str) -> bool:
+    """Q58: two agency references (``ref_key``) of one ad: equal, or one is the other with a repost suffix."""
+    short, long = sorted((a, b), key=len)
+    return bool(short) and (short == long or any(long == short + suffix for suffix in _REPOST_SUFFIXES))
+
+
+def _same_twin(a: Listing, b: Listing) -> bool:
+    """Q58: one object listed twice (see the module notes): the same long description (``COPY_JACCARD``), the price
+    and the area exactly equal, the same type, deal, rooms and floor; never a new development or two references
+    that are not one (``_repost_refs``); a round area only with references on both sides or one cadastral reference."""
+    host_a, host_b = _host(a.url), _host(b.url)
+    if not host_a or not host_b or a.url == b.url or host_a in _SOCIAL_HOSTS or host_b in _SOCIAL_HOSTS:
+        return False
+    if a.new_build or b.new_build or not (a.kind and a.kind == b.kind) or not (a.deal and a.deal == b.deal):
+        return False
+    if a.rooms != b.rooms or a.floor != b.floor:
+        return False
+    area_a, area_b = _bare_area(a), _bare_area(b)
+    if a.price is None or a.price != b.price or area_a is None or area_b is None or round(area_a) != round(area_b):
+        return False
+    refs = bool(a.agency_ref and b.agency_ref)
+    if refs and not _repost_refs(a.agency_ref, b.agency_ref):
+        return False  # another reference of the agency: another unit
+    if round(area_a) % BARE_ROUND_AREA == 0 and not (refs or a.cadastre & b.cadastre or a.parcels & b.parcels):
+        return False  # typical plots of one estate under one template text
+    short, long = sorted((len(a.description), len(b.description)))
+    if short < TWIN_LENGTH_RATIO * long:
+        return False  # a short template is the prefix of a long text: the common length hides the rest
     return _same_description(a, b, COPY_JACCARD)
 
 

@@ -166,7 +166,8 @@ class CampaignRunnerSettings(BaseSettings):
                                              timeout_seconds=float(self.final_timeout_seconds))
                        if self.openrouter_api_key else None)
         return FinalReporter(recommender, every_portal=self.report_every_portal,
-                             precise_reasons=self.report_precise_reasons)
+                             precise_reasons=self.report_precise_reasons,
+                             exact_first=self.report_top_exact_first)
 
     # Tell the chat about closed Facebook groups (Apify group_private) and read them after «Вступил».
     join_notices: bool = Field(default=False, validation_alias="CAMPAIGN_JOIN_NOTICES")
@@ -195,6 +196,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q37: «По источникам» in the final report shows every portal source that ran, also one that found nothing
     # («Habitaclia — объявлений не найдено»); bot/web_search/settings.py reads the same flag.
     report_every_portal: bool = Field(default=False, validation_alias="REPORT_EVERY_PORTAL")
+    # Q58: «Лучшие варианты» of the final report list the cards sent as exact first, then the similar/other ones sent
+    # after «Одобрить» (shares, lots); the previous order (score, price, number) within each group.
+    report_top_exact_first: bool = Field(default=False, validation_alias="REPORT_TOP_EXACT_FIRST")
     # Q40: a finished search's last status line counts every delivery (cards, people, post leads, reach contacts).
     status_counts_all_deliveries: bool = Field(default=False, validation_alias="STATUS_COUNTS_ALL_DELIVERIES")
     # Q41: held findings with no recorded why (why IS NULL) are listed too when an exclude_why is not given
@@ -210,6 +214,10 @@ class CampaignRunnerSettings(BaseSettings):
     # «Показать?»; one plot with the same cadastral references, or one portal's lot at one address with one
     # description and price, is one card (bot/campaign/dedup.py ``same_lot``).
     held_offer_quality: bool = Field(default=False, validation_alias="HELD_OFFER_QUALITY")
+    # Q58: one long description (the same small numbers) at one exact price and area is one card even under two
+    # addresses or municipalities, or with a repost suffix of the agency reference («E18484R»); never a new
+    # development, two other references, or a round plot area without references (bot/campaign/dedup.py ``_same_twin``).
+    dedup_twin_listings: bool = Field(default=False, validation_alias="DEDUP_TWIN_LISTINGS")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")
@@ -509,7 +517,8 @@ class CampaignRunnerSettings(BaseSettings):
                             status_counts_all_deliveries=self.status_counts_all_deliveries,
                             report_precise_reasons=self.report_precise_reasons,
                             report_after_offer=self.report_after_offer,
-                            held_offer_quality=self.held_offer_quality)
+                            held_offer_quality=self.held_offer_quality,
+                            dedup_twin_listings=self.dedup_twin_listings)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

@@ -327,6 +327,9 @@ class RunnerConfig:
     # A reviewer's fail is never held for «Показать?», and one plot listed twice is one card
     # (``review_match(strict_fail=True)``, ``same_object(same_lot=True)``, Q55).
     held_offer_quality: bool = False
+    # One long description at one exact price and area is one object whatever the addresses or a repost suffix of the
+    # reference (``same_object(twin_listings=True)``, Q58).
+    dedup_twin_listings: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -797,7 +800,8 @@ class CampaignRunner:
                         cross_portal_facts=self.config.dedup_cross_portal_facts,
                         same_host_copy=self.config.dedup_same_host_copy,
                         description_normalize=self.config.dedup_description_normalize,
-                        same_lot=self.config.held_offer_quality):
+                        same_lot=self.config.held_offer_quality,
+                        twin_listings=self.config.dedup_twin_listings):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -839,7 +843,8 @@ class CampaignRunner:
                         cross_portal_facts=self.config.dedup_cross_portal_facts,
                         same_host_copy=self.config.dedup_same_host_copy,
                         description_normalize=self.config.dedup_description_normalize,
-                        same_lot=self.config.held_offer_quality):
+                        same_lot=self.config.held_offer_quality,
+                        twin_listings=self.config.dedup_twin_listings):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:

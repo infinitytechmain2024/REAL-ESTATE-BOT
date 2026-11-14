@@ -250,15 +250,19 @@ def card_score(payload: dict[str, Any] | None, request: Request) -> float:
     return round(0.4 * budget + 0.15 * rooms + 0.15 * area + 0.3 * sum(present) / len(present), 4)
 
 
-def rank_cards(sent: Sequence[SentFinding], request: Request, limit: int = TOP) -> list[Ranked]:
+def rank_cards(sent: Sequence[SentFinding], request: Request, limit: int = TOP,
+               exact_first: bool = False) -> list[Ranked]:
     """The best ``limit`` sent cards: exact ones before similar, highest score first, then the cheaper one,
-    then the card's own number (the earlier one)."""
+    then the card's own number (the earlier one). ``exact_first`` (``REPORT_TOP_EXACT_FIRST``, Q58): the cards sent as
+    exact (``SentFinding.bucket``) come before the similar/other ones sent after «Одобрить» (shares, lots the reviewer
+    held, which the rules alone call exact), the order above within each group."""
     scored = [Ranked(card, card_score(card.finding.payload, request)) for card in sent]
 
-    def key(r: Ranked) -> tuple[int, float, float, int, str]:
+    def key(r: Ranked) -> tuple[Any, ...]:
         payload = r.card.finding.payload
         exact = classify(payload, request, vertical=r.card.finding.vertical).bucket == "exact"
-        return (0 if exact else 1, -r.score, price_of(payload) or float("inf"), r.card.number, r.card.finding.id)
+        order = (0 if exact else 1, -r.score, price_of(payload) or float("inf"), r.card.number, r.card.finding.id)
+        return (0 if r.card.bucket == "exact" else 1, *order) if exact_first else order
 
     return sorted(scored, key=key)[:limit]
 
@@ -872,8 +876,9 @@ class FinalReporter:
     """Builds the report; ``recommender`` None (no key): the rule-based recommendations only."""
 
     def __init__(self, recommender: Recommender | None = None, *, every_portal: bool = False,
-                 precise_reasons: bool = False) -> None:
+                 precise_reasons: bool = False, exact_first: bool = False) -> None:
         self.recommender = recommender
+        self.exact_first = exact_first  # REPORT_TOP_EXACT_FIRST (Q58): the cards sent as exact lead «Лучшие варианты»
         self.every_portal = every_portal  # REPORT_EVERY_PORTAL (Q37): every portal that ran in «По источникам»
         # REPORT_PRECISE_REASONS (Q43): a portal our page/budget caps stopped says so in «По источникам»
         self.precise_reasons = precise_reasons
@@ -915,14 +920,14 @@ class FinalReporter:
         advice = evidence_actions(held)
         advice.extend(tip for tip in await self._advice(facts, counts) if tip not in advice)
         if vertical != "both":
-            return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
+            return report_text(goal, counts, rank_cards(sent, request, exact_first=self.exact_first), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
                                other_sites, note, cost_lines(costs, budget), evidence, task_text,
                                must_note=mandatory_note(counts, held))
         tail = "\n\n" + "\n".join(investors_section(leads))
         money = cost_lines(costs, budget) + branch_cost_line(costs)
         if money:
             tail += "\n\n" + "\n".join(money)
-        return report_text(goal, counts, rank_cards(sent, request), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
+        return report_text(goal, counts, rank_cards(sent, request, exact_first=self.exact_first), funnel, unreadable, advice[:MAX_RECOMMENDATIONS],
                            other_sites, note, (), evidence, task_text, "🏠 Недвижимость", len(tail),
                            mandatory_note(counts, held)) + tail
 
