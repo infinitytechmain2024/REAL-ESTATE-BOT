@@ -175,6 +175,29 @@ def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] |
     """«long» when the person's words ask for a long lease («на год», «долгосрочно», «long term») and name no short
     one; «short» for the reverse («на лето», «на 1–3 месяца», «посуточно»); None when neither or both are named.
     A term with a negation among the 3 words before it («не обязательно на год», «not long term») is not named."""
+    folded = _task_words(spec, texts)
+    long, short = _term_named(_LONG_TERM, folded), _term_named(_SHORT_TERM, folded)
+    return "long" if long and not short else "short" if short and not long else None
+
+
+# RENT_SEASONAL_EXCLUDED (Q59). A lease of six months or more in the person's words («на 6 месяцев», «от 6 месяцев»,
+# «на полгода», «минимум 8 месяцев»): ``_SHORT_TERM`` reads «на 6 месяцев» as short (any 1–11 months), yet a seasonal
+# let does not fit it. Sim b5-g5-s6 answered «от 6 месяцев».
+_HALF_YEAR_PLUS = re.compile(
+    r"(?<!\w)(?:(?:на|от|від|минимум|не\s+менее|мінімум|хотя\s+бы)\s+"
+    r"(?:(?:[6-9]|1[01])(?!\d)|шесть|семь|восемь|девять|десять|одиннадцать|шість|сім|вісім|дев'ять)\s+"
+    r"(?:месяц|місяц)\w*|(?:на|от|від)\s+(?:полгода|пол\s+года|полугода|півроку|пів\s+року)(?!\w))")
+
+
+def task_asks_short(spec: object, *texts: object) -> bool:
+    """Q59: ``task_rental_term`` is «short» once a lease of six months or more is not counted as a short term: «на
+    6 месяцев» or «на полгода» alone is no short term, «на 6 месяцев или на лето» still is."""
+    folded = _HALF_YEAR_PLUS.sub(" | ", _task_words(spec, texts))
+    return _term_named(_SHORT_TERM, folded) and not _term_named(_LONG_TERM, folded)
+
+
+def _task_words(spec: object, texts: tuple[object, ...]) -> str:
+    """The person's own words of a task, folded: the texts, the interview answers, must-haves, wishes and notes."""
     parts = [str(t or "") for t in texts]
     if isinstance(spec, dict):
         context = spec.get("context")
@@ -190,9 +213,7 @@ def task_rental_term(spec: object, *texts: object) -> Literal["long", "short"] |
             if isinstance(wish, dict):
                 parts.append(str(wish.get("text") or ""))
         parts.append(str(spec.get("notes") or ""))
-    folded = " ".join(_fold(" | ".join(parts)).split())
-    long, short = _term_named(_LONG_TERM, folded), _term_named(_SHORT_TERM, folded)
-    return "long" if long and not short else "short" if short and not long else None
+    return " ".join(_fold(" | ".join(parts)).split())
 
 
 # RENT_DEFAULT_LONG_TERM (Q49). A listing that says it is a seasonal, temporary or holiday let, read from its own

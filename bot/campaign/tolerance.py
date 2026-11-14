@@ -67,6 +67,11 @@ Other constraints
   seasonal, temporary or holiday let (``bot/utils/listing_text.py`` ``seasonal_let_named``: «alquiler de temporada»,
   «alquiler temporal», «uso vacacional», «por meses», «estancias cortas»; not «larga temporada», «no temporal»). A task that asks
   for a short term («на сезон», «на пару месяцев», «посуточно»; ``task_rental_term`` «short»): unchanged.
+* Seasonal let excluded (Q59, ``RENT_SEASONAL_EXCLUDED``; ``Request.seasonal_excluded``) -> excluded (``seasonal``,
+  «сезонная аренда»), never offered with «Показать?»: the same home rent and the same listing signs as Q49, but the
+  person does not want a seasonal let at all. A lease of six months or more («на 6 месяцев», «на полгода»;
+  ``bot/utils/listing_text.py`` ``task_asks_short``) is no short term here. Sim b5-g5-s6 («от 6 месяцев»): 12 seasonal
+  lets were offered as similar and approved. A task that asks for a short term: unchanged.
 * Another country (``geo``) -> excluded: the payload's ``country`` is not the
   requested city's, its location names a place clearly in another country
   (Москва, Минск ...), its link is under another country's TLD (``.ru``,
@@ -101,7 +106,12 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from bot.utils.listing_text import auction_named, seasonal_let_named, task_rental_term
+from bot.utils.listing_text import (
+    auction_named,
+    seasonal_let_named,
+    task_asks_short,
+    task_rental_term,
+)
 
 from . import geo
 from .architect import find_places
@@ -118,7 +128,7 @@ _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
 Why = Literal["price", "area", "area_max", "rooms", "location", "deal", "kind", "type", "foreign", "currency", "ai",
               "unverified", "area_unknown", "location_unknown", "approved_deviation", "ai_failed", "cost_cap",
-              "deal_kind"]
+              "deal_kind", "seasonal"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -157,6 +167,8 @@ class Request:
     rental_term: str | None = None
     # RENT_DEFAULT_LONG_TERM (Q49): a home rent that asked for no short term; a seasonal let is never exact
     seasonal_guard: bool = False
+    # RENT_SEASONAL_EXCLUDED (Q59): a home rent that asked for no short term; a seasonal let is excluded
+    seasonal_excluded: bool = False
 
     @property
     def country_code(self) -> str | None:
@@ -353,6 +365,17 @@ def _seasonal_guard(deal: object, kind: str | None, spec: dict[str, Any] | None,
             and task_rental_term(spec, text) != "short")
 
 
+def seasonal_excluded_enabled() -> bool:
+    """RENT_SEASONAL_EXCLUDED (default off): a seasonal let is excluded for a home rent without a short term (Q59)."""
+    return os.environ.get("RENT_SEASONAL_EXCLUDED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _seasonal_excluded(deal: object, kind: str | None, spec: dict[str, Any] | None, text: str | None) -> bool:
+    """RENT_SEASONAL_EXCLUDED (Q59): a rent of a home whose words name no short term (six months or more is none)."""
+    return (deal == "rent" and kind in (None, "apartment", "house") and seasonal_excluded_enabled()
+            and not task_asks_short(spec, text))
+
+
 def request_for(constraints: dict[str, Any], *, location: str | None = None, vertical: str | None = None,
                 text: str | None = None, country: str | None = None,
                 deviations: dict[str, Any] | None = None, spec: dict[str, Any] | None = None) -> Request:
@@ -390,6 +413,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         auction_guard=facts_from_row_enabled(),
         rental_term=task_rental_term(spec, text) if deal == "rent" and rental_term_enabled() else None,
         seasonal_guard=_seasonal_guard(deal, kind, spec, text),
+        seasonal_excluded=_seasonal_excluded(deal, kind, spec, text),
     )
 
 
@@ -479,6 +503,8 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
         result = worse(result, Match("similar", 0.0, "deal_kind", note=TEMPORARY_NOTE))  # Q20: not a long lease
     if request.seasonal_guard and request.deal == "rent" and _seasonal_let(payload):
         result = worse(result, Match("similar", 0.0, "deal_kind", note=SEASONAL_NOTE))  # Q49: not a home to live in
+    if request.seasonal_excluded and request.deal == "rent" and _seasonal_let(payload):
+        result = worse(result, Match("excluded", math.inf, "seasonal", note=SEASONAL_NOTE))  # Q59: not wanted at all
     if request.amount is not None:
         price = price_of(payload)
         currency = currency_code(payload.get("price_currency")) or request.currency
