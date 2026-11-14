@@ -96,6 +96,8 @@ BASE_ENV: dict[str, str] = {
     "CAMPAIGN_EMPTY_REPORT": "true",  # Q33
     "REPORT_EVERY_PORTAL": "true",  # Q37
     "STATUS_COUNTS_ALL_DELIVERIES": "true",  # Q40
+    # Q39: every page of the web stage is an operator's answer (pending_page); 30 per campaign, not prod's 400.
+    "WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN": "30",
 }
 # Unset for the run whatever the shell says: no digest chat (the runner sends a campaign's cards).
 UNSET = ("ANALYSIS_TELEGRAM_CHAT_ID", "SIM_DATABASE_URL")
@@ -271,7 +273,7 @@ class Bench:
     def _clear_pending(self) -> None:
         """This run's old pending files go: what is left after the pass is what it waits for now."""
         (self.root / "pending_answers" / f"{self.run_id}.json").unlink(missing_ok=True)
-        for folder in ("pending", "pending_apify", "pending_web"):
+        for folder in ("pending", "pending_apify", "pending_web", "pending_page"):
             for path in (self.root / folder).glob("*.json"):
                 with contextlib.suppress(ValueError, OSError):
                     if json.loads(path.read_text(encoding="utf-8")).get("run") == self.run_id:
@@ -305,7 +307,8 @@ class Bench:
                     await close()
 
     def _finish(self) -> int:
-        if self.net.pending_llm or self.net.pending_apify or self.net.pending_web or self.net.blocked_apify:
+        if (self.net.pending_llm or self.net.pending_apify or self.net.pending_web or self.net.pending_page
+                or self.net.blocked_apify):
             self.status = "waiting"
             return CODE_WAITING
         if self.status == "stalled":
@@ -317,7 +320,8 @@ class Bench:
         """A strict run's miss in a background task (an Apify run of the social stage) stops the run here."""
         for kind, folder, names in (("llm", "pending", self.net.pending_llm),
                                     ("apify", "pending_apify", self.net.pending_apify),
-                                    ("web", "pending_web", self.net.pending_web)):
+                                    ("web", "pending_web", self.net.pending_web),
+                                    ("page", "pending_page", self.net.pending_page)):
             if self.strict and names:
                 raise SimStop(kind, self.root / folder / f"{names[0]}.json")
 
@@ -719,7 +723,7 @@ class Bench:
 
     def _progress(self) -> tuple[int, ...]:
         net = self.net
-        return net.calls, len(net.pending_llm), len(net.pending_apify), len(net.pending_web)
+        return net.calls, len(net.pending_llm), len(net.pending_apify), len(net.pending_web), len(net.pending_page)
 
     async def _offer(self) -> bool:
         """The runner's «Есть ещё похожие варианты (…). Показать?» (``near:`` buttons, ``bot/campaign/offers.py``)
@@ -736,7 +740,7 @@ class Bench:
                     or not any(str(b.get("data") or "").startswith(NEAR_PREFIX) for b in buttons)):
                 continue
             if self.answers_used >= len(self._answers()) and (self.net.pending_llm or self.net.pending_apify
-                                                               or self.net.pending_web):
+                                                               or self.net.pending_web or self.net.pending_page):
                 return answered
             self._offered.add(message["message_id"])
             reply = Reply(message["text"], tuple(Button(b["text"], callback_data=b["data"]) for b in buttons
@@ -785,7 +789,7 @@ class Bench:
             data.update(await self._campaign_data(pool, campaign_id))
         data["pending"] = {"llm": sorted(set(self.net.pending_llm)), "apify": sorted(set(self.net.pending_apify)),
                            "apify_blocked": sorted(set(self.net.blocked_apify)),
-                           "web": sorted(set(self.net.pending_web))}
+                           "web": sorted(set(self.net.pending_web)), "page": sorted(set(self.net.pending_page))}
         data["llm_calls"] = _count(c["stage"] for c in self.net.llm_calls)
         data["offline"] = _count(f"{o['method']} {o['host']}{o['path']}" for o in self.net.offline)
         data["unhandled"] = sorted(set(self.net.unhandled))

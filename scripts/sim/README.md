@@ -71,6 +71,7 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 | LLM | `pending/<ключ>.json`: `stage`, `caller`, `model`, `system`, `user`, `schema` | `cassette/<ключ>.json` | `{"content": "<JSON-ответ модели строкой>"}` или `{"tool_call": {"name": "...", "input": {...}}}`; `{"error_status": 503}` — записанный сбой |
 | Apify | `pending_apify/<актор>__<хэш>.json`: `actor`, `input`, `params` | `apify/<актор>/<хэш>.json` (`<актор>` в форме `owner~name`) | `[<строки датасета>]` или `{"items": [...], "usage_usd": 0.0}`; `apify/<актор>/_default.json` — для любого входа |
 | веб-поиск (SearXNG) | `pending_web/<ключ>.json`: `query`, `params` (`engines`, `language`, `pageno`, `categories`), `host`, `stage`, `answer_to` | `web/<ключ>.json` | JSON SearXNG: `{"query": "...", "request": {"query": ..., "params": ...}, "results": [{"url": "...", "title": "...", "content": "..."}]}`; `{"results": []}` — поиск ничего не нашёл; `{"error_status": 503}` — записанный сбой |
+| страница сайта | `pending_page/<ключ>.json`: `url`, `host`, `path`, `stage`, `speculative`, `answer_to` | `page/<ключ>.json` | `{"status": 200, "content_type": "text/html", "body": "<текст страницы>"}`; `{"status": 301, "location": "<куда>"}` (или 302, 303, 307, 308) — редирект; `{"status": 404}` — страницы нет; `{"status": 503}` — недоступна |
 | пользователь | `pending_answers/<run>.json`: `question`, `buttons`, `keyboard`, `dialogue` | `answers/<run>.json` | `{"answers": [{"text": "до 3 млн евро"}, {"press": "<текст или data кнопки>"}, ...]}` — дописать следующий |
 
 - **Ключ LLM** = sha256 от (провайдер, модель, сообщения с system, схема `response_format` или `tools`) после
@@ -132,6 +133,33 @@ Orchestra → кампания (web-этап с порталами Apify, соц
     запятой — один токен, так что `1.5` ≠ `5.1`; `-`, `"` и `site:` сохраняются), та же страница, тот же язык
     (`es` = `es-ES`) и `categories`; `engines` не важны. Копия получает свой `request` и `reused_from`.
     Остальное печатается как `left` — на это отвечает оператор; нечитаемый pending — `broken` (пропущен).
+- **Страницы сайтов** (web-этап: `PageFetcher` из `bot/web_search/fetcher.py`, страница или её `robots.txt`).
+  DNS на стенде нет: под `cassette.offline` резолвер фетчера по умолчанию — `cassette.sim_resolve`, любой хост
+  получает публичный `SIM_ADDRESS`, проверка приватных адресов проходит, запрос идёт через httpx в `SimNet`
+  (заголовки, robots, редиректы — как в проде). IP-литералы проверяются как раньше. Ответ — `page/<ключ>.json`;
+  редирект (`status` 301/302/303/307/308 с `location`) отдаётся заголовком `Location`, бот идёт по нему (не больше
+  4 переходов, адрес назначения — своя страница со своим ключом и своим pending).
+  - **Промах** (ответа нет): pending в `pending_page/` (одна страница за проход — один pending), а бот получает не
+    503, а сбой соединения `httpx.ConnectError` → `network_error:ConnectError`. Страница не прочитана
+    (`failed`, входит в лимит страниц кампании), но сайт не считается отказавшим: 503 бот засчитал бы как отказ
+    (`_REFUSALS` в `bot/web_search/store.py`, предохранитель `host_breaker` после 3 подряд в
+    `bot/web_search/worker.py`, переход к браузеру и scrape API), и остальные URL сайта ушли бы в `skipped`, не
+    попав в pending. Так все страницы сайта, до которых дошёл бот, попадают в pending за один проход. Прогон
+    кончается кодом `3`; `--step` — стоп на первом (`stop_reason: page: …`). Записанный `{"status": 503}` — это
+    уже отказ сайта, как в проде. `robots.txt` без ответа — 404 без
+  pending (у большинства сайтов его нет, всё разрешено); записанный `page/<ключ>.json` для `robots.txt`
+  (`content_type: text/plain`) отдаётся как есть.
+  - **Ключ страницы** = sha256 (`cassette.page_key`) от `bot.utils.urls.normalize_url`: без фрагмента, хост в
+    нижнем регистре без `www.`, `http` = `https`, без хвостового `/` и трекинг-параметров, query отсортирован.
+  - **Отвечает оператор** (агент Claude) настоящим содержимым публичной страницы по `url`: WebFetch или агент
+    web-fetch. В `body` — только реальный текст страницы (HTML или текст), достаточный для анализа (объявление,
+    цена, площадь, контакты, описание фонда/инвестора), ничего не придумывать и не дописывать; не больше ~20 КБ на
+    страницу (лишнее обрезать, а не пересказывать). Только публичные страницы без входа и пейволла. Недоступна —
+    `{"status": 404}` (нет) или `{"status": 503}` (сбой).
+  - **Сколько**: сайтовый этап может просить сотни страниц (прогон `b2-g7-s3` нашёл 652 ссылки). На стенде
+    `BASE_ENV` ставит `WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN=30` (прод — 400): не больше 30 страниц на кампанию
+    (плюс `WEB_SEARCH_MAX_PAGES_PER_HOST`, умолчание 100). Персона может поднять через `env`. Сначала
+    не-`speculative`.
 - Прочие хосты (сайты): `http/<host>/<хэш>.json` (`{"status": 200, "json": ...}` или `{"text": ...}`), если
   записано; иначе сайт отвечает 503, запрос попадает в `offline` результата.
 
@@ -155,6 +183,7 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 | `FEATURE_APIFY_FACEBOOK` (+ `APIFY_FACEBOOK_*`) | `false` | A4 (п. 4): `true` на время проверки, дальше — по решению владельца | группы Facebook через Apify на стенде — только названные в задаче (`SIM_FACEBOOK`) |
 | `WATCHDOG_*` | — | (ж): `true` | к кампании не относится |
 | `APIFY_MIN_LISTINGS` | `5` (умолчание) | (б1): `5` | совпадает |
+| `WEB_SEARCH_MAX_PAGES_PER_CAMPAIGN` | `30` (Q39) | `400` (умолчание) | каждая страница — ручной ответ оператора (`pending_page`); на стенде сайтов прочитано меньше |
 
 ## Деньги
 
@@ -170,6 +199,7 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 2. Код `3`: ответить на pending — `pending_answers/<id>.json` агенту-пользователю (дописать `answers/<id>.json`),
    каждый `pending/*.json` агенту в роли модели этапа (`stage`; ответ строго по `schema` и формату из `system`),
    веб-поиск — `python -m scripts.sim.web`, остаток `pending_web/*.json` — оператор настоящим поиском (см. «Ответы»),
+   `pending_page/*.json` — оператор настоящим содержимым страницы (WebFetch, см. «Ответы»),
    Apify — `python -m scripts.sim.fixtures`, остаток — запись прогона через MCP с `maxTotalChargeUsd` не выше
    `params.maxTotalChargeUsd`, затем `record_spend` и `python -m scripts.sim.spend` (код 1 — стоп). Сначала
    не-`speculative`.
@@ -184,7 +214,7 @@ Orchestra → кампания (web-этап с порталами Apify, соц
 удалениями), `cards` (отправленные карточки: текст, ссылка, payload фактов), `findings` (все, с bucket и причиной),
 `leads` (лиды из комментариев, с карточкой, если отправлен), `reach_contacts` (инвесторы из reach, с карточкой,
 если отправлен), `report` (отчёт по поиску), `campaign_costs` и
-`costs_total_usd`, `pending` (`llm`, `apify`, `apify_blocked`, `web`), `llm_calls` (вызовы по этапам), `offline`, `unhandled`, `errors` (`stages` — исключения
+`costs_total_usd`, `pending` (`llm`, `apify`, `apify_blocked`, `web`, `page`), `llm_calls` (вызовы по этапам), `offline`, `unhandled`, `errors` (`stages` — исключения
 этапов, `logged` — предупреждения и ошибки бота по модулям). Время вырезано; id детерминированы (UUID из
 последовательности `sim.gen_random_uuid`, `uuid.uuid4` процесса — счётчик), поэтому повтор даёт тот же файл.
 Исключение — тексты бота относительно сегодняшней даты («последний комментарий сегодня»): в другой день они другие.

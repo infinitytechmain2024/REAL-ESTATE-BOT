@@ -62,6 +62,8 @@ def summary(root: Path, run: str, result: dict, out: Path) -> str:
         f"(answer: {root / 'apify'}/<actor>/<hash>.json)",
         f"  pending web:     {len(pending.get('web', []))}  -> {root / 'pending_web'}/<key>.json "
         f"(answer: {root / 'web'}/<key>.json)",
+        f"  pending pages:   {len(pending.get('page', []))}  -> {root / 'pending_page'}/<key>.json "
+        f"(answer: {root / 'page'}/<key>.json)",
         f"  pending answers: {1 if waiting_answer else 0}  -> {answers} (answer: {root / 'answers'}/{run}.json)",
     ]
     if pending.get("apify_blocked"):
