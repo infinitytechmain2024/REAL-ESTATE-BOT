@@ -73,6 +73,7 @@ BASE_ENV: dict[str, str] = {
     "IDEALISTA_SORT_BIGGEST": "true",
     "IDEALISTA_UNAMBIGUOUS_PLACE": "true",  # Q17; REDIS_URL is empty here: no geocoder, so the input stays the name
     "IDEALISTA_STATIC_CENTERS": "true",  # Q30: ...except for a city of the static list (its centre and circle)
+    "IDEALISTA_PROVINCE_LOCATION_ID": "true",  # Q36: a province goes as its Location ID 0-EU-ES-<INE code>
     "RELEVANCE_SOFT_WISHES": "true",
     "SEARCH_QUERY_HYGIENE": "true",
     "ANALYSIS_LOCATION_FROM_TEXT": "true",
