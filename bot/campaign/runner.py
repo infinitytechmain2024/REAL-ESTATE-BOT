@@ -304,6 +304,8 @@ class RunnerConfig:
     dedup_without_address: bool = False
     # A district in the address is no street; the agency reference counts (``same_object(district_not_street=True)``, Q15).
     dedup_district_not_street: bool = False
+    # Two portals' addresses without a shared street merge by the facts rule (``same_object(cross_portal_facts=True)``, Q32).
+    dedup_cross_portal_facts: bool = False
     # The similar question names every distinct difference of the held listings, not only the closest one's (Q25).
     offer_all_reasons: bool = False
     # A held similar/other finding is merged with the same object already held or sent before it is held (Q27).
@@ -745,7 +747,8 @@ class CampaignRunner:
             for head in held[bucket]:
                 if head.sent.finding.id == finding.id or not same_object(
                         mine, head.listing, without_address=self.config.dedup_without_address,
-                        district_not_street=self.config.dedup_district_not_street):
+                        district_not_street=self.config.dedup_district_not_street,
+                        cross_portal_facts=self.config.dedup_cross_portal_facts):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -783,7 +786,8 @@ class CampaignRunner:
             for position, head in enumerate(index.heads):
                 if head.sent.finding.id == finding.id or not same_object(
                         mine, head.listing, without_address=self.config.dedup_without_address,
-                        district_not_street=self.config.dedup_district_not_street):
+                        district_not_street=self.config.dedup_district_not_street,
+                        cross_portal_facts=self.config.dedup_cross_portal_facts):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
