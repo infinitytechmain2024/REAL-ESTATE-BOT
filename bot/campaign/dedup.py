@@ -129,11 +129,13 @@ b6-g5-s7): other texts, other agency references (Q15 then ends the comparison) a
 social network) are one object when all hold (``_same_rent_copy``): both ``rent``; the price exactly equal and the
 area exactly equal (both known); the rooms known on both sides and equal; the property type equal when known on both;
 one named city; no new development; the numbers of the two addresses (house, floor, door) the same when both have any;
-not two named streets without a shared street token; not one agency with two other references (one platform, two
-units); and a sign of one place: a shared street token (both streets named), a shared district or street token
-(``_place_tokens``) when the price is not round (``_round_price``: a round rent is common in one district), or the same
-long description (``normalized_description``, ``_same_description`` with ``COPY_JACCARD``) of two other agencies (one
-platform's template text is the same for all its units, and shorter than 400 characters anyway).
+not two named streets without a shared street token; both advertisers named, and not one advertiser (``compact_agency``:
+«Housing Anywhere» = «HousingAnywhere») with two other references; and a strong sign of one ad (``rent_copy_sign``):
+the same strong agency reference, the same link to another site in both descriptions (the platform's ad page), one
+named street with the same house number (on both sides or on none), or the same long description
+(``normalized_description``, ``_same_description`` with ``COPY_JACCARD``) of two other advertisers. A shared district
+is no sign: one flat named only by its district on two platforms (HousingAnywhere's template, no street) stays two
+cards.
 
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
@@ -175,6 +177,8 @@ _REPOST_SUFFIXES = ("r",)
 # Q58: the shorter description is at least this share of the longer one (a short template is a prefix of a long text)
 TWIN_LENGTH_RATIO = 0.8
 TITLE_JACCARD = 0.8
+# Q67: mid-term rent platforms (``rent_platform``, compared by ``compact_agency``)
+RENT_PLATFORMS = ("housinganywhere", "spotahome", "uniplaces", "badi", "erasmusu", "nestpick", "inlife")
 MIN_TITLE_WORDS = 6
 
 TEXT_LIMIT = 1500  # characters of the post body that are fingerprinted (heads keep only this excerpt)
@@ -793,14 +797,58 @@ def _address_numbers(address: str) -> tuple[str, ...]:
     return tuple(re.findall(r"\d+", _fold(address or "")))
 
 
+def compact_agency(name: str | None) -> str:
+    """Q67: an advertiser name without spaces, case, hyphens and legal forms («Housing Anywhere» = «HousingAnywhere»)."""
+    return agency_key(name).replace(" ", "")
+
+
+def rent_platform(name: str | None) -> bool:
+    """Q67: the advertiser is a mid-term rent platform (``RENT_PLATFORMS``, «Spotahome», «spotahome.com»)."""
+    key = compact_agency(name)
+    return any(key in (platform, platform + "com", platform + "es") for platform in RENT_PLATFORMS)
+
+
+def _external_links(listing: Listing) -> frozenset[str]:
+    """Q67: the links of the description to another site than the listing's own portal (a platform's ad page)."""
+    own = _host(listing.url)
+    out = set()
+    for found in _URL.findall(listing.description):
+        link = found.lower().rstrip("/.,;)»\"'")
+        link = re.sub(r"^(?:https?://)?(?:www\.)?", "", link)
+        if link and site_of("https://" + link) not in ("", own):
+            out.add(link)
+    return frozenset(out)
+
+
+def rent_copy_sign(a: Listing, b: Listing) -> bool:
+    """Q67: a strong sign of one ad (no district, no price): the same strong agency reference, the same link to the
+    platform's ad, one named street with the same house number (on both or on none), or the same long description of
+    two other advertisers (``COPY_JACCARD``; one advertiser's template is the same for all its units)."""
+    if a.agency_ref and a.agency_ref == b.agency_ref and strong_ref(a.agency_ref):
+        return True
+    if _external_links(a) & _external_links(b):
+        return True
+    if (_named_street(a) and _named_street(b) and (tokens(a.address) & tokens(b.address)) - _DISTRICT_STOP
+            and _house_number(a.address) == _house_number(b.address)):
+        return True
+    key_a, key_b = compact_agency(a.agency), compact_agency(b.agency)
+    if not key_a or not key_b or key_a == key_b:
+        return False
+    text_a, text_b = normalized_description(a.description)[0], normalized_description(b.description)[0]
+    return _same_description(replace(a, description=text_a), replace(b, description=text_b), COPY_JACCARD)
+
+
 def _same_rent_copy(a: Listing, b: Listing) -> bool:
     """Q67 (``DEDUP_RENT_PLATFORM_COPY``): one rented flat on two portals through two rent platforms (see the module
     notes); the negative rules of ``same_object`` (deal, currency, rooms, floor, house number) have already passed."""
     host_a, host_b = _host(a.url), _host(b.url)
     if not host_a or not host_b or a.url == b.url or host_a in _SOCIAL_HOSTS or host_b in _SOCIAL_HOSTS:
         return False
-    if host_a == host_b and not (a.agency and b.agency and a.agency != b.agency):
-        return False  # one portal lists a flat twice only through two platforms (two named advertisers)
+    key_a, key_b = compact_agency(a.agency), compact_agency(b.agency)
+    if not key_a or not key_b or (key_a == key_b and a.agency_ref != b.agency_ref):
+        return False  # an unknown advertiser, or one platform's two units
+    if host_a == host_b and key_a == key_b:
+        return False  # one portal lists a flat twice only through two platforms
     if not (a.deal == b.deal == "rent") or a.new_build or b.new_build or (a.kind and b.kind and a.kind != b.kind):
         return False
     if a.price is None or a.price != b.price or a.area is None or a.area != b.area or not (a.rooms and a.rooms == b.rooms):
@@ -811,18 +859,9 @@ def _same_rent_copy(a: Listing, b: Listing) -> bool:
     numbers_a, numbers_b = _address_numbers(a.address), _address_numbers(b.address)
     if numbers_a and numbers_b and numbers_a != numbers_b:
         return False  # one building, another floor or door
-    same_agency = bool(a.agency and a.agency == b.agency)
-    if same_agency and a.agency_ref and b.agency_ref and a.agency_ref != b.agency_ref:
-        return False  # one platform, two of its units
-    streets = _named_street(a) and _named_street(b)
-    shared_street = bool((tokens(a.address) & tokens(b.address)) - _DISTRICT_STOP)
-    if streets and not shared_street:
+    if _named_street(a) and _named_street(b) and not (tokens(a.address) & tokens(b.address)) - _DISTRICT_STOP:
         return False  # two streets
-    if streets or (_place_tokens(a) & _place_tokens(b) and not _round_price(a.price)):
-        return True
-    text_a, text_b = normalized_description(a.description)[0], normalized_description(b.description)[0]
-    return not same_agency and _same_description(replace(a, description=text_a), replace(b, description=text_b),
-                                                 COPY_JACCARD)
+    return rent_copy_sign(a, b)
 
 
 def _same_parcels(a: Listing, b: Listing) -> bool:

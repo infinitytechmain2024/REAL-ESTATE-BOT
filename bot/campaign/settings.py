@@ -235,8 +235,9 @@ class CampaignRunnerSettings(BaseSettings):
     # development, two other references, or a round plot area without references (bot/campaign/dedup.py ``_same_twin``).
     dedup_twin_listings: bool = Field(default=False, validation_alias="DEDUP_TWIN_LISTINGS")
     # Q67: one rented flat through two rent platforms (HousingAnywhere, Spotahome: other texts and references) on two
-    # portals, at one exact price and area, the same rooms and district, is one card (bot/campaign/dedup.py
-    # ``_same_rent_copy``); an exact copy of a held seasonal let is held with it, not sent as exact.
+    # portals, at one exact price and area and the same rooms, is one card with a strong sign only (one reference, one
+    # platform link, one street and house number or one long text; bot/campaign/dedup.py ``_same_rent_copy``); an exact
+    # copy from a rent platform of a held seasonal let is held with it, not sent as exact.
     dedup_rent_platform_copy: bool = Field(default=False, validation_alias="DEDUP_RENT_PLATFORM_COPY")
     # Q60: investor findings naming one organisation, club or person (the analysis fact ``who``, normalised) are one
     # card with «Также на», even on different hosts (a club's page and its ticket pages); the first sent card stays.

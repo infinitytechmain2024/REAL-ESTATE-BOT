@@ -62,7 +62,7 @@ from bot.utils import costs
 from bot.utils.listing_text import seasonal_let_named
 
 from . import offers, people
-from .dedup import Listing, listing_of, same_object, site_of
+from .dedup import Listing, listing_of, rent_copy_sign, rent_platform, same_object, site_of
 from .fblinks import post_link_only
 from .final_report import (
     FinalReporter,
@@ -883,7 +883,7 @@ class CampaignRunner:
                         or (org and _same_lead_org(finding, head.sent.finding))):
                     continue
                 if (self.config.dedup_rent_platform_copy and _seasonal(finding.payload)
-                        and not _seasonal(head.sent.finding.payload)):
+                        and not _seasonal(head.sent.finding.payload) and campaign_request(campaign).deal == "rent"):
                     continue  # Q67: a seasonal let is not hidden under a card sent without the sign
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -904,12 +904,15 @@ class CampaignRunner:
 
     async def _seasonal_copy(self, campaign: Campaign, finding: StreamFinding,
                              held: dict[str, list[_Head]]) -> bool:
-        """Q67 (``DEDUP_RENT_PLATFORM_COPY``): an exact rent finding that is the same object as a held similar finding
-        with a seasonal sign (``_seasonal``) inherits it: it is stored as that one's duplicate (its link is shown in
-        «Также на» once the held one is sent after approval) and is not sent as an exact card. The copies attached
-        in this step are compared too (another portal's copy may match only one of them). Returns True when attached.
+        """Q67 (``DEDUP_RENT_PLATFORM_COPY``): an exact rent finding from a mid-term rent platform (``rent_platform``)
+        or with a seasonal sign itself, that is the same object as a held similar finding with a seasonal sign
+        (``_seasonal``) by a strong sign (``rent_copy_sign``), inherits it: it is stored as that one's duplicate (its
+        link is shown in «Также на» once the held one is sent after approval) and is not sent as an exact card. Only
+        the held findings are compared (no chains through attached copies). Returns True when attached.
         """
-        if not finding.url or _seasonal(finding.payload):
+        payload = finding.payload or {}
+        advertiser = next((payload[k] for k in ("agency", "advertiser") if isinstance(payload.get(k), str)), "")
+        if not finding.url or not (rent_platform(advertiser) or _seasonal(payload)):
             return False
         mine = listing_of(finding.payload, url=finding.url, text=finding.text, body=finding.original)
         if mine.price is None and mine.area is None and not mine.shingles:
@@ -919,7 +922,7 @@ class CampaignRunner:
             if bucket not in held:
                 held[bucket] = [_head_of(SentFinding(f, None, bucket=bucket)) for f in await self.store.held_findings(
                     campaign.id, bucket, HELD_DEDUP_LIMIT, exclude_why=self._unoffered(bucket))]
-            for head in list(held[bucket]):
+            for head in held[bucket]:
                 if head.sent.finding.id == finding.id or not _seasonal(head.sent.finding.payload) or not same_object(
                         mine, head.listing, without_address=self.config.dedup_without_address,
                         district_not_street=self.config.dedup_district_not_street,
@@ -927,7 +930,7 @@ class CampaignRunner:
                         same_host_copy=self.config.dedup_same_host_copy,
                         description_normalize=self.config.dedup_description_normalize,
                         same_lot=self.config.held_offer_quality, twin_listings=self.config.dedup_twin_listings,
-                        rent_platform_copy=True):
+                        rent_platform_copy=True) or not rent_copy_sign(mine, head.listing):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
@@ -937,7 +940,6 @@ class CampaignRunner:
                 log.info("campaign.seasonal_copy_held", extra={
                     "campaign_id": campaign.id, "finding_id": finding.id, "head_finding_id": head.sent.finding.id})
                 await self._record(campaign, finding, "excluded", reason=f"duplicate_of:{head.sent.finding.id}")
-                held[bucket].append(_Head(head.sent, mine))  # this copy's facts and text stand for the head too
                 return True
         except Exception:  # noqa: BLE001 - dedup is an optimisation: on any failure send the card as usual
             log.warning("campaign.seasonal_copy_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
