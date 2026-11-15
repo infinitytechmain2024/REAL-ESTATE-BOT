@@ -264,14 +264,6 @@ _VERY_SAID = re.compile(
     + _NOT + r"\bсамое\s+важное\b|" + _NOT + r"\bmuy\s+important|" + _NOT + r"\bvery\s+important|"
     + _NOT + r"\bcrucial\b",
     re.IGNORECASE)
-# The person takes an obligation back («лифт не обязателен», «not required», «no es imprescindible»).
-_UNMUST = re.compile(
-    r"\bне\s+(?:так\s+)?(?:обязател|обов.язков|нужн|потрібн|критичн|важн)|\bнеобязател|\bнеобов.язков|"
-    r"\bnot\s+(?:required|mandatory|essential|necessary|a\s+must)\b|\bno\s+need\b|"
-    r"\bno\s+es\s+(?:imprescindible|obligatori|necesari)|\bno\s+hace\s+falta\b",
-    re.IGNORECASE)
-_CLAUSE = re.compile(r"[.,;!?\n]|\s+(?:но|але|but|pero)\s+", re.IGNORECASE)
-
 
 def must_said(message: str) -> bool:
     """INTAKE_MUST_HAVE_EXPLICIT: the person called something required in ``message``."""
@@ -299,27 +291,19 @@ def _equal(a: str, b: str) -> bool:
     return _key(a) == _key(b) or (bool(_words(a)) and _words(a) == _words(b))
 
 
-def _taken_back(item: str, message: str) -> bool:
-    """The message takes this must-have back: a clause with «не обязательно» or the like names one of its words."""
-    words = _words(item)
-    return any(_UNMUST.search(part) and words & _words(part) for part in _CLAUSE.split(message))
-
-
 def explicit_must(before: TaskSpec, after: TaskSpec, message: str) -> TaskSpec:
     """INTAKE_MUST_HAVE_EXPLICIT (Q70), the safety net under the model.
 
     The must-haves that were there before are the base: none is lost or made a wish, even when the model dropped or
-    reworded it (a reworded one keeps the model's words), unless this message takes it back («лифт не обязателен»):
-    then it is a wish of weight 2. A must-have this answer added without a word of obligation (``must_said``) becomes
-    a wish of weight 2; a new wish of weight 3 without «очень важно» or such a word gets 2."""
+    reworded it (a reworded one keeps the model's words); only an edit of the field on the card lowers it. A
+    must-have this answer added without a word of obligation (``must_said``) becomes a wish of weight 2; a new wish of
+    weight 3 without «очень важно» or such a word gets 2."""
     said = must_said(message)
     musts: list[str] = []
-    released: list[str] = []
     for old in before.must_have:
-        free = [m for m in after.must_have if m not in musts and m not in released]
-        match = next((m for m in free if _equal(m, old)), None) or next((m for m in free if _same(m, old)), None)
-        (released if _taken_back(old, message) else musts).append(match or old)
-    new = [m for m in after.must_have if m not in musts and m not in released]
+        free = [m for m in after.must_have if m not in musts]
+        musts.append(next((m for m in free if _equal(m, old)), None) or next((m for m in free if _same(m, old)), old))
+    new = [m for m in after.must_have if m not in musts]
     wishes = [{"text": w.text, "weight": w.weight} for w in after.wishes
               if not any(_equal(w.text, m) for m in musts)]  # a must is never lowered to a wish
     old_weight = {_key(w.text): w.weight for w in before.wishes}
@@ -328,12 +312,9 @@ def explicit_must(before: TaskSpec, after: TaskSpec, message: str) -> TaskSpec:
             if wish["weight"] == 3 and old_weight.get(_key(wish["text"])) != 3:
                 wish["weight"] = 2
     if said:
-        musts += [m for m in new if not _taken_back(m, message)]
-        released += [m for m in new if _taken_back(m, message)]
-    else:
-        released += new
+        musts += new
     known = {_key(w["text"]) for w in wishes}
-    for item in released:
+    for item in [] if said else new:
         if _key(item) not in known and not any(_equal(item, w["text"]) for w in wishes):
             wishes.append({"text": item, "weight": 2})
             known.add(_key(item))

@@ -166,18 +166,15 @@ def test_the_safety_net_keeps_old_must_haves_and_caps_new_weight_3() -> None:
     assert [(w.text, w.weight) for w in out.wishes] == [("терраса", 3), ("земля urbano", 2), ("парковка", 1)]
 
 
-@pytest.mark.parametrize(("lift", "message"), [
-    ("лифт", "лифт не обязателен"), ("лифт", "лифт необязательно, но хорошо бы"),
-    ("lift", "the lift is not required"), ("ascensor", "el ascensor no es imprescindible")])
-def test_a_must_have_taken_back_becomes_a_wish(lift: str, message: str) -> None:
-    before = TaskSpec.model_validate({"must_have": [lift, "вода"]})
-    for after in (before.merged({"must_have": ["вода"]}),  # the model dropped it
-                  before.merged({"must_have": [lift, "вода"]})):  # or kept it
+@pytest.mark.parametrize(("item", "message"), [
+    ("лифт", "квартира без лифта не нужна"), ("лифт", "без лифта не нужно даже предлагать"),
+    ("парковка", "парковка обязательна не важно какая"), ("лифт", "лифт нужен не обязательно новый")])
+def test_a_previous_must_stays_a_must_whatever_the_words(item: str, message: str) -> None:
+    before = TaskSpec.model_validate({"must_have": [item, "вода"]})
+    for after in (before.merged({"must_have": ["вода"]}), before.merged({"must_have": [item, "вода"]}),
+                  before.merged({"must_have": ["вода"], "wishes": [{"text": item, "weight": 2}]})):
         out = explicit_must(before, after, message)
-        assert out.must_have == ["вода"] and [(w.text, w.weight) for w in out.wishes] == [(lift, 2)]
-    before = TaskSpec.model_validate({"must_have": ["лифт", "вода"]})
-    # «не обязательно» about another item does not take this one back
-    assert explicit_must(before, before.merged({"must_have": []}), "терраса не обязательна").must_have == ["лифт", "вода"]
+        assert out.must_have == [item, "вода"] and out.wishes == []  # lowered only by an edit of the card
 
 
 def test_same_items_are_whole_words_and_a_new_wish_with_a_must_word_stays() -> None:
