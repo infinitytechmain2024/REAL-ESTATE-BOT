@@ -119,6 +119,7 @@ from .store import CampaignStore
 from .summary import summary_text, without_limited
 from .tolerance import (
     HELD_BUCKETS,
+    TOLERANCE_WHY,
     Match,
     Request,
     area_text,
@@ -127,6 +128,7 @@ from .tolerance import (
     money,
     price_of,
     request_for,
+    tolerance_hit,
 )
 
 log = logging.getLogger(__name__)
@@ -346,6 +348,8 @@ class RunnerConfig:
     investor_report_counts_all: bool = False
     # The live status links only a listing portal's host; any other site is «Читаю найденные страницы…» (Q69).
     status_hide_unvetted_sites: bool = False
+    # A finding exact only by an approved deviation is sent at once as similar (``tolerance_hit``), not as exact (Q71).
+    tolerance_hits_as_similar: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -766,6 +770,8 @@ class CampaignRunner:
                 continue
             if match.bucket == "exact" and self._deal_kind(request, finding) is not None:
                 match = Match("similar", match.distance, "deal_kind")
+            # Q71: inside the approved deviations -> similar, but sent at once (approved in advance), never asked about
+            tolerated = tolerance_hit(match) if self.config.tolerance_hits_as_similar else None
             if match.bucket != "exact":
                 why = reason_category(match.why)
                 if self.config.report_precise_reasons and why == "rooms" and _more_rooms(request, finding):
@@ -789,14 +795,21 @@ class CampaignRunner:
             if (self.config.dedup_rent_platform_copy and request.deal == "rent"
                     and await self._seasonal_copy(campaign, finding, held)):
                 continue  # Q67: a copy of a held seasonal let is not exact
-            count = await self.store.claim_finding(campaign.id, finding.id)
+            if tolerated is None:
+                count = await self.store.claim_finding(campaign.id, finding.id)
+            else:
+                count = await self.store.claim_finding(campaign.id, finding.id, tolerated.bucket, TOLERANCE_WHY)
             if count is None:
                 continue
             note = f"{APPROVED_LINE}{match.note}" if match.why == "approved_deviation" and match.note else None
-            if not await self._send_card(campaign, finding, count, active, "exact", note=note):
+            bucket = "exact" if tolerated is None else tolerated.bucket
+            if not await self._send_card(campaign, finding, count, active, bucket, note=note):
                 return deferred
+            if tolerated is not None:
+                log.info("campaign.finding_tolerated %s", tolerated.note,
+                         extra={"campaign_id": campaign.id, "finding_id": finding.id})
             if index.loaded:  # the card just sent is a head for the findings still to come in this step
-                index.heads.insert(0, _head_of(SentFinding(finding, None, count)))
+                index.heads.insert(0, _head_of(SentFinding(finding, None, count, bucket=bucket)))
         # OFFER_AFTER_SEARCH (Q27): the search is over and every finding of the campaign was checked in this step.
         settled = not active and deferred == 0 and len(batch) < self.config.max_stream_per_step
         unasked = await self._near_matches(campaign, request, active, settled=settled)

@@ -32,7 +32,7 @@ from bot.web_search.urls import PORTALS, SPAIN_BANK_PORTALS, SPAIN_PORTALS_BY_KI
 from .relevance import MANDATORY_UNKNOWN
 from .runs import OutcomeCount, SearchOutcome, SentFinding, SourceCount, StreamFinding
 from .summary import Site, plural, site_lines, site_name, site_stats
-from .tolerance import BUDGET_TOLERANCE, Request, classify, currency_code, price_of
+from .tolerance import BUDGET_TOLERANCE, TOLERANCE_WHY, Request, classify, currency_code, price_of
 
 log = logging.getLogger(__name__)
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
@@ -103,10 +103,11 @@ class Tally:
     excluded: dict[str, int] = field(default_factory=dict)  # reason category -> count
     unchecked: dict[str, int] = field(default_factory=dict)  # of ``held_unverified``: ``UNCHECKED`` reason -> count
     held_must: int = 0  # of the held ones: a must-have criterion is not mentioned, never offered (H11)
+    sent_tolerance: int = 0  # similar cards sent at once inside the approved deviations (TOLERANCE_HITS_AS_SIMILAR, Q71)
 
     @property
     def sent(self) -> int:
-        return self.sent_exact + self.sent_approved
+        return self.sent_exact + self.sent_approved + self.sent_tolerance
 
     @property
     def held(self) -> int:
@@ -135,7 +136,7 @@ class Tally:
 
 def tally(outcomes: Sequence[OutcomeCount]) -> Tally:
     """``RunStore.outcome_counts`` rows -> a ``Tally``; a finding still being sent counts as sent."""
-    sent_exact = sent_approved = similar = other = unverified = duplicates = must = 0
+    sent_exact = sent_approved = similar = other = unverified = duplicates = must = tolerated = 0
     excluded: Counter[str] = Counter()
     unchecked: Counter[str] = Counter()
     for row in outcomes:
@@ -144,6 +145,8 @@ def tally(outcomes: Sequence[OutcomeCount]) -> Tally:
         elif row.state in ("sent", "sending"):
             if row.bucket == "exact":
                 sent_exact += row.count
+            elif row.why == TOLERANCE_WHY:  # Q71: sent at once inside the approved deviations, not a confirmed match
+                tolerated += row.count
             else:
                 sent_approved += row.count
         elif row.bucket == "excluded":
@@ -156,7 +159,8 @@ def tally(outcomes: Sequence[OutcomeCount]) -> Tally:
             if row.why in UNCHECKED:
                 unverified += row.count
                 unchecked[row.why] += row.count
-    return Tally(sent_exact, sent_approved, similar, other, unverified, duplicates, dict(excluded), dict(unchecked), must)
+    return Tally(sent_exact, sent_approved, similar, other, unverified, duplicates, dict(excluded), dict(unchecked), must,
+                 tolerated)
 
 
 # --- the ranking -------------------------------------------------------------------------------------------------------
@@ -355,12 +359,15 @@ def real_estate_sources(sources: Sequence[SourceCount], reports: Sequence[object
 def facts_for_model(task: dict[str, Any], counts: Tally, sites: Sequence[Site], unreadable: Sequence[Site],
                     tolerance_pct: float | None = None) -> dict[str, Any]:
     """The aggregated numbers the model writes recommendations from: no listing text, no links, no ids."""
+    numbers = {"sent_exact": counts.sent_exact, "sent_after_approval": counts.sent_approved,
+               "held_similar": counts.held_similar, "held_other": counts.held_other,
+               "held_unverified": counts.held_unverified, "duplicates": counts.duplicates,
+               "rejected_total": counts.rejected}
+    if counts.sent_tolerance:  # Q71: only when there are some, so the facts stay as before without the flag
+        numbers["sent_within_approved_deviations"] = counts.sent_tolerance
     return {
         "task": task,
-        "counts": {"sent_exact": counts.sent_exact, "sent_after_approval": counts.sent_approved,
-                   "held_similar": counts.held_similar, "held_other": counts.held_other,
-                   "held_unverified": counts.held_unverified, "duplicates": counts.duplicates,
-                   "rejected_total": counts.rejected},
+        "counts": numbers,
         "rejected_by_reason": counts.excluded,
         "sites": [{"site": s.host, "links": s.links, "pages_read": s.read, "from_search_snippet": s.from_search,
                    "refused": s.refused, "unverified": s.unverified, "cards_sent": s.sent, "cards_held": s.held} for s in sites[:12]],
@@ -384,7 +391,8 @@ def fallback_recommendations(facts: dict[str, Any]) -> list[str]:
     """
     counts, by_reason = facts.get("counts", {}), facts.get("rejected_by_reason", {})
     only_exact = bool((facts.get("task") or {}).get("only_exact"))
-    sent = counts.get("sent_exact", 0) + counts.get("sent_after_approval", 0)
+    sent = (counts.get("sent_exact", 0) + counts.get("sent_after_approval", 0)
+            + counts.get("sent_within_approved_deviations", 0))
     tips: list[str] = []
     if not only_exact and by_reason.get("budget", 0) >= 2 and sent < 10 and not _budget_covered(facts):
         tips.append(f"Часть вариантов отклонена из-за цены ({by_reason['budget']}): поднимите бюджет на 10 %, "
@@ -825,8 +833,12 @@ def report_text(goal: str, counts: Tally, top: Sequence[Ranked], funnel: Sequenc
             conclusion = "Подтверждённых совпадений нет. Ни один предварительный вариант не прошёл все условия."
         else:
             conclusion = "Подтверждённых совпадений нет."
-        summary = [conclusion, f"Отправлено вам: {counts.sent}"
-                   + (f" (из них {counts.sent_approved} похожих — по вашему согласию)" if counts.sent_approved else "")]
+        if counts.sent_tolerance:  # Q71: approved in advance, but not a confirmed match
+            conclusion += f"\nВ пределах ваших отступлений: {counts.sent_tolerance}."
+        parts = [f"{counts.sent_approved} похожих — по вашему согласию"] if counts.sent_approved else []
+        if counts.sent_tolerance:
+            parts.append(f"{counts.sent_tolerance} — в пределах ваших отступлений")
+        summary = [conclusion, f"Отправлено вам: {counts.sent}" + (f" (из них {'; '.join(parts)})" if parts else "")]
         if counts.held:
             parts = [f"{REASONS[k]}: {counts.unchecked[k]}" for k in UNCHECKED if counts.unchecked.get(k)]
             extra = f", {', '.join(parts)}" if parts else ""
