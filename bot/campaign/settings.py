@@ -251,6 +251,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q69: the live status links only a listing portal's host (bot.web_search.queries.listing_portal_host); any other
     # site the web stage reads (appraisers, agencies, news) is «🔎 Читаю найденные страницы…», no name, no link.
     status_hide_unvetted_sites: bool = Field(default=False, validation_alias="STATUS_HIDE_UNVETTED_SITES")
+    # Q71: a finding that passes only by a deviation the person approved in the interview (``tolerance_hit``) is filed
+    # similar («в пределах отступления»), sent at once without «Показать?», and counted apart from the confirmed matches.
+    tolerance_hits_as_similar: bool = Field(default=False, validation_alias="TOLERANCE_HITS_AS_SIMILAR")
     # Q68: an investor card shows the ticket range as written («10 000 – 100 000 $»; an ambiguous «€100 - €150,000» as
     # is), an investor whose range ends below the task's minimum ticket is excluded and the lead score compares the
     # range (bot/utils/ticket_range.py, read where it is used). false (default): the lower bound, as before.
@@ -561,7 +564,8 @@ class CampaignRunnerSettings(BaseSettings):
                             investor_lead_same_org=self.investor_lead_same_org,
                             investor_past_event_excluded=self.investor_past_event_excluded,
                             investor_report_counts_all=self.investor_report_counts_all,
-                            status_hide_unvetted_sites=self.status_hide_unvetted_sites)
+                            status_hide_unvetted_sites=self.status_hide_unvetted_sites,
+                            tolerance_hits_as_similar=self.tolerance_hits_as_similar)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")

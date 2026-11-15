@@ -25,6 +25,7 @@ from .models import TERMINAL_STATES, WINDOW_SIZE
 from .offers import MemoryOffer, MemoryOfferDesk
 from .reach import KIND_ORDER, Contact
 from .relevance import Relevance
+from .tolerance import TOLERANCE_WHY
 
 if TYPE_CHECKING:
     import asyncpg
@@ -239,7 +240,8 @@ class RunStore(Protocol):
         ...
     async def unstreamed_findings(self, campaign_id: str, limit: int,
                                   skip: Collection[str] = ()) -> list[StreamFinding]: ...
-    async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None: ...
+    async def claim_finding(self, campaign_id: str, finding_id: str, bucket: str = "exact",
+                            why: str | None = None) -> int | None: ...
     async def finding_sent(self, finding_id: str, message_id: int) -> None: ...
     async def release_finding(self, finding_id: str) -> None: ...
     async def streamed_count(self, campaign_id: str) -> int: ...
@@ -611,13 +613,20 @@ class PostgresRunStore:
         return [StreamFinding(r["id"], r["text"], _payload(r["payload"]), r["original"], r["language"],
                               r["confidence"], r["vertical"], r["url"]) for r in rows]
 
-    async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None:
-        """Take the one send slot for a finding; returns the campaign's finding count, or None if taken."""
+    async def claim_finding(self, campaign_id: str, finding_id: str, bucket: str = "exact",
+                            why: str | None = None) -> int | None:
+        """Take the one send slot for a finding; returns the campaign's finding count, or None if taken.
+
+        ``bucket``/``why``: a finding sent at once though not exact (``TOLERANCE_WHY``, Q71); default: exact."""
         async with self.pool.acquire() as conn, conn.transaction():
             claimed = await conn.fetchval(
                 """insert into campaign_findings (finding_id, campaign_id) values ($1::uuid, $2::uuid)
                    on conflict do nothing returning 1""",
                 finding_id, campaign_id,
+            ) if bucket == "exact" and why is None else await conn.fetchval(
+                """insert into campaign_findings (finding_id, campaign_id, bucket, why)
+                   values ($1::uuid, $2::uuid, $3, $4) on conflict do nothing returning 1""",
+                finding_id, campaign_id, bucket, why[:40] if why else None,
             )
             if not claimed:
                 return None
@@ -634,11 +643,13 @@ class PostgresRunStore:
             await conn.execute("update findings set state = 'delivered' where id = $1::uuid and state = 'ready'", finding_id)
 
     async def release_finding(self, finding_id: str) -> None:
-        """Give a failed send back: an exact finding is picked up again, a held one is held again."""
+        """Give a failed send back: an exact finding is picked up again, a held one is held again (a finding inside the
+        approved deviations, ``TOLERANCE_WHY``, was never held: it is picked up again like an exact one)."""
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute(
-                "delete from campaign_findings where finding_id = $1::uuid and state = 'sending' and bucket = 'exact'",
-                finding_id)
+                """delete from campaign_findings where finding_id = $1::uuid and state = 'sending'
+                      and (bucket = 'exact' or why = $2)""",
+                finding_id, TOLERANCE_WHY)
             await conn.execute(
                 "update campaign_findings set state = 'held' where finding_id = $1::uuid and state = 'sending'",
                 finding_id)
@@ -1382,12 +1393,15 @@ class MemoryRunStore:
         return [f for f in self.findings.get(campaign_id, [])
                 if f.id not in done and f.id not in self.buckets and f.id not in skip][:limit]
 
-    async def claim_finding(self, campaign_id: str, finding_id: str) -> int | None:
+    async def claim_finding(self, campaign_id: str, finding_id: str, bucket: str = "exact",
+                            why: str | None = None) -> int | None:
         done = self.streamed.setdefault(campaign_id, {})
         if finding_id in done or finding_id in self.buckets:
             return None
         done[finding_id] = None
-        self.buckets[finding_id] = ("exact", 0.0)
+        self.buckets[finding_id] = (bucket, 0.0)
+        if why is not None:
+            self.whys[finding_id] = why
         self.card_numbers[finding_id] = len(done)
         return len(done)
 
@@ -1401,8 +1415,9 @@ class MemoryRunStore:
         for cid, done in self.streamed.items():
             if done.get(finding_id, 0) is None:
                 del done[finding_id]
-                if self.buckets[finding_id][0] == "exact":
+                if self.buckets[finding_id][0] == "exact" or self.whys.get(finding_id) == TOLERANCE_WHY:
                     del self.buckets[finding_id]
+                    self.whys.pop(finding_id, None)
                 else:
                     self.held.setdefault(cid, {})[finding_id] = None
 

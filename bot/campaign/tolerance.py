@@ -36,6 +36,12 @@ as the requested place. A listing that is outside the strict request but inside 
 at once and says what differs. Beyond the approved band the usual similar/other buckets apply (similar up to
 ``max(SIMILAR_CEILING, band + 15 %)``).
 
+With ``TOLERANCE_HITS_AS_SIMILAR`` (Q71; the runner's ``tolerance_hits_as_similar``) such a finding is not counted as an
+exact match: ``tolerance_hit`` turns it into ``similar`` with ``why=TOLERANCE_WHY`` and the note «в пределах
+отступления: площадь ~65 м² при запросе от 70 м²». The person approved it in advance, so the runner sends it at once
+(no «Показать?» question), filed ``similar``/``tolerance``; the final report counts it apart from the confirmed
+matches («В пределах ваших отступлений: N»). Sim b6-n3-s7: 65 м² for «от 70 м², −10 %» was counted as confirmed.
+
 Other constraints
 -----------------
 * Deal type: when both the request and the listing name one (rent/sale) and
@@ -144,7 +150,7 @@ _RANK = {"exact": 0, "similar": 1, "other": 2, "excluded": 3}
 # Why a finding is not exact: price, area, location, deal, kind (not one offer), foreign, currency.
 Why = Literal["price", "area", "area_max", "rooms", "location", "deal", "kind", "type", "foreign", "currency", "ai",
               "unverified", "area_unknown", "location_unknown", "approved_deviation", "ai_failed", "cost_cap",
-              "deal_kind", "seasonal", "past_event"]
+              "deal_kind", "seasonal", "past_event", "tolerance"]
 BUCKETS: tuple[Bucket, ...] = ("exact", "similar", "other")
 HeldBucket = Literal["similar", "other"]
 HELD_BUCKETS: tuple[HeldBucket, ...] = ("similar", "other")
@@ -206,6 +212,19 @@ class Match:
     note: str | None = None  # owner-facing Russian reason (e.g. «Не проверено ИИ: ...»), when not from the rules
     # ``approved_deviation``: the reviewer criteria the approved deviation covers (``budget``, ``area``, ``rooms``, ``place``)
     covers: tuple[str, ...] = ()
+
+
+TOLERANCE_WHY = "tolerance"  # Q71: sent at once as similar, inside the deviations the person approved
+TOLERANCE_PREFIX = "в пределах отступления: "
+
+
+def tolerance_hit(match: Match) -> Match | None:
+    """Q71: an exact match only by an approved deviation as ``similar`` (``TOLERANCE_WHY``, «в пределах отступления:
+    ...»); None for any other verdict (a strictly exact one stays exact)."""
+    if match.bucket != "exact" or match.why != "approved_deviation":
+        return None
+    note = f"{TOLERANCE_PREFIX}{match.note}" if match.note else TOLERANCE_PREFIX.rstrip(": ")
+    return Match("similar", match.distance, TOLERANCE_WHY, note=note, covers=match.covers)
 
 
 def worse(a: Match, b: Match) -> Match:
