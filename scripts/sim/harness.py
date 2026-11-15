@@ -118,6 +118,7 @@ BASE_ENV: dict[str, str] = {
     "HELD_OFFER_QUALITY": "true",  # Q55
     "ANALYSIS_FACT_CONFLICT_NULL": "true",  # Q56
     "DEDUP_TWIN_LISTINGS": "true",  # Q58
+    "DEDUP_RENT_PLATFORM_COPY": "true",  # Q67
     "REPORT_TOP_EXACT_FIRST": "true",  # Q58
     "INVESTOR_LEAD_SAME_ORG": "true",  # Q60
     "INVESTOR_PAST_EVENT_EXCLUDED": "true",  # Q60

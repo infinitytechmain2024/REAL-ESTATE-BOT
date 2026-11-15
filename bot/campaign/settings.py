@@ -234,6 +234,10 @@ class CampaignRunnerSettings(BaseSettings):
     # addresses or municipalities, or with a repost suffix of the agency reference («E18484R»); never a new
     # development, two other references, or a round plot area without references (bot/campaign/dedup.py ``_same_twin``).
     dedup_twin_listings: bool = Field(default=False, validation_alias="DEDUP_TWIN_LISTINGS")
+    # Q67: one rented flat through two rent platforms (HousingAnywhere, Spotahome: other texts and references) on two
+    # portals, at one exact price and area, the same rooms and district, is one card (bot/campaign/dedup.py
+    # ``_same_rent_copy``); an exact copy of a held seasonal let is held with it, not sent as exact.
+    dedup_rent_platform_copy: bool = Field(default=False, validation_alias="DEDUP_RENT_PLATFORM_COPY")
     # Q60: investor findings naming one organisation, club or person (the analysis fact ``who``, normalised) are one
     # card with «Также на», even on different hosts (a club's page and its ticket pages); the first sent card stays.
     investor_lead_same_org: bool = Field(default=False, validation_alias="INVESTOR_LEAD_SAME_ORG")
@@ -545,6 +549,7 @@ class CampaignRunnerSettings(BaseSettings):
                             report_after_offer=self.report_after_offer,
                             held_offer_quality=self.held_offer_quality,
                             dedup_twin_listings=self.dedup_twin_listings,
+                            dedup_rent_platform_copy=self.dedup_rent_platform_copy,
                             investor_lead_same_org=self.investor_lead_same_org,
                             investor_past_event_excluded=self.investor_past_event_excluded,
                             investor_report_counts_all=self.investor_report_counts_all)

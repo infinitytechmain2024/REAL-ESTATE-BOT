@@ -123,6 +123,18 @@ suffix («R», ``_REPOST_SUFFIXES``). A round area (rounded to 1 m², a multiple
 estate under one template text) merges only with agency references on both sides (equal or a repost) or one
 cadastral reference stated in both texts. The addresses and the agencies may differ.
 
+Rent platform copies (``same_object(..., rent_platform_copy=True)``, ``DEDUP_RENT_PLATFORM_COPY``, Q67): one rented
+flat reaches two portals through two rent platforms (HousingAnywhere on Fotocasa, Spotahome on Habitaclia, bench run
+b6-g5-s7): other texts, other agency references (Q15 then ends the comparison) and often no street. Two sites (no
+social network) are one object when all hold (``_same_rent_copy``): both ``rent``; the price exactly equal and the
+area exactly equal (both known); the rooms known on both sides and equal; the property type equal when known on both;
+one named city; no new development; the numbers of the two addresses (house, floor, door) the same when both have any;
+not two named streets without a shared street token; not one agency with two other references (one platform, two
+units); and a sign of one place: a shared street token (both streets named), a shared district or street token
+(``_place_tokens``) when the price is not round (``_round_price``: a round rent is common in one district), or the same
+long description (``normalized_description``, ``_same_description`` with ``COPY_JACCARD``) of two other agencies (one
+platform's template text is the same for all its units, and shorter than 400 characters anyway).
+
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
 are both unknown. ``same_object`` is the arbiter.
@@ -543,7 +555,8 @@ def _host(url: str | None) -> str:
 
 def same_object(a: Listing, b: Listing, *, without_address: bool = False, district_not_street: bool = False,
                 cross_portal_facts: bool = False, same_host_copy: bool = False,
-                description_normalize: bool = False, same_lot: bool = False, twin_listings: bool = False) -> bool:
+                description_normalize: bool = False, same_lot: bool = False, twin_listings: bool = False,
+                rent_platform_copy: bool = False) -> bool:
     """True only when the two listings are almost surely one property (see the module notes); ``without_address``
     (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``);
     ``district_not_street`` (``DEDUP_DISTRICT_NOT_STREET``, Q15) does not require a shared street when an address is
@@ -555,7 +568,8 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
     with the same whole cadastral references at two prices (``_same_parcels``) and one portal's two ads of one
     address with the same description and price while the area is unknown (``_same_listed_lot``); ``twin_listings``
     (``DEDUP_TWIN_LISTINGS``, Q58) merges one long description at one exact price and area whatever the addresses or a
-    repost suffix of the reference (``_same_twin``)."""
+    repost suffix of the reference (``_same_twin``); ``rent_platform_copy`` (``DEDUP_RENT_PLATFORM_COPY``, Q67) merges
+    one rented flat listed through two rent platforms on two portals (``_same_rent_copy``)."""
     if a.deal and b.deal and a.deal != b.deal:
         return False
     if a.currency and b.currency and a.currency != b.currency:
@@ -575,6 +589,8 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
         return False
     if twin_listings and _same_twin(a, b):
         return True  # Q58: one object reposted or filed under two municipalities, one text, price and area
+    if rent_platform_copy and _same_rent_copy(a, b):
+        return True  # Q67: one rented flat through two rent platforms (other texts and references) on two portals
     street_a, street_b = tokens(a.address), tokens(b.address)
     both_addressed = bool(a.address.strip() and b.address.strip())
     stop = _DISTRICT_STOP if district_not_street else _PLACE_STOP
@@ -770,6 +786,43 @@ def _same_twin(a: Listing, b: Listing) -> bool:
     if short < TWIN_LENGTH_RATIO * long:
         return False  # a short template is the prefix of a long text: the common length hides the rest
     return _same_description(a, b, COPY_JACCARD)
+
+
+def _address_numbers(address: str) -> tuple[str, ...]:
+    """Q67: every number of an address (house, floor, door: «Carrer Vidre, 8, 3º» -> 8, 3)."""
+    return tuple(re.findall(r"\d+", _fold(address or "")))
+
+
+def _same_rent_copy(a: Listing, b: Listing) -> bool:
+    """Q67 (``DEDUP_RENT_PLATFORM_COPY``): one rented flat on two portals through two rent platforms (see the module
+    notes); the negative rules of ``same_object`` (deal, currency, rooms, floor, house number) have already passed."""
+    host_a, host_b = _host(a.url), _host(b.url)
+    if not host_a or not host_b or a.url == b.url or host_a in _SOCIAL_HOSTS or host_b in _SOCIAL_HOSTS:
+        return False
+    if host_a == host_b and not (a.agency and b.agency and a.agency != b.agency):
+        return False  # one portal lists a flat twice only through two platforms (two named advertisers)
+    if not (a.deal == b.deal == "rent") or a.new_build or b.new_build or (a.kind and b.kind and a.kind != b.kind):
+        return False
+    if a.price is None or a.price != b.price or a.area is None or a.area != b.area or not (a.rooms and a.rooms == b.rooms):
+        return False
+    cities = _cities(a)
+    if not cities or cities != _cities(b):
+        return False
+    numbers_a, numbers_b = _address_numbers(a.address), _address_numbers(b.address)
+    if numbers_a and numbers_b and numbers_a != numbers_b:
+        return False  # one building, another floor or door
+    same_agency = bool(a.agency and a.agency == b.agency)
+    if same_agency and a.agency_ref and b.agency_ref and a.agency_ref != b.agency_ref:
+        return False  # one platform, two of its units
+    streets = _named_street(a) and _named_street(b)
+    shared_street = bool((tokens(a.address) & tokens(b.address)) - _DISTRICT_STOP)
+    if streets and not shared_street:
+        return False  # two streets
+    if streets or (_place_tokens(a) & _place_tokens(b) and not _round_price(a.price)):
+        return True
+    text_a, text_b = normalized_description(a.description)[0], normalized_description(b.description)[0]
+    return not same_agency and _same_description(replace(a, description=text_a), replace(b, description=text_b),
+                                                 COPY_JACCARD)
 
 
 def _same_parcels(a: Listing, b: Listing) -> bool:
