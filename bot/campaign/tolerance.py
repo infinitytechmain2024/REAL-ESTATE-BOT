@@ -104,7 +104,11 @@ Other constraints
   ask for a studio («студия», «estudio», «loft»; ``bot/utils/listing_text.py`` ``task_names_studio``): unchanged. Sim
   b5-g5-s6: «Estudio a estrenar», rooms 1, went out as exact.
 * A budget with an unknown listing price is other (see Budget).
-* Findings of the investors vertical carry no prices; they are always exact.
+* Findings of the investors vertical carry no prices; they are always exact. With INVESTOR_TICKET_RANGE (Q68;
+  ``Request.ticket_min``) an investor whose ticket range («$10,000 - $100,000» in ``price_signals``,
+  ``bot/utils/ticket_range.py``) ends below the task's minimum ticket, in the same currency (a task's ticket without
+  one: the country's), is excluded (``price``); the upper bound decides, an ambiguous lower bound does not matter; no
+  range, an unread one («€1-3MM», «25 - 40 €/hora») or another currency: exact as before.
 """
 
 from __future__ import annotations
@@ -123,6 +127,7 @@ from bot.utils.listing_text import (
     task_names_studio,
     task_rental_term,
 )
+from bot.utils.ticket_range import SYMBOLS, investor_ticket_range_enabled, ticket_range_of
 
 from . import geo
 from .architect import find_places
@@ -182,6 +187,9 @@ class Request:
     seasonal_excluded: bool = False
     # STUDIO_ZERO_BEDROOMS (Q59), unless the task asks for a studio: a studio's bedrooms are 0 (no rooms) or unconfirmed
     studio_zero: bool = False
+    # INVESTOR_TICKET_RANGE (Q68): the task's minimum ticket (``spec.investor.ticket.min``) and its currency
+    ticket_min: float | None = None
+    ticket_currency: str | None = None
 
     @property
     def country_code(self) -> str | None:
@@ -402,8 +410,9 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
     ``text``: the task; ``deviations``: ``TaskSpec.deviations`` as a dict, the compromises the person approved;
     ``spec``: the TaskSpec as a dict, whose interview answers may name the rent term, read with PORTAL_RENTAL_TERM
     and RENT_DEFAULT_LONG_TERM)."""
+    ticket_min, ticket_currency = _ticket_of(spec)
     if vertical == "investors":
-        return Request(location=location, country=country)
+        return Request(location=location, country=country, ticket_min=ticket_min, ticket_currency=ticket_currency)
     dev = deviations if isinstance(deviations, dict) else {}
     amount = constraints.get("max_price")
     deal = constraints.get("deal")
@@ -434,7 +443,31 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         seasonal_guard=_seasonal_guard(deal, kind, spec, text),
         seasonal_excluded=_seasonal_excluded(deal, kind, spec, text),
         studio_zero=studio_zero_enabled() and not task_names_studio(spec, text),
+        ticket_min=ticket_min,
+        ticket_currency=ticket_currency,
     )
+
+
+def _ticket_of(spec: dict[str, Any] | None) -> tuple[float | None, str | None]:
+    """INVESTOR_TICKET_RANGE (Q68): the spec's minimum investor ticket and its currency; (None, None) without the flag."""
+    investor = (spec or {}).get("investor") if isinstance(spec, dict) else None
+    ticket = investor.get("ticket") if isinstance(investor, dict) else None
+    if not investor_ticket_range_enabled() or not isinstance(ticket, dict):
+        return None, None
+    return _positive(ticket.get("min")), currency_code(ticket.get("currency"))
+
+
+def ticket_short(payload: dict[str, Any], request: Request) -> Match | None:
+    """INVESTOR_TICKET_RANGE (Q68): excluded when the investor's ticket range ends below the task's minimum ticket."""
+    if request.ticket_min is None:
+        return None
+    ticket = ticket_range_of(payload)
+    # a task's ticket without a currency is in its country's currency (EUR for Spain)
+    currency = request.ticket_currency or geo.CURRENCY.get(request.country_code or "") or DEFAULT_CURRENCY
+    if ticket is None or ticket.high is None or ticket.currency != currency or ticket.high >= request.ticket_min:
+        return None  # no range, an unread one, another currency, or the upper bound reaches the minimum
+    top = f"{int(ticket.high):,}".replace(",", " ")
+    return Match("excluded", math.inf, "price", note=f"Не подходит: тикет до {top} {SYMBOLS.get(ticket.currency, '')}".strip())
 
 
 def currency_code(value: object) -> str | None:
@@ -457,7 +490,7 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
     if not_an_offer(payload, vertical=vertical):
         return Match("excluded", math.inf, "kind")
     if vertical == "investors":
-        return Match("exact")
+        return ticket_short(payload, request) or Match("exact")
     deal = payload.get("deal_type")
     if request.deal and deal in ("rent", "sale") and deal != request.deal:
         return Match("excluded", math.inf, "deal")

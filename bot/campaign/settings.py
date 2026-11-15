@@ -248,6 +248,10 @@ class CampaignRunnerSettings(BaseSettings):
     # Q60: the investor report's «Отправлено вам» counts every lead the chat got: the finding cards of the search
     # (campaign_findings 'sent') besides the people and reach contacts (campaign_lead_deliveries); off: people only.
     investor_report_counts_all: bool = Field(default=False, validation_alias="INVESTOR_REPORT_COUNTS_ALL")
+    # Q68: an investor card shows the ticket range as written («10 000 – 100 000 $»; an ambiguous «€100 - €150,000» as
+    # is), an investor whose range ends below the task's minimum ticket is excluded and the lead score compares the
+    # range (bot/utils/ticket_range.py, read where it is used). false (default): the lower bound, as before.
+    investor_ticket_range: bool = Field(default=False, validation_alias="INVESTOR_TICKET_RANGE")
     # Investor leads from the comments under sent Facebook posts (bot/campaign/leads.py).
     # all: every campaign; investors (default): investor campaigns only; off: never read comments.
     comment_leads: str = Field(default="investors", pattern="^(all|investors|off)$", validation_alias="CAMPAIGN_COMMENT_LEADS")

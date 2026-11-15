@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+from bot.utils.ticket_range import investor_ticket_range_enabled, ticket_range_of
+
 MAX_CARD_CHARS = 3900  # Telegram allows 4096; the runner adds a short footer.
 MAX_SUMMARY_CHARS = 1200
 
@@ -232,6 +234,8 @@ def render_card(
         fields["Площадь"] = _area(payload)
         fields["Телефон"] = _phone(payload)
         fields["Агентство"] = _trim(str(payload["advertiser"]).strip(), 120) if payload.get("advertiser") else None
+    if investors and investor_ticket_range_enabled() and (ticket := ticket_range_of(payload)):
+        fields["Цена"] = ticket.display()  # INVESTOR_TICKET_RANGE (Q68): the range, not its lower bound
     if investors:
         order = ["Кто", "Локация", "Цена"]
     else:
