@@ -802,6 +802,7 @@ services:
       INVESTOR_LEAD_SAME_ORG: ${INVESTOR_LEAD_SAME_ORG:-false}
       INVESTOR_PAST_EVENT_EXCLUDED: ${INVESTOR_PAST_EVENT_EXCLUDED:-false}
       INVESTOR_REPORT_COUNTS_ALL: ${INVESTOR_REPORT_COUNTS_ALL:-false}
+      STATUS_HIDE_UNVETTED_SITES: ${STATUS_HIDE_UNVETTED_SITES:-false}
       INVESTOR_TICKET_RANGE: ${INVESTOR_TICKET_RANGE:-false}
       FOREIGN_TLD_SPAIN_MENTION: ${FOREIGN_TLD_SPAIN_MENTION:-false}
       # Investor leads from the comments under sent objects (bot/campaign/leads.py), and dead groups.

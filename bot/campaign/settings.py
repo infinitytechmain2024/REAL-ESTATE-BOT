@@ -248,6 +248,9 @@ class CampaignRunnerSettings(BaseSettings):
     # Q60: the investor report's «Отправлено вам» counts every lead the chat got: the finding cards of the search
     # (campaign_findings 'sent') besides the people and reach contacts (campaign_lead_deliveries); off: people only.
     investor_report_counts_all: bool = Field(default=False, validation_alias="INVESTOR_REPORT_COUNTS_ALL")
+    # Q69: the live status links only a listing portal's host (bot.web_search.queries.listing_portal_host); any other
+    # site the web stage reads (appraisers, agencies, news) is «🔎 Читаю найденные страницы…», no name, no link.
+    status_hide_unvetted_sites: bool = Field(default=False, validation_alias="STATUS_HIDE_UNVETTED_SITES")
     # Q68: an investor card shows the ticket range as written («10 000 – 100 000 $»; an ambiguous «€100 - €150,000» as
     # is), an investor whose range ends below the task's minimum ticket is excluded and the lead score compares the
     # range (bot/utils/ticket_range.py, read where it is used). false (default): the lower bound, as before.
@@ -557,7 +560,8 @@ class CampaignRunnerSettings(BaseSettings):
                             dedup_rent_platform_copy=self.dedup_rent_platform_copy,
                             investor_lead_same_org=self.investor_lead_same_org,
                             investor_past_event_excluded=self.investor_past_event_excluded,
-                            investor_report_counts_all=self.investor_report_counts_all)
+                            investor_report_counts_all=self.investor_report_counts_all,
+                            status_hide_unvetted_sites=self.status_hide_unvetted_sites)
 
     # The final report gets the «💼 Инвесторы» section (v2 B4); off: the report is as before B4.
     investor_report: bool = Field(default=False, validation_alias="CAMPAIGN_INVESTOR_REPORT")
