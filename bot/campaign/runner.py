@@ -1469,7 +1469,8 @@ class CampaignRunner:
             text = await self.final_report.build(title, request, outcomes, sent, sources, reports, portals,
                                                  offers=offers, costs=spent, budget=costs.budget(),
                                                  task_text=campaign.source_text, held=held, scope=scope,
-                                                 leads=leads, vertical=vertical)
+                                                 leads=leads, vertical=vertical,
+                                                 hide_unvetted=self._hide_unvetted(campaign))
             await self.messenger.send(campaign.chat_id, text[:MAX_MESSAGE_CHARS])
         except Exception:  # noqa: BLE001 - store or Telegram down: try again next tick
             log.warning("campaign.final_report_failed", extra={"campaign_id": campaign.id})
@@ -1650,7 +1651,7 @@ class CampaignRunner:
         progress = getattr(web, "progress", None)
         if web is not None and web.active:
             host, url = web.host or getattr(progress, "host", None), getattr(progress, "url", None)
-            if self.config.status_hide_unvetted_sites:
+            if self._hide_unvetted(campaign):
                 from bot.web_search.queries import listing_portal_host
 
                 text = vetted_site_line(host, url, listing_portal_host)
@@ -1685,6 +1686,10 @@ class CampaignRunner:
         order = ["facebook", "web", "social", "reach", "checking"]
         best = max(shown, key=lambda stage: (seen[stage][1], -order.index(stage)))
         return shown[best][1]
+
+    def _hide_unvetted(self, campaign: Campaign) -> bool:
+        """STATUS_HIDE_UNVETTED_SITES (Q69): a user's status and report name only listing portals; owners see all."""
+        return self.config.status_hide_unvetted_sites and campaign.requested_by not in self.owner_ids
 
     async def _web_detail(self, campaign: Campaign, progress: Any) -> str:
         """Owners only: the current host's refusals per layer and the cards sent so far."""
