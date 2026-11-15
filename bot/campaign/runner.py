@@ -1294,6 +1294,9 @@ class CampaignRunner:
             if not held:
                 continue
             exact = await self.store.exact_count(campaign.id)
+            if not exact and self.config.tolerance_hits_as_similar:  # Q71: a sent tolerance hit is a find too
+                exact = sum(row.count for row in await self.store.outcome_counts(campaign.id)
+                            if row.state in ("sent", "sending") and row.why == TOLERANCE_WHY)
             if bucket == "similar":
                 # as soon as the first similar finding is held, not only at the end (Q27: at the end, when the flag is on)
                 ask = settled if self.config.offer_after_search else True

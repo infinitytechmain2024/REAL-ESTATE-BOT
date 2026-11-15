@@ -16,7 +16,14 @@ from bot.campaign.runner import APPROVED_LINE, CampaignRunner, RunnerConfig
 from bot.campaign.runs import MemoryRunStore, OutcomeCount
 from bot.campaign.settings import CampaignRunnerSettings
 from bot.campaign.tolerance import TOLERANCE_WHY, Request, classify, tolerance_hit
-from tests.test_near_match import ButtonMessenger, cards, listing
+from tests.test_near_match import (
+    ButtonMessenger,
+    _migrated_pool,
+    _seed_findings,
+    cards,
+    listing,
+    needs_db,
+)
 
 GOAL = "Купить квартиру в Мадриде от 70 м² до 400 000 €"
 CHAT, USER = 4242, 42
@@ -27,7 +34,7 @@ def flat(area: float, price: float = 375_000) -> dict[str, Any]:
     return {**listing(price, location="El Pardo, Fuencarral, Madrid"), "area_m2": area, "rooms": 3}
 
 
-async def setup(flag: bool):
+async def setup(flag: bool, areas: dict[str, float] | None = None):
     campaigns = MemoryCampaignStore()
     store = MemoryRunStore(campaigns)
     messenger = ButtonMessenger()
@@ -38,7 +45,7 @@ async def setup(flag: bool):
                                  actor=f"telegram:{USER}", spec=DEVIATIONS)
     await campaigns.set_state(cid, "running", "campaign:test")
     store.add_groups(cid, 5)  # the search keeps running
-    for fid, area in (("f65", 65), ("f70", 70)):
+    for fid, area in (areas or {"f65": 65, "f70": 70}).items():
         store.add_finding(cid, fid, f"🏠 {fid}", payload=flat(area), original=f"post {fid}", vertical="real_estate")
     await runner.tick()
     await runner.tick()
@@ -113,3 +120,52 @@ def test_setting_reads_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert CampaignRunnerSettings(_env_file=None).runner_config().tolerance_hits_as_similar is False
     monkeypatch.setenv("TOLERANCE_HITS_AS_SIMILAR", "true")
     assert CampaignRunnerSettings(_env_file=None).runner_config().tolerance_hits_as_similar is True
+
+
+@pytest.mark.asyncio
+async def test_flag_on_a_sent_tolerance_hit_makes_the_similar_question_say_more_found() -> None:
+    store, messenger, _ = await setup(True, {"f65": 65, "f60": 60})
+    assert store.buckets["f65"][0] == "similar" and store.buckets["f60"][0] == "similar"
+    assert len(cards(messenger)) == 1 and len(messenger.asks) == 1
+    assert messenger.asks[0][1].startswith("Есть ещё похожие варианты")  # not «пока ничего не нашёл»
+    _, alone, _ = await setup(True, {"f60": 60})
+    assert alone.asks[0][1].startswith("По вашим критериям пока ничего не нашёл")
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_postgres_claims_a_tolerance_hit_as_similar_and_releases_it_for_a_retry() -> None:
+    from bot.campaign.runs import PostgresRunStore
+    from bot.campaign.store import PostgresCampaignStore
+    from bot.orchestra.store import SafetyLimits
+
+    pool = await _migrated_pool()
+    try:
+        campaigns = PostgresCampaignStore(pool)
+        store = PostgresRunStore(pool, SafetyLimits())
+        cid = await campaigns.create(plan_campaign(GOAL), chat_id=CHAT, requested_by=USER, source_text=GOAL,
+                                     actor=f"telegram:{USER}")
+        ids = await _seed_findings(pool, cid, {"a": 52_000, "b": 53_000, "c": 54_000})
+        assert await store.claim_finding(cid, ids["a"], "similar", TOLERANCE_WHY) == 1
+        assert await store.claim_finding(cid, ids["a"], "similar", TOLERANCE_WHY) is None
+        assert await store.claim_finding(cid, ids["a"]) is None
+        row = await pool.fetchrow("select bucket, why, state from campaign_findings where finding_id = $1::uuid", ids["a"])
+        assert tuple(row) == ("similar", TOLERANCE_WHY, "sending")
+        await store.release_finding(ids["a"])  # a failed send: picked up again, never held
+        assert await pool.fetchval("select count(*) from campaign_findings where finding_id = $1::uuid", ids["a"]) == 0
+        assert ids["a"] in {f.id for f in await store.unstreamed_findings(cid, 10)}
+        assert await store.claim_finding(cid, ids["b"]) is not None  # an exact one, the old insert
+        assert await store.claim_finding(cid, ids["a"], "similar", TOLERANCE_WHY) is not None
+        await store.finding_sent(ids["a"], 99)
+        assert await store.hold_finding(cid, ids["c"], "similar", 0.2, why="budget")
+        assert await store.claim_held(cid, ids["c"]) is not None
+        await store.release_finding(ids["c"])  # an approved similar one goes back to held, as before
+        rows = dict(await pool.fetch("""select finding_id::text, bucket || ':' || state from campaign_findings
+                                          where campaign_id = $1::uuid""", cid))
+        assert rows == {ids["a"]: "similar:sent", ids["b"]: "exact:sending", ids["c"]: "similar:held"}
+        counts = tally(await store.outcome_counts(cid))
+        assert (counts.sent_exact, counts.sent_approved, counts.sent_tolerance) == (1, 0, 1)
+        assert await store.exact_count(cid) == 1
+        assert await store.offer_state(cid, "similar") is None
+    finally:
+        await pool.close()

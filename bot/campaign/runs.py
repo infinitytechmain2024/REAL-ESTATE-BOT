@@ -619,18 +619,15 @@ class PostgresRunStore:
 
         ``bucket``/``why``: a finding sent at once though not exact (``TOLERANCE_WHY``, Q71); default: exact."""
         async with self.pool.acquire() as conn, conn.transaction():
-            if bucket == "exact" and why is None:
-                claimed = await conn.fetchval(
-                    """insert into campaign_findings (finding_id, campaign_id) values ($1::uuid, $2::uuid)
-                       on conflict do nothing returning 1""",
-                    finding_id, campaign_id,
-                )
-            else:
-                claimed = await conn.fetchval(
-                    """insert into campaign_findings (finding_id, campaign_id, bucket, why)
-                       values ($1::uuid, $2::uuid, $3, $4) on conflict do nothing returning 1""",
-                    finding_id, campaign_id, bucket, why[:40] if why else None,
-                )
+            claimed = await conn.fetchval(
+                """insert into campaign_findings (finding_id, campaign_id) values ($1::uuid, $2::uuid)
+                   on conflict do nothing returning 1""",
+                finding_id, campaign_id,
+            ) if bucket == "exact" and why is None else await conn.fetchval(
+                """insert into campaign_findings (finding_id, campaign_id, bucket, why)
+                   values ($1::uuid, $2::uuid, $3, $4) on conflict do nothing returning 1""",
+                finding_id, campaign_id, bucket, why[:40] if why else None,
+            )
             if not claimed:
                 return None
             return await _number_card(conn, campaign_id, finding_id)
