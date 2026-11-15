@@ -488,8 +488,8 @@ class TaskIntake:
 
         ``must_explicit`` (``INTAKE_MUST_HAVE_EXPLICIT``, Q70): a must-have the AI interviewer added from an answer
         without a word of obligation («обязательно», «только», «imprescindible» …) becomes a wish of weight 2, and a
-        new wish of weight 3 without «очень важно» gets weight 2 (``interviewer.explicit_must``). Off, as the model
-        returned it. The rules of ``rules.py`` ask «Что обязательно должно быть?» and are not changed.
+        new wish of weight 3 without «очень важно» gets weight 2; the must-haves there before are never lost or lowered
+        (``interviewer.explicit_must``). Off, as the model returned it. The rules of ``rules.py`` ask «Что обязательно должно быть?» and are not changed.
 
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
@@ -834,8 +834,7 @@ class TaskIntake:
                 turn = await self.interviewer.interview(mode=mode, spec=spec, dialogue=draft.dialogue, message=message,
                                                         asking=draft.asking, editing=editing)
                 if self.must_explicit and not editing:  # INTAKE_MUST_HAVE_EXPLICIT (Q70): must only when said
-                    question = next((t["text"] for t in reversed(draft.dialogue) if t.get("role") == "assistant"), "")
-                    turn.spec = explicit_must(spec, turn.spec, message, question)
+                    turn.spec = explicit_must(spec, turn.spec, message)
                 log.info("telegram.intake.interviewed", extra={"user_id": draft.user_id, "done": turn.done,
                                                                 "round": draft.rounds})
                 return turn

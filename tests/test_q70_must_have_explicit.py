@@ -73,7 +73,7 @@ async def test_on_the_g9_answers_are_wishes_of_weight_2() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer", ["обязательно вода и свет", "только urbano", "вода imprescindible",
-                                    "sin agua no", "без воды не рассматриваю"])
+                                    "sin agua no", "без воды не рассматриваю", "нужна вода", "свет обязателен"])
 async def test_on_an_explicit_must_stays_a_must(answer: str) -> None:
     control, _, _ = with_fake(FakeInterviewer(
         ask(STATUS_Q, "context.answers", LAND), ask(DEVIATION_Q, "deviations", {"must_have": ["вода"]})))
@@ -99,21 +99,49 @@ async def test_on_the_first_message_without_a_marker_gives_a_wish() -> None:
 # --- the safety net ------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("message", "question", "said"), [
-    ("обязательно вода", "", True),
-    ("вода обязательна", "", True),
-    ("only with a pool", "", True),
-    ("must have parking", "", True),
-    ("нужна вода", "Что обязательно для участка?", True),
-    ("нужна вода", "Что по коммуникациям?", False),  # «нужна» only answers a question about what is obligatory
-    ("коммуникации подведены или рядом, подъезд для техники", "Что обязательно для участка по коммуникациям?", False),
-    ("urbano или urbanizable, под застройку", "Какой статус земли подходит?", False),
-    ("не обязательно, но желательно вода", "", False),
-    ("необязательно", "", False),
-    ("не только urbano", "", False),
+@pytest.mark.parametrize(("message", "said"), [
+    ("обязательно вода", True),
+    ("вода обязательна", True),
+    ("свет обязателен", True),  # Б1: обязател-ен
+    ("only with a pool", True),
+    ("must have parking", True),
+    ("нужна вода", True),  # G4: «нужна» is a must in any answer
+    ("I need parking", True),
+    ("hace falta agua", True),
+    ("потрібна вода", True),
+    ("главное — вода", True),
+    ("самое важное — подъезд", True),
+    ("без воды — не вариант", True),
+    ("без воды, не подходит", True),
+    ("без воды не підходить", True),
+    ("sin agua, no compro", True),
+    ("лише urbano", True),
+    ("необхідно світло", True),
+    ("tiene que tener agua", True),
+    ("water is non-negotiable", True),
+    ("it has to have water", True),
+    ("коммуникации подведены или рядом, подъезд для техники", False),  # G9
+    ("urbano или urbanizable, под застройку", False),
+    ("не обязательно, но желательно вода", False),
+    ("необязательно", False),
+    ("не только urbano", False),
+    ("not only land", False),
+    ("не нужна вода", False),
+    ("лучше urbano, чтобы можно было строить", False),
 ])
-def test_must_said(message: str, question: str, said: bool) -> None:
-    assert must_said(message, question) is said
+def test_must_said(message: str, said: bool) -> None:
+    assert must_said(message) is said
+
+
+@pytest.mark.parametrize(("message", "very"), [
+    ("urbano, это очень важно", True), ("критично: вода", True),
+    ("не очень важно, urbano", False), ("не критично, urbano", False), ("некритично", False),
+    ("not very important", False), ("no muy importante", False),
+])
+def test_a_new_weight_3_needs_a_very(message: str, very: bool) -> None:
+    before = TaskSpec()
+    after = before.merged({"wishes": [{"text": "земля urbano", "weight": 3}]})
+    assert [w.weight for w in explicit_must(before, after, message).wishes] == [3 if very else 2]
 
 
 def test_the_safety_net_keeps_old_must_haves_and_caps_new_weight_3() -> None:
@@ -125,8 +153,17 @@ def test_the_safety_net_keeps_old_must_haves_and_caps_new_weight_3() -> None:
     assert out.must_have == ["лифт"]  # the earlier must stays, the new one has no marker
     # the old weight 3 stays, the new one without «очень важно» is 2, the existing wish keeps its weight
     assert [(w.text, w.weight) for w in out.wishes] == [("терраса", 3), ("земля urbano", 2), ("парковка", 1)]
-    very = before.merged({"wishes": [{"text": "земля urbano", "weight": 3}]})
-    assert [w.weight for w in explicit_must(before, very, "urbano, это очень важно").wishes] == [3]
+
+
+def test_previous_must_haves_are_never_lost_or_lowered() -> None:
+    before = TaskSpec.model_validate({"must_have": ["Лифт", "вода"]})
+    # the model drops «вода», rewords «Лифт» and lowers it to a wish, adds «парковка» without a marker
+    after = before.merged({"must_have": ["лифт в доме", "парковка"], "wishes": [{"text": "вода", "weight": 2}]})
+    out = explicit_must(before, after, "есть парковка рядом")
+    assert out.must_have == ["лифт в доме", "вода"]
+    assert [(w.text, w.weight) for w in out.wishes] == [("парковка", 2)]
+    said = explicit_must(before, before.merged({"must_have": ["лифт", "вода", "парковка"]}), "парковка обязательна")
+    assert said.must_have == ["лифт", "вода", "парковка"]
 
 
 @pytest.mark.asyncio

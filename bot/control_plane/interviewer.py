@@ -220,7 +220,7 @@ MUST_EXAMPLE = '"budget": {"max": 900, "currency": "EUR"}, "wishes": [{"text": "
 MUST_RULE = """
 MUST-HAVE ONLY WHEN SAID (this refines rule 1 and every example and skill below): an item goes into must_have ONLY
 when the person explicitly calls it required: «обязательно», «только», «must», «imprescindible», «sin X no», «без X
-не рассматриваю», «необходимо», or «нужен / нужна» in an answer to a question about what is obligatory. Anything
+не рассматриваю», «необходимо», «главное», «нужен / нужна». Anything
 else the person wants is a wish, even when your question said «обязательно»: an answer to a descriptive question
 («Какой статус земли подходит?» — «urbano или urbanizable», «Что по коммуникациям и подъезду?» — «коммуникации
 подведены, подъезд для техники») is a wish of weight 2. Weight 1: «желательно», «было бы неплохо»; weight 2: a plain
@@ -242,40 +242,67 @@ def prompt_version(must_explicit: bool = False) -> str:
     return PROMPT_VERSION_MUST if must_explicit else PROMPT_VERSION
 
 
-# INTAKE_MUST_HAVE_EXPLICIT (Q70): the words that make a wish a must; «не обязательно», «не только» are none.
+# INTAKE_MUST_HAVE_EXPLICIT (Q70): the words that make a wish a must; negated ones («не обязательно», «не только»,
+# «not only», «не нужна») are none. «нужна», «need» count in any answer (G4 «нужна вода» is a must).
+_NOT = r"(?<!не )(?<!не)(?<!not )(?<!no )"
 _MUST_SAID = re.compile(
-    r"(?<!не )(?<!не)обязательн|обов.язков|(?<!не )\bтолько\b|(?<!не )\bтільки\b|\bmust\b|imprescindible|"
-    r"obligatori|\brequired\b|\bmandatory\b|\bessential\b|(?<!не)необходим|\bsolo\b|\bsólo\b|\bsolamente\b|"
-    r"\bonly\b|\bsin\b[^.,;!?\n]{1,40}\bno\b|"
-    r"\bбез\b[^.,;!?\n]{1,40}\b(?:не\s+(?:рассматр|подойд|подходит|интересн|нужн|купл)|нельзя|никак)",
+    _NOT + r"обязател(?:ьн|ен)|" + _NOT + r"обов.язков|" + _NOT + r"\bтолько\b|" + _NOT + r"\bтільки\b|"
+    + _NOT + r"\bлише\b|" + _NOT + r"необходим|" + _NOT + r"необхідн|" + _NOT + r"\bглавное\b|"
+    + _NOT + r"самое\s+важное|" + _NOT + r"\b(?:нужен|нужна|нужно|нужны|надо|потрібна|потрібен|потрібно)\b|"
+    r"\bmust\b|\bnon-negotiable\b|\bhas\s+to\s+have\b|\bhave\s+to\s+have\b|" + _NOT + r"\bonly\b|"
+    + _NOT + r"\b(?:need|needs|required|mandatory|essential)\b|imprescindible|obligatori|tiene\s+que\s+tener|"
+    + _NOT + r"\b(?:necesito|necesita|necesitamos)\b|hace\s+falta|" + _NOT + r"\b(?:solo|sólo|solamente)\b|"
+    r"\bsin\s+[^.;!?\n]{1,40}?,?\s*\bno\b|"
+    r"\bбез\s+[^.;!?\n]{1,40}?\s*[,—–-]?\s*(?:не\s+(?:вариант|подход|подойд|рассматр|интересн|нужн|купл|підход|"
+    r"розгляд)|нельзя|никак|ніяк)",
     re.IGNORECASE)
-_MUST_ASKED = re.compile(r"обязательн|обов.язков", re.IGNORECASE)  # the question asks what is obligatory
-_NEED_SAID = re.compile(r"(?<!не )\b(?:нужен|нужна|нужно|нужны|надо|need|necesito|necesita)\b", re.IGNORECASE)
-_VERY_SAID = re.compile(r"очень\s+важн|критичн|принципиальн|muy\s+important|very\s+important|\bcrucial", re.IGNORECASE)
+_VERY_SAID = re.compile(
+    _NOT + r"очень\s+важн|" + _NOT + r"критичн|" + _NOT + r"принципиальн|" + _NOT + r"\bглавное\b|"
+    + _NOT + r"самое\s+важное|" + _NOT + r"muy\s+important|" + _NOT + r"very\s+important|"
+    + _NOT + r"\bcrucial",
+    re.IGNORECASE)
 
 
-def must_said(message: str, question: str = "") -> bool:
-    """INTAKE_MUST_HAVE_EXPLICIT: the person called something required in ``message`` (the answer to ``question``)."""
-    return bool(_MUST_SAID.search(message) or (_MUST_ASKED.search(question) and _NEED_SAID.search(message)))
+def must_said(message: str) -> bool:
+    """INTAKE_MUST_HAVE_EXPLICIT: the person called something required in ``message``."""
+    return bool(_MUST_SAID.search(message))
 
 
-def explicit_must(before: TaskSpec, after: TaskSpec, message: str, question: str = "") -> TaskSpec:
-    """INTAKE_MUST_HAVE_EXPLICIT (Q70), the safety net under the model: a must-have this answer added without a word
-    of obligation (``must_said``) becomes a wish of weight 2; a new wish of weight 3 without «очень важно» or such a
-    word gets weight 2. Must-haves and wishes that were there before stay as they are."""
-    had = {m.casefold() for m in before.must_have}
-    new = [m for m in after.must_have if m.casefold() not in had]
-    said = must_said(message, question)
-    wishes = [{"text": w.text, "weight": w.weight} for w in after.wishes]
-    old = {w.text.casefold(): w.weight for w in before.wishes}
+def _key(text: str) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", text.casefold()).split())
+
+
+def _same(a: str, b: str) -> bool:
+    """The same item, maybe reworded by the model: equal once normalised, or one contains the other (3+ chars)."""
+    x, y = _key(a), _key(b)
+    return x == y or (min(len(x), len(y)) >= 3 and (x in y or y in x))
+
+
+def explicit_must(before: TaskSpec, after: TaskSpec, message: str) -> TaskSpec:
+    """INTAKE_MUST_HAVE_EXPLICIT (Q70), the safety net under the model.
+
+    The must-haves that were there before are the base: none is lost or made a wish, even when the model dropped or
+    reworded it (a reworded one keeps the model's words). A must-have this answer added without a word of obligation
+    (``must_said``) becomes a wish of weight 2; a new wish of weight 3 without «очень важно» or such a word gets 2."""
+    said = must_said(message)
+    musts: list[str] = []
+    for old in before.must_have:
+        musts.append(next((m for m in after.must_have if _same(m, old) and m not in musts), old))
+    new = [m for m in after.must_have if m not in musts and not any(_same(m, o) for o in before.must_have)]
+    wishes = [{"text": w.text, "weight": w.weight} for w in after.wishes
+              if not any(_same(w.text, m) for m in musts)]  # a must is never lowered to a wish
+    old_weight = {_key(w.text): w.weight for w in before.wishes}
     if not said and not _VERY_SAID.search(message):
         for wish in wishes:
-            if wish["weight"] == 3 and old.get(wish["text"].casefold()) != 3:
+            if wish["weight"] == 3 and old_weight.get(_key(wish["text"])) != 3:
                 wish["weight"] = 2
-    if new and not said:
-        after.must_have = [m for m in after.must_have if m.casefold() in had]
-        known = {w["text"].casefold() for w in wishes}
-        wishes += [{"text": m, "weight": 2} for m in new if m.casefold() not in known]
+    if said:
+        musts += new
+    else:
+        known = {_key(w["text"]) for w in wishes}
+        wishes += [{"text": m, "weight": 2} for m in new if _key(m) not in known]
+    if musts != after.must_have:
+        after.must_have = musts
     if wishes != [{"text": w.text, "weight": w.weight} for w in after.wishes]:
         after.wishes = after.__class__.model_validate({"wishes": wishes}).wishes
     return after
