@@ -53,11 +53,12 @@ def task_prompt(mode: str) -> str:
         return ""
 
 
-def system_prompt(mode: str, *, post_link: bool = False, seller_role: bool = False) -> str:
+def system_prompt(mode: str, *, post_link: bool = False, seller_role: bool = False, must_explicit: bool = False) -> str:
     """``SYSTEM`` plus the mode's skill; for a task built from a post link (``spec.post_link``) the post-link skill too.
 
-    ``seller_role`` (INVESTOR_SELLER_ROLE, Q63): ``SYSTEM_SELLER`` (the selling role) instead of ``SYSTEM``."""
-    base = system_text(seller_role)
+    ``seller_role`` (INVESTOR_SELLER_ROLE, Q63): ``SYSTEM_SELLER`` (the selling role) instead of ``SYSTEM``.
+    ``must_explicit`` (INTAKE_MUST_HAVE_EXPLICIT, Q70): with ``MUST_RULE`` (must_have only when said)."""
+    base = system_text(seller_role, must_explicit)
     skill = task_prompt(mode)
     if post_link and (extra := task_prompt("post_link")):
         skill = f"{skill}\n\n{extra}" if skill else extra
@@ -69,11 +70,12 @@ class AnthropicInterviewer:
 
     def __init__(self, *, api_key: str, model: str, timeout_seconds: float = 90.0,
                  base_url: str = ANTHROPIC_BASE_URL, client: httpx.AsyncClient | None = None,
-                 seller_role: bool = False) -> None:
+                 seller_role: bool = False, must_explicit: bool = False) -> None:
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is required for the Anthropic interviewer")
         self.model = model
         self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): the prompt with the selling role
+        self.must_explicit = must_explicit  # INTAKE_MUST_HAVE_EXPLICIT (Q70): the prompt with MUST_RULE
         self._url = f"{base_url.rstrip('/')}/v1/messages"
         self._headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION,
                          "content-type": "application/json"}
@@ -91,7 +93,7 @@ class AnthropicInterviewer:
             "model": self.model,
             "max_tokens": MAX_TOKENS,
             "system": system_prompt(mode, post_link=bool(getattr(spec, "post_link", False)),
-                                    seller_role=self.seller_role),
+                                    seller_role=self.seller_role, must_explicit=self.must_explicit),
             "messages": [{"role": "user", "content": state_message(mode, spec, dialogue, message, asking, editing)}],
             "tools": [{"name": TOOL_NAME, "description": "Return the updated task and the next question.",
                        "input_schema": TURN_SCHEMA}],

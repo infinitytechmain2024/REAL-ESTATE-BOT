@@ -53,7 +53,7 @@ from bot.campaign.spec import (
     Sources,
     TaskSpec,
 )
-from bot.control_plane.interviewer import Interviewer, InterviewTurn
+from bot.control_plane.interviewer import Interviewer, InterviewTurn, explicit_must
 from bot.control_plane.models import Button, CommandEnvelope, IncomingMessage, Reply
 from bot.control_plane.rules import (
     AI_SKIP_WORDS,
@@ -460,7 +460,7 @@ class TaskIntake:
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
                  post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False,
                  role_conflict_check: bool = False, ask_city_or_province: bool = False,
-                 seller_role: bool = False) -> None:
+                 seller_role: bool = False, must_explicit: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -486,6 +486,11 @@ class TaskIntake:
         покупателя», «vendo …, busco comprador» in the task (or in the answer to the role question) set it, and the role
         buttons get «Продаю объект, ищу покупателя». Off, the role is raising or deploying, as before.
 
+        ``must_explicit`` (``INTAKE_MUST_HAVE_EXPLICIT``, Q70): a must-have the AI interviewer added from an answer
+        without a word of obligation («обязательно», «только», «imprescindible» …) becomes a wish of weight 2, and a
+        new wish of weight 3 without «очень важно» gets weight 2; the must-haves there before are never lost or lowered
+        (``interviewer.explicit_must``). Off, as the model returned it. The rules of ``rules.py`` ask «Что обязательно должно быть?» and are not changed.
+
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
         """
@@ -498,6 +503,7 @@ class TaskIntake:
         self.skip_widens_place = skip_widens_place
         self.role_conflict_check = role_conflict_check
         self.ask_city_or_province = ask_city_or_province
+        self.must_explicit = must_explicit
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
         return mode_menu(text, both=self.both_mode)
@@ -827,6 +833,8 @@ class TaskIntake:
             try:
                 turn = await self.interviewer.interview(mode=mode, spec=spec, dialogue=draft.dialogue, message=message,
                                                         asking=draft.asking, editing=editing)
+                if self.must_explicit and not editing:  # INTAKE_MUST_HAVE_EXPLICIT (Q70): must only when said
+                    turn.spec = explicit_must(spec, turn.spec, message)
                 log.info("telegram.intake.interviewed", extra={"user_id": draft.user_id, "done": turn.done,
                                                                 "round": draft.rounds})
                 return turn

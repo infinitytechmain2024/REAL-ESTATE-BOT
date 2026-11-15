@@ -26,6 +26,7 @@ from bot.campaign.spec import ASKABLE_PATHS, TaskSpec
 log = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 PROMPT_VERSION = "interview-v3"
+PROMPT_VERSION_MUST = "interview-v3-must"  # INTAKE_MUST_HAVE_EXPLICIT (Q70): must_have only when said
 MAX_DIALOGUE_TURNS = 12
 MAX_TURN_CHARS = 600
 MAX_MESSAGE_CHARS = 2000
@@ -210,9 +211,118 @@ assert SYSTEM.count(_ROLE_FIELD) == 1
 SYSTEM_SELLER = SYSTEM.replace(_ROLE_FIELD, SELLER_ROLE_FIELD) + SELLER_RULE
 
 
-def system_text(seller_role: bool = False) -> str:
-    """The interviewer's system prompt: ``SYSTEM``, or with INVESTOR_SELLER_ROLE (Q63) the one with the selling role."""
-    return SYSTEM_SELLER if seller_role else SYSTEM
+# INTAKE_MUST_HAVE_EXPLICIT (Q70, sim b6-g9-s7): answers to descriptive questions («Какой статус земли подходит?» —
+# «urbano или urbanizable», «Что по коммуникациям и подъезду?» — «коммуникации подведены или рядом, подъезд для
+# техники») went into must_have; the listings did not state them and no finding was exact. b6-g1-s7: «лучше urbano»
+# became a wish of weight 3. With the flag must_have is only what the person calls required; off, SYSTEM is sent as is.
+_MUST_EXAMPLE = '"budget": {"max": 900, "currency": "EUR"}, "must_have": ["можно с собакой"]},'
+MUST_EXAMPLE = '"budget": {"max": 900, "currency": "EUR"}, "wishes": [{"text": "можно с собакой", "weight": 2}]},'
+MUST_RULE = """
+MUST-HAVE ONLY WHEN SAID (this refines rule 1 and every example and skill below): an item goes into must_have ONLY
+when the person explicitly calls it required: «обязательно», «только», «must», «imprescindible», «sin X no», «без X
+не рассматриваю», «необходимо», «главное», «нужен / нужна». Anything
+else the person wants is a wish, even when your question said «обязательно»: an answer to a descriptive question
+(«Какой статус земли подходит?» — «urbano или urbanizable», «Что по коммуникациям и подъезду?» — «коммуникации
+подведены, подъезд для техники») is a wish of weight 2. Weight 1: «желательно», «было бы неплохо»; weight 2: a plain
+description, «лучше», «предпочтительно»; weight 3 only when the person says «очень важно», «критично» or the like.
+Never ask part B questions as «что обязательно…»; ask what fits («Что важно по коммуникациям и подъезду?»).
+"""
+assert SYSTEM.count(_MUST_EXAMPLE) == 1
+
+
+def system_text(seller_role: bool = False, must_explicit: bool = False) -> str:
+    """The interviewer's system prompt: ``SYSTEM``, or with INVESTOR_SELLER_ROLE (Q63) the one with the selling role.
+
+    ``must_explicit`` (INTAKE_MUST_HAVE_EXPLICIT, Q70): plus ``MUST_RULE`` and the example's must-have as a wish."""
+    base = SYSTEM_SELLER if seller_role else SYSTEM
+    return base.replace(_MUST_EXAMPLE, MUST_EXAMPLE) + MUST_RULE if must_explicit else base
+
+
+def prompt_version(must_explicit: bool = False) -> str:
+    return PROMPT_VERSION_MUST if must_explicit else PROMPT_VERSION
+
+
+# INTAKE_MUST_HAVE_EXPLICIT (Q70): the words that make a wish a must. A marker starts a word («необязательно» is
+# none), and a separate «не», «not», «no», «no es» right before it negates it («не обязательно», «not only», «no
+# need»); the end of another word does not («мне нужна», «на балконе обязательно», «terreno solo»). «нужна», «need»
+# count in any answer (G4 «нужна вода» is a must).
+_NOT = r"(?<!\bне )(?<!\bnot )(?<!\bno )(?<!\bno es )"
+_MUST_SAID = re.compile(
+    _NOT + r"\bобязател(?:ьн|ен)|" + _NOT + r"\bобов.язков|" + _NOT + r"\bтолько\b|" + _NOT + r"\bтільки\b|"
+    + _NOT + r"\bлише\b|" + _NOT + r"\bнеобходим|" + _NOT + r"\bнеобхідн|" + _NOT + r"\bглавное\b|"
+    + _NOT + r"\bсамое\s+важное\b|" + _NOT + r"\b(?:нужен|нужна|нужно|нужны|надо|потрібна|потрібен|потрібно)\b|"
+    + _NOT + r"\bmust\b|\bnon-negotiable\b|" + _NOT + r"\b(?:has|have)\s+to\s+have\b|" + _NOT + r"\bonly\b|"
+    + _NOT + r"\b(?:need|needs|required|mandatory|essential)\b|" + _NOT + r"\bimprescindible\b|"
+    + _NOT + r"\bobligatori|" + _NOT + r"\btiene\s+que\s+tener\b|" + _NOT + r"\b(?:necesito|necesita|necesitamos)\b|"
+    + _NOT + r"\bhace\s+falta\b|" + _NOT + r"\b(?:solo|sólo|solamente)\b|"
+    r"\bsin\s+[^.;!?\n]{1,40}?,?\s*\bno\b|"
+    r"\bбез\s+[^.;!?\n]{1,40}?\s*[,—–-]?\s*\b(?:не\s+(?:вариант|подход|подойд|рассматр|интересн|нужн|купл|підход|"
+    r"розгляд)|нельзя|никак|ніяк)",
+    re.IGNORECASE)
+_VERY_SAID = re.compile(
+    _NOT + r"\bочень\s+важн|" + _NOT + r"\bкритичн|" + _NOT + r"\bпринципиальн|" + _NOT + r"\bглавное\b|"
+    + _NOT + r"\bсамое\s+важное\b|" + _NOT + r"\bmuy\s+important|" + _NOT + r"\bvery\s+important|"
+    + _NOT + r"\bcrucial\b",
+    re.IGNORECASE)
+
+def must_said(message: str) -> bool:
+    """INTAKE_MUST_HAVE_EXPLICIT: the person called something required in ``message``."""
+    return bool(_MUST_SAID.search(message))
+
+
+def _key(text: str) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", text.casefold()).split())
+
+
+def _words(text: str) -> frozenset[str]:
+    """The whole words of 3+ letters, their final vowels cut («вода», «воды» -> «вод»; «свет» ≠ «светлая»)."""
+    return frozenset(re.sub(r"[аеёиоуыэюяйьіїєaeiouy]+$", "", w) or w
+                     for w in re.findall(r"\w+", text.casefold()) if len(w) >= 3)
+
+
+def _same(a: str, b: str) -> bool:
+    """The same item, maybe reworded by the model: the whole words of one are all in the other («лифт», «лифт в доме»)."""
+    x, y = _words(a), _words(b)
+    return _key(a) == _key(b) or (bool(x) and bool(y) and (x <= y or y <= x))
+
+
+def _equal(a: str, b: str) -> bool:
+    """The same text once normalised (the same words): a wish that only repeats a must-have."""
+    return _key(a) == _key(b) or (bool(_words(a)) and _words(a) == _words(b))
+
+
+def explicit_must(before: TaskSpec, after: TaskSpec, message: str) -> TaskSpec:
+    """INTAKE_MUST_HAVE_EXPLICIT (Q70), the safety net under the model.
+
+    The must-haves that were there before are the base: none is lost or made a wish, even when the model dropped or
+    reworded it (a reworded one keeps the model's words); only an edit of the field on the card lowers it. A
+    must-have this answer added without a word of obligation (``must_said``) becomes a wish of weight 2; a new wish of
+    weight 3 without «очень важно» or such a word gets 2."""
+    said = must_said(message)
+    musts: list[str] = []
+    for old in before.must_have:
+        free = [m for m in after.must_have if m not in musts]
+        musts.append(next((m for m in free if _equal(m, old)), None) or next((m for m in free if _same(m, old)), old))
+    new = [m for m in after.must_have if m not in musts]
+    wishes = [{"text": w.text, "weight": w.weight} for w in after.wishes
+              if not any(_equal(w.text, m) for m in musts)]  # a must is never lowered to a wish
+    old_weight = {_key(w.text): w.weight for w in before.wishes}
+    if not said and not _VERY_SAID.search(message):
+        for wish in wishes:
+            if wish["weight"] == 3 and old_weight.get(_key(wish["text"])) != 3:
+                wish["weight"] = 2
+    if said:
+        musts += new
+    known = {_key(w["text"]) for w in wishes}
+    for item in [] if said else new:
+        if _key(item) not in known and not any(_equal(item, w["text"]) for w in wishes):
+            wishes.append({"text": item, "weight": 2})
+            known.add(_key(item))
+    if musts != after.must_have:
+        after.must_have = musts
+    if wishes != [{"text": w.text, "weight": w.weight} for w in after.wishes]:
+        after.wishes = after.__class__.model_validate({"wishes": wishes}).wishes
+    return after
 
 
 # --- parsing -----------------------------------------------------------------------------------
@@ -304,11 +414,12 @@ class OpenRouterInterviewer:
 
     def __init__(self, *, api_key: str, model: str, timeout_seconds: float,
                  base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None,
-                 seller_role: bool = False) -> None:
+                 seller_role: bool = False, must_explicit: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the interviewer")
         self.model = model
         self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): the prompt with the selling role
+        self.must_explicit = must_explicit  # INTAKE_MUST_HAVE_EXPLICIT (Q70): the prompt with MUST_RULE
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
@@ -325,7 +436,7 @@ class OpenRouterInterviewer:
             "max_tokens": 1800,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": system_text(self.seller_role)},
+                {"role": "system", "content": system_text(self.seller_role, self.must_explicit)},
                 {"role": "user", "content": state},
             ],
         }

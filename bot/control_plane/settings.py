@@ -46,6 +46,9 @@ class ControlPlaneSettings:
     # INVESTOR_SELLER_ROLE (Q63): the investor role selling (the person has a property and seeks its buyers) is read
     # and offered (off: raising or deploying, the interviewer's prompt byte for byte).
     investor_seller_role: bool = False
+    # INTAKE_MUST_HAVE_EXPLICIT (Q70): must_have only what the person calls required («обязательно», «только» …);
+    # answers to descriptive questions are wishes of weight 2 (off: as the interviewer's model returns them).
+    intake_must_have_explicit: bool = False
     # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
     # OpenRouter stays its fallback. The key is never logged or echoed.
     architect_provider: str = "openrouter"
@@ -109,6 +112,7 @@ class ControlPlaneSettings:
             intake_role_conflict_check=os.environ.get("INTAKE_ROLE_CONFLICT_CHECK", "").strip().lower() in {"1", "true", "yes", "on"},
             intake_ask_city_or_province=os.environ.get("INTAKE_ASK_CITY_OR_PROVINCE", "").strip().lower() in {"1", "true", "yes", "on"},
             investor_seller_role=os.environ.get("INVESTOR_SELLER_ROLE", "").strip().lower() in {"1", "true", "yes", "on"},
+            intake_must_have_explicit=os.environ.get("INTAKE_MUST_HAVE_EXPLICIT", "").strip().lower() in {"1", "true", "yes", "on"},
             architect_provider=_architect_provider(os.environ.get("ARCHITECT_PROVIDER", "openrouter")),
             anthropic_api_key=anthropic_key,
             anthropic_interview_model=os.environ.get("ANTHROPIC_INTERVIEW_MODEL", "").strip() or "claude-sonnet-5-5",

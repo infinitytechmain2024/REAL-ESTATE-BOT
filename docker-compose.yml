@@ -140,6 +140,8 @@ services:
       INTAKE_ASK_CITY_OR_PROVINCE: ${INTAKE_ASK_CITY_OR_PROVINCE:-false}
       # Q63: the investor role «selling» (has a property, seeks its buyers) in the interview and on the card
       INVESTOR_SELLER_ROLE: ${INVESTOR_SELLER_ROLE:-false}
+      # Q70: must_have only what the person calls required; answers to descriptive questions are wishes of weight 2.
+      INTAKE_MUST_HAVE_EXPLICIT: ${INTAKE_MUST_HAVE_EXPLICIT:-false}
       # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
       ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
