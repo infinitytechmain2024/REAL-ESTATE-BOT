@@ -59,9 +59,10 @@ import httpx
 from bot.agents.recorder import PostgresRecorder, Recorder, record_of
 from bot.analysis_pipeline.cards import CardTask, also_on, render_card
 from bot.utils import costs
+from bot.utils.listing_text import seasonal_let_named
 
 from . import offers, people
-from .dedup import Listing, listing_of, same_object, site_of
+from .dedup import Listing, listing_of, rent_copy_sign, rent_platform, same_object, site_of
 from .fblinks import post_link_only
 from .final_report import (
     FinalReporter,
@@ -333,6 +334,9 @@ class RunnerConfig:
     # One long description at one exact price and area is one object whatever the addresses or a repost suffix of the
     # reference (``same_object(twin_listings=True)``, Q58).
     dedup_twin_listings: bool = False
+    # One rented flat through two rent platforms is one object, and an exact copy of a held seasonal let is held with it
+    # (``same_object(rent_platform_copy=True)``, ``_seasonal_copy``, Q67).
+    dedup_rent_platform_copy: bool = False
     # Investor findings naming one organisation, club or person (``who``) are one card, whatever the hosts (Q60).
     investor_lead_same_org: bool = False
     # An investor finding on the page of a one-off event whose date is before the runner's today is excluded (Q60).
@@ -359,6 +363,14 @@ def _more_rooms(request: Request, finding: StreamFinding) -> bool:
     listed = (finding.payload or {}).get("rooms")
     return (bool(request.rooms) and isinstance(listed, int | float) and not isinstance(listed, bool)
             and listed > request.rooms)  # type: ignore[operator]
+
+
+def _seasonal(payload: dict[str, Any] | None) -> bool:
+    """Q67: the portal row says temporary (``rental_term``) or the summaries name a seasonal let (``seasonal_let_named``),
+    the signs of ``tolerance._seasonal_let``."""
+    payload = payload or {}
+    return payload.get("rental_term") == "temporary" or seasonal_let_named(payload.get("summary"),
+                                                                           payload.get("summary_ru"))
 
 
 @dataclass(slots=True)
@@ -771,6 +783,9 @@ class CampaignRunner:
                 continue
             if await self._deduplicate(campaign, finding, active, index):
                 continue
+            if (self.config.dedup_rent_platform_copy and request.deal == "rent"
+                    and await self._seasonal_copy(campaign, finding, held)):
+                continue  # Q67: a copy of a held seasonal let is not exact
             count = await self.store.claim_finding(campaign.id, finding.id)
             if count is None:
                 continue
@@ -817,7 +832,8 @@ class CampaignRunner:
                             same_host_copy=self.config.dedup_same_host_copy,
                             description_normalize=self.config.dedup_description_normalize,
                             same_lot=self.config.held_offer_quality,
-                            twin_listings=self.config.dedup_twin_listings))
+                            twin_listings=self.config.dedup_twin_listings,
+                            rent_platform_copy=self.config.dedup_rent_platform_copy))
                         or (org and _same_lead_org(finding, head.sent.finding))):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
@@ -862,9 +878,13 @@ class CampaignRunner:
                         same_host_copy=self.config.dedup_same_host_copy,
                         description_normalize=self.config.dedup_description_normalize,
                         same_lot=self.config.held_offer_quality,
-                        twin_listings=self.config.dedup_twin_listings)
+                        twin_listings=self.config.dedup_twin_listings,
+                        rent_platform_copy=self.config.dedup_rent_platform_copy)
                         or (org and _same_lead_org(finding, head.sent.finding))):
                     continue
+                if (self.config.dedup_rent_platform_copy and _seasonal(finding.payload)
+                        and not _seasonal(head.sent.finding.payload) and campaign_request(campaign).deal == "rent"):
+                    continue  # Q67: a seasonal let is not hidden under a card sent without the sign
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:
                     link = {}  # the same post again: nothing to add
@@ -880,6 +900,49 @@ class CampaignRunner:
                 return True
         except Exception:  # noqa: BLE001 - dedup is an optimisation: on any failure send the card as usual
             log.warning("campaign.dedup_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
+        return False
+
+    async def _seasonal_copy(self, campaign: Campaign, finding: StreamFinding,
+                             held: dict[str, list[_Head]]) -> bool:
+        """Q67 (``DEDUP_RENT_PLATFORM_COPY``): an exact rent finding from a mid-term rent platform (``rent_platform``)
+        or with a seasonal sign itself, that is the same object as a held similar finding with a seasonal sign
+        (``_seasonal``) by a strong sign (``rent_copy_sign``), inherits it: it is stored as that one's duplicate (its
+        link is shown in «Также на» once the held one is sent after approval) and is not sent as an exact card. Only
+        the held findings are compared (no chains through attached copies). Returns True when attached.
+        """
+        payload = finding.payload or {}
+        advertiser = next((payload[k] for k in ("agency", "advertiser") if isinstance(payload.get(k), str)), "")
+        if not finding.url or not (rent_platform(advertiser) or _seasonal(payload)):
+            return False
+        mine = listing_of(finding.payload, url=finding.url, text=finding.text, body=finding.original)
+        if mine.price is None and mine.area is None and not mine.shingles:
+            return False
+        bucket = "similar"
+        try:
+            if bucket not in held:
+                held[bucket] = [_head_of(SentFinding(f, None, bucket=bucket)) for f in await self.store.held_findings(
+                    campaign.id, bucket, HELD_DEDUP_LIMIT, exclude_why=self._unoffered(bucket))]
+            for head in held[bucket]:
+                if head.sent.finding.id == finding.id or not _seasonal(head.sent.finding.payload) or not same_object(
+                        mine, head.listing, without_address=self.config.dedup_without_address,
+                        district_not_street=self.config.dedup_district_not_street,
+                        cross_portal_facts=self.config.dedup_cross_portal_facts,
+                        same_host_copy=self.config.dedup_same_host_copy,
+                        description_normalize=self.config.dedup_description_normalize,
+                        same_lot=self.config.held_offer_quality, twin_listings=self.config.dedup_twin_listings,
+                        rent_platform_copy=True) or not rent_copy_sign(mine, head.listing):
+                    continue
+                link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
+                if finding.url == head.sent.finding.url:
+                    link = {}
+                if not await self.store.attach_to_held(campaign.id, finding.id, head.sent.finding.id, bucket, link):
+                    continue
+                log.info("campaign.seasonal_copy_held", extra={
+                    "campaign_id": campaign.id, "finding_id": finding.id, "head_finding_id": head.sent.finding.id})
+                await self._record(campaign, finding, "excluded", reason=f"duplicate_of:{head.sent.finding.id}")
+                return True
+        except Exception:  # noqa: BLE001 - dedup is an optimisation: on any failure send the card as usual
+            log.warning("campaign.seasonal_copy_failed", extra={"campaign_id": campaign.id, "finding_id": finding.id})
         return False
 
     def _org_dedup(self, finding: StreamFinding) -> bool:
