@@ -161,7 +161,7 @@ class WebSearchSettings(BaseSettings):
     # Q63: the investor rounds of a person who sells a property look for its buyers and property investors.
     investor_seller_role: bool = Field(default=False, validation_alias="INVESTOR_SELLER_ROLE")
     # Q68: an investor search keeps a hit on a foreign country-code domain (an angel network's mirror on .ec) whose
-    # title or snippet names the task's place or its country (Spain, España); off: every foreign domain is dropped.
+    # snippet names the task's city or province (not the country alone); off: every foreign domain is dropped.
     foreign_tld_spain_mention: bool = Field(default=False, validation_alias="FOREIGN_TLD_SPAIN_MENTION")
     # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
     # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or

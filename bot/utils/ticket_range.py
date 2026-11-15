@@ -22,17 +22,29 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-_CUR = r"[€$£]|eur(?:os?)?(?![^\W\d_])|usd(?![^\W\d_])|gbp(?![^\W\d_])"
-_NUM = r"(?<![\d.,])(?:\d{1,3}(?:[.,   ]\d{3})+|\d+)(?![.,]?\d)"
+_CUR = r"[€$£]|(?<![^\W\d_])(?:eur(?:os?)?|usd|gbp)(?![^\W\d_])"
 _SUF = r"millones|millions?|mil|mln|млн|тыс|k|m(?![²2])"
 _SEP = r"\s*[-–—]\s*|\s+(?:to|a|hasta|до)\s+"
+# Magnitudes this module does not read: a bound followed by one is not read («€1-3MM», «€1 - 5 Mio.», «£1-2bn»).
+_MAGNITUDE = r"mm|mio|mn|mrd|bn|b|bill|billions?|billones|millardos?|thousands?|lakhs?|crores?|tn|trillions?"
+# A price per hour, day, week or month after the range is no ticket («25 - 40 €/hora», «€1,000 - €2,000 al mes»).
+_RATE = re.compile(r"\s*(?:/\s*(?:h|hr|hora|horas|hour|d[ií]a|day|semana|week|mes|month|mo|час|день|мес)"
+                   r"|(?:per|a|an)\s+(?:hour|day|week|month)|por\s+(?:hora|d[ií]a|semana|mes)|al\s+(?:d[ií]a|mes)"
+                   r"|a\s+la\s+(?:hora|semana)|в\s+(?:час|день|неделю|месяц)|hourly|monthly|mensual(?:es)?)"
+                   r"(?![^\W\d_])", re.IGNORECASE)
+_LETTER = re.compile(r"[^\W\d_]")
+_CUR_AT = re.compile(rf"\s*(?:{_CUR})", re.IGNORECASE)
+_MAGNITUDE_AT = re.compile(rf"\s?(?:(?:{_CUR})\s?)?(?:{_SUF}|{_MAGNITUDE})(?![^\W\d_])", re.IGNORECASE)
+_WORD_AT = re.compile(r"\s+[^\W\d_]")
 
 
 def _side(i: int) -> str:
-    return (rf"(?:(?P<pre{i}>{_CUR})\s?)?(?P<num{i}>{_NUM})(?:\s?(?P<suf{i}>{_SUF})(?![^\W\d_]))?"
+    # thousands in groups of three with one separator throughout («100,000 200 startups» is 100 000, then 200)
+    number = rf"(?<![\d.,])(?:\d{{1,3}}(?P<sep{i}>[.,   ])\d{{3}}(?:(?P=sep{i})\d{{3}})*|\d+)(?![.,]?\d)"
+    return (rf"(?:(?P<pre{i}>{_CUR})\s?)?(?P<num{i}>{number})(?:\s?(?P<suf{i}>{_SUF})(?![^\W\d_]))?"
             rf"(?:\s?(?P<post{i}>{_CUR}))?")
 
 
@@ -50,14 +62,14 @@ def investor_ticket_range_enabled() -> bool:
 
 @dataclass(frozen=True, slots=True)
 class TicketRange:
-    low: float | None  # None: ambiguous (see the module notes)
-    high: float
+    low: float | None  # None: ambiguous or unreadable (see the module notes)
+    high: float | None  # None: unreadable (a magnitude or a rate the module does not read)
     currency: str  # EUR | USD | GBP
     text: str  # the range as the source wrote it
 
     def display(self) -> str:
         """«10 000 – 100 000 $»; an ambiguous lower bound: the source's text as it is."""
-        if self.low is None:
+        if self.low is None or self.high is None:
             return self.text
         return f"{_number(self.low)} – {_number(self.high)} {SYMBOLS.get(self.currency, self.currency)}"
 
@@ -73,12 +85,31 @@ def _value(match: re.Match[str], i: int) -> tuple[float, bool]:
     return float(digits) * _MULTIPLIER.get(suffix, 1.0), digits == num and not suffix
 
 
+def _unread_tail(text: str, match: re.Match[str]) -> bool:
+    """A bound with a letter or a magnitude after it that is not read, a space-grouped upper bound followed by a word,
+    or a rate after the range: the range is not read."""
+    for i in (1, 2):
+        end = match.end(f"suf{i}") if match.group(f"suf{i}") else match.end(f"num{i}")
+        rest = text[end:]
+        if (_LETTER.match(rest) and not _CUR_AT.match(rest)) or _MAGNITUDE_AT.match(rest):
+            return True
+    rest = text[match.end("num2"):]
+    if match.group("sep2") in (" ", " ", " ") and _WORD_AT.match(rest) and not _CUR_AT.match(rest):
+        return True
+    return bool(_RATE.match(text, match.end()))
+
+
 def ticket_ranges(text: str) -> list[TicketRange]:
-    """Every money range in ``text`` (both bounds, one currency, the upper above the lower)."""
+    """Every money range in ``text`` (both bounds, one currency, the upper above the lower); a range followed by an
+    unread magnitude or a rate comes with ``low`` and ``high`` None (shown as written, never compared)."""
     found: list[TicketRange] = []
-    for match in _RANGE.finditer(text or ""):
+    text = text or ""
+    for match in _RANGE.finditer(text):
         marks = {_CODES[m.casefold()] for k in ("pre1", "post1", "pre2", "post2") if (m := match.group(k))}
         if len(marks) != 1:
+            continue
+        if _unread_tail(text, match):
+            found.append(TicketRange(None, None, marks.pop(), match.group(0).strip()))
             continue
         low, bare = _value(match, 1)
         high, _ = _value(match, 2)
@@ -90,8 +121,10 @@ def ticket_ranges(text: str) -> list[TicketRange]:
 
 
 def ticket_range_of(payload: Mapping[str, Any] | None) -> TicketRange | None:
-    """The first range among the finding's ``price_signals`` (the prices as written), None without one."""
+    """The first range among the finding's ``price_signals`` (the prices as written), None without one; an unread
+    range carries the whole signal as its text."""
     for signal in (payload or {}).get("price_signals") or []:
         if ranges := ticket_ranges(str(signal)):
-            return ranges[0]
+            first = ranges[0]
+            return replace(first, text=str(signal).strip()) if first.high is None else first
     return None

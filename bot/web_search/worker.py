@@ -195,10 +195,11 @@ class WebSearchConfig:
     # Off: the investor rounds as before.
     investor_seller_role: bool = False
     # FOREIGN_TLD_SPAIN_MENTION (Q68): a search hit of an investor search (an investors campaign, an investor round)
-    # on another country's code domain (``geo.foreign_tld``: .ec, .ru ...) is kept when its title or snippet names the
-    # task's place (``geo.place_names``: the city or province, its aliases and region) or its country («Spain»,
-    # «España»; ``geo.mentions_country``). A real-estate search still drops it (its finding would be excluded as
-    # foreign anyway). Off: every foreign country-code domain is dropped, as before.
+    # on another country's code domain (``geo.foreign_tld``: .ec, .ru ...) is kept when its snippet names the task's
+    # place (``geo.place_names`` without regions: the city or province and its aliases). The title is not read (it
+    # repeats the query) and the country alone («Spain», «España») is not enough. Each kept hit is counted
+    # (``web_search.serp_kept_foreign``). A real-estate search still drops it (its finding would be excluded as foreign
+    # anyway). Off: every foreign country-code domain is dropped, as before.
     foreign_tld_spain_mention: bool = False
 
     def __post_init__(self) -> None:
@@ -247,10 +248,9 @@ def hygienic_languages(campaign: Campaign) -> tuple[str, ...]:
 
 
 def names_task_place(task: QueryTask, hit: SearchHit) -> bool:
-    """FOREIGN_TLD_SPAIN_MENTION (Q68): the hit's title or snippet names the task's place or country."""
-    text = f"{hit.title} {hit.snippet}"
-    return (geo.mentions_place(text, geo.place_names(task.location, task.location_aliases))
-            or geo.mentions_country(text, task.country))
+    """FOREIGN_TLD_SPAIN_MENTION (Q68): the hit's snippet names the task's place (the city or province, not the country;
+    the title repeats the query, so it is not read)."""
+    return geo.mentions_place(hit.snippet, geo.place_names(task.location, task.location_aliases, regions=False))
 
 
 def seller_campaign(campaign: Campaign) -> bool:
@@ -883,7 +883,7 @@ class WebSearchWorker:
             if self.config.query_cost_usd:
                 await costs.record("search", provider="search_api", item="query", cost_usd=self.config.query_cost_usd)
             candidates: list[Candidate] = []
-            dropped = 0
+            dropped = kept_foreign = 0
             for hit in hits[: self.config.results_per_query]:
                 if not fetchable(hit.url, blocked):
                     continue
@@ -900,10 +900,11 @@ class WebSearchWorker:
                 if real_estate and not self._host_allowed(host, known, allowed, hit.title, hit.snippet):
                     dropped += 1  # not a client portal (strict), or a hit without a listing's figures: a dictionary ...
                     continue
-                if geo.foreign_tld(host_of(hit.url), task.country) and not (  # .ru/.ua/.pl ... for a Spanish campaign
-                        self.config.foreign_tld_spain_mention and (campaign.plan.vertical == "investors" or investors)
-                        and names_task_place(task, hit)):
-                    continue
+                if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
+                    if not (self.config.foreign_tld_spain_mention and (campaign.plan.vertical == "investors" or investors)
+                            and names_task_place(task, hit)):
+                        continue
+                    kept_foreign += 1  # FOREIGN_TLD_SPAIN_MENTION: an investor hit whose snippet names the place
                 if geo.foreign_markers_hit(task.country, f"{hit.title} {hit.snippet}"):  # Valencia in Venezuela/CA
                     continue
                 candidates.append(Candidate(hit.url, url_key(hit.url), host_of(hit.url), 0, classify_url(hit.url),
@@ -911,6 +912,9 @@ class WebSearchWorker:
             if dropped:
                 log.info("web_search.serp_dropped", extra={"campaign_id": campaign.id, "query_id": query.id,
                                                            "dropped": dropped, "hits": len(hits)})
+            if kept_foreign:
+                log.info("web_search.serp_kept_foreign", extra={"campaign_id": campaign.id, "query_id": query.id,
+                                                                "kept_foreign": kept_foreign, "hits": len(hits)})
             new = await self.store.enqueue(campaign.id, candidates, index_ttl_days=self.config.index_ttl_days)
             await self.store.query_done(query.id, ok=True, results=len(hits), new_urls=new)
 

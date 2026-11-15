@@ -342,7 +342,8 @@ def score(contact: Any, spec_investor: Mapping[str, Any] | None, *, places: Sequ
 
     kind matches ``who`` +40 (a company with no ``who``: +10), the place (``geography`` and ``places``) is named +20, an asset class word +15,
     a sum within the ticket range +15 (INVESTOR_TICKET_RANGE, Q68: also a written range «€10,000 - €100,000» whose upper
-    bound reaches the minimum and whose lower bound, when certain, the maximum), a contact (e-mail / phone) +10, activity within a year +5.
+    bound reaches the minimum and whose lower bound, when certain, the maximum, in the task's currency when it names one),
+    a contact (e-mail / phone) +10, activity within a year +5.
     Without a spec only the place, contact and activity count (the rest is not asked). Without a ``profile_text``
     (the page was not read: snippet evidence only) the total is capped at 60.
     """
@@ -377,10 +378,13 @@ def score(contact: Any, spec_investor: Mapping[str, Any] | None, *, places: Sequ
         reasons.append(f"класс актива: {asset}")
     ticket = spec.get("ticket") or {}
     low, high = ticket.get("min"), ticket.get("max")
+    currency = {"€": "EUR", "$": "USD", "£": "GBP"}.get(str(ticket.get("currency") or "").strip(),
+                                                      str(ticket.get("currency") or "").strip().upper())
     if (low is not None or high is not None) and (any(
             (low is None or v >= low) and (high is None or v <= high) for v in amounts_in(text))
             or (investor_ticket_range_enabled() and any(  # INVESTOR_TICKET_RANGE (Q68): a range by its bounds
-                (low is None or r.high >= low) and (high is None or (r.low is not None and r.low <= high))
+                r.high is not None and (not currency or r.currency == currency)
+                and (low is None or r.high >= low) and (high is None or (r.low is not None and r.low <= high))
                 for r in ticket_ranges(text)))):
         points += POINTS["ticket"]
         reasons.append("тикет в вашем диапазоне")

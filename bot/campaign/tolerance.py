@@ -106,8 +106,9 @@ Other constraints
 * A budget with an unknown listing price is other (see Budget).
 * Findings of the investors vertical carry no prices; they are always exact. With INVESTOR_TICKET_RANGE (Q68;
   ``Request.ticket_min``) an investor whose ticket range («$10,000 - $100,000» in ``price_signals``,
-  ``bot/utils/ticket_range.py``) ends below the task's minimum ticket, in the same currency, is excluded (``price``);
-  the upper bound decides, an ambiguous lower bound does not matter, no range or another currency: exact as before.
+  ``bot/utils/ticket_range.py``) ends below the task's minimum ticket, in the same currency (a task's ticket without
+  one: the country's), is excluded (``price``); the upper bound decides, an ambiguous lower bound does not matter; no
+  range, an unread one («€1-3MM», «25 - 40 €/hora») or another currency: exact as before.
 """
 
 from __future__ import annotations
@@ -461,8 +462,10 @@ def ticket_short(payload: dict[str, Any], request: Request) -> Match | None:
     if request.ticket_min is None:
         return None
     ticket = ticket_range_of(payload)
-    if ticket is None or ticket.currency != (request.ticket_currency or request.currency) or ticket.high >= request.ticket_min:
-        return None
+    # a task's ticket without a currency is in its country's currency (EUR for Spain)
+    currency = request.ticket_currency or geo.CURRENCY.get(request.country_code or "") or DEFAULT_CURRENCY
+    if ticket is None or ticket.high is None or ticket.currency != currency or ticket.high >= request.ticket_min:
+        return None  # no range, an unread one, another currency, or the upper bound reaches the minimum
     top = f"{int(ticket.high):,}".replace(",", " ")
     return Match("excluded", math.inf, "price", note=f"Не подходит: тикет до {top} {SYMBOLS.get(ticket.currency, '')}".strip())
 

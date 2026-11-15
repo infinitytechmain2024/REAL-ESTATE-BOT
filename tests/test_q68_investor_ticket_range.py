@@ -53,9 +53,24 @@ def test_ranges_are_read_without_guessing(text, low, high, currency, shown) -> N
 
 
 @pytest.mark.parametrize("text", ["100 - 200", "€100 - $150,000", "€150,000 - €100", "1,5M - 3M €",
-                                  "2 - 3 habitaciones, 100 €", "Inversión mínima: 500 €"])
+                                  "2 - 3 habitaciones, 100 €", "Inversión mínima: 500 €", "Entrepreneur 2019 - 2024"])
 def test_no_range_without_one_currency_and_a_rising_upper_bound(text) -> None:
     assert ticket_ranges(text) == []
+
+
+@pytest.mark.parametrize("text", ["Tickets €1-3MM", "€1 - 5 Mio.", "$1 – $5 billion", "£1-2bn", "5 - 10 € millones",
+                                  "€10 000 - €100 000 200 startups", "25 - 40 €/hora", "€1,000 - €2,000 al mes",
+                                  "$50 - $80 per hour", "1.000 - 2.000 € / mes", "€1,000 - €2,000 per month"])
+def test_an_unread_magnitude_or_a_rate_is_not_read(text) -> None:
+    [found] = ticket_ranges(text)
+    assert (found.low, found.high) == (None, None)
+    payload = {**FEDERICO, "price_amount": 1.0, "price_signals": [text]}
+    assert ticket_range_of(payload).display() == text  # the card shows the source's text as it is
+
+
+def test_one_thousands_separator_per_number() -> None:
+    [found] = ticket_ranges("$10,000 - $100,000 200 startups")
+    assert (found.low, found.high) == (10_000, 100_000)
 
 
 def test_card_shows_the_range_with_the_flag_and_the_lower_bound_without(monkeypatch) -> None:
@@ -87,9 +102,26 @@ def test_the_upper_bound_meets_the_tasks_minimum_ticket(monkeypatch) -> None:
     # another currency or no range: not compared
     assert classify({**small, "price_signals": ["$5,000 - $20,000"]}, request, vertical="investors").bucket == "exact"
     assert classify({**small, "price_signals": ["20 000 €"]}, request, vertical="investors").bucket == "exact"
+    # an unread range is never compared (not excluded)
+    unread = {**small, "price_signals": ["Tickets €1-3MM"]}
+    assert classify(unread, request, vertical="investors").bucket == "exact"
     # the task names no minimum: nothing to compare
     no_min = _request(monkeypatch, True, {"investor": {"ticket": {"min": None, "max": 80000, "currency": "EUR"}}})
     assert classify(small, no_min, vertical="investors").bucket == "exact"
+
+
+def test_a_ticket_without_a_currency_is_in_the_countrys(monkeypatch) -> None:
+    request = _request(monkeypatch, True, {"investor": {"ticket": {"min": 50000}}})
+    assert (request.ticket_min, request.ticket_currency) == (50000.0, None)
+    small = {**FRANCISCO, "price_signals": ["€5,000 - €20,000"]}
+    assert classify(small, request, vertical="investors").why == "price"  # Spain: EUR
+    assert classify({**small, "price_signals": ["$5,000 - $20,000"]}, request, vertical="investors").bucket == "exact"
+
+
+def test_card_shows_an_unread_range_as_written(monkeypatch) -> None:
+    _flag(monkeypatch, True)
+    payload = {**FEDERICO, "price_amount": 1.0, "price_signals": ["Tickets €1-3MM"]}
+    assert _sum_line(render_card(payload, vertical="investors")) == "Сумма: Tickets €1-3MM"
 
 
 def test_flag_off_investors_are_exact_as_before(monkeypatch) -> None:
@@ -119,3 +151,7 @@ def test_lead_score_counts_a_range_that_overlaps_the_ticket(monkeypatch) -> None
                      profile_text="Nivel de Inversión €100 - €150,000")
     assert "тикет в вашем диапазоне" not in score(unsure, {"ticket": {"max": 80000}}, now=NOW)[1]  # lower bound unknown
     assert "тикет в вашем диапазоне" in score(unsure, {"ticket": {"min": 50000}}, now=NOW)[1]
+    # the range counts only in the task's currency, when the task names one
+    assert "тикет в вашем диапазоне" in score(angel, {**spec, "ticket": {**spec["ticket"], "currency": "EUR"}}, now=NOW)[1]
+    assert "тикет в вашем диапазоне" not in score(angel, {**spec, "ticket": {**spec["ticket"], "currency": "USD"}},
+                                                    now=NOW)[1]

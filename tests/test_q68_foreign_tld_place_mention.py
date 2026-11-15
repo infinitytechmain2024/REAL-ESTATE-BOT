@@ -6,6 +6,8 @@ its copy on .com.co passed (``co`` is generic). Mocks only, no network.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from bot.campaign import MemoryCampaignStore
@@ -25,8 +27,11 @@ SPAIN_RU = "https://invest-club.example.ru/spain"
 SPAIN_TEXT = ("Инвесторы в недвижимость Испании", "Клуб частных инвесторов: проекты в Испании")
 OTHER_PL = "https://inwestorzy.example.pl/warszawa"
 OTHER_TEXT = ("Aniołowie biznesu Warszawa", "Sieć inwestorów w Polsce")
+TITLE_CL = "https://inversionistas.example.cl/angeles"
+TITLE_TEXT = ("business angels Málaga", "Red de inversionistas ángeles de Chile")
 HOME = "https://www.inversores-malaga.example/club"
-TEXTS = {ANGEL_EC: ANGEL_TEXT, SPAIN_RU: SPAIN_TEXT, OTHER_PL: OTHER_TEXT, HOME: ("Club de inversores Málaga", "")}
+TEXTS = {ANGEL_EC: ANGEL_TEXT, SPAIN_RU: SPAIN_TEXT, OTHER_PL: OTHER_TEXT, TITLE_CL: TITLE_TEXT,
+         HOME: ("Club de inversores Málaga", "")}
 
 
 async def _queued(mode: str, *, flag: bool, texts=TEXTS) -> set[str]:
@@ -42,8 +47,12 @@ async def _queued(mode: str, *, flag: bool, texts=TEXTS) -> set[str]:
     return {r.url for r in store.urls[cid].values()}
 
 
-async def test_flag_on_an_investor_search_keeps_a_foreign_domain_naming_the_place_or_spain() -> None:
-    assert await _queued("investors", flag=True) == {ANGEL_EC, SPAIN_RU, HOME}  # .pl names Warsaw: dropped
+async def test_flag_on_an_investor_search_keeps_a_foreign_domain_naming_the_place(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="bot.web_search.worker")
+    # .ru names only Spain, .pl Warsaw, .cl names Málaga only in its title (the query): dropped
+    assert await _queued("investors", flag=True) == {ANGEL_EC, HOME}
+    kept = [r for r in caplog.records if r.getMessage() == "web_search.serp_kept_foreign"]
+    assert kept and all(r.kept_foreign == 1 for r in kept)
 
 
 async def test_flag_off_every_foreign_domain_is_dropped_as_before() -> None:
@@ -65,9 +74,11 @@ def _task(location: str = "Málaga", **aliases: str) -> QueryTask:
 
 @pytest.mark.parametrize(("title", "snippet", "named"), [
     ("Business Angel in Puerto Banus", "Marbella (Malaga), España", True),
-    ("Business angels Malaga", "", True),
-    ("Angel investors", "network in Spain", True),
-    ("Инвесторы", "проекты в Испании", True),
+    ("x", "Business angels Málaga", True),
+    ("Business angels Malaga", "", False),  # the title repeats the query
+    ("Angel investors", "network in Spain", False),  # the country alone
+    ("Инвесторы", "проекты в Испании", False),
+    ("x", "Angels Costa del Sol", False),  # a region is not the city or province
     ("Aniołowie biznesu Warszawa", "Sieć inwestorów w Polsce", False),
     ("Angel investors Quito", "Ecuador", False),
 ])
