@@ -79,7 +79,7 @@ from .queries import (
 )
 from .render import ChallengeDetected, Renderer, RenderError
 from .scrape_api import Scraper
-from .searxng import Searcher, SearchError
+from .searxng import Searcher, SearchError, SearchHit
 from .sources import ListingSource, SourceListing
 from .sources.apify import (
     PermanentApifyError,
@@ -194,6 +194,12 @@ class WebSearchConfig:
     # terms, no startup or business-angel words). Needs the investor round (INVESTOR_WEB_QUERIES or the both-mode one).
     # Off: the investor rounds as before.
     investor_seller_role: bool = False
+    # FOREIGN_TLD_SPAIN_MENTION (Q68): a search hit of an investor search (an investors campaign, an investor round)
+    # on another country's code domain (``geo.foreign_tld``: .ec, .ru ...) is kept when its title or snippet names the
+    # task's place (``geo.place_names``: the city or province, its aliases and region) or its country («Spain»,
+    # «España»; ``geo.mentions_country``). A real-estate search still drops it (its finding would be excluded as
+    # foreign anyway). Off: every foreign country-code domain is dropped, as before.
+    foreign_tld_spain_mention: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -238,6 +244,13 @@ def hygienic_languages(campaign: Campaign) -> tuple[str, ...]:
     allowed = set(plan_languages(spec, campaign.source_text, campaign.plan.country))
     kept = tuple(lang for lang in campaign.plan.languages if lang in allowed)
     return kept or tuple(campaign.plan.languages)
+
+
+def names_task_place(task: QueryTask, hit: SearchHit) -> bool:
+    """FOREIGN_TLD_SPAIN_MENTION (Q68): the hit's title or snippet names the task's place or country."""
+    text = f"{hit.title} {hit.snippet}"
+    return (geo.mentions_place(text, geo.place_names(task.location, task.location_aliases))
+            or geo.mentions_country(text, task.country))
 
 
 def seller_campaign(campaign: Campaign) -> bool:
@@ -887,7 +900,9 @@ class WebSearchWorker:
                 if real_estate and not self._host_allowed(host, known, allowed, hit.title, hit.snippet):
                     dropped += 1  # not a client portal (strict), or a hit without a listing's figures: a dictionary ...
                     continue
-                if geo.foreign_tld(host_of(hit.url), task.country):  # .ru/.ua/.pl ... for a Spanish campaign
+                if geo.foreign_tld(host_of(hit.url), task.country) and not (  # .ru/.ua/.pl ... for a Spanish campaign
+                        self.config.foreign_tld_spain_mention and (campaign.plan.vertical == "investors" or investors)
+                        and names_task_place(task, hit)):
                     continue
                 if geo.foreign_markers_hit(task.country, f"{hit.title} {hit.snippet}"):  # Valencia in Venezuela/CA
                     continue

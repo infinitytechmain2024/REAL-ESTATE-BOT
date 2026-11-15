@@ -160,6 +160,9 @@ class WebSearchSettings(BaseSettings):
     both_mode_investor_queries: bool = Field(default=False, validation_alias="BOTH_MODE_INVESTOR_QUERIES")
     # Q63: the investor rounds of a person who sells a property look for its buyers and property investors.
     investor_seller_role: bool = Field(default=False, validation_alias="INVESTOR_SELLER_ROLE")
+    # Q68: an investor search keeps a hit on a foreign country-code domain (an angel network's mirror on .ec) whose
+    # title or snippet names the task's place or its country (Spain, España); off: every foreign domain is dropped.
+    foreign_tld_spain_mention: bool = Field(default=False, validation_alias="FOREIGN_TLD_SPAIN_MENTION")
     # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
     # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or
     # an area), off (the old rule: a property word and a deal word). A country without a portal list is soft.
@@ -238,7 +241,7 @@ class WebSearchSettings(BaseSettings):
             cover_portals=self.cover_portals, query_hygiene=self.query_hygiene, render_on_refusal=self.render_on_refusal,
             place_level_from_spec=self.place_level_from_spec, investor_web_queries=self.investor_web_queries,
             both_mode_portals=self.both_mode_portals, both_mode_investor_queries=self.both_mode_investor_queries,
-            investor_seller_role=self.investor_seller_role,
+            investor_seller_role=self.investor_seller_role, foreign_tld_spain_mention=self.foreign_tld_spain_mention,
             render_index_on_refusal=self.render_index_on_refusal,
             human_verification=self.human_verification and self.render_enabled,
             verified_host_interval_seconds=self.verified_host_interval_seconds,
