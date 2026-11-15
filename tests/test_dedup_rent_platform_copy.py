@@ -137,6 +137,9 @@ def test_the_same_platform_link_and_the_names_of_one_platform() -> None:
     a, b = link_pair("HOUSINGANYWHERE", "Housing Anywhere")
     assert same(a, b, **ON) and not same(a, b, **BENCH)  # one link to the platform's ad
     assert not same(*link_pair("HOUSINGANYWHERE", "Housing-Anywhere", ref_b="ut0000043"), **ON)  # one platform, 2 refs
+    home = listing(rent(HA_URL, "Finques Uno"), post(HA_URL, f"{TEMPLATE}\nhttps://www.spotahome.com/", "", "")), \
+        listing(rent(SPOT_URL, "Finques Dos"), post(SPOT_URL, f"{SPOT}\nwww.spotahome.com", "", ""))
+    assert not _same_rent_copy(*home)  # two agencies with one link to the platform's home page: no ad of its own
     for agency_a, agency_b in (("", "Housing Anywhere"), ("HOUSINGANYWHERE", "")):
         assert not _same_rent_copy(*link_pair(agency_a, agency_b))  # an unknown advertiser
 

@@ -809,13 +809,14 @@ def rent_platform(name: str | None) -> bool:
 
 
 def _external_links(listing: Listing) -> frozenset[str]:
-    """Q67: the links of the description to another site than the listing's own portal (a platform's ad page)."""
+    """Q67: the links of the description to another site than the listing's own portal with a path (a platform's ad
+    page; a bare domain such as «www.spotahome.com» is any agency's signature)."""
     own = _host(listing.url)
     out = set()
     for found in _URL.findall(listing.description):
         link = found.lower().rstrip("/.,;)»\"'")
         link = re.sub(r"^(?:https?://)?(?:www\.)?", "", link)
-        if link and site_of("https://" + link) not in ("", own):
+        if link and site_of("https://" + link) not in ("", own) and urlsplit("https://" + link).path.strip("/"):
             out.add(link)
     return frozenset(out)
 
