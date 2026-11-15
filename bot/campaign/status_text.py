@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import re
+from collections.abc import Callable
 from typing import Literal
 from urllib.parse import quote_plus, urlsplit
 
@@ -25,6 +26,8 @@ SOCIAL: dict[str, str] = {"tiktok": TIKTOK, "instagram": INSTAGRAM, "linkedin": 
 CHECKING = "🔎 Поиск завершён. Проверяю найденное…"
 _CHECKING_HEAD = "🔎 Поиск завершён. Проверяю найденное"
 DONE = "Поиск завершён."
+# STATUS_HIDE_UNVETTED_SITES (Q69): a site that is not a listing portal is shown without its name or a link.
+READING = "🔎 Читаю найденные страницы…"
 NOTHING = "Пока ничего подходящего не нашёл."
 
 # A closed group the Apify read could not open: the person joins it, then presses the button (group:joined:<id>).
@@ -50,7 +53,7 @@ LIMIT_NOTE = "Лимит Facebook на сегодня исчерпан, част
 LIMIT_REASONS = frozenset({"facebook_daily_limit", "facebook_breaker"})
 
 FIXED_STATUSES: frozenset[str] = frozenset({ACCEPTED, SEARCHING, FACEBOOK, TIKTOK, INSTAGRAM, LINKEDIN,
-                                            CHECKING, DONE, NOTHING, f"{DONE}\n{LIMIT_NOTE}",
+                                            CHECKING, READING, DONE, NOTHING, f"{DONE}\n{LIMIT_NOTE}",
                                             f"{NOTHING}\n{LIMIT_NOTE}"})
 _SITE_NAME = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9.\-]{0,79}$")  # a host, no spaces
 MAX_GROUP_CHARS = 60
@@ -125,6 +128,15 @@ def site_line(host: str | None, url: str | None = None) -> str | None:
     return f"{_NOW}на сайте {link(page, name)}"
 
 
+def vetted_site_line(host: str | None, url: str | None, vetted: Callable[[str], bool]) -> str | None:
+    """``site_line`` for a site ``vetted`` accepts (a listing portal), else ``READING``: no host name, no link.
+    None when no plain site name is known."""
+    name = host_name(host) or host_name(url if safe_url(url) else None)
+    if name is None:
+        return None
+    return site_line(host, url) if vetted(name) else READING
+
+
 def group_name(name: str | None) -> str | None:
     """A readable Facebook group name (trimmed to 60 characters), or None for an id, a link or nothing."""
     name = _clip(name or "", 10_000)
@@ -185,8 +197,8 @@ def is_checking_line(text: str) -> bool:
 
 
 def is_live_line(text: str) -> bool:
-    """True for a «🔎 Сейчас ищу …» line, alone or inside an owner's message."""
-    return any(line.startswith(LIVE_PREFIX) for line in text.split("\n"))
+    """True for a «🔎 Сейчас ищу …» line (or ``READING``), alone or inside an owner's message."""
+    return any(line.startswith(LIVE_PREFIX) or line == READING for line in text.split("\n"))
 
 
 def user_status(stage: Stage, *, site: str | None = None, found: int = 0, facebook_started: bool = False,

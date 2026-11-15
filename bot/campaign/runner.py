@@ -110,6 +110,7 @@ from .status_text import (
     reach_line,
     site_line,
     social_line,
+    vetted_site_line,
 )
 from .status_text import (
     SEARCHING as USER_SEARCHING,
@@ -343,6 +344,8 @@ class RunnerConfig:
     investor_past_event_excluded: bool = False
     # The investor report's «Отправлено вам» counts the finding cards too, not only people and reach contacts (Q60).
     investor_report_counts_all: bool = False
+    # The live status links only a listing portal's host; any other site is «Читаю найденные страницы…» (Q69).
+    status_hide_unvetted_sites: bool = False
 
     def __post_init__(self) -> None:
         if (self.window_cooldown_seconds < 0 or self.analysis_grace_seconds < 0 or self.refusal_retry_seconds < 0
@@ -1646,7 +1649,13 @@ class CampaignRunner:
         shown: dict[str, tuple[str, str]] = {}  # stage -> (what it shows, the line)
         progress = getattr(web, "progress", None)
         if web is not None and web.active:
-            text = site_line(web.host or getattr(progress, "host", None), getattr(progress, "url", None))
+            host, url = web.host or getattr(progress, "host", None), getattr(progress, "url", None)
+            if self.config.status_hide_unvetted_sites:
+                from bot.web_search.queries import listing_portal_host
+
+                text = vetted_site_line(host, url, listing_portal_host)
+            else:
+                text = site_line(host, url)
             if text is not None:
                 shown["web"] = (text, text)
         if line.startswith("Сейчас: Facebook · ") and line.endswith(" · ищу дальше"):
