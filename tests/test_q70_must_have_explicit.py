@@ -128,6 +128,17 @@ async def test_on_the_first_message_without_a_marker_gives_a_wish() -> None:
     ("not only land", False),
     ("не нужна вода", False),
     ("лучше urbano, чтобы можно было строить", False),
+    # Б2: a word ending in «-не» / «no» before the marker does not negate it
+    ("мне нужна вода", True),
+    ("мне обязательно с террасой", True),
+    ("мне только центр", True),
+    ("в Барселоне только вторичка", True),
+    ("на балконе обязательно сетка", True),
+    ("terreno solo urbano", True),
+    ("не обязательно", False),
+    ("Не обязательно", False),
+    ("no need", False),
+    ("no es imprescindible", False),
 ])
 def test_must_said(message: str, said: bool) -> None:
     assert must_said(message) is said
@@ -153,6 +164,33 @@ def test_the_safety_net_keeps_old_must_haves_and_caps_new_weight_3() -> None:
     assert out.must_have == ["лифт"]  # the earlier must stays, the new one has no marker
     # the old weight 3 stays, the new one without «очень важно» is 2, the existing wish keeps its weight
     assert [(w.text, w.weight) for w in out.wishes] == [("терраса", 3), ("земля urbano", 2), ("парковка", 1)]
+
+
+@pytest.mark.parametrize(("lift", "message"), [
+    ("лифт", "лифт не обязателен"), ("лифт", "лифт необязательно, но хорошо бы"),
+    ("lift", "the lift is not required"), ("ascensor", "el ascensor no es imprescindible")])
+def test_a_must_have_taken_back_becomes_a_wish(lift: str, message: str) -> None:
+    before = TaskSpec.model_validate({"must_have": [lift, "вода"]})
+    for after in (before.merged({"must_have": ["вода"]}),  # the model dropped it
+                  before.merged({"must_have": [lift, "вода"]})):  # or kept it
+        out = explicit_must(before, after, message)
+        assert out.must_have == ["вода"] and [(w.text, w.weight) for w in out.wishes] == [(lift, 2)]
+    before = TaskSpec.model_validate({"must_have": ["лифт", "вода"]})
+    # «не обязательно» about another item does not take this one back
+    assert explicit_must(before, before.merged({"must_have": []}), "терраса не обязательна").must_have == ["лифт", "вода"]
+
+
+def test_same_items_are_whole_words_and_a_new_wish_with_a_must_word_stays() -> None:
+    before = TaskSpec.model_validate({"must_have": ["свет"]})
+    # «светлая квартира» is not «свет»: the old must stays, the new item is new (no marker -> a wish)
+    out = explicit_must(before, before.merged({"must_have": ["светлая квартира"]}), "светлая квартира")
+    assert out.must_have == ["свет"] and [w.text for w in out.wishes] == ["светлая квартира"]
+    lift = TaskSpec.model_validate({"must_have": ["лифт"]})
+    out = explicit_must(lift, lift.merged({"wishes": [{"text": "лифт до 5 этажа", "weight": 2}, {"text": "Лифт", "weight": 2}]}),
+                        "лифт до 5 этажа")
+    assert out.must_have == ["лифт"] and [w.text for w in out.wishes] == ["лифт до 5 этажа"]  # only the repeat goes
+    water = TaskSpec.model_validate({"must_have": ["вода"]})
+    assert explicit_must(water, water.merged({"must_have": ["воды"]}), "да").must_have == ["воды"]  # reworded
 
 
 def test_previous_must_haves_are_never_lost_or_lowered() -> None:

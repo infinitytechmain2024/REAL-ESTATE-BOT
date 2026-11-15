@@ -242,25 +242,35 @@ def prompt_version(must_explicit: bool = False) -> str:
     return PROMPT_VERSION_MUST if must_explicit else PROMPT_VERSION
 
 
-# INTAKE_MUST_HAVE_EXPLICIT (Q70): the words that make a wish a must; negated ones («не обязательно», «не только»,
-# «not only», «не нужна») are none. «нужна», «need» count in any answer (G4 «нужна вода» is a must).
-_NOT = r"(?<!не )(?<!не)(?<!not )(?<!no )"
+# INTAKE_MUST_HAVE_EXPLICIT (Q70): the words that make a wish a must. A marker starts a word («необязательно» is
+# none), and a separate «не», «not», «no», «no es» right before it negates it («не обязательно», «not only», «no
+# need»); the end of another word does not («мне нужна», «на балконе обязательно», «terreno solo»). «нужна», «need»
+# count in any answer (G4 «нужна вода» is a must).
+_NOT = r"(?<!\bне )(?<!\bnot )(?<!\bno )(?<!\bno es )"
 _MUST_SAID = re.compile(
-    _NOT + r"обязател(?:ьн|ен)|" + _NOT + r"обов.язков|" + _NOT + r"\bтолько\b|" + _NOT + r"\bтільки\b|"
-    + _NOT + r"\bлише\b|" + _NOT + r"необходим|" + _NOT + r"необхідн|" + _NOT + r"\bглавное\b|"
-    + _NOT + r"самое\s+важное|" + _NOT + r"\b(?:нужен|нужна|нужно|нужны|надо|потрібна|потрібен|потрібно)\b|"
-    r"\bmust\b|\bnon-negotiable\b|\bhas\s+to\s+have\b|\bhave\s+to\s+have\b|" + _NOT + r"\bonly\b|"
-    + _NOT + r"\b(?:need|needs|required|mandatory|essential)\b|imprescindible|obligatori|tiene\s+que\s+tener|"
-    + _NOT + r"\b(?:necesito|necesita|necesitamos)\b|hace\s+falta|" + _NOT + r"\b(?:solo|sólo|solamente)\b|"
+    _NOT + r"\bобязател(?:ьн|ен)|" + _NOT + r"\bобов.язков|" + _NOT + r"\bтолько\b|" + _NOT + r"\bтільки\b|"
+    + _NOT + r"\bлише\b|" + _NOT + r"\bнеобходим|" + _NOT + r"\bнеобхідн|" + _NOT + r"\bглавное\b|"
+    + _NOT + r"\bсамое\s+важное\b|" + _NOT + r"\b(?:нужен|нужна|нужно|нужны|надо|потрібна|потрібен|потрібно)\b|"
+    + _NOT + r"\bmust\b|\bnon-negotiable\b|" + _NOT + r"\b(?:has|have)\s+to\s+have\b|" + _NOT + r"\bonly\b|"
+    + _NOT + r"\b(?:need|needs|required|mandatory|essential)\b|" + _NOT + r"\bimprescindible\b|"
+    + _NOT + r"\bobligatori|" + _NOT + r"\btiene\s+que\s+tener\b|" + _NOT + r"\b(?:necesito|necesita|necesitamos)\b|"
+    + _NOT + r"\bhace\s+falta\b|" + _NOT + r"\b(?:solo|sólo|solamente)\b|"
     r"\bsin\s+[^.;!?\n]{1,40}?,?\s*\bno\b|"
-    r"\bбез\s+[^.;!?\n]{1,40}?\s*[,—–-]?\s*(?:не\s+(?:вариант|подход|подойд|рассматр|интересн|нужн|купл|підход|"
+    r"\bбез\s+[^.;!?\n]{1,40}?\s*[,—–-]?\s*\b(?:не\s+(?:вариант|подход|подойд|рассматр|интересн|нужн|купл|підход|"
     r"розгляд)|нельзя|никак|ніяк)",
     re.IGNORECASE)
 _VERY_SAID = re.compile(
-    _NOT + r"очень\s+важн|" + _NOT + r"критичн|" + _NOT + r"принципиальн|" + _NOT + r"\bглавное\b|"
-    + _NOT + r"самое\s+важное|" + _NOT + r"muy\s+important|" + _NOT + r"very\s+important|"
-    + _NOT + r"\bcrucial",
+    _NOT + r"\bочень\s+важн|" + _NOT + r"\bкритичн|" + _NOT + r"\bпринципиальн|" + _NOT + r"\bглавное\b|"
+    + _NOT + r"\bсамое\s+важное\b|" + _NOT + r"\bmuy\s+important|" + _NOT + r"\bvery\s+important|"
+    + _NOT + r"\bcrucial\b",
     re.IGNORECASE)
+# The person takes an obligation back («лифт не обязателен», «not required», «no es imprescindible»).
+_UNMUST = re.compile(
+    r"\bне\s+(?:так\s+)?(?:обязател|обов.язков|нужн|потрібн|критичн|важн)|\bнеобязател|\bнеобов.язков|"
+    r"\bnot\s+(?:required|mandatory|essential|necessary|a\s+must)\b|\bno\s+need\b|"
+    r"\bno\s+es\s+(?:imprescindible|obligatori|necesari)|\bno\s+hace\s+falta\b",
+    re.IGNORECASE)
+_CLAUSE = re.compile(r"[.,;!?\n]|\s+(?:но|але|but|pero)\s+", re.IGNORECASE)
 
 
 def must_said(message: str) -> bool:
@@ -272,35 +282,61 @@ def _key(text: str) -> str:
     return " ".join(re.sub(r"[^\w]+", " ", text.casefold()).split())
 
 
+def _words(text: str) -> frozenset[str]:
+    """The whole words of 3+ letters, their final vowels cut («вода», «воды» -> «вод»; «свет» ≠ «светлая»)."""
+    return frozenset(re.sub(r"[аеёиоуыэюяйьіїєaeiouy]+$", "", w) or w
+                     for w in re.findall(r"\w+", text.casefold()) if len(w) >= 3)
+
+
 def _same(a: str, b: str) -> bool:
-    """The same item, maybe reworded by the model: equal once normalised, or one contains the other (3+ chars)."""
-    x, y = _key(a), _key(b)
-    return x == y or (min(len(x), len(y)) >= 3 and (x in y or y in x))
+    """The same item, maybe reworded by the model: the whole words of one are all in the other («лифт», «лифт в доме»)."""
+    x, y = _words(a), _words(b)
+    return _key(a) == _key(b) or (bool(x) and bool(y) and (x <= y or y <= x))
+
+
+def _equal(a: str, b: str) -> bool:
+    """The same text once normalised (the same words): a wish that only repeats a must-have."""
+    return _key(a) == _key(b) or (bool(_words(a)) and _words(a) == _words(b))
+
+
+def _taken_back(item: str, message: str) -> bool:
+    """The message takes this must-have back: a clause with «не обязательно» or the like names one of its words."""
+    words = _words(item)
+    return any(_UNMUST.search(part) and words & _words(part) for part in _CLAUSE.split(message))
 
 
 def explicit_must(before: TaskSpec, after: TaskSpec, message: str) -> TaskSpec:
     """INTAKE_MUST_HAVE_EXPLICIT (Q70), the safety net under the model.
 
     The must-haves that were there before are the base: none is lost or made a wish, even when the model dropped or
-    reworded it (a reworded one keeps the model's words). A must-have this answer added without a word of obligation
-    (``must_said``) becomes a wish of weight 2; a new wish of weight 3 without «очень важно» or such a word gets 2."""
+    reworded it (a reworded one keeps the model's words), unless this message takes it back («лифт не обязателен»):
+    then it is a wish of weight 2. A must-have this answer added without a word of obligation (``must_said``) becomes
+    a wish of weight 2; a new wish of weight 3 without «очень важно» or such a word gets 2."""
     said = must_said(message)
     musts: list[str] = []
+    released: list[str] = []
     for old in before.must_have:
-        musts.append(next((m for m in after.must_have if _same(m, old) and m not in musts), old))
-    new = [m for m in after.must_have if m not in musts and not any(_same(m, o) for o in before.must_have)]
+        free = [m for m in after.must_have if m not in musts and m not in released]
+        match = next((m for m in free if _equal(m, old)), None) or next((m for m in free if _same(m, old)), None)
+        (released if _taken_back(old, message) else musts).append(match or old)
+    new = [m for m in after.must_have if m not in musts and m not in released]
     wishes = [{"text": w.text, "weight": w.weight} for w in after.wishes
-              if not any(_same(w.text, m) for m in musts)]  # a must is never lowered to a wish
+              if not any(_equal(w.text, m) for m in musts)]  # a must is never lowered to a wish
     old_weight = {_key(w.text): w.weight for w in before.wishes}
     if not said and not _VERY_SAID.search(message):
         for wish in wishes:
             if wish["weight"] == 3 and old_weight.get(_key(wish["text"])) != 3:
                 wish["weight"] = 2
     if said:
-        musts += new
+        musts += [m for m in new if not _taken_back(m, message)]
+        released += [m for m in new if _taken_back(m, message)]
     else:
-        known = {_key(w["text"]) for w in wishes}
-        wishes += [{"text": m, "weight": 2} for m in new if _key(m) not in known]
+        released += new
+    known = {_key(w["text"]) for w in wishes}
+    for item in released:
+        if _key(item) not in known and not any(_equal(item, w["text"]) for w in wishes):
+            wishes.append({"text": item, "weight": 2})
+            known.add(_key(item))
     if musts != after.must_have:
         after.must_have = musts
     if wishes != [{"text": w.text, "weight": w.weight} for w in after.wishes]:
