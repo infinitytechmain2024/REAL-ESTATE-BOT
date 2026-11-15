@@ -318,15 +318,28 @@ def _known(host: str, portals: Sequence[str] = ()) -> bool:
     return any(host == p or host.endswith("." + p) for p in (*KNOWN_PORTALS, *portals))
 
 
-def real_estate_sources(sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = ()
-                        ) -> tuple[list[SourceCount], list[object], int]:
+def _vetted(host: str, portals: Sequence[str] = ()) -> bool:
+    """STATUS_HIDE_UNVETTED_SITES (Q69): a listing portal (``_known`` or ``listing_portal_host``), a site a user may
+    see named."""
+    from bot.web_search.queries import listing_portal_host
+
+    return _known(host, portals) or listing_portal_host(host)
+
+
+def real_estate_sources(sources: Sequence[SourceCount], reports: Sequence[object], portals: Sequence[str] = (),
+                        *, vetted_only: bool = False) -> tuple[list[SourceCount], list[object], int]:
     """The user's view of the sites: only known portals and hosts that gave at least one listing post or finding.
 
     Returns the sources and reports of those sites and how many other sites the search touched (dictionaries,
-    calculators, wikis ...). The owners' summary keeps the raw list.
+    calculators, wikis ...). The owners' summary keeps the raw list. ``vetted_only`` (STATUS_HIDE_UNVETTED_SITES,
+    Q69): another site stays only with a card sent or held (not for pages, a captcha or refusals alone).
     """
     stats = site_stats(sources, reports, portals)
-    keep = {host for host, s in stats.items() if _known(host, portals) or s.posts or s.sent or s.held or s.unverified}
+    if vetted_only:
+        keep = {host for host, s in stats.items() if _vetted(host, portals) or s.sent or s.held}
+    else:
+        keep = {host for host, s in stats.items()
+                if _known(host, portals) or s.posts or s.sent or s.held or s.unverified}
 
     def key(host: str) -> str:
         return next((p for p in portals if host == p or host.endswith("." + p)), host)
@@ -903,26 +916,30 @@ class FinalReporter:
                     costs: CostSummary | None = None, budget: float = 0.0, task_text: str = "",
                     held: Sequence[HeldEvidence] = (), scope: PlaceScope | None = None,
                     leads: LeadsSummary | None = None, vertical: str = "real_estate",
-                    empty: Sequence[str] = ()) -> str:
+                    empty: Sequence[str] = (), hide_unvetted: bool = False) -> str:
         """``offers``: the state of each bucket's question (``offer_state``: None, asked, approved, declined); with it
         a report that sent nothing but holds similar variants says how to get them. ``costs``: the run's ledger
         (``bot.utils.costs``) and ``budget`` its limit: the money, what was dropped before the model, its errors.
         ``vertical``: ``real_estate`` (the text above, unchanged), ``both`` (it as «🏠 Недвижимость», then «💼 Инвесторы»
         from ``leads``, then the money by branch), ``investors`` (the investor section only, then ``empty``: why it
-        found nobody, Q33)."""
+        found nobody, Q33). ``hide_unvetted`` (STATUS_HIDE_UNVETTED_SITES, Q69, users only): a site that is not a
+        listing portal is named only with a card sent or held, and the recommendations (rules and model) see portals
+        only."""
         if vertical == "investors":
             head = f"📋 Отчёт по поиску\n🎯 {goal}\n\n"
             reasons = "\n\n" + "\n".join(empty) if empty else ""
             return (head + "\n".join(investors_section(leads)) + reasons + "\n\n"
                     + "\n".join(cost_lines(costs, budget) + branch_cost_line(costs))).rstrip()[:MAX_REPORT_CHARS]
         counts = tally(outcomes)
-        sources, reports, other_sites = real_estate_sources(sources, reports, portals)
+        sources, reports, other_sites = real_estate_sources(sources, reports, portals, vetted_only=hide_unvetted)
         stats = site_stats(sources, reports, portals)
         unreadable = unreadable_sites(sources, reports, portals)
         funnel, _nothing = site_lines(sources, reports, portals, every_portal=self.every_portal,
                                       limited=self.precise_reasons)
+        advised = [s for s in stats.values() if not hide_unvetted or _vetted(s.host, portals)]
         facts = facts_for_model(task_facts(request), counts, sorted(
-            stats.values(), key=lambda s: (-s.sent, -s.links, s.host)), unreadable, tolerance_pct)
+            advised, key=lambda s: (-s.sent, -s.links, s.host)),
+            [s for s in unreadable if not hide_unvetted or _vetted(s.host, portals)], tolerance_pct)
         note = None if facts["task"].get("only_exact") else similar_note(counts, offers)
         evidence = held_evidence_lines(held, total=counts.held, task_text=task_text,
                                        requested_place=request.location, min_area=request.min_area, scope=scope)
