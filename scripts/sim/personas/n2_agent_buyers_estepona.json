@@ -6,6 +6,7 @@
   "mode": "investors",
   "task": "Im an agent, have a 4 bed villa in Estepona asking 1.2M EUR, need serious buyers or investors for it",
   "task_source": "text",
+  "excluded_by_owner": "2026-11-16: нет данных покупателей в стенде (нужны FB-записи групп или ссылки владельца)",
   "voice": false,
   "confirm_card": false,
   "env": {},

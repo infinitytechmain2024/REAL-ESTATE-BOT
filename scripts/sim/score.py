@@ -1,11 +1,15 @@
-"""``python -m scripts.sim.score [--scores sim/scores.jsonl] [--exclude G6,G8] [--latest] [--check]``: the goal.
+"""``python -m scripts.sim.score [--scores sim/scores.jsonl] [--exclude G6,G8 | --all] [--latest] [--check]``: the goal.
 
 Reads the judge's lines (``docs/v3/SIM_RUBRIC.md`` §6), one per run, checks their numbers, groups them by ``batch``
 (one pass of the persona set), prints the score of every role and their mean per batch, and checks the owner's goal:
 the mean by roles >= 90 % on at least 3 batches in a row with different seeds, ending with the last one. Every
-persona of ``scripts/sim/personas/`` is expected in every batch; ``--exclude`` drops some (until the owner gives the
-post links, O7), and the goal is then only «conditionally» met, as it is while a run of the streak flagged «check
-by hand» has no ``checked_by_hand: true``. ``--check``: exit code 0 — met, 2 — met only conditionally, 1 — not met.
+persona of ``scripts/sim/personas/`` is expected in every batch but the ones the owner has set aside, which are
+dropped by default (Q72): a post link waiting for the owner's link (``task_source: owner_O7``, G6/G8) and a persona
+with a non-empty ``excluded_by_owner`` (why and since when, the owner's decision: N2, no buyers in the fixtures).
+``--exclude`` drops only the named ones of them, ``--all`` none. Their lines are skipped, the table names them
+(«исключены владельцем: …»), and the goal is then only «conditionally» met, as it is while a run of the streak
+flagged «check by hand» has no ``checked_by_hand: true``. ``--check``: exit code 0 — met, 2 — met only
+conditionally, 1 — not met.
 """
 
 from __future__ import annotations
@@ -222,28 +226,36 @@ class PersonaSet:
     roles: dict[str, str]  # name -> role
     ids: dict[str, str]  # name -> id (G1, N3)
     excluded: set[str] = field(default_factory=set)
+    blocked: dict[str, str] = field(default_factory=dict)  # name -> why the owner set it aside
 
     @classmethod
-    def load(cls, folder: Path, exclude: str = "") -> PersonaSet:
-        """The set; ``exclude`` may name only personas waiting for the owner's link (``task_source: owner_O7``)."""
-        roles, ids, owner = {}, {}, set()
+    def load(cls, folder: Path, exclude: str = "", owner_blocked: bool = False) -> PersonaSet:
+        """The set; ``exclude`` may name only personas the owner has set aside: waiting for the owner's link
+        (``task_source: owner_O7``) or with a non-empty ``excluded_by_owner``. ``owner_blocked``: exclude all of
+        them (the default of ``main``)."""
+        roles, ids, owner = {}, {}, {}
         for path in sorted(folder.glob("*.json")):
             data = json.loads(path.read_text(encoding="utf-8"))
             roles[path.stem], ids[path.stem] = str(data.get("role")), str(data.get("id", path.stem))
-            if data.get("task_source") == "owner_O7":
-                owner.add(path.stem)
+            reason = data.get("excluded_by_owner")
+            if reason is not None and not (isinstance(reason, str) and reason.strip()):
+                raise ValueError(f"{path}: excluded_by_owner must be a non-empty text, got {reason!r}")
+            if reason:
+                owner[path.stem] = reason.strip()
+            elif data.get("task_source") == "owner_O7":
+                owner[path.stem] = "task_source owner_O7"
         if not roles:
             raise ValueError(f"no personas in {folder}")
-        excluded: set[str] = set()
+        excluded: set[str] = set(owner) if owner_blocked else set()
         for item in filter(None, (x.strip() for x in exclude.split(","))):
             names = {n for n in roles if item in (n, ids[n])}
             if not names:
                 raise ValueError(f"--exclude {item!r}: no such persona in {folder}")
-            if names - owner:
-                raise ValueError(f"--exclude {item!r}: only a persona waiting for the owner's link "
-                                 f"(task_source owner_O7) may be excluded")
+            if names - set(owner):
+                raise ValueError(f"--exclude {item!r}: only a persona set aside by the owner (task_source owner_O7 "
+                                 f"or excluded_by_owner) may be excluded")
             excluded |= names
-        return cls(roles, ids, excluded)
+        return cls(roles, ids, excluded, owner)
 
     @property
     def expected(self) -> set[str]:
@@ -366,7 +378,8 @@ def report(batches: list[Batch], personas: PersonaSet | None = None) -> str:
     lines += ["", f"streak: {run} batch(es) in a row >= {TARGET * 100:.0f} % with different seeds; "
               f"goal ({STREAK} in a row): {goal}"]
     if personas and personas.excluded:
-        lines.append("excluded: " + ", ".join(f"{personas.ids[n]} {n}" for n in sorted(personas.excluded)))
+        lines.append("исключены владельцем: " + ", ".join(
+            f"{personas.ids[n]} {n} ({personas.blocked.get(n, '?')})" for n in sorted(personas.excluded)))
     if notes:
         lines += ["", *notes]
     return "\n".join(lines)
@@ -377,13 +390,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scores", default=str(ROOT / "sim" / "scores.jsonl"), help="the judge's lines")
     parser.add_argument("--personas", default=str(ROOT / "scripts" / "sim" / "personas"),
                         help="the persona set: every persona in it is expected in every batch")
-    parser.add_argument("--exclude", default="", help="persona ids or names not expected yet, e.g. G6,G8 (until O7)")
+    excluded = parser.add_mutually_exclusive_group()
+    excluded.add_argument("--exclude", default=None,
+                          help="only these of the personas set aside by the owner are not expected, e.g. G6,G8 "
+                               "(default: all of them, task_source owner_O7 or excluded_by_owner)")
+    excluded.add_argument("--all", action="store_true", help="every persona is expected, none excluded")
     parser.add_argument("--latest", action="store_true",
                         help="a rerun of a persona whose earlier run is not done replaces it (default: an error)")
     parser.add_argument("--check", action="store_true",
-                        help="exit code 0 met, 2 met only conditionally (--exclude, unchecked runs), 1 not met")
+                        help="exit code 0 met, 2 met only conditionally (personas excluded, unchecked runs), 1 not met")
     args = parser.parse_args(argv)
-    personas = PersonaSet.load(Path(args.personas), args.exclude)
+    personas = PersonaSet.load(Path(args.personas), args.exclude or "",
+                               owner_blocked=args.exclude is None and not args.all)
     if not Path(args.scores).is_file():
         print(f"no scores yet: {args.scores}")
         return 1 if args.check else 0

@@ -65,7 +65,8 @@ def test_a_persona_is_complete(path: Path) -> None:
 
 def test_no_personal_data_in_the_personas() -> None:
     text = "\n".join(p.read_text(encoding="utf-8") for p in FILES)
-    assert not re.search(r"\+?\d[\d\s-]{8,}\d", text.replace("2-3", ""))  # no phone numbers
+    dateless = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", text.replace("2-3", ""))  # a date (excluded_by_owner)
+    assert not re.search(r"\+?\d[\d\s-]{8,}\d", dateless)  # no phone numbers
     assert "@" not in text and "http" not in text  # no e-mails, no links (the posts come from the owner)
 
 
@@ -516,7 +517,7 @@ def test_the_streak_of_three(tmp_path: Path, persona_set: Path, capsys: pytest.C
     assert not batches[0].passed(personas.expected) and batches[1].passed(personas.expected)
     assert score.streak(batches, personas.expected) == 2
     path = write(tmp_path, [*lines, *good_batch("b4")])
-    args = ["--scores", str(path), "--personas", str(persona_set), "--latest", "--check"]
+    args = ["--scores", str(path), "--personas", str(persona_set), "--latest", "--check", "--all"]
     assert score.main(args) == 0
     out = capsys.readouterr().out
     assert "goal (3 in a row): met" in out and "| b4 | 4 |" in out
@@ -539,11 +540,11 @@ def test_every_persona_of_the_set_is_expected(tmp_path: Path, persona_set: Path,
     # --exclude (until O7): the excluded are named, the goal only conditional, exit code 2
     no_post = [x for x in [*good_batch("b1"), *good_batch("b2"), *good_batch("b3")] if x["persona"] != "post_a"]
     path = write(tmp_path, no_post)
-    assert score.main(["--scores", str(path), "--personas", str(persona_set), "--check"]) == 1
+    assert score.main(["--scores", str(path), "--personas", str(persona_set), "--check", "--all"]) == 1
     capsys.readouterr()
     assert score.main(["--scores", str(path), "--personas", str(persona_set), "--exclude", "X5", "--check"]) == 2
     out = capsys.readouterr().out
-    assert "met conditionally" in out and "excluded: X5 post_a" in out
+    assert "met conditionally" in out and "исключены владельцем: X5 post_a (task_source owner_O7)" in out
     with pytest.raises(ValueError, match="no such persona"):
         score.PersonaSet.load(persona_set, "G42")
     # the real set: every persona file is expected, G6/G8 can be excluded by id
@@ -745,7 +746,7 @@ def test_unchecked_flags_keep_the_goal_conditional(tmp_path: Path, persona_set: 
     # three passing batches, one run in b3 flagged «check by hand» (2 cards, exact_available = exact = 2)
     flagged = objects("b3", "home_a", 2, sent=2, available=2)
     lines = [*good_batch("b1"), *good_batch("b2"), flagged, *good_batch("b3")[1:]]
-    args = ["--scores", str(write(tmp_path, lines)), "--personas", str(persona_set), "--check"]
+    args = ["--scores", str(write(tmp_path, lines)), "--personas", str(persona_set), "--check", "--all"]
     assert score.main(args) == 2
     out = capsys.readouterr().out
     assert "met conditionally (runs to check by hand)" in out and "b3/b3-home_a: check by hand" in out
@@ -766,7 +767,7 @@ def test_unchecked_flags_keep_the_goal_conditional(tmp_path: Path, persona_set: 
     no_post = [x for x in lines if x["persona"] != "post_a"]
     no_post[8] = flagged
     args[1] = str(write(tmp_path, no_post))
-    assert score.main([*args, "--exclude", "X5"]) == 2
+    assert score.main([*args[:-1], "--exclude", "X5"]) == 2
     assert "personas excluded, runs to check by hand" in capsys.readouterr().out
 
 
@@ -789,7 +790,7 @@ def test_check_by_hand_and_seeds(tmp_path: Path, persona_set: Path, capsys: pyte
 
 def test_only_owner_personas_can_be_excluded(persona_set: Path) -> None:
     assert score.PersonaSet.load(persona_set, "X5").excluded == {"post_a"}
-    with pytest.raises(ValueError, match="only a persona waiting for the owner's link"):
+    with pytest.raises(ValueError, match="only a persona set aside by the owner"):
         score.PersonaSet.load(persona_set, "home_b")
-    with pytest.raises(ValueError, match="only a persona waiting"):
+    with pytest.raises(ValueError, match="only a persona set aside"):
         score.PersonaSet.load(PERSONAS, "G2")
