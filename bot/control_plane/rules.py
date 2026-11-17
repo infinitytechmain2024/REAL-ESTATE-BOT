@@ -12,7 +12,14 @@ import re
 from typing import Any
 
 from bot.campaign.architect import GAZETTEER, InvalidGoal, find_places, plan_campaign
-from bot.campaign.spec import DEAL_RU, INVESTOR_WHO_RU, PROPERTY_RU, ROLE_RU, TaskSpec
+from bot.campaign.spec import (
+    DEAL_RU,
+    INVESTOR_WHO_RU,
+    PROPERTY_RU,
+    ROLE_RU,
+    TaskSpec,
+    deviation_kinds,
+)
 from bot.control_plane.details import details, property_type
 from bot.control_plane.interviewer import InterviewTurn
 
@@ -260,6 +267,69 @@ def read_deviations(spec: TaskSpec, text: str) -> TaskSpec:
         update = {"other": [*spec.deviations.other, answer[:120]], "asked": True}
     spec.deviations = spec.deviations.__class__.model_validate({**spec.deviations.model_dump(), **update})
     return spec
+
+
+# FAR_VARIANTS_SKIP_DECLINED (Q75): «только точные» among the suggested answers or as the answer.
+_EXACT_ONLY = re.compile(r"только\s+точн|лише\s+точн|only\s+exact|solo\s+exact", re.IGNORECASE)
+
+
+def _place_names(choice: str) -> list[str]:
+    """Q75: the places a place button names after «:» («соседние города: Бадалона, Л'Оспиталет»)."""
+    _, sep, tail = choice.partition(":")
+    return [n.strip(" .") for n in re.split(r"[,;/]|\s+и\s+|\s+y\s+|\s+or\s+|\s+или\s+", tail) if n.strip(" .")] if sep else []
+
+
+def _names_place(name: str, texts: list[str]) -> bool:
+    """A place name (3+ letters) in one of ``texts``, from the start of a word; a long one may change its ending
+    («Бадалона» — «в Бадалоне»)."""
+    needle = name.casefold()
+    if len(needle) < 3:
+        return False
+    if len(needle) >= 5:
+        needle = needle[:-1]
+    return any(re.search(rf"(?<!\w){re.escape(needle)}", t.casefold()) for t in texts)
+
+
+def still_declined(declined: list[str], answer: str, spec: TaskSpec) -> list[str]:
+    """Q75: ``declined`` without what ``answer`` (a «Изменить» of the deviations) or the spec now takes."""
+    taken = _taken(answer, spec, [])
+    return [kind for kind in declined if kind not in taken]
+
+
+def _taken(answer: str, spec: TaskSpec, choices: list[str]) -> set[str]:
+    dev = spec.deviations
+    taken = deviation_kinds(answer).union(*(deviation_kinds(o) for o in dev.other))
+    if dev.budget_pct:
+        taken.add("budget")
+    if dev.area_pct:
+        taken.add("area")
+    if dev.rooms_delta:
+        taken.add("rooms")
+        if spec.rooms.min is None or spec.rooms.min - dev.rooms_delta <= 0:
+            taken.add("studio")
+    if dev.nearby_areas or dev.radius_km:
+        taken.add("place")
+    texts = [answer, *dev.other]
+    if any(_names_place(n, texts) for c in choices if deviation_kinds(c) == {"place"} for n in _place_names(c)):
+        taken.add("place")  # «соседние города: Бадалона» — «Бадалона подойдёт»
+    return taken
+
+
+def declined_deviations(choices: list[str], answer: str, spec: TaskSpec) -> list[str]:
+    """FAR_VARIANTS_SKIP_DECLINED (Q75): the compromises the deviation question offered as suggested answers
+    (``choices``, one kind each; a choice of two kinds or none is not read) that the answer did not take.
+
+    Only when the answer chose something: a compromise recorded in ``spec.deviations`` (``0`` = only exact) or
+    «только точные». Taken: a kind the answer names (any mention of the studio counts), one of ``deviations.other``, a place a
+    place button names after «:» named in the answer or ``other``, or an approved value (``budget_pct``, ``area_pct``,
+    ``rooms_delta`` -- the studio too when it reaches 0 rooms --, nearby areas, radius).
+    """
+    if not (spec.deviations.has_values() or _EXACT_ONLY.search(answer or "")):
+        return []
+    offered = [kinds.pop() for choice in choices
+               if not _EXACT_ONLY.search(choice) and len(kinds := deviation_kinds(choice)) == 1]
+    taken = _taken(answer, spec, choices)
+    return [kind for kind in dict.fromkeys(offered) if kind not in taken]
 
 
 def question_for(spec: TaskSpec, path: str, *, seller: bool = False) -> str:

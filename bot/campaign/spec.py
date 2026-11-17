@@ -24,7 +24,16 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 Mode = Literal["real_estate", "investors", "both"]
 Deal = Literal["rent", "sale", "any"]
@@ -293,6 +302,28 @@ class Investor(_Model):
         return None if isinstance(value, bool) or value == "" else value
 
 
+# FAR_VARIANTS_SKIP_DECLINED (Q75): the kinds of compromise ``Deviations.declined`` can name.
+DECLINABLE = ("studio", "rooms", "budget", "area", "place")
+# The kind of compromise a text names. «студия вместо 1 спальни» is the studio (its «спальни» is not a second kind);
+# a place only by a word of neighbouring / wider area, never «рядом с метро», «cerca de la playa», «2 км от моря».
+_STUDIO_WORD = r"(?:студи|estudio|studio|loft|лофт)"
+DEVIATION_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("studio", re.compile(_STUDIO_WORD, re.IGNORECASE)),
+    ("rooms", re.compile(r"спал|комнат|кімнат|dormitor|habitaci|bedroom|\brooms?\b", re.IGNORECASE)),
+    ("budget", re.compile(r"бюджет|дорож|цен[аеуы]\b|€|евро|presupuest|precio|budget|price", re.IGNORECASE)),
+    ("area", re.compile(r"площад|м²|м2|m²|m2|superficie|\barea\b", re.IGNORECASE)),
+    ("place", re.compile(r"сосед|сусід|пригород|передмі|окрестн|радиус|радіус|alrededores|"
+                         r"друг(?:ой|ие|их|ом)\s+(?:район|город)|nearby|neighbou?r|barrios?\s+cercan",
+                         re.IGNORECASE)),
+)
+def deviation_kinds(text: str | None) -> set[str]:
+    """Q75: the kinds of compromise ``text`` names (``DECLINABLE``)."""
+    kinds = {kind for kind, pattern in DEVIATION_KINDS if pattern.search(text or "")}
+    if "studio" in kinds:
+        kinds.discard("rooms")
+    return kinds
+
+
 class Deviations(_Model):
     """Compromises the person approved in advance ("если точных вариантов не будет, что допустимо?").
 
@@ -307,6 +338,10 @@ class Deviations(_Model):
     nearby_areas: list[str] = Field(default_factory=list)  # neighbouring districts or towns accepted as the place
     other: list[str] = Field(default_factory=list)  # free-text compromises: «без лифта ок до 2 этажа»
     asked: bool = False
+    # FAR_VARIANTS_SKIP_DECLINED (Q75): the compromises a suggested answer of the deviation question offered and the
+    # person did not take («studio», «rooms», «budget», «area», «place»); written only by the intake, never by the
+    # model, never an approval. Empty: left out of every dump (the spec's JSON and the prompts as before).
+    declined: list[str] = Field(default_factory=list)
 
     @field_validator("budget_pct", "area_pct", mode="before")
     @classmethod
@@ -340,6 +375,19 @@ class Deviations(_Model):
     @classmethod
     def _asked(cls, value: Any) -> bool:
         return value if isinstance(value, bool) else False
+
+    @field_validator("declined", mode="before")
+    @classmethod
+    def _declined(cls, value: Any) -> list[str]:
+        items = value if isinstance(value, list) else []
+        return list(dict.fromkeys(v for v in items if v in DECLINABLE))
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("declined"):
+            data.pop("declined", None)
+        return data
 
     @model_validator(mode="after")
     def _implied(self) -> Deviations:
@@ -593,6 +641,8 @@ class TaskSpec(_Model):
                     value = {k: v for k, v in value.items() if k != "required"}  # the post link stays the source
                 if key == "context":
                     value = _append_answers(base[key], value)
+                if key == "deviations" and isinstance(value, dict):
+                    value = {k: v for k, v in value.items() if k != "declined"}  # Q75: only the intake writes it
                 trial = {**base, key: _overlay(base[key], value)}
                 try:
                     checked = TaskSpec.model_validate(trial).model_dump()[key]

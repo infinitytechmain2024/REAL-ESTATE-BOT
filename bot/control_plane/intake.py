@@ -69,6 +69,7 @@ from bot.control_plane.rules import (
     SKIP_WORDS,
     TASK_PATH,
     RuleInterviewer,
+    declined_deviations,
     gazetteer_place,
     geo_ru,
     next_path,
@@ -78,6 +79,7 @@ from bot.control_plane.rules import (
     question_for,
     read_deviations,
     selling_in_text,
+    still_declined,
 )
 
 __all__ = ["geo_ru", "parse_budget", "parse_deal"]  # re-exported: the answer parsers live in rules.py
@@ -466,7 +468,8 @@ class TaskIntake:
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
                  post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False,
                  role_conflict_check: bool = False, ask_city_or_province: bool = False,
-                 seller_role: bool = False, must_explicit: bool = False, strict_question_must: bool = False) -> None:
+                 seller_role: bool = False, must_explicit: bool = False, strict_question_must: bool = False,
+                 skip_declined: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -503,6 +506,11 @@ class TaskIntake:
         the model, «Понял: …» is rebuilt from the final spec (``interviewer.understood_lists``), so it never says
         «обязателен» of a wish. Off, as with ``must_explicit`` alone.
 
+        ``skip_declined`` (``FAR_VARIANTS_SKIP_DECLINED``, Q75): the answer to the deviation question whose suggested
+        answers (buttons «task:opt:<i>») offered compromises records those it did not take in
+        ``spec.deviations.declined`` (``rules.declined_deviations``); the runner never offers a farther finding that has
+        one. Off, nothing is recorded.
+
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
         """
@@ -517,6 +525,7 @@ class TaskIntake:
         self.ask_city_or_province = ask_city_or_province
         self.must_explicit = must_explicit
         self.strict_question_must = strict_question_must  # INTAKE_STRICT_QUESTION_MUST (Q73)
+        self.skip_declined = skip_declined  # FAR_VARIANTS_SKIP_DECLINED (Q75)
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
         return mode_menu(text, both=self.both_mode)
@@ -753,6 +762,18 @@ class TaskIntake:
         turn = await self._turn(draft, mode, spec, message, editing)
         draft.spec = _enrich(self._record_answer(draft, spec, turn.spec, message, editing,
                                                  next_question=turn.question), mode)
+        if self.skip_declined and draft.spec.deviations.declined and (editing or draft.step == "summary"):
+            # Q75: a correction under the card («студия тоже подойдёт») or a «Изменить» takes back what it now allows;
+            # a field of «Изменить» («комнаты: от 2») only by the spec's values, not by its words
+            draft.spec.deviations.declined = still_declined(draft.spec.deviations.declined,
+                                                            "" if editing else message, draft.spec)
+        elif (self.skip_declined and not editing and draft.asking == DEVIATION_PATH and draft.choices
+                and _norm(message) not in self._skip_words()):
+            # Q75: the compromises the suggested answers offered and this answer did not take
+            draft.spec.deviations.declined = declined_deviations(draft.choices, message, draft.spec)
+            if draft.spec.deviations.declined:
+                log.info("telegram.intake.deviations_declined",
+                         extra={"user_id": draft.user_id, "declined": draft.spec.deviations.declined})
         if widen:
             draft.spec.place = draft.spec.place.model_copy(update=widen)
             draft.widened = True
