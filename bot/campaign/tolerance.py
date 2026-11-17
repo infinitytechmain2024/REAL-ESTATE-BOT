@@ -60,7 +60,8 @@ Other constraints
 * Comarcas (Q74, ``PLACE_COMARCA_MEMBERSHIP``; ``Request.comarcas``): when every district of the task is a comarca
   of the province of Alicante (``bot/campaign/comarcas.py``: «Вега-Баха», «Vega Baja del Segura», «Baix Segura»,
   «Marina Alta» ...) and the task's place is one the table covers, the listing's comarca decides the place: the
-  payload's ``comarca`` (Fotocasa ``level3Name``), else the municipality its location / address names. In a named
+  comarcas of the municipality its location / address names (the table), else the payload's ``comarca`` (Fotocasa
+  ``level3Name``) for a town the table does not know. In a named
   comarca -> the place is confirmed (``Match.confirmed``: the reviewer's «unknown» place no longer holds it); in
   another one -> other (``location``), as a named other city, unless an approved neighbouring area
   (``nearby_areas``, «соседние районы: Марина-Баха») is that comarca or names the town -> exact,
@@ -645,9 +646,9 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
 def _comarca_place(payload: dict[str, Any], request: Request) -> tuple[str, str | None]:
     """Q74: «in» (a named comarca), «nearby» (an approved neighbouring comarca, its name as the person gave it),
     «out» (another comarca) or «unknown»: an approved area is a comarca of the listing or a town its place names;
-    the listing's comarcas are the payload's ``comarca`` (Fotocasa ``level3Name``) when the table knows it,
-    else the comarcas of the town the location / address / district names (``comarcas.comarcas_of_place``). A
-    ``comarca`` that is not one of the table's comarcas of the town it names: unknown."""
+    the listing's comarcas are those of the town the location / address / district names
+    (``comarcas.comarcas_of_place``), else the payload's ``comarca`` (Fotocasa ``level3Name``) when the table knows
+    that comarca. A ``comarca`` that is not one of the table's comarcas of the town: unknown."""
     direct = comarcas.comarca_of(payload["comarca"]) if isinstance(payload.get("comarca"), str) else None
     town = comarcas.comarcas_of_place(payload.get("location"), payload.get("address"), payload.get("district"))
     if direct and town and direct not in town:
