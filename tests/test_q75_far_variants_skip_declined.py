@@ -228,3 +228,61 @@ async def test_the_intake_with_the_studio_pressed() -> None:
 async def test_the_intake_flag_off_records_nothing() -> None:
     spec = await _interview(False, ANSWER, {"budget_pct": 10, "area_pct": 10})
     assert spec.deviations.declined == []
+
+
+# --- review fixes: places named, corrections, narrow place words, a negated studio ----------------------------
+
+
+def test_a_place_button_named_in_the_answer_is_taken() -> None:
+    choices = ["бюджет до +10 % (до 1650 €)", "соседние города: Бадалона", "нет, только точные"]
+    spec = _spec({"budget_pct": 10})
+    assert declined_deviations(choices, "бюджет +10 %, и Бадалона подойдёт", spec) == []
+    assert declined_deviations(choices, "бюджет +10 %, в Бадалоне тоже можно", spec) == []
+    assert declined_deviations(choices, "можно +10 % по бюджету", _spec({"budget_pct": 10, "other": ["Бадалона ок"]})) == []
+    assert declined_deviations(choices, "можно +10 % по бюджету", spec) == ["place"]
+
+
+@pytest.mark.parametrize("text", ["рядом с метро", "cerca de la playa", "до 2 км от моря", "barrio tranquilo"])
+def test_near_a_landmark_is_not_a_place_compromise(text) -> None:
+    assert "place" not in deviation_kinds(text)
+
+
+@pytest.mark.parametrize("text", ["соседние районы: Грасия", "другой район", "радиус 5 км", "пригороды", "nearby towns",
+                                  "barrios cercanos", "alrededores de Barcelona"])
+def test_place_compromise_words(text) -> None:
+    assert deviation_kinds(text) == {"place"}
+
+
+@pytest.mark.parametrize("answer", ["студию не надо, бюджет +10 %", "не студия, бюджет +10 %", "без студий, бюджет +10 %"])
+def test_a_negated_studio_is_not_taken(answer) -> None:
+    assert declined_deviations(OPTIONS, answer, _spec({"budget_pct": 10})) == ["studio"]
+
+
+def test_a_studio_in_other_is_approved_in_the_runner(monkeypatch) -> None:
+    again = request(monkeypatch, True, {"budget_pct": 10, "other": ["студия тоже подойдёт"], "declined": ["studio"]})
+    assert again.declined == ()
+    assert classify(STUDIO, again).bucket == "other"  # among the farther variants again
+    kept = request(monkeypatch, True, {"budget_pct": 10, "other": ["студию не надо"], "declined": ["studio"]})
+    assert kept.declined == ("studio",)
+
+
+@pytest.mark.asyncio
+async def test_a_correction_under_the_card_takes_the_studio_back() -> None:
+    fake = FakeInterviewer(
+        ask(TERM_Q, "context.answers", SPEC, "Квартира в аренду в Барселоне, до 1500 € в месяц, от 1 спальни"),
+        ask_with(DEVIATION_Q, "deviations", {"context": {"answers": [{"question": TERM_Q, "answer": "на год"}]}},
+                 OPTIONS, "Аренда на год"),
+        finish({"deviations": {"budget_pct": 10, "area_pct": 10, "asked": True}}),
+        finish({"deviations": {"other": ["студия тоже подойдёт"]}}),
+    )
+    control, sink = await _mode(fake)
+    control.intake.skip_declined = True
+    await say(control, INTAKE_USER, "снять piso в Барселоне до 1500 в месяц от 1 спальни")
+    await say(control, INTAKE_USER, "на год")
+    await say(control, INTAKE_USER, ANSWER)
+    card = await say(control, INTAKE_USER, "студия тоже подойдёт")
+    assert card.text.startswith("Проверьте задачу:")
+    await press(control, INTAKE_USER, "task:launch")
+    [envelope] = sink.envelopes
+    spec = TaskSpec.model_validate(parse_campaign_spec(envelope.arguments))
+    assert spec.deviations.declined == [] and spec.deviations.budget_pct == 10

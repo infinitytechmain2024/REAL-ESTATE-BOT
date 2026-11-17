@@ -304,6 +304,37 @@ class Investor(_Model):
 
 # FAR_VARIANTS_SKIP_DECLINED (Q75): the kinds of compromise ``Deviations.declined`` can name.
 DECLINABLE = ("studio", "rooms", "budget", "area", "place")
+# The kind of compromise a text names. «студия вместо 1 спальни» is the studio (its «спальни» is not a second kind);
+# a place only by a word of neighbouring / wider area, never «рядом с метро», «cerca de la playa», «2 км от моря».
+_STUDIO_WORD = r"(?:студи|estudio|studio|loft|лофт)"
+DEVIATION_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("studio", re.compile(_STUDIO_WORD, re.IGNORECASE)),
+    ("rooms", re.compile(r"спал|комнат|кімнат|dormitor|habitaci|bedroom|\brooms?\b", re.IGNORECASE)),
+    ("budget", re.compile(r"бюджет|дорож|цен[аеуы]\b|€|евро|presupuest|precio|budget|price", re.IGNORECASE)),
+    ("area", re.compile(r"площад|м²|м2|m²|m2|superficie|\barea\b", re.IGNORECASE)),
+    ("place", re.compile(r"сосед|сусід|пригород|передмі|окрестн|радиус|радіус|alrededores|"
+                         r"друг(?:ой|ие|их|ом)\s+(?:район|город)|nearby|neighbou?r|barrios?\s+cercan",
+                         re.IGNORECASE)),
+)
+# «студию не надо», «не студия», «без студий», «no studio»: the studio is not taken
+_STUDIO_NEGATED = re.compile(r"(?:\bне|\bбез|\bno|\bnot|\bsin)\s+(?:\w+\s+)?" + _STUDIO_WORD + "|"
+                             + _STUDIO_WORD + r"\w*\s+(?:не|no|not)\b", re.IGNORECASE)
+
+
+def deviation_kinds(text: str | None) -> set[str]:
+    """Q75: the kinds of compromise ``text`` names (``DECLINABLE``)."""
+    kinds = {kind for kind, pattern in DEVIATION_KINDS if pattern.search(text or "")}
+    if "studio" in kinds:
+        kinds.discard("rooms")
+    return kinds
+
+
+def taken_kinds(text: str | None) -> set[str]:
+    """Q75: the kinds an answer or an approved free-text compromise takes: those it names, a negated studio aside."""
+    kinds = deviation_kinds(text)
+    if "studio" in kinds and _STUDIO_NEGATED.search(text or ""):
+        kinds.discard("studio")
+    return kinds
 
 
 class Deviations(_Model):

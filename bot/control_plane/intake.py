@@ -79,6 +79,7 @@ from bot.control_plane.rules import (
     question_for,
     read_deviations,
     selling_in_text,
+    still_declined,
 )
 
 __all__ = ["geo_ru", "parse_budget", "parse_deal"]  # re-exported: the answer parsers live in rules.py
@@ -761,7 +762,12 @@ class TaskIntake:
         turn = await self._turn(draft, mode, spec, message, editing)
         draft.spec = _enrich(self._record_answer(draft, spec, turn.spec, message, editing,
                                                  next_question=turn.question), mode)
-        if (self.skip_declined and not editing and draft.asking == DEVIATION_PATH and draft.choices
+        if self.skip_declined and draft.spec.deviations.declined and (editing or draft.step == "summary"):
+            # Q75: a correction under the card («студия тоже подойдёт») or a «Изменить» takes back what it now allows;
+            # a field of «Изменить» («комнаты: от 2») only by the spec's values, not by its words
+            draft.spec.deviations.declined = still_declined(draft.spec.deviations.declined,
+                                                            "" if editing else message, draft.spec)
+        elif (self.skip_declined and not editing and draft.asking == DEVIATION_PATH and draft.choices
                 and _norm(message) not in self._skip_words()):
             # Q75: the compromises the suggested answers offered and this answer did not take
             draft.spec.deviations.declined = declined_deviations(draft.choices, message, draft.spec)
