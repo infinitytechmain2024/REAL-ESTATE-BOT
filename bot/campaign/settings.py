@@ -252,6 +252,10 @@ class CampaignRunnerSettings(BaseSettings):
     # platform link, one street and house number or one long text; bot/campaign/dedup.py ``_same_rent_copy``); an exact
     # copy from a rent platform of a held seasonal let is held with it, not sent as exact.
     dedup_rent_platform_copy: bool = Field(default=False, validation_alias="DEDUP_RENT_PLATFORM_COPY")
+    # Q77: two URLs of one site with a leading language/country segment (/be/en/, /be/fr/, /es-es/) on one side at
+    # least, the same numbers in the path and the query, and the same rest of the path (or a UUID / 6+ digit id) are
+    # one card (bot/web_search/urls.py ``language_versions``); two hosts never merge by a number alone.
+    dedup_language_versions: bool = Field(default=False, validation_alias="DEDUP_LANGUAGE_VERSIONS")
     # Q60: investor findings naming one organisation, club or person (the analysis fact ``who``, normalised) are one
     # card with «Также на», even on different hosts (a club's page and its ticket pages); the first sent card stays.
     investor_lead_same_org: bool = Field(default=False, validation_alias="INVESTOR_LEAD_SAME_ORG")
@@ -574,6 +578,7 @@ class CampaignRunnerSettings(BaseSettings):
                             held_offer_quality=self.held_offer_quality,
                             dedup_twin_listings=self.dedup_twin_listings,
                             dedup_rent_platform_copy=self.dedup_rent_platform_copy,
+                            dedup_language_versions=self.dedup_language_versions,
                             investor_lead_same_org=self.investor_lead_same_org,
                             investor_past_event_excluded=self.investor_past_event_excluded,
                             investor_report_counts_all=self.investor_report_counts_all,

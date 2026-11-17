@@ -340,6 +340,9 @@ class RunnerConfig:
     # One rented flat through two rent platforms is one object, and an exact copy of a held seasonal let is held with it
     # (``same_object(rent_platform_copy=True)``, ``_seasonal_copy``, Q67).
     dedup_rent_platform_copy: bool = False
+    # Two language versions of one ad on one site (/be/en/... and /be/fr/... with one id) are one object
+    # (``same_object(language_versions=True)``, Q77).
+    dedup_language_versions: bool = False
     # Investor findings naming one organisation, club or person (``who``) are one card, whatever the hosts (Q60).
     investor_lead_same_org: bool = False
     # An investor finding on the page of a one-off event whose date is before the runner's today is excluded (Q60).
@@ -849,7 +852,8 @@ class CampaignRunner:
                             description_normalize=self.config.dedup_description_normalize,
                             same_lot=self.config.held_offer_quality,
                             twin_listings=self.config.dedup_twin_listings,
-                            rent_platform_copy=self.config.dedup_rent_platform_copy))
+                            rent_platform_copy=self.config.dedup_rent_platform_copy,
+                            language_versions=self.config.dedup_language_versions))
                         or (org and _same_lead_org(finding, head.sent.finding))):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
@@ -895,7 +899,8 @@ class CampaignRunner:
                         description_normalize=self.config.dedup_description_normalize,
                         same_lot=self.config.held_offer_quality,
                         twin_listings=self.config.dedup_twin_listings,
-                        rent_platform_copy=self.config.dedup_rent_platform_copy)
+                        rent_platform_copy=self.config.dedup_rent_platform_copy,
+                        language_versions=self.config.dedup_language_versions)
                         or (org and _same_lead_org(finding, head.sent.finding))):
                     continue
                 if (self.config.dedup_rent_platform_copy and _seasonal(finding.payload)
@@ -946,7 +951,8 @@ class CampaignRunner:
                         same_host_copy=self.config.dedup_same_host_copy,
                         description_normalize=self.config.dedup_description_normalize,
                         same_lot=self.config.held_offer_quality, twin_listings=self.config.dedup_twin_listings,
-                        rent_platform_copy=True) or not rent_copy_sign(mine, head.listing):
+                        rent_platform_copy=True,
+                        language_versions=self.config.dedup_language_versions) or not rent_copy_sign(mine, head.listing):
                     continue
                 link = {"url": finding.url, "site": await self._site_name(campaign, finding.url)}
                 if finding.url == head.sent.finding.url:

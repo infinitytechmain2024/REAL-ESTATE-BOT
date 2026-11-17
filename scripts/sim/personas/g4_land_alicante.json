@@ -185,6 +185,11 @@
         "price_max_eur": {
           "value": null,
           "from": "budget"
+        },
+        "water": {
+          "value": true,
+          "from": "must_have",
+          "note": "«нужна вода» / «вода» (обязательно): в объявлении сказано, что вода есть (agua, pozo, acometida de agua, agua potable, derecho de riego) — match; «sin agua» — no; не сказано — unknown. «Подъезд по грунтовке ок» — допуск, не требование"
         }
       },
       "soft": [

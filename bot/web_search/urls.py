@@ -131,6 +131,68 @@ def normalized(url: str) -> str:
     return normalize_url(url)
 
 
+# Q77: one ad in two languages of one site (Engel & Völkers ``/be/en/exposes/<uuid>`` and ``/be/fr/exposes/<uuid>``).
+_LANGUAGES = frozenset({"en", "fr", "de", "es", "it", "nl", "ru", "pt", "ca", "gl", "eu", "pl", "sv", "da", "no",
+                        "fi"})
+_LOCALE = re.compile(r"([a-z]{2})[-_][a-z]{2}")                          # es-es, en-gb, fr_be
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_LONG_ID = re.compile(rf"{_UUID.pattern}|(?<!\d)\d{{6,}}(?!\d)")
+_NUMBER = re.compile(r"\d+")
+
+
+def _language_free(path: str) -> tuple[str, bool]:
+    """The path (casefolded, no trailing slash) without its leading language or country/language segments
+    (``/en/``, ``/es-es/``, ``/be/en/``) and whether one was dropped."""
+    segments = [s for s in unquote(path).lower().split("/") if s]
+    dropped = 0
+    while dropped < 2 and dropped < len(segments):
+        segment = segments[dropped]
+        locale = _LOCALE.fullmatch(segment)
+        if segment in _LANGUAGES or (locale and locale.group(1) in _LANGUAGES):
+            dropped += 1
+        elif (dropped == 0 and len(segment) == 2 and segment.isalpha() and len(segments) > 1
+              and segments[1] in _LANGUAGES):
+            dropped = 2  # a country, then its language: /be/en/
+        else:
+            break
+    return "/".join(segments[dropped:]), dropped > 0
+
+
+def _long_ids(text: str) -> frozenset[str]:
+    return frozenset(_LONG_ID.findall(unquote(text).lower()))
+
+
+def _numbers(text: str) -> list[str]:
+    """Every UUID and every run of digits outside them (``7901`` of ``9804652-7901``, ``7600`` of ``?unit=7600``),
+    sorted: a multiset."""
+    text = unquote(text).lower()
+    uuids = _UUID.findall(text)
+    return sorted(uuids + _NUMBER.findall(_UUID.sub(" ", text)))
+
+
+def language_versions(a: str | None, b: str | None) -> bool:
+    """Q77 (``DEDUP_LANGUAGE_VERSIONS``): two URLs of one ad in two languages of one site. All of: one host
+    (``host_of``); a leading language or country/language segment dropped on one side at least (never without one);
+    the same numbers in the path and the query (every UUID and run of digits, as a multiset); and the same rest of the
+    path once the language is dropped, or (a translated slug) a UUID or a number of 6+ digits among those numbers.
+    Never across two hosts, whatever the number."""
+    host = host_of(a or "")
+    if not host or host != host_of(b or ""):
+        return False
+    try:
+        parts_a, parts_b = urlsplit(a or ""), urlsplit(b or "")
+    except ValueError:
+        return False
+    rest_a, dropped_a = _language_free(parts_a.path)
+    rest_b, dropped_b = _language_free(parts_b.path)
+    if not (dropped_a or dropped_b):
+        return False
+    numbers = _numbers(parts_a.path + "?" + parts_a.query)
+    if numbers != _numbers(parts_b.path + "?" + parts_b.query):
+        return False
+    return bool(rest_a and rest_a == rest_b) or bool(_long_ids(parts_a.path + "?" + parts_a.query))
+
+
 # --- portals ------------------------------------------------------------------------------
 
 
