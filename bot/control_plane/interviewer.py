@@ -273,8 +273,12 @@ def must_said(message: str) -> bool:
 # INTAKE_STRICT_QUESTION_MUST (Q73, sim b7-g2-s8): to «Есть ли строгие требования к квартире: этаж, лифт, состояние?»
 # the answer «con ascensor, no bajo» names the requirements without a marker of its own; the question asked for the
 # required ones, so the answer counts as said required. Stems, as in the question's text.
-_STRICT_ASKED = re.compile(r"обязательн|строг|\bmust\b|\brequired\b|imprescindible|obligatori|обов['’ʼ]?язков",
-                           re.IGNORECASE)
+# A stem starts a word and a separate «не» / «not» / «no» right before it negates it (``_NOT``): «необязательно»,
+# «не обязательно», «желательно, но необязательно» ask for no required item.
+_STRICT_ASKED = re.compile(
+    _NOT + r"\bобязательн|" + _NOT + r"\bстрог|" + _NOT + r"\bmust\b|" + _NOT + r"\brequired\b|"
+    + _NOT + r"\bimprescindible|" + _NOT + r"\bobligatori|" + _NOT + r"\bобов['’ʼ]?язков",
+    re.IGNORECASE)
 
 
 def strict_question(question: str) -> bool:

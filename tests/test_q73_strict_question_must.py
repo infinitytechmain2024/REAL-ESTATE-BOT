@@ -82,6 +82,10 @@ async def test_without_q70_the_flag_does_nothing() -> None:
     ("Which features are required?", True), ("¿Algo imprescindible?", True), ("¿Algo obligatorio?", True),
     ("Що обов'язково має бути?", True), ("Що обов’язково?", True),
     (CONDITION_Q, False), ("Какой этаж подходит?", False), ("", False),
+    ("Что желательно, но необязательно?", False), ("Лифт не обязателен?", False),
+    ("Что не обязательно, но было бы хорошо?", False), ("Що необов'язково, але бажано?", False),
+    ("Anything nice to have, not required?", False), ("¿Algo no imprescindible?", False),
+    ("Есть ли нестрогие пожелания?", False),
 ])
 def test_strict_question(question: str, strict: bool) -> None:
     assert strict_question(question) is strict

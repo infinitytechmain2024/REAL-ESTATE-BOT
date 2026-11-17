@@ -192,3 +192,52 @@ async def test_settings_pass_the_flag_to_idealista_and_habitaclia():
     finally:
         for source in sources:
             await source.aclose()
+
+
+# --- dedup: the floor of one portal is no difference -----------------------------------------------------------------
+
+DESC = ("Piso luminoso reformado en Benimaclet, tres dormitorios, dos baños, cocina equipada, terraza, cerca del metro "
+        "y de todos los servicios, ideal para familias. ") * 3
+IDEALISTA_URL = "https://www.idealista.com/inmueble/100000734/"
+FOTOCASA_URL = "https://www.fotocasa.es/es/comprar/vivienda/valencia-capital/100000735/d"
+
+
+def _post(url: str, floor: int | None, ref: str | None = None) -> str:
+    line = {"url": url, "title": "Piso en venta", "price": 250000.0, "currency": "EUR", "area_m2": 87.0, "rooms": 3,
+            "address": "Benimaclet, Valencia"}
+    if ref:
+        line["agency_ref"] = ref
+    if floor is not None:
+        line |= {"floor": floor, "lift": True}
+    return f"JSON-LD: {json.dumps(line, ensure_ascii=False, separators=(', ', ': '))}\nPiso en venta\nСсылка: {url}\n{DESC}"
+
+
+def _found(floor: int | None, address: str = "Benimaclet") -> dict:
+    found = {"price_amount": 250000, "area_m2": 87, "rooms": 3, "property_type": "apartment", "deal_type": "sale",
+             "location": "Valencia", "district": "Benimaclet", "address": address}
+    return found if floor is None else {**found, "floor": floor}
+
+
+@pytest.mark.parametrize("ref", [None, "REF-1"])
+def test_dedup_numbers_ignore_the_floor_of_the_facts_line(ref):
+    from bot.campaign.dedup import listing_of, same_object
+
+    a = listing_of(_found(3, "Benimaclet"), url=IDEALISTA_URL, body=_post(IDEALISTA_URL, 3, ref))
+    b = listing_of(_found(None, "Camins al Grau"), url=FOTOCASA_URL, body=_post(FOTOCASA_URL, None))
+    plain = listing_of(_found(None, "Benimaclet"), url=IDEALISTA_URL, body=_post(IDEALISTA_URL, None))
+    assert a.numbers == b.numbers == plain.numbers
+    assert same_object(a, b, district_not_street=True)
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_dedup_twin_one_sided_floor(monkeypatch, flag):
+    from bot.campaign.dedup import _same_twin, listing_of
+
+    monkeypatch.setenv("IDEALISTA_FLOOR_FACT", "true" if flag else "false")
+    a = listing_of(_found(3), url=IDEALISTA_URL, body=_post(IDEALISTA_URL, 3))
+    b = listing_of(_found(None), url=FOTOCASA_URL, body=_post(FOTOCASA_URL, None))
+    other = listing_of(_found(5), url=FOTOCASA_URL, body=_post(FOTOCASA_URL, 5))
+    assert a.floor == 3 and b.floor is None
+    assert _same_twin(a, b) is flag  # off: as before, a floor on one side only differs
+    assert _same_twin(a, other) is False  # two known floors that differ: two flats
+    assert _same_twin(a, listing_of(_found(3), url=FOTOCASA_URL, body=_post(FOTOCASA_URL, 3))) is True
