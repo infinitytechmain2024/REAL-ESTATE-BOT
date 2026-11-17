@@ -34,6 +34,11 @@ def source_line_facts(text: str) -> dict[str, Any]:
         out["auction"] = True
     if data.get("rental_term") in ("long", "temporary"):  # Q20: written only with PORTAL_RENTAL_TERM
         out["rental_term"] = data["rental_term"]
+    v = data.get("floor")  # Q73: written only with IDEALISTA_FLOOR_FACT (0 = bajo, -1 = sótano)
+    if isinstance(v, int) and not isinstance(v, bool) and -5 <= v <= 200:
+        out["floor"] = v
+    if isinstance(data.get("lift"), bool):  # Q73: written only with IDEALISTA_FLOOR_FACT
+        out["lift"] = data["lift"]
     return out
 
 
@@ -48,6 +53,12 @@ def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any
         payload["auction"] = True  # Q16: read by campaign/tolerance.py only with PORTAL_FACTS_FROM_ROW
     if evidence.platform == "website" and (term := source_line_facts(evidence.text).get("rental_term")):
         payload["rental_term"] = term  # Q20: read by campaign/tolerance.py only with PORTAL_RENTAL_TERM
+    if evidence.platform == "website":  # Q73: the portal row's own floor and lift (IDEALISTA_FLOOR_FACT)
+        facts = source_line_facts(evidence.text)
+        if payload.get("floor") is None and "floor" in facts:
+            payload["floor"] = facts["floor"]
+        if "lift" in facts:
+            payload["lift"] = facts["lift"]
     if result.area_unconfirmed:  # Q13: only with ANALYSIS_AREA_TEXT_CHECK; the JSON-LD plot is not shown either
         payload["area_unconfirmed"] = result.area_unconfirmed
     if card_extra_fields_enabled() and evidence.platform == "website":

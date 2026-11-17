@@ -145,6 +145,7 @@ are both unknown. ``same_object`` is the arbiter.
 from __future__ import annotations
 
 import math
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -237,6 +238,9 @@ _DISTRICT_STREET_WORD = re.compile(r"(?<![^\W_])(?:camino|cami|via|ronda|rambla|
 # Q50 (``DEDUP_DESCRIPTION_NORMALIZE``): a portal's «Ref: <agency reference>.» before the description (Milanuncios).
 _REF_WRAPPER = re.compile(r"\A\s*ref(?:erencia)?\s*\.?\s*:\s*([^\n.]{1,40})\.\s*", re.IGNORECASE)
 _AGENCY_REF_FIELD = re.compile(r',?\s*"agency_ref":\s*"((?:[^"\\]|\\.)*)"')
+# IDEALISTA_FLOOR_FACT (Q73): the row's floor and lift in the «JSON-LD» line; one portal gives them, another (Fotocasa)
+# does not, so their digits are no detail of the flat's text (``numbers``) and the floor is compared as a fact only.
+_FLOOR_FIELDS = re.compile(r',?\s*"(?:floor|lift)":\s*(?:-?\d+|true|false|"(?:[^"\\]|\\.)*")')
 _SOCIAL_HOSTS = frozenset({"facebook.com", "web.facebook.com", "fb.com", "fb.watch", "instagram.com"})
 _STOP = frozenset({
     "calle", "carrer", "avenida", "avda", "plaza", "paseo", "camino", "barrio", "zona", "centro", "street", "road",
@@ -299,6 +303,9 @@ def listing_of(payload: dict[str, Any] | None, *, url: str | None = None, text: 
     found_ref = _AGENCY_REF_FIELD.search(first_line) if first_line.startswith("JSON-LD:") else None
     if found_ref:  # its digits are no detail of the flat (``numbers``) and no phone
         excerpt = excerpt.replace(found_ref.group(0), "", 1)
+    line = excerpt.lstrip().split("\n", 1)[0]  # the line without its agency_ref
+    if line.startswith("JSON-LD:") and _FLOOR_FIELDS.search(line):  # Q73
+        excerpt = excerpt.replace(line, _FLOOR_FIELDS.sub("", line), 1)
     shingles, words = fingerprint(excerpt)
     description = description_of(excerpt)
     price = _positive(payload.get("price_amount"))
@@ -767,6 +774,11 @@ def _repost_refs(a: str, b: str) -> bool:
     return bool(short) and (short == long or any(long == short + suffix for suffix in _REPOST_SUFFIXES))
 
 
+def floor_fact_enabled() -> bool:
+    """IDEALISTA_FLOOR_FACT (Q73, default off): a portal row's floor is in the payload of one portal's findings only."""
+    return os.environ.get("IDEALISTA_FLOOR_FACT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _same_twin(a: Listing, b: Listing) -> bool:
     """Q58: one object listed twice (see the module notes): the same long description (``COPY_JACCARD``), the price
     and the area exactly equal, the same type, deal, rooms and floor; never a new development or two references
@@ -776,8 +788,8 @@ def _same_twin(a: Listing, b: Listing) -> bool:
         return False
     if a.new_build or b.new_build or not (a.kind and a.kind == b.kind) or not (a.deal and a.deal == b.deal):
         return False
-    if a.rooms != b.rooms or a.floor != b.floor:
-        return False
+    if a.rooms != b.rooms or (a.floor != b.floor and not (floor_fact_enabled() and None in (a.floor, b.floor))):
+        return False  # Q73: with IDEALISTA_FLOOR_FACT a floor on one side only is no difference
     area_a, area_b = _bare_area(a), _bare_area(b)
     if a.price is None or a.price != b.price or area_a is None or area_b is None or round(area_a) != round(area_b):
         return False

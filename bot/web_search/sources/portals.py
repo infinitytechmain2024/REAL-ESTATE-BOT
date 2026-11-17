@@ -181,6 +181,38 @@ def _idealista_rental_term(labels: Any) -> str | None:
     return "temporary" if "seasonalRental" in names else None
 
 
+# IDEALISTA_FLOOR_FACT (Q73, sim b7-g2-s8 «квартира в Валенсии, con ascensor, no bajo»): the row's own floor and lift,
+# never guessed from the text. Recorded output (igolaizola idealista, 2026-11): ``floor`` is "1".."10", "bj" (bajo) or
+# "en" (entreplanta) or absent, ``hasLift`` true/false or absent; Habitaclia ``trev0n``: ``floor`` GROUND_FLOOR,
+# FIRST..TENTH, MEZZANINE, BASEMENT, PENTHOUSE or null, ``hasElevator`` true/false/null (the descriptions agree with
+# the floor words). Fotocasa igolaizola is not mapped: its ``floor`` is a code ("3" with ``floorType`` FIRST_FLOOR,
+# "32" with INTERMEDIATE_FLOOR and TOP_FLOOR alike) whose meaning is not in the output, and its lift is a feature id.
+# A value not listed here leaves the field out.
+_FLOOR_WORDS: dict[str, int | str] = {
+    "bj": 0, "bajo": 0, "baja": 0, "planta baja": 0, "ground_floor": 0,
+    "st": -1, "sotano": -1, "basement": -1,
+    "en": "entreplanta", "entreplanta": "entreplanta", "entresuelo": "entreplanta", "mezzanine": "entreplanta",
+    "ss": "semisótano", "semisotano": "semisótano", "penthouse": "ático", "atico": "ático",
+}
+_HABITACLIA_FLOORS = ("FIRST", "SECOND", "THIRD", "FOURTH", "FIFTH", "SIXTH", "SEVENTH", "EIGHTH", "NINTH", "TENTH")
+
+
+def _row_floor(value: Any) -> int | str | None:
+    """The row's floor: a whole number (-5..200), 0 for bajo, -1 for sótano, «entreplanta» as a word; else None."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if -5 <= value <= 200 else None
+    word = _fold(_text(value))
+    if re.fullmatch(r"-?\d{1,3}", word):
+        return int(word) if -5 <= int(word) <= 200 else None
+    if word.upper() in _HABITACLIA_FLOORS:
+        return _HABITACLIA_FLOORS.index(word.upper()) + 1
+    return _FLOOR_WORDS.get(word)
+
+
+def _lift(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 class _PortalSource(ApifyListingSource):
     """Shared task rules: Spain, real estate, a sale or a rent, a city (or a province) or an explicit radius."""
 
@@ -189,12 +221,14 @@ class _PortalSource(ApifyListingSource):
     agency_ref = False  # DEDUP_DISTRICT_NOT_STREET (Q15): pass the row's agency reference on
 
     def __init__(self, token: str, *, facts_from_row: bool = False, description_full: bool = False,
-                 rental_term: bool = False, province_by_code: bool = False, **kwargs: Any) -> None:
+                 rental_term: bool = False, province_by_code: bool = False, floor_fact: bool = False,
+                 **kwargs: Any) -> None:
         super().__init__(token, **kwargs)
         self.facts_from_row = facts_from_row  # PORTAL_FACTS_FROM_ROW (Q16)
         self.description_full = description_full  # PORTAL_DESCRIPTION_FULL (Q18)
         self.rental_term = rental_term  # PORTAL_RENTAL_TERM (Q20)
         self.province_by_code = province_by_code  # PORTAL_PROVINCE_BY_CODE (Q38)
+        self.floor_fact = floor_fact  # IDEALISTA_FLOOR_FACT (Q73)
 
     def supports(self, task: QueryTask) -> bool:
         return bool(self._token and task.location.strip() and task.country == "ES"
@@ -242,10 +276,11 @@ class _PortalSource(ApifyListingSource):
                  address: list[str], description: str, phone: Any, advertiser: Any,
                  property_type: str | None, place_unverified: bool = False,
                  row_type: str | None = None, row_deal: str | None = None, reference: Any = None,
-                 rental_term: str | None = None) -> SourceListing:
+                 rental_term: str | None = None, floor: Any = None, lift: Any = None) -> SourceListing:
         """``property_type`` and the deal are the task's; with ``facts_from_row`` (Q16) ``row_type``/``row_deal``,
         the row's own (None: not in the row), are written instead, and an auction named in the row is marked.
-        ``rental_term`` (the row's own, ``_RENTAL_TERMS``) is written only with PORTAL_RENTAL_TERM (Q20) and a rent."""
+        ``rental_term`` (the row's own, ``_RENTAL_TERMS``) is written only with PORTAL_RENTAL_TERM (Q20) and a rent.
+        ``floor``/``lift`` (the row's own values, ``_row_floor``/``_lift``) are written only with IDEALISTA_FLOOR_FACT."""
         auction = self.facts_from_row and auction_named(title, description)
         if self.facts_from_row:
             property_type, deal = row_type, row_deal
@@ -268,6 +303,7 @@ class _PortalSource(ApifyListingSource):
             agency_ref=_reference(reference) if self.agency_ref else None,
             rental_term=(rental_term if self.rental_term and self._deal(task) == "rent" and rental_term in _RENTAL_TERMS
                          else None),
+            floor=_row_floor(floor) if self.floor_fact else None, lift=_lift(lift) if self.floor_fact else None,
         )
 
 
@@ -819,7 +855,8 @@ class ApifyIdealistaPortalSource(_PortalSource):
                    or phone.get("formattedPhone")),
             advertiser=contact.get("commercialName") or contact.get("contactName"),
             property_type=self._TYPES.get(task_kind(task)), row_type=_row_type(item.get("propertyType")),
-            row_deal=_row_deal(item.get("operation")), rental_term=_idealista_rental_term(item.get("labels")))
+            row_deal=_row_deal(item.get("operation")), rental_term=_idealista_rental_term(item.get("labels")),
+            floor=item.get("floor"), lift=item.get("hasLift"))
 
 
 _EURO = frozenset({"eur", "euro", "euros", "\u20ac"})
@@ -1009,7 +1046,7 @@ class ApifyHabitacliaSource(_SchemaPortal):
             advertiser=row.get("advertiserName"), property_type=self._TYPES.get(task_kind(task)),
             row_type=_row_type(row.get("propertyType"), row.get("propertySubtype"), land=task_kind(task) == "land"),
             row_deal=_row_deal(row.get("transactionType")),
-            reference=row.get("agencyRef"))
+            reference=row.get("agencyRef"), floor=row.get("floor"), lift=row.get("hasElevator"))
 
 
 class ApifyMilanunciosSource(_SchemaPortal):

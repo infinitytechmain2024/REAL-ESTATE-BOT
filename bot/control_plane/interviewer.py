@@ -270,6 +270,37 @@ def must_said(message: str) -> bool:
     return bool(_MUST_SAID.search(message))
 
 
+# INTAKE_STRICT_QUESTION_MUST (Q73, sim b7-g2-s8): to «Есть ли строгие требования к квартире: этаж, лифт, состояние?»
+# the answer «con ascensor, no bajo» names the requirements without a marker of its own; the question asked for the
+# required ones, so the answer counts as said required. Stems, as in the question's text.
+# A stem starts a word and a separate «не» / «not» / «no» right before it negates it (``_NOT``): «необязательно»,
+# «не обязательно», «желательно, но необязательно» ask for no required item.
+_STRICT_ASKED = re.compile(
+    _NOT + r"\bобязательн|" + _NOT + r"\bстрог|" + _NOT + r"\bmust\b|" + _NOT + r"\brequired\b|"
+    + _NOT + r"\bimprescindible|" + _NOT + r"\bobligatori|" + _NOT + r"\bобов['’ʼ]?язков",
+    re.IGNORECASE)
+
+
+def strict_question(question: str) -> bool:
+    """INTAKE_STRICT_QUESTION_MUST: the question itself asks what is required or strict."""
+    return bool(_STRICT_ASKED.search(question or ""))
+
+
+def understood_lists(before: TaskSpec, after: TaskSpec) -> str:
+    """INTAKE_STRICT_QUESTION_MUST: «Понял: …» rebuilt from the final spec: what this answer added to the must-haves,
+    the wishes and the exclusions, in the card's words; "" when it added none of them."""
+    old_wishes = {(_key(w.text), w.weight) for w in before.wishes}
+    parts = []
+    if musts := [m for m in after.must_have if m not in before.must_have]:
+        parts.append("обязательно: " + ", ".join(musts))
+    if wishes := [w for w in after.wishes if (_key(w.text), w.weight) not in old_wishes]:
+        parts.append("пожелания: " + ", ".join(w.text + (" (очень важно)" if w.weight == 3 else "") for w in wishes))
+    if excluded := [e for e in after.exclude if e not in before.exclude]:
+        parts.append("исключить: " + ", ".join(excluded))
+    text = "; ".join(parts)
+    return text[:1].upper() + text[1:]
+
+
 def _key(text: str) -> str:
     return " ".join(re.sub(r"[^\w]+", " ", text.casefold()).split())
 
@@ -291,14 +322,15 @@ def _equal(a: str, b: str) -> bool:
     return _key(a) == _key(b) or (bool(_words(a)) and _words(a) == _words(b))
 
 
-def explicit_must(before: TaskSpec, after: TaskSpec, message: str) -> TaskSpec:
+def explicit_must(before: TaskSpec, after: TaskSpec, message: str, *, asked_must: bool = False) -> TaskSpec:
     """INTAKE_MUST_HAVE_EXPLICIT (Q70), the safety net under the model.
 
     The must-haves that were there before are the base: none is lost or made a wish, even when the model dropped or
     reworded it (a reworded one keeps the model's words); only an edit of the field on the card lowers it. A
     must-have this answer added without a word of obligation (``must_said``) becomes a wish of weight 2; a new wish of
-    weight 3 without «очень важно» or such a word gets 2."""
-    said = must_said(message)
+    weight 3 without «очень важно» or such a word gets 2. ``asked_must`` (INTAKE_STRICT_QUESTION_MUST, Q73): the
+    question asked for the required items (``strict_question``), so the answer counts as one with a marker."""
+    said = asked_must or must_said(message)
     musts: list[str] = []
     for old in before.must_have:
         free = [m for m in after.must_have if m not in musts]

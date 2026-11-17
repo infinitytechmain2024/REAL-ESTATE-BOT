@@ -49,6 +49,10 @@ class ControlPlaneSettings:
     # INTAKE_MUST_HAVE_EXPLICIT (Q70): must_have only what the person calls required («обязательно», «только» …);
     # answers to descriptive questions are wishes of weight 2 (off: as the interviewer's model returns them).
     intake_must_have_explicit: bool = False
+    # INTAKE_STRICT_QUESTION_MUST (Q73, only with INTAKE_MUST_HAVE_EXPLICIT): the answer to a question asking for the
+    # strict or required items («Есть ли строгие требования…?») counts as said required, and «Понял: …» is rebuilt from
+    # the final spec when a must-have was lowered (off: as with Q70 alone).
+    intake_strict_question_must: bool = False
     # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
     # OpenRouter stays its fallback. The key is never logged or echoed.
     architect_provider: str = "openrouter"
@@ -113,6 +117,7 @@ class ControlPlaneSettings:
             intake_ask_city_or_province=os.environ.get("INTAKE_ASK_CITY_OR_PROVINCE", "").strip().lower() in {"1", "true", "yes", "on"},
             investor_seller_role=os.environ.get("INVESTOR_SELLER_ROLE", "").strip().lower() in {"1", "true", "yes", "on"},
             intake_must_have_explicit=os.environ.get("INTAKE_MUST_HAVE_EXPLICIT", "").strip().lower() in {"1", "true", "yes", "on"},
+            intake_strict_question_must=os.environ.get("INTAKE_STRICT_QUESTION_MUST", "").strip().lower() in {"1", "true", "yes", "on"},
             architect_provider=_architect_provider(os.environ.get("ARCHITECT_PROVIDER", "openrouter")),
             anthropic_api_key=anthropic_key,
             anthropic_interview_model=os.environ.get("ANTHROPIC_INTERVIEW_MODEL", "").strip() or "claude-sonnet-5-5",

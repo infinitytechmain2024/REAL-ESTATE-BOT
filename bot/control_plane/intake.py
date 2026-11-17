@@ -53,7 +53,13 @@ from bot.campaign.spec import (
     Sources,
     TaskSpec,
 )
-from bot.control_plane.interviewer import Interviewer, InterviewTurn, explicit_must
+from bot.control_plane.interviewer import (
+    Interviewer,
+    InterviewTurn,
+    explicit_must,
+    strict_question,
+    understood_lists,
+)
 from bot.control_plane.models import Button, CommandEnvelope, IncomingMessage, Reply
 from bot.control_plane.rules import (
     AI_SKIP_WORDS,
@@ -460,7 +466,7 @@ class TaskIntake:
                  interviewer: Interviewer | None = None, max_rounds: int = MAX_ROUNDS,
                  post_links: bool = False, both_mode: bool = False, skip_widens_place: bool = False,
                  role_conflict_check: bool = False, ask_city_or_province: bool = False,
-                 seller_role: bool = False, must_explicit: bool = False) -> None:
+                 seller_role: bool = False, must_explicit: bool = False, strict_question_must: bool = False) -> None:
         """``technical(user_id)`` says who also sees planner details and queue ids (the owner).
 
         ``post_links`` (``APIFY_FACEBOOK_COMMENTS_ENABLED``): a task that is one Facebook post link becomes an
@@ -491,6 +497,12 @@ class TaskIntake:
         new wish of weight 3 without «очень важно» gets weight 2; the must-haves there before are never lost or lowered
         (``interviewer.explicit_must``). Off, as the model returned it. The rules of ``rules.py`` ask «Что обязательно должно быть?» and are not changed.
 
+        ``strict_question_must`` (``INTAKE_STRICT_QUESTION_MUST``, Q73; only with ``must_explicit``): the answer to a
+        question that itself asks for the required or strict items («Есть ли строгие требования…?», «Что обязательно…?»,
+        ``interviewer.strict_question``) counts as said required; and when the safety net still lowered a must-have of
+        the model, «Понял: …» is rebuilt from the final spec (``interviewer.understood_lists``), so it never says
+        «обязателен» of a wish. Off, as with ``must_explicit`` alone.
+
         ``interviewer`` (optional) reads every message with AI; without it, or when it fails, the rules of
         ``rules.py`` interview instead. ``max_rounds`` caps the questions per task.
         """
@@ -504,6 +516,7 @@ class TaskIntake:
         self.role_conflict_check = role_conflict_check
         self.ask_city_or_province = ask_city_or_province
         self.must_explicit = must_explicit
+        self.strict_question_must = strict_question_must  # INTAKE_STRICT_QUESTION_MUST (Q73)
 
     def menu(self, text: str = "Выберите режим:") -> Reply:
         return mode_menu(text, both=self.both_mode)
@@ -834,7 +847,12 @@ class TaskIntake:
                 turn = await self.interviewer.interview(mode=mode, spec=spec, dialogue=draft.dialogue, message=message,
                                                         asking=draft.asking, editing=editing)
                 if self.must_explicit and not editing:  # INTAKE_MUST_HAVE_EXPLICIT (Q70): must only when said
-                    turn.spec = explicit_must(spec, turn.spec, message)
+                    question = next((t["text"] for t in reversed(draft.dialogue) if t.get("role") == "assistant"), "")
+                    asked = self.strict_question_must and strict_question(question)  # Q73
+                    model_musts = list(turn.spec.must_have)
+                    turn.spec = explicit_must(spec, turn.spec, message, asked_must=asked)
+                    if self.strict_question_must and any(m not in turn.spec.must_have for m in model_musts):
+                        turn.understood_ru = understood_lists(spec, turn.spec)  # Q73: never «обязателен» of a wish
                 log.info("telegram.intake.interviewed", extra={"user_id": draft.user_id, "done": turn.done,
                                                                 "round": draft.rounds})
                 return turn

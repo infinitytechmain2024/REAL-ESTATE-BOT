@@ -216,7 +216,7 @@ def finding_data(payload: dict[str, Any] | None, *, fallback_text: str = "", ori
     if review:
         evidence = payload.get("evidence")
         data["evidence"] = {str(k): str(v)[:200] for k, v in evidence.items() if v} if isinstance(evidence, dict) else {}
-        for key in ("district", "address", "floor", "features", "condition"):
+        for key in ("district", "address", "floor", "lift", "features", "condition"):  # lift: Q73
             if payload.get(key) not in (None, "", []):
                 data[key] = payload[key]
         data["vertical"] = vertical
