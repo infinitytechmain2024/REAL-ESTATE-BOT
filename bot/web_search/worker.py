@@ -201,6 +201,11 @@ class WebSearchConfig:
     # (``web_search.serp_kept_foreign``). A real-estate search still drops it (its finding would be excluded as foreign
     # anyway). Off: every foreign country-code domain is dropped, as before.
     foreign_tld_spain_mention: bool = False
+    # INVESTOR_CLUB_IS_LEAD (Q76, sim b7-g7-s8): a page an investor search read (an investors campaign, an investor round
+    # of a both one) goes to the analysis even when neither its address nor its text looks like a listing (no ad id, no
+    # price and area): a club's event page («/evento/encuentro-inversores/») or a fund's site is no listing, so it was
+    # dropped as ``not_a_listing`` before the model read it. Only the plain HTTP read; a real-estate search is unchanged.
+    investor_club_is_lead: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_round <= 30 and 1 <= self.max_queries_per_campaign <= 200
@@ -1112,9 +1117,10 @@ class WebSearchWorker:
                 if looks_blocked(parsed.title, post_text(parsed, limit=cfg.max_post_chars)):
                     failed = PageResult(False, url.kind, page.url, parsed.title, error="captcha")
                 else:
+                    investors = cfg.investor_club_is_lead and await self._url_vertical(campaign, url) == "investors"
                     result, children = self._page(url, page.url, parsed, structured(page.html, page.url),
                                                   blocked=cfg.blocked_hosts | query_task(campaign, spec_level=self.config.place_level_from_spec).blocked_hosts,
-                                                  deal=campaign_deal(campaign))
+                                                  deal=campaign_deal(campaign), investors=investors)
                     if not await self._wants_render(campaign.id, result, children):
                         return result, children
                     return await self._render_empty(campaign.id, url, page.url, parsed, result, children)
@@ -1255,7 +1261,8 @@ class WebSearchWorker:
 
     def _page(self, url: QueuedUrl, final_url: str, parsed: ParsedPage,
               data: Structured, blocked: frozenset[str] | None = None,
-              deal: str | None = None) -> tuple[PageResult, list[Candidate]]:
+              deal: str | None = None, investors: bool = False) -> tuple[PageResult, list[Candidate]]:
+        """``investors`` (INVESTOR_CLUB_IS_LEAD): an investor search's page is a post without a listing's signs."""
         cfg = self.config
         blocked = cfg.blocked_hosts if blocked is None else blocked  # config + the campaign's blocked sources
         kind = classify_url(final_url) if url.kind == "unknown" else url.kind
@@ -1281,7 +1288,8 @@ class WebSearchWorker:
             text = f"{facts_block(facts)}\n{text}".strip()[:cfg.max_post_chars]
         if len(text) < MIN_POST_CHARS:
             return PageResult(False, "listing", final_url, parsed.title, error="no_readable_text"), []
-        if url.kind == "unknown" and classify_page(final_url, has_listing_data=facts is not None, text=text) != "listing":
+        if (url.kind == "unknown" and not investors
+                and classify_page(final_url, has_listing_data=facts is not None, text=text) != "listing"):
             return PageResult(False, "unknown", final_url, parsed.title, error="not_a_listing"), []
         return PageResult(True, "listing", final_url, parsed.title, text), []
 

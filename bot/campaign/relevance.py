@@ -123,6 +123,23 @@ for a rental or for something much cheaper, news, articles and directories.
 """
 SYSTEM_SELLER = SYSTEM.replace(_REASON_LINE, SELLER_RULES + _REASON_LINE)
 
+# INVESTOR_CLUB_IS_LEAD (Q76, sim b7-g7-s8): a club or community of real-estate investors that meets regularly is a lead
+# (its organiser is the way to the investors), also by the page of one of its meetups on an event or ticket site; a
+# one-off paid conference without a named organiser or a listing of many events is not. Appended after INVESTOR_RULES
+# (or after the base rules without INVESTOR_LEAD_SOURCE_CHECK); a seller's task keeps SELLER_RULES as they are.
+CLUB_PROMPT_SUFFIX = "-club"
+CLUB_RULES = """Investor clubs (task.mode "investors"): a club, network, association or community of real-estate investors
+that meets regularly (a monthly meetup, regular investor meetings or networking evenings) in or around the place is a
+lead, not an event: its organiser is the contact through whom the person reaches the investors. Its own page and the
+page of one of its regular meetups, even on an event or ticket site (Eventbrite, Meetup, Skiddle), are "match" when
+the place fits; that the page sells or books seats for one meeting is not a reason for "near" or "reject". "reject": a
+one-off paid conference, summit, fair or congress is not a club, even with a named organiser; and an event or ticket
+listing of many events of many organisers with no club of its own.
+
+"""
+SYSTEM_CLUB = SYSTEM.replace(_REASON_LINE, CLUB_RULES + _REASON_LINE)
+SYSTEM_INVESTORS_CLUB = SYSTEM.replace(_REASON_LINE, INVESTOR_RULES + CLUB_RULES + _REASON_LINE)
+
 INDEX_NOTE_PREFIX = INDEX_RESULT_NOTE.split("{")[0]
 
 
@@ -393,7 +410,7 @@ class OpenRouterRelevanceJudge:
     def __init__(self, *, api_key: str, model: str = DEFAULT_MODEL, timeout_seconds: float = 15,
                  base_url: str = OPENROUTER_BASE_URL, client: httpx.AsyncClient | None = None,
                  phrase_places: bool = False, investor_leads: bool = False, seller_role: bool = False,
-                 phrase_land_terms: bool = False) -> None:
+                 phrase_land_terms: bool = False, investor_club: bool = False) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for the relevance check")
         self.model, self.timeout_seconds = model, timeout_seconds
@@ -401,6 +418,7 @@ class OpenRouterRelevanceJudge:
         self.phrase_land_terms = phrase_land_terms  # OFFER_REASONS_FROM_REVIEW (Q64): «rústico» in the phrase
         self.investor_leads = investor_leads  # INVESTOR_LEAD_SOURCE_CHECK (Q53): SYSTEM_INVESTORS for investor findings
         self.seller_role = seller_role  # INVESTOR_SELLER_ROLE (Q63): SYSTEM_SELLER for a seller's investor findings
+        self.investor_club = investor_club  # INVESTOR_CLUB_IS_LEAD (Q76): CLUB_RULES for investor findings
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
@@ -416,10 +434,14 @@ class OpenRouterRelevanceJudge:
 
     def prompt(self, task: dict[str, Any], finding: dict[str, Any]) -> tuple[str, str]:
         """The prompt version and system text for this finding (``SYSTEM_INVESTORS`` only with the Q53 flag,
-        ``SYSTEM_SELLER`` only with the Q63 one for a seller's task)."""
+        ``SYSTEM_SELLER`` only with the Q63 one for a seller's task, ``CLUB_RULES`` added only with the Q76 one)."""
         investor = task.get("mode") == "investors" or finding.get("vertical") == "investors"
         if self.seller_role and investor and task.get("user_role") == "selling":
             return SELLER_PROMPT_VERSION, SYSTEM_SELLER
+        if self.investor_club and investor:  # INVESTOR_CLUB_IS_LEAD (Q76)
+            if self.investor_leads:
+                return INVESTOR_PROMPT_VERSION + CLUB_PROMPT_SUFFIX, SYSTEM_INVESTORS_CLUB
+            return PROMPT_VERSION + CLUB_PROMPT_SUFFIX, SYSTEM_CLUB
         if self.investor_leads and (task.get("mode") == "investors" or finding.get("vertical") == "investors"):
             return INVESTOR_PROMPT_VERSION, SYSTEM_INVESTORS
         return PROMPT_VERSION, SYSTEM
@@ -515,6 +537,11 @@ class ReviewerJudge:
     def seller_role(self) -> bool:
         """``INVESTOR_SELLER_ROLE`` (Q63) of the legacy judge that takes the investor findings."""
         return bool(getattr(self.fallback, "seller_role", False))
+
+    @property
+    def investor_club(self) -> bool:
+        """``INVESTOR_CLUB_IS_LEAD`` (Q76) of the legacy judge that takes the investor findings."""
+        return bool(getattr(self.fallback, "investor_club", False))
 
     @property
     def soft_wishes(self) -> bool:

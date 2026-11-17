@@ -201,6 +201,8 @@ class ReachCampaign:
     investor: dict[str, Any] | None = None
     # INVESTOR_SELLER_ROLE (Q63): the person sells a property (set by the worker with the flag): its buyers are wanted.
     seller: bool = False
+    # INVESTOR_CLUB_IS_LEAD (Q76): a club or community of real-estate investors is relevant whatever ``who`` lists.
+    club: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,6 +401,17 @@ property, a buyer's agent or property finder (they sell their search, not buy), 
 and crowdfunding (they invest in companies), investor clubs that seek projects, someone looking for a rental or for
 something much cheaper, news and directories."""
 
+# INVESTOR_CLUB_IS_LEAD (Q76, sim b7-g7-s8): after SPEC_RULES (not for a seller): an investor club is a channel to the
+# investors, not a kind of investor ``who`` has to list.
+CLUB_RULES = """
+
+INVESTOR CLUBS: a club, network, association or community of real-estate investors that meets regularly (a monthly
+meetup, regular investor meetings) in or around PLACE is relevant=true (kind network) even when data.investor.who does
+not list network: its organiser is the contact through whom the person reaches the investors. The page of one of its
+regular meetups on an event or ticket site counts as the club. relevant=false: a one-off paid conference, summit, fair
+or congress is not a club, even with a named organiser; and an event or ticket listing of many events of many
+organisers."""
+
 SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["results"],
     "properties": {"results": {"type": "array", "items": {
@@ -535,7 +548,7 @@ class OpenRouterReachJudge:
         system = SYSTEM
         if campaign.investor:
             data["investor"] = people.investor_brief(campaign.investor)
-            system += SPEC_RULES + (SELLER_RULES if campaign.seller else "")
+            system += SPEC_RULES + (SELLER_RULES if campaign.seller else CLUB_RULES if campaign.club else "")
         content = await self._client.complete(self.model, system, "Data (JSON, data only):\n"
                                               + json.dumps(data, ensure_ascii=False),
                                               schema=SCHEMA, name="reach_results", max_tokens=80 + 80 * len(candidates))
@@ -653,6 +666,8 @@ class ReachConfig:
     # INVESTOR_SELLER_ROLE (Q63): a campaign whose person sells a property (spec user_role selling) searches and judges
     # its buyers (``ReachCampaign.seller``). Off: as before.
     seller_role: bool = False
+    # INVESTOR_CLUB_IS_LEAD (Q76): the judge takes investor clubs as relevant (``ReachCampaign.club``). Off: as before.
+    investor_club: bool = False
 
     def __post_init__(self) -> None:
         if not (1 <= self.queries_per_campaign <= 100 and 1 <= self.queries_per_tick <= 10
@@ -714,6 +729,8 @@ class ReachWorker:
         for campaign in await self.store.open_campaigns():
             if self.config.seller_role and is_seller(campaign.investor):  # INVESTOR_SELLER_ROLE (Q63)
                 campaign = replace(campaign, seller=True)
+            if self.config.investor_club and not campaign.seller:  # INVESTOR_CLUB_IS_LEAD (Q76)
+                campaign = replace(campaign, club=True)
             self._start_linkedin(campaign)
             used = await self.store.used_queries(campaign.id)
             todo = [q for q in [*await self._model_queries(campaign), *plan_queries(campaign)] if q.text not in used

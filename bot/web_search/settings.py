@@ -170,6 +170,9 @@ class WebSearchSettings(BaseSettings):
     # Q68: an investor search keeps a hit on a foreign country-code domain (an angel network's mirror on .ec) whose
     # snippet names the task's city or province (not the country alone); off: every foreign domain is dropped.
     foreign_tld_spain_mention: bool = Field(default=False, validation_alias="FOREIGN_TLD_SPAIN_MENTION")
+    # Q76: an investor search's page goes to the analysis without a listing's signs (a club's event page, a fund's
+    # site); off: such a page is dropped as not_a_listing, as before.
+    investor_club_is_lead: bool = Field(default=False, validation_alias="INVESTOR_CLUB_IS_LEAD")
     # Which sites a search hit may come from: strict (the country's known portals -- for Spain the 20 of
     # urls.SPAIN_PORTALS -- plus the sites the plan or the person named), soft (also sites whose hit shows a price or
     # an area), off (the old rule: a property word and a deal word). A country without a portal list is soft.
@@ -249,6 +252,7 @@ class WebSearchSettings(BaseSettings):
             place_level_from_spec=self.place_level_from_spec, investor_web_queries=self.investor_web_queries,
             both_mode_portals=self.both_mode_portals, both_mode_investor_queries=self.both_mode_investor_queries,
             investor_seller_role=self.investor_seller_role, foreign_tld_spain_mention=self.foreign_tld_spain_mention,
+            investor_club_is_lead=self.investor_club_is_lead,
             render_index_on_refusal=self.render_index_on_refusal,
             human_verification=self.human_verification and self.render_enabled,
             verified_host_interval_seconds=self.verified_host_interval_seconds,
