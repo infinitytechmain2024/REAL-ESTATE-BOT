@@ -133,8 +133,8 @@ that meets regularly (a monthly meetup, regular investor meetings or networking 
 lead, not an event: its organiser is the contact through whom the person reaches the investors. Its own page and the
 page of one of its regular meetups, even on an event or ticket site (Eventbrite, Meetup, Skiddle), are "match" when
 the place fits; that the page sells or books seats for one meeting is not a reason for "near" or "reject". "reject": a
-one-off paid conference, fair or congress with no named club or organiser to contact, and an event or ticket listing
-of many events of many organisers with no club of its own.
+one-off paid conference, summit, fair or congress is not a club, even with a named organiser; and an event or ticket
+listing of many events of many organisers with no club of its own.
 
 """
 SYSTEM_CLUB = SYSTEM.replace(_REASON_LINE, CLUB_RULES + _REASON_LINE)

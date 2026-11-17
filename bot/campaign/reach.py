@@ -408,8 +408,9 @@ CLUB_RULES = """
 INVESTOR CLUBS: a club, network, association or community of real-estate investors that meets regularly (a monthly
 meetup, regular investor meetings) in or around PLACE is relevant=true (kind network) even when data.investor.who does
 not list network: its organiser is the contact through whom the person reaches the investors. The page of one of its
-regular meetups on an event or ticket site counts as the club. relevant=false: a one-off paid conference, fair or
-congress with no named club or organiser to contact, and an event or ticket listing of many events of many organisers."""
+regular meetups on an event or ticket site counts as the club. relevant=false: a one-off paid conference, summit, fair
+or congress is not a club, even with a named organiser; and an event or ticket listing of many events of many
+organisers."""
 
 SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["results"],

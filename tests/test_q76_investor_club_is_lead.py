@@ -48,6 +48,9 @@ def _judge(handler: Any = None, **flags: bool) -> OpenRouterRelevanceJudge:
 def test_the_club_rule_is_in_the_prompt_only_with_the_flag() -> None:
     assert "meets regularly" in rel.CLUB_RULES and "ticket site" in rel.CLUB_RULES
     assert "one-off paid conference" in rel.CLUB_RULES and "organiser" in rel.CLUB_RULES
+    conference = "one-off paid conference, summit, fair or congress is not a club, even with a named organiser"
+    assert conference in " ".join(rel.CLUB_RULES.split())
+    assert conference in " ".join(reach_mod.CLUB_RULES.split())
     on = _judge(investor_leads=True, investor_club=True).prompt(TASK, FINDING)
     assert on == ("relevance-v3-isrc-club", rel.SYSTEM_INVESTORS_CLUB)
     assert rel.INVESTOR_RULES in on[1] and rel.CLUB_RULES in on[1]
@@ -154,16 +157,19 @@ EVENT_HTML = ("<html><head><title>Encuentro de Inversores en Málaga – Uppery 
               "inversión inmobiliaria. Networking de alto nivel entre inversores de toda España.</p></main></body></html>")
 
 
-async def _posts(mode: str, *, flag: bool) -> tuple[list[str], str | None]:
+async def _posts(mode: str, *, flag: bool, both_investor_queries: bool = False) -> tuple[list[str], str | None]:
     campaigns, store = MemoryCampaignStore(), MemoryWebStore(None)
     store.campaigns = campaigns
     cid = await make_campaign(campaigns, mode)
     texts = {EVENT: ("Encuentro de Inversores en Málaga", "Vive una jornada única de inversión, networking")}
+    if mode == "real_estate":  # a hit with a property and a deal word: queued by a real-estate search too
+        texts = {EVENT: ("Pisos en venta en Málaga: encuentro de inversores", "Piso en venta, vivienda en Málaga")}
     w = WebSearchWorker(campaigns, store, FakeSearcher(default=[EVENT], texts=texts), FakeFetcher({EVENT: EVENT_HTML}),
                         FallbackQueryGenerator(None), planner=FixedPlanner(),
                         config=WebSearchConfig(cover_portals=False, queries_per_round=2, max_queries_per_campaign=2,
                                                domain_policy="off", investor_web_queries=True,
-                                               investor_club_is_lead=flag))
+                                               investor_club_is_lead=flag,
+                                               both_mode_investor_queries=both_investor_queries))
     await run_until_done(w, cid)
     row = store.urls[cid].get(url_key(EVENT))
     return [p["url"] for p in store.posts], row.detail if row else None
@@ -179,6 +185,14 @@ async def test_an_investor_event_page_is_analysed_with_the_flag() -> None:
 async def test_flag_off_the_page_is_dropped_as_not_a_listing_as_before() -> None:
     posts, detail = await _posts("investors", flag=False)
     assert posts == [] and detail == "not_a_listing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["real_estate", "both"])
+async def test_flag_on_a_real_estate_search_and_a_both_one_without_investor_rounds_are_unchanged(mode: str) -> None:
+    # both without BOTH_MODE_INVESTOR_QUERIES: its pages are read as «both», not as an investor round's
+    posts, detail = await _posts(mode, flag=True)
+    assert EVENT not in posts and detail == "not_a_listing"
 
 
 def test_the_flag_is_off_by_default_and_reaches_the_campaign_runner(monkeypatch) -> None:
