@@ -90,6 +90,7 @@ BASE_ENV: dict[str, str] = {
     "RENT_DEFAULT_LONG_TERM": "true",  # Q49
     "RENT_SEASONAL_EXCLUDED": "false",  # Q59: deferred (month names / «до 12 месяцев» not parsed)
     "STUDIO_ZERO_BEDROOMS": "true",  # Q59
+    "PLACE_COMARCA_MEMBERSHIP": "true",  # Q74
     "SEARCH_PLACE_LEVEL_FROM_SPEC": "true",  # Q11
     "ANALYSIS_AREA_TEXT_CHECK": "false",  # Q13: off until area_check review blockers (N4, N5) are fixed
     "DEDUP_DISTRICT_NOT_STREET": "true",  # Q15

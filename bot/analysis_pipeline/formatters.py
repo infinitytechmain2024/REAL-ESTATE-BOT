@@ -39,6 +39,9 @@ def source_line_facts(text: str) -> dict[str, Any]:
         out["floor"] = v
     if isinstance(data.get("lift"), bool):  # Q73: written only with IDEALISTA_FLOOR_FACT
         out["lift"] = data["lift"]
+    v = data.get("comarca")  # Q74: written only with PLACE_COMARCA_MEMBERSHIP (Fotocasa level3Name)
+    if isinstance(v, str) and v.strip():
+        out["comarca"] = v.strip()[:80]
     return out
 
 
@@ -59,6 +62,8 @@ def finding_payload(result: AnalysisResult, evidence: Evidence) -> dict[str, Any
             payload["floor"] = facts["floor"]
         if "lift" in facts:
             payload["lift"] = facts["lift"]
+        if "comarca" in facts:  # Q74: read by campaign/tolerance.py only with PLACE_COMARCA_MEMBERSHIP
+            payload["comarca"] = facts["comarca"]
     if result.area_unconfirmed:  # Q13: only with ANALYSIS_AREA_TEXT_CHECK; the JSON-LD plot is not shown either
         payload["area_unconfirmed"] = result.area_unconfirmed
     if card_extra_fields_enabled() and evidence.platform == "website":

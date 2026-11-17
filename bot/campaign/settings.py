@@ -118,6 +118,10 @@ class CampaignRunnerSettings(BaseSettings):
     # Q59: against the task's rooms a studio without rooms has 0 bedrooms («меньше комнат»), with one room unconfirmed
     # (similar); not when the task asks for a studio (bot/campaign/tolerance.py). false (default): as before.
     studio_zero_bedrooms: bool = Field(default=False, validation_alias="STUDIO_ZERO_BEDROOMS")
+    # Q74: when the task's districts are comarcas of Alicante («Вега-Баха, Марина-Альта») the listing's town decides the
+    # place: in a named comarca confirmed, in another one «не тот район» (bot/campaign/comarcas.py, tolerance.py;
+    # the same variable as bot/web_search/settings.py). false (default): as before.
+    place_comarca_membership: bool = Field(default=False, validation_alias="PLACE_COMARCA_MEMBERSHIP")
     # Q18, the same variable as bot/web_search/settings.py: the reviewer also gets «hits», windows of the whole
     # listing text around the must-have words, and may quote them (prompt «-hits»). Off: as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")
