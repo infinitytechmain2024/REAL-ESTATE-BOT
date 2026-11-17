@@ -53,6 +53,9 @@ class ControlPlaneSettings:
     # strict or required items («Есть ли строгие требования…?») counts as said required, and «Понял: …» is rebuilt from
     # the final spec when a must-have was lowered (off: as with Q70 alone).
     intake_strict_question_must: bool = False
+    # FAR_VARIANTS_SKIP_DECLINED (Q75): the compromises the deviation question offered as buttons and the answer did not
+    # take are recorded in the spec (deviations.declined); campaign-runner reads the same variable (off: not recorded).
+    far_variants_skip_declined: bool = False
     # The interviewer on the Claude API (anthropic_interviewer.py); off unless ARCHITECT_PROVIDER=anthropic.
     # OpenRouter stays its fallback. The key is never logged or echoed.
     architect_provider: str = "openrouter"
@@ -118,6 +121,7 @@ class ControlPlaneSettings:
             investor_seller_role=os.environ.get("INVESTOR_SELLER_ROLE", "").strip().lower() in {"1", "true", "yes", "on"},
             intake_must_have_explicit=os.environ.get("INTAKE_MUST_HAVE_EXPLICIT", "").strip().lower() in {"1", "true", "yes", "on"},
             intake_strict_question_must=os.environ.get("INTAKE_STRICT_QUESTION_MUST", "").strip().lower() in {"1", "true", "yes", "on"},
+            far_variants_skip_declined=os.environ.get("FAR_VARIANTS_SKIP_DECLINED", "").strip().lower() in {"1", "true", "yes", "on"},
             architect_provider=_architect_provider(os.environ.get("ARCHITECT_PROVIDER", "openrouter")),
             anthropic_api_key=anthropic_key,
             anthropic_interview_model=os.environ.get("ANTHROPIC_INTERVIEW_MODEL", "").strip() or "claude-sonnet-5-5",

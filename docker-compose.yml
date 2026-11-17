@@ -144,6 +144,8 @@ services:
       INTAKE_MUST_HAVE_EXPLICIT: ${INTAKE_MUST_HAVE_EXPLICIT:-false}
       # Q73 (with Q70): an answer to «Есть ли строгие требования…?» is a must; «Понял: …» follows the final spec.
       INTAKE_STRICT_QUESTION_MUST: ${INTAKE_STRICT_QUESTION_MUST:-false}
+      # Q75: the compromises offered as buttons in the deviation question and not taken are recorded in the spec.
+      FAR_VARIANTS_SKIP_DECLINED: ${FAR_VARIANTS_SKIP_DECLINED:-false}
       # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
       ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -778,6 +780,7 @@ services:
       RENT_SEASONAL_EXCLUDED: ${RENT_SEASONAL_EXCLUDED:-false}
       STUDIO_ZERO_BEDROOMS: ${STUDIO_ZERO_BEDROOMS:-false}
       PLACE_COMARCA_MEMBERSHIP: ${PLACE_COMARCA_MEMBERSHIP:-false}
+      FAR_VARIANTS_SKIP_DECLINED: ${FAR_VARIANTS_SKIP_DECLINED:-false}
       USER_PHRASE_PLACES: ${USER_PHRASE_PLACES:-false}
       INVESTOR_LEAD_SOURCE_CHECK: ${INVESTOR_LEAD_SOURCE_CHECK:-false}
       INVESTOR_SELLER_ROLE: ${INVESTOR_SELLER_ROLE:-false}

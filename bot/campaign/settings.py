@@ -122,6 +122,10 @@ class CampaignRunnerSettings(BaseSettings):
     # place: in a named comarca confirmed, in another one «не тот район» (bot/campaign/comarcas.py, tolerance.py;
     # the same variable as bot/web_search/settings.py). false (default): as before.
     place_comarca_membership: bool = Field(default=False, validation_alias="PLACE_COMARCA_MEMBERSHIP")
+    # Q75: a farther («other») finding with a compromise the deviation question offered and the person did not take
+    # (deviations.declined: a studio, fewer rooms, over the budget, another area) is excluded, never offered
+    # (bot/campaign/tolerance.py; the same variable as bot/control_plane/settings.py). false (default): as before.
+    far_variants_skip_declined: bool = Field(default=False, validation_alias="FAR_VARIANTS_SKIP_DECLINED")
     # Q18, the same variable as bot/web_search/settings.py: the reviewer also gets «hits», windows of the whole
     # listing text around the must-have words, and may quote them (prompt «-hits»). Off: as before.
     portal_description_full: bool = Field(default=False, validation_alias="PORTAL_DESCRIPTION_FULL")

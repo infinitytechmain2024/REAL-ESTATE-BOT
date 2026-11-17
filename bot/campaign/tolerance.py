@@ -120,6 +120,14 @@ Other constraints
   rooms rule. A ``rooms_delta`` that reaches 0 still approves it. A studio naming 2+ rooms, any other type with an unknown count, no rooms in the task, or a task whose own words
   ask for a studio («студия», «estudio», «loft»; ``bot/utils/listing_text.py`` ``task_names_studio``): unchanged. Sim
   b5-g5-s6: «Estudio a estrenar», rooms 1, went out as exact.
+* Declined compromise (Q75, ``FAR_VARIANTS_SKIP_DECLINED``; ``Request.declined``): the deviation question offered a
+  compromise as a suggested answer («студия вместо 1 спальни», «бюджет до +10 %», «соседний район») and the person
+  chose others or «только точные» (``TaskSpec.deviations.declined``, written by the intake). An «other» finding that
+  has it -- a studio without bedrooms (with ``studio_zero``), fewer rooms, a price beyond the exact band, an area
+  outside it, another known city or comarca -- is excluded under that reason (``rooms``, ``price``, ``area``,
+  ``location``): never in «Показать более далёкие варианты?», never sent on «Одобрить». A compromise approved after
+  all (``rooms_delta``, ``budget_pct`` ...) or a task naming a studio is not declined; similar findings: unchanged.
+  Sim b7-g5-s8: «студия вместо 1 спальни» not chosen, three studios went out as farther variants.
 * A budget with an unknown listing price is other (see Budget).
 * Findings of the investors vertical carry no prices; they are always exact. With INVESTOR_TICKET_RANGE (Q68;
   ``Request.ticket_min``) an investor whose ticket range («$10,000 - $100,000» in ``price_signals``,
@@ -148,6 +156,7 @@ from bot.utils.ticket_range import SYMBOLS, investor_ticket_range_enabled, ticke
 
 from . import comarcas, geo
 from .architect import find_places
+from .spec import deviation_kinds
 
 BUDGET_TOLERANCE = 0.10
 SIMILAR_CEILING = 0.25
@@ -209,6 +218,9 @@ class Request:
     ticket_currency: str | None = None
     # PLACE_COMARCA_MEMBERSHIP (Q74): the comarcas the districts name (all of them are comarcas), else empty
     comarcas: tuple[str, ...] = ()
+    # FAR_VARIANTS_SKIP_DECLINED (Q75): the compromises offered in the deviation question and not taken
+    # (``TaskSpec.deviations.declined``, minus any approved since): an «other» finding with one is excluded
+    declined: tuple[str, ...] = ()
 
     @property
     def country_code(self) -> str | None:
@@ -446,6 +458,28 @@ def _comarcas(districts: tuple[str, ...], location: str | None) -> tuple[str, ..
     return tuple(dict.fromkeys(f for f in found if f)) if all(found) else ()
 
 
+def far_skip_declined_enabled() -> bool:
+    """FAR_VARIANTS_SKIP_DECLINED (default off): an «other» finding with a declined compromise is excluded (Q75)."""
+    return os.environ.get("FAR_VARIANTS_SKIP_DECLINED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _declined_of(dev: dict[str, Any], rooms: object, delta: int | None, spec: dict[str, Any] | None,
+                 text: str | None) -> tuple[str, ...]:
+    """Q75: the declined compromises (``deviations.declined``) still not approved (a value, or a free-text compromise
+    in ``deviations.other`` naming the kind, ``spec.deviation_kinds``); () without the flag."""
+    raw = dev.get("declined")
+    if not far_skip_declined_enabled() or not isinstance(raw, list):
+        return ()
+    wanted = rooms if isinstance(rooms, int) and not isinstance(rooms, bool) and rooms > 0 else None
+    other = dev.get("other") if isinstance(dev.get("other"), list) else []
+    named = set().union(*(deviation_kinds(o) for o in other if isinstance(o, str)))
+    approved = {"budget": bool(_pct(dev.get("budget_pct"))), "area": bool(_pct(dev.get("area_pct"))),
+                "rooms": bool(delta),
+                "studio": bool(delta and (wanted is None or wanted - delta <= 0)) or task_names_studio(spec, text),
+                "place": bool(_names(dev.get("nearby_areas")) or _positive(dev.get("radius_km")))}
+    return tuple(dict.fromkeys(k for k in raw if isinstance(k, str) and approved.get(k) is False and k not in named))
+
+
 def _seasonal_excluded(deal: object, kind: str | None, spec: dict[str, Any] | None, text: str | None) -> bool:
     """RENT_SEASONAL_EXCLUDED (Q59): a rent of a home whose words name no term or only a clear long one."""
     return (deal == "rent" and kind in (None, "apartment", "house") and seasonal_excluded_enabled()
@@ -470,6 +504,8 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
     stated = currency_code(constraints.get("currency"))
     code = country or geo.country_of(location)
     kind = _TYPE_GROUP.get(str(constraints.get("property_type") or ""))
+    delta = (dev["rooms_delta"] if isinstance(dev.get("rooms_delta"), int)
+             and not isinstance(dev.get("rooms_delta"), bool) and dev["rooms_delta"] > 0 else None)
     return Request(
         amount=amount if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0 else None,
         currency=stated or geo.CURRENCY.get(code or "") or DEFAULT_CURRENCY,
@@ -483,8 +519,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         country=country,
         budget_pct=_pct(dev.get("budget_pct")),
         area_pct=_pct(dev.get("area_pct")),
-        rooms_delta=dev["rooms_delta"] if isinstance(dev.get("rooms_delta"), int)
-        and not isinstance(dev.get("rooms_delta"), bool) and dev["rooms_delta"] > 0 else None,
+        rooms_delta=delta,
         nearby=_names(dev.get("nearby_areas")),
         districts=districts,
         place_guard=default_point_guard_enabled(),
@@ -496,6 +531,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         ticket_min=ticket_min,
         ticket_currency=ticket_currency,
         comarcas=_comarcas(districts, location),
+        declined=_declined_of(dev, rooms, delta, spec, text),
     )
 
 
@@ -537,7 +573,45 @@ def price_of(payload: dict[str, Any] | None) -> float | None:
 
 def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str | None = None) -> Match:
     """Put one finding in exactly one bucket (see the module notes for the rules)."""
-    payload = payload or {}
+    match = _classify(payload or {}, request, vertical=vertical)
+    if request.declined and match.bucket == "other" and (why := declined_hit(payload or {}, request)):
+        return Match("excluded", math.inf, why)  # Q75: offered in the interview and not taken: never offered again
+    return match
+
+
+def declined_hit(payload: dict[str, Any], request: Request) -> str | None:
+    """FAR_VARIANTS_SKIP_DECLINED (Q75): the ``Why`` of a declined compromise the listing has, else None: a studio
+    (0 bedrooms, as STUDIO_ZERO_BEDROOMS reads it) for «studio»; fewer rooms than asked for «rooms»; a price beyond
+    the exact band for «budget»; an area outside it for «area»; another known city or comarca for «place»."""
+    listed = payload.get("rooms")
+    count = listed if isinstance(listed, int | float) and not isinstance(listed, bool) else None
+    if ("studio" in request.declined and request.studio_zero and request.rooms
+            and payload.get("property_type") == "studio" and (count is None or count <= 0)):
+        return "rooms"
+    if "rooms" in request.declined and request.rooms and count is not None and 0 < count < request.rooms:
+        return "rooms"
+    price = price_of(payload)
+    if ("budget" in request.declined and request.amount is not None and price is not None and price > request.amount
+            and (currency_code(payload.get("price_currency")) or request.currency) == request.currency
+            and budget_match(price, request.amount, is_max=request.is_max, pct=request.budget_pct).bucket != "exact"):
+        return "price"
+    area = _positive(payload.get("area_m2"))
+    if "area" in request.declined and area is not None and (
+            (request.min_area and area_match(area, request.min_area, request.area_pct).bucket != "exact")
+            or (request.max_area and area > request.max_area * (1 + (AREA_TOLERANCE if request.area_pct is None
+                                                                    else request.area_pct / 100)) + 1e-9)):
+        return "area"
+    if "place" in request.declined and request.location:
+        location = payload.get("location")
+        if (isinstance(location, str) and (places := find_places(location)) and request.location not in places
+                and _nearby_hit(location, request) is None):
+            return "location"
+        if request.comarcas and _comarca_place(payload, request)[0] == "out":
+            return "location"
+    return None
+
+
+def _classify(payload: dict[str, Any], request: Request, *, vertical: str | None = None) -> Match:
     if not_an_offer(payload, vertical=vertical):
         return Match("excluded", math.inf, "kind")
     if vertical == "investors":

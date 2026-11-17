@@ -150,7 +150,8 @@ class ControlPlane:
                                  ask_city_or_province=settings.intake_ask_city_or_province,
                                  seller_role=settings.investor_seller_role,
                                  must_explicit=settings.intake_must_have_explicit,
-                                 strict_question_must=settings.intake_strict_question_must)
+                                 strict_question_must=settings.intake_strict_question_must,
+                                 skip_declined=settings.far_variants_skip_declined)
 
     def _is_operator(self, user_id: int | None) -> bool:
         """Any access at all: helpers, users, operators and owners."""
