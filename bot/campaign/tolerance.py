@@ -64,7 +64,9 @@ Other constraints
   comarca -> the place is confirmed (``Match.confirmed``: the reviewer's «unknown» place no longer holds it); in
   another one -> other (``location``), as a named other city, unless an approved neighbouring area
   (``nearby_areas``, «соседние районы: Марина-Баха») is that comarca or names the town -> exact,
-  ``approved_deviation`` «район Марина-Баха (соседний)». A town not in the table (or towns of two comarcas): unchanged.
+  ``approved_deviation`` «район Марина-Баха (соседний)». A town not in the table, towns of two comarcas, «Alicante»
+  alone (the province's name; «Alicante / Alacant» is the city) or a ``comarca`` the table disagrees with: unchanged.
+  The reviewer's overall «near» stays similar even with the place confirmed (``relevance.review_match``).
 * Auction in a purchase (Q16, ``PORTAL_FACTS_FROM_ROW``; ``Request.auction_guard``) -> similar (``deal_kind``,
   «аукцион, не обычная продажа»), never exact: the portal row's title or description names a «subasta»,
   «puja» or «cesión de remate», not negated (``auction`` in the payload; ``bot/utils/listing_text.py``
@@ -644,10 +646,13 @@ def _comarca_place(payload: dict[str, Any], request: Request) -> tuple[str, str 
     """Q74: «in» (a named comarca), «nearby» (an approved neighbouring comarca, its name as the person gave it),
     «out» (another comarca) or «unknown»: an approved area is a comarca of the listing or a town its place names;
     the listing's comarcas are the payload's ``comarca`` (Fotocasa ``level3Name``) when the table knows it,
-    else the comarcas of the town the location / address / district names (``comarcas.comarcas_of_place``)."""
+    else the comarcas of the town the location / address / district names (``comarcas.comarcas_of_place``). A
+    ``comarca`` that is not one of the table's comarcas of the town it names: unknown."""
     direct = comarcas.comarca_of(payload["comarca"]) if isinstance(payload.get("comarca"), str) else None
-    found = frozenset({direct}) if direct else comarcas.comarcas_of_place(
-        payload.get("location"), payload.get("address"), payload.get("district"))
+    town = comarcas.comarcas_of_place(payload.get("location"), payload.get("address"), payload.get("district"))
+    if direct and town and direct not in town:
+        return "unknown", None  # the portal and the table disagree on a known town (Sax, a portal's typo): not guessed
+    found = town or frozenset({direct} if direct else ())  # a town of two comarcas (Sax): either one named counts
     if not found:
         return "unknown", None
     if found & set(request.comarcas):

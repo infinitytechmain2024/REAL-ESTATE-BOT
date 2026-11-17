@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -50,7 +51,9 @@ def test_sim_orihuela_is_the_place_and_the_reviewer_unknown_does_not_hold_it(mon
     assert request.comarcas == ("Vega Baja", "Marina Alta")
     match = classify(finding("Molins - Campaneta - San Bartolomé, Orihuela, Alicante"), request)
     assert (match.bucket, match.confirmed) == ("exact", ("place",))
-    assert review_match(match, review("unknown")).bucket == "exact"  # was «Не подтверждено: место»
+    near = review_match(match, review("unknown"))  # was «Не подтверждено: место»
+    assert (near.bucket, near.why, near.note) == ("similar", "ai", None)  # the reviewer's near stays near
+    assert review_match(match, review("pass")).bucket == "exact"
 
 
 @pytest.mark.parametrize("location", ["Pedanías Este, Aspe, Alicante", "Finestrat Pueblo, Finestrat, Alicante",
@@ -104,7 +107,7 @@ def test_an_approved_neighbouring_comarca_still_passes(monkeypatch):
     assert (match.bucket, match.why, match.note) == ("exact", "approved_deviation", "район Марина-Баха (соседний)")
     assert match.covers == ("place",)
     assert review_match(match, review("fail")).bucket == "exact"  # «not in Vega Baja / Marina Alta»: approved
-    assert review_match(match, review("unknown")).bucket == "exact"
+    assert review_match(match, review("unknown")).why == "ai"  # the place is not unknown, the near stays
     assert classify(finding("Pedanías Este, Aspe, Alicante"), request).bucket == "other"  # not the approved one
 
 
@@ -230,3 +233,65 @@ def test_a_confirmed_place_leaves_the_other_unknowns_and_a_wish_near(monkeypatch
     assert (held.bucket, held.note) == ("similar", "Не подтверждено: обязательно: вода")
     wish = {**review("unknown"), "near_reason": "wish"}
     assert review_match(match, wish).bucket == "similar"
+
+
+@pytest.mark.parametrize("near_reason", ["other", None])
+def test_an_adosado_for_a_detached_house_stays_near(monkeypatch, near_reason):
+    """REVIEW_TOWNHOUSE_IS_HOUSE: «adosado» for «отдельный дом» is type pass, overall near («таунхаус»); the place
+    the comarca confirmed does not make it a match."""
+    request = g4(monkeypatch)
+    match = classify({**finding("Orihuela, Alicante"), "property_type": "house"},
+                     replace(request, property_type="house"))
+    assert match.confirmed == ("place",)
+    adosado = {"overall": "near", "deviation_ru": "таунхаус", "near_reason": near_reason,
+               "criteria": [{"name": "place", "verdict": "unknown"}, {"name": "type", "verdict": "pass"}]}
+    held = review_match(match, adosado)
+    assert (held.bucket, held.why) == ("similar", "ai")
+
+
+def test_fotocasa_comarca_against_the_table_is_unknown(monkeypatch):
+    """Fotocasa's level3Name that the table does not give the town (Sax, a portal's typo): not «another place»."""
+    request = g4(monkeypatch)
+    for location, comarca in (("Aspe, Alicante", "Vega Baja"), ("Orihuela, Alicante", "Marina Baixa"),
+                              ("Sax, Alicante", "Baix Vinalopó")):
+        match = classify(finding(location, comarca=comarca), request)
+        assert (match.bucket, match.confirmed) == ("exact", ()), location
+    sax = g4(monkeypatch, districts="Vinalopó Mitjà")
+    assert classify(finding("Sax, Alicante", comarca="Alt Vinalopó"), sax).confirmed == ("place",)  # both are Sax's
+
+
+def test_torremanzanas_is_in_alacanti():
+    assert comarcas.comarcas_of_place("La Torre de les Maçanes, Alicante") == {"Alacantí"}
+    assert comarcas.comarcas_of_place("Torremanzanas / La Torre de les Maçanes") == {"Alacantí"}
+    assert sum(len(set(towns) - {"Orihuela Costa", "Ciudad Quesada", "Moraira", "Teulada-Moraira"})
+               for towns in comarcas.MUNICIPALITIES.values()) == 142  # 141 municipalities, Sax in two comarcas
+
+
+# --- dedup: the comarca of one portal is no difference -----------------------------------------------------------
+
+DESC = ("Parcela rústica en Orihuela con agua de riego, pozo propio, casa de aperos, acceso asfaltado, a diez "
+        "minutos del pueblo, ideal para cultivo de cítricos. ") * 3
+FOTOCASA_URL = "https://www.fotocasa.es/es/comprar/terreno/orihuela/molins/100000074/d"
+IDEALISTA_URL = "https://www.idealista.com/inmueble/100000075/"
+
+
+def _post(url: str, comarca: str | None) -> str:
+    line = {"url": url, "title": "Terreno en venta", "price": 99000.0, "currency": "EUR", "plot_m2": 11907.0,
+            "address": "Molins, Orihuela, Alicante"}
+    if comarca:
+        line["comarca"] = comarca
+    return (f"JSON-LD: {json.dumps(line, ensure_ascii=False, separators=(', ', ': '))}\nTerreno en venta\n"
+            f"Ссылка: {url}\n{DESC}")
+
+
+def test_dedup_ignores_the_comarca_of_the_facts_line():
+    from bot.campaign.dedup import listing_of
+
+    payload = {"price_amount": 99000, "plot_m2": 11907, "property_type": "land", "deal_type": "sale",
+               "location": "Orihuela"}
+    on = listing_of(payload, url=FOTOCASA_URL, body=_post(FOTOCASA_URL, "Vega Baja"))
+    off = listing_of(payload, url=FOTOCASA_URL, body=_post(FOTOCASA_URL, None))
+    assert on.shingles == off.shingles and on.words == off.words and on.numbers == off.numbers
+    assert on.description == off.description
+    other = listing_of(payload, url=IDEALISTA_URL, body=_post(IDEALISTA_URL, None))
+    assert on.shingles == other.shingles  # the Jaccard of the two copies is as without the flag

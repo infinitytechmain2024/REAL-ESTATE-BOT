@@ -9,7 +9,9 @@ The nine comarcas of the province (the Generalitat's delimitation, as Fotocasa's
 Spanish and Valencian names and the usual Russian spellings. The municipalities: their Spanish and Valencian names,
 plus a few well-known localities inside one municipality (Orihuela Costa, Moraira, Ciudad Quesada). Sax is filed in
 both Alt Vinalopó (the Generalitat's and Fotocasa's) and Vinalopó Mitjà (the older delimitation): either one named
-counts, neither is another place. A name not in the table is unknown: nothing is guessed (rule 9).
+counts, neither is another place. A name not in the table is unknown: nothing is guessed (rule 9). «Alicante»
+(or «Alacant», «Valencia», «Castellón») alone is the province's name too, so it is no town: only the official
+«Alicante / Alacant» is the city. Fotocasa's ``level3Name`` that disagrees with the table on a town it knows: unknown.
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ MUNICIPALITIES: dict[str, tuple[str, ...]] = {
     "Alacantí": (
         "Agost", "Aigües", "Alicante / Alacant", "Busot", "El Campello", "Jijona / Xixona", "Muchamiel / Mutxamel",
         "San Juan de Alicante / Sant Joan d'Alacant", "San Vicente del Raspeig / Sant Vicent del Raspeig",
+        "Torremanzanas / La Torre de les Maçanes",
     ),
     "Alcoià": ("Alcoy / Alcoi", "Bañeres / Banyeres de Mariola", "Benifallim", "Castalla", "Ibi", "Onil",
                "Penáguila / Penàguila", "Tibi"),
