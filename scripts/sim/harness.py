@@ -83,6 +83,7 @@ BASE_ENV: dict[str, str] = {
     "PORTAL_FACTS_FROM_ROW": "true",  # Q16
     "PORTAL_DESCRIPTION_FULL": "true",  # Q18
     "PORTAL_RENTAL_TERM": "true",  # Q20
+    "IDEALISTA_FLOOR_FACT": "true",  # Q73
     "REVIEW_TOWNHOUSE_IS_HOUSE": "true",  # Q18
     "REVIEW_NON_RESIDENTIAL": "true",  # Q22
     "REVIEW_TENANT_HITS": "true",  # Q45

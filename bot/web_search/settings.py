@@ -101,6 +101,10 @@ class WebSearchSettings(BaseSettings):
     # ``rental_term`` («long»/«temporary»; none when the row has none), and a rent «на год» asks Idealista igolaizola
     # for ``rentalTypes: ["longTerm"]``; campaign/tolerance.py files a temporary let of a long-term task as similar.
     portal_rental_term: bool = Field(default=False, validation_alias="PORTAL_RENTAL_TERM")
+    # Q73: true = the Idealista igolaizola row's ``floor`` («bj» = 0, «en» = «entreplanta») and ``hasLift``, and the
+    # Habitaclia row's ``floor`` (GROUND_FLOOR = 0, FIRST = 1 …) and ``hasElevator``, go to the facts line as ``floor``
+    # and ``lift`` (none when the row has none); the analysis and the reviewer see the floor of a «no bajo» task.
+    idealista_floor_fact: bool = Field(default=False, validation_alias="IDEALISTA_FLOOR_FACT")
     # Q37: true = the Habitaclia actor's ``noResults`` marker row is an empty output, not an «apify_invalid_listing»
     # skip, and the final report shows every portal source that ran (bot/campaign/settings.py, the same flag).
     report_every_portal: bool = Field(default=False, validation_alias="REPORT_EVERY_PORTAL")
@@ -291,6 +295,7 @@ class WebSearchSettings(BaseSettings):
                                                     facts_from_row=self.portal_facts_from_row,
                                                     description_full=self.portal_description_full,
                                                     rental_term=self.portal_rental_term,
+                                                    floor_fact=self.idealista_floor_fact,
                                                     unambiguous_place=self.idealista_unambiguous_place,
                                                     static_centers=self.idealista_static_centers,
                                                     province_location_id=self.idealista_province_location_id,
@@ -353,6 +358,7 @@ class WebSearchSettings(BaseSettings):
                                                agency_ref=self.portal_agency_ref,
                                                description_full=self.portal_description_full,
                                                province_by_code=self.portal_province_by_code,
+                                               floor_fact=self.idealista_floor_fact,
                                                no_results_empty=self.report_every_portal))
         if self.apify_milanuncios_enabled:
             from .sources.portals import ApifyMilanunciosSource

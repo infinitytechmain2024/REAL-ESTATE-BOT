@@ -38,6 +38,11 @@ class SourceListing:
     # LONG_TERM / TEMPORARY, Idealista igolaizola label ``seasonalRental``); None when the row names none or without
     # the flag, so the «JSON-LD» line is unchanged.
     rental_term: str | None = None
+    # IDEALISTA_FLOOR_FACT (Q73): the row's own floor (an integer, 0 = bajo, -1 = sótano, or the portal's word such as
+    # «entreplanta») and whether the building has a lift (Idealista ``floor``/``hasLift``, Habitaclia
+    # ``floor``/``hasElevator``); None when the row gives none or without the flag, so the «JSON-LD» line is unchanged.
+    floor: int | str | None = None
+    lift: bool | None = None
 
 
 class ListingSource(Protocol):
