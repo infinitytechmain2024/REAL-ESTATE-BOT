@@ -198,6 +198,16 @@
         "price_max_eur": {
           "value": null,
           "from": "budget"
+        },
+        "utilities": {
+          "value": true,
+          "from": "must_have",
+          "note": "«коммуникации подведены или рядом» (обязательно): в объявлении сказано, что вода, свет или канализация подведены или рядом (servicios, acometidas, agua y luz, a pie de parcela, urbanizado) — match; «sin servicios», «sin acometidas» — no; не сказано — unknown"
+        },
+        "machinery_access": {
+          "value": true,
+          "from": "must_have",
+          "note": "«подъезд для техники» (обязательно): в объявлении сказано про подъезд для грузовиков/техники, асфальтированную дорогу или участок у дороги (acceso asfaltado, acceso rodado, fachada a calle/carretera) — match; «sin acceso rodado», только пешая тропа — no; не сказано — unknown"
         }
       },
       "soft": [

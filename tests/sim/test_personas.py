@@ -63,6 +63,17 @@ def test_a_persona_is_complete(path: Path) -> None:
         assert truth["leads"]["roles"] and truth["leads"]["not"]
 
 
+@pytest.mark.parametrize(("name", "slots"), [("g4_land_alicante", {"water"}),
+                                             ("g9_both_land_madrid", {"utilities", "machinery_access"}),
+                                             ("g5_rent_barcelona", {"pets_allowed"})])
+def test_must_have_answers_are_in_the_truth(name: str, slots: set[str]) -> None:
+    """Q75/Q77: what the persona answers to «что обязательно» is a hard criterion, checked only when said."""
+    data = load(PERSONAS / f"{name}.json")
+    hard = data["truth"]["objects"]["hard"]
+    assert {k for k, c in hard.items() if c["from"] == "must_have"} == slots
+    assert any("tag" not in o for o in data["replies"]["must_have"])  # a non-«any» answer names them
+
+
 def test_no_personal_data_in_the_personas() -> None:
     text = "\n".join(p.read_text(encoding="utf-8") for p in FILES)
     assert not re.search(r"\+?\d[\d\s-]{8,}\d", text.replace("2-3", ""))  # no phone numbers
