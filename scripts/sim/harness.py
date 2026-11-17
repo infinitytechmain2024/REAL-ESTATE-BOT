@@ -115,6 +115,7 @@ BASE_ENV: dict[str, str] = {
     "INTAKE_ASK_CITY_OR_PROVINCE": "true",  # Q62
     "INVESTOR_SELLER_ROLE": "true",  # Q63
     "INTAKE_MUST_HAVE_EXPLICIT": "true",  # Q70
+    "INTAKE_STRICT_QUESTION_MUST": "true",  # Q73
     "BOTH_MODE_PORTALS": "true",  # Q54
     "BOTH_MODE_INVESTOR_QUERIES": "true",  # Q61
     "HELD_OFFER_QUALITY": "true",  # Q55

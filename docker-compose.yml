@@ -142,6 +142,8 @@ services:
       INVESTOR_SELLER_ROLE: ${INVESTOR_SELLER_ROLE:-false}
       # Q70: must_have only what the person calls required; answers to descriptive questions are wishes of weight 2.
       INTAKE_MUST_HAVE_EXPLICIT: ${INTAKE_MUST_HAVE_EXPLICIT:-false}
+      # Q73 (with Q70): an answer to «Есть ли строгие требования…?» is a must; «Понял: …» follows the final spec.
+      INTAKE_STRICT_QUESTION_MUST: ${INTAKE_STRICT_QUESTION_MUST:-false}
       # Task architect on the Claude API (openrouter|anthropic); OpenRouter stays the fallback.
       ARCHITECT_PROVIDER: ${ARCHITECT_PROVIDER:-openrouter}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
