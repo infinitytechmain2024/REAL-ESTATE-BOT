@@ -137,6 +137,13 @@ named street with the same house number (on both sides or on none), or the same 
 is no sign: one flat named only by its district on two platforms (HousingAnywhere's template, no street) stays two
 cards.
 
+Language versions (``same_object(..., language_versions=True)``, ``DEDUP_LANGUAGE_VERSIONS``, Q77): Engel & Völkers
+serves one ad as ``/be/en/exposes/<uuid>`` and ``/be/fr/exposes/<uuid>``; without a price the rule of one host above
+keeps them apart. Two URLs of one host (``www.`` dropped) are one object when the rest of the path is the same once the
+leading language or country/language segments (``en``, ``fr``, ``es-es``, ``en-gb``, ``be/en`` ...) and the query are
+dropped, or when the path has the same long ids (UUIDs, numbers of 6+ digits) on both sides. The negative rules
+above (deal, currency, rooms, floor, house number, price, area) still win; two hosts never merge by a number alone.
+
 ``object_key`` is an index hint (same key = very likely the same object), built from the
 location tokens, rooms and logarithmic price / area buckets; ``None`` when price and area
 are both unknown. ``same_object`` is the arbiter.
@@ -152,6 +159,8 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
+
+from bot.web_search.urls import language_versions as _language_versions
 
 from .architect import find_places
 
@@ -568,7 +577,7 @@ def _host(url: str | None) -> str:
 def same_object(a: Listing, b: Listing, *, without_address: bool = False, district_not_street: bool = False,
                 cross_portal_facts: bool = False, same_host_copy: bool = False,
                 description_normalize: bool = False, same_lot: bool = False, twin_listings: bool = False,
-                rent_platform_copy: bool = False) -> bool:
+                rent_platform_copy: bool = False, language_versions: bool = False) -> bool:
     """True only when the two listings are almost surely one property (see the module notes); ``without_address``
     (``DEDUP_WITHOUT_ADDRESS``) adds the rule for listings without a street address (``_same_bare_facts``);
     ``district_not_street`` (``DEDUP_DISTRICT_NOT_STREET``, Q15) does not require a shared street when an address is
@@ -581,7 +590,9 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
     address with the same description and price while the area is unknown (``_same_listed_lot``); ``twin_listings``
     (``DEDUP_TWIN_LISTINGS``, Q58) merges one long description at one exact price and area whatever the addresses or a
     repost suffix of the reference (``_same_twin``); ``rent_platform_copy`` (``DEDUP_RENT_PLATFORM_COPY``, Q67) merges
-    one rented flat listed through two rent platforms on two portals (``_same_rent_copy``)."""
+    one rented flat listed through two rent platforms on two portals (``_same_rent_copy``); ``language_versions``
+    (``DEDUP_LANGUAGE_VERSIONS``, Q77) merges two language versions of one ad on one site
+    (``bot.web_search.urls.language_versions``)."""
     if a.deal and b.deal and a.deal != b.deal:
         return False
     if a.currency and b.currency and a.currency != b.currency:
@@ -599,6 +610,8 @@ def same_object(a: Listing, b: Listing, *, without_address: bool = False, distri
     area = _close(a.area, b.area, AREA_TOLERANCE)
     if price is False or area is False:
         return False
+    if language_versions and _language_versions(a.url, b.url):
+        return True  # Q77: one ad of one site in two languages (/be/en/... and /be/fr/... with one id)
     if twin_listings and _same_twin(a, b):
         return True  # Q58: one object reposted or filed under two municipalities, one text, price and area
     if rent_platform_copy and _same_rent_copy(a, b):
