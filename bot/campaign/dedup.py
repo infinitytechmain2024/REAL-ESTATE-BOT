@@ -139,9 +139,10 @@ cards.
 
 Language versions (``same_object(..., language_versions=True)``, ``DEDUP_LANGUAGE_VERSIONS``, Q77): Engel & Völkers
 serves one ad as ``/be/en/exposes/<uuid>`` and ``/be/fr/exposes/<uuid>``; without a price the rule of one host above
-keeps them apart. Two URLs of one host (``www.`` dropped) are one object when the rest of the path is the same once the
-leading language or country/language segments (``en``, ``fr``, ``es-es``, ``en-gb``, ``be/en`` ...) and the query are
-dropped, or when the path has the same long ids (UUIDs, numbers of 6+ digits) on both sides. The negative rules
+keeps them apart. Two URLs of one host (``www.`` dropped) are one object only when a leading language or
+country/language segment (``en``, ``fr``, ``es-es``, ``en-gb``, ``be/en`` ...) is dropped on one side at least, every
+number of the path and the query (UUIDs, runs of digits) is the same on both sides, and the rest of the path is the
+same or (a translated slug) a UUID or a number of 6+ digits is among those numbers. The negative rules
 above (deal, currency, rooms, floor, house number, price, area) still win; two hosts never merge by a number alone.
 
 ``object_key`` is an index hint (same key = very likely the same object), built from the

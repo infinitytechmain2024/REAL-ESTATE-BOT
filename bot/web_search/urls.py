@@ -132,9 +132,12 @@ def normalized(url: str) -> str:
 
 
 # Q77: one ad in two languages of one site (Engel & Völkers ``/be/en/exposes/<uuid>`` and ``/be/fr/exposes/<uuid>``).
-_LANGUAGES = frozenset({"en", "fr", "de", "es", "it", "nl", "ru", "pt", "ca"})
+_LANGUAGES = frozenset({"en", "fr", "de", "es", "it", "nl", "ru", "pt", "ca", "gl", "eu", "pl", "sv", "da", "no",
+                        "fi"})
 _LOCALE = re.compile(r"([a-z]{2})[-_][a-z]{2}")                          # es-es, en-gb, fr_be
-_LONG_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?<!\d)\d{6,}(?!\d)")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_LONG_ID = re.compile(rf"{_UUID.pattern}|(?<!\d)\d{{6,}}(?!\d)")
+_NUMBER = re.compile(r"\d+")
 
 
 def _language_free(path: str) -> tuple[str, bool]:
@@ -159,11 +162,20 @@ def _long_ids(text: str) -> frozenset[str]:
     return frozenset(_LONG_ID.findall(unquote(text).lower()))
 
 
+def _numbers(text: str) -> list[str]:
+    """Every UUID and every run of digits outside them (``7901`` of ``9804652-7901``, ``7600`` of ``?unit=7600``),
+    sorted: a multiset."""
+    text = unquote(text).lower()
+    uuids = _UUID.findall(text)
+    return sorted(uuids + _NUMBER.findall(_UUID.sub(" ", text)))
+
+
 def language_versions(a: str | None, b: str | None) -> bool:
-    """Q77 (``DEDUP_LANGUAGE_VERSIONS``): two URLs of one ad in two languages of one site. One host (``host_of``)
-    and either the same rest of the path once the leading language/country segments are dropped (on one side at
-    least; the query is ignored, but two different long ids in the two queries are two ads) or the same long ids in
-    the path (UUIDs, numbers of 6+ digits; the same set on both sides). Never across two hosts, whatever the number."""
+    """Q77 (``DEDUP_LANGUAGE_VERSIONS``): two URLs of one ad in two languages of one site. All of: one host
+    (``host_of``); a leading language or country/language segment dropped on one side at least (never without one);
+    the same numbers in the path and the query (every UUID and run of digits, as a multiset); and the same rest of the
+    path once the language is dropped, or (a translated slug) a UUID or a number of 6+ digits among those numbers.
+    Never across two hosts, whatever the number."""
     host = host_of(a or "")
     if not host or host != host_of(b or ""):
         return False
@@ -173,11 +185,12 @@ def language_versions(a: str | None, b: str | None) -> bool:
         return False
     rest_a, dropped_a = _language_free(parts_a.path)
     rest_b, dropped_b = _language_free(parts_b.path)
-    if rest_a and rest_a == rest_b and (dropped_a or dropped_b):
-        query_a, query_b = _long_ids(parts_a.query), _long_ids(parts_b.query)
-        return not (query_a and query_b and query_a != query_b)
-    ids_a = _long_ids(parts_a.path)
-    return bool(ids_a) and ids_a == _long_ids(parts_b.path)
+    if not (dropped_a or dropped_b):
+        return False
+    numbers = _numbers(parts_a.path + "?" + parts_a.query)
+    if numbers != _numbers(parts_b.path + "?" + parts_b.query):
+        return False
+    return bool(rest_a and rest_a == rest_b) or bool(_long_ids(parts_a.path + "?" + parts_a.query))
 
 
 # --- portals ------------------------------------------------------------------------------

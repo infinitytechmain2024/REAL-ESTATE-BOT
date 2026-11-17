@@ -49,6 +49,9 @@ def test_urls_of_one_ad_in_two_languages() -> None:
     assert language_versions("https://a.es/es-es/piso-centro/", "https://a.es/en-gb/piso-centro?utm=x")
     assert language_versions("https://a.es/piso-centro", "https://www.a.es/de/piso-centro")
     assert language_versions("https://www.idealista.com/inmueble/123456/", "https://www.idealista.com/en/inmueble/123456/")
+    assert language_versions("https://www.jamesedition.com/es/real_estate/madrid-spain/parcela-14811476",
+                             "https://www.jamesedition.com/real_estate/madrid-spain/plot-14811476")  # a translated slug
+    assert language_versions("https://a.es/gl/finca-rio", "https://a.es/eu/finca-rio")
 
 
 def test_other_ads_are_not_language_versions() -> None:
@@ -59,6 +62,19 @@ def test_other_ads_are_not_language_versions() -> None:
     assert not language_versions("https://a.es/en/", "https://a.es/fr/")  # two home pages
     assert not language_versions("https://a.es/en/villa-mar", "https://a.es/fr/villa-sol")
     assert not language_versions(EV.format("en"), None)
+    # two chalets of one development: one long id, other unit numbers
+    assert not language_versions("https://www.indomio.es/anuncios/9804652-7901/",
+                                 "https://www.indomio.es/anuncios/9804652-41871/")
+    assert not language_versions("https://www.indomio.es/en/anuncios/9804652-7901/",
+                                 "https://www.indomio.es/anuncios/9804652-41871/")
+    # lot PDFs of one date, no language segment
+    assert not language_versions("https://www.valdecarros.es/wp-content/uploads/20241009-lote-1.pdf",
+                                 "https://www.valdecarros.es/wp-content/uploads/20241009-lote-2.pdf")
+    assert not language_versions("https://a.es/promocion/123456/unidad-a", "https://a.es/promocion/123456/unidad-b")
+    assert not language_versions("https://www.aproperties.es/en/property/sale/pdf?unit=7600",
+                                 "https://www.aproperties.es/es/property/sale/pdf?unit=7604")
+    assert not language_versions("https://a.es/en/villa?ref=4521", "https://a.es/fr/villa?ref=4522")
+    assert not language_versions("https://a.es/en/property.php?id=1234", "https://a.es/fr/property.php?id=987")
 
 
 def test_the_bench_pair_is_one_object_with_the_flag() -> None:
