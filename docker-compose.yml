@@ -812,6 +812,7 @@ services:
       TOLERANCE_HITS_AS_SIMILAR: ${TOLERANCE_HITS_AS_SIMILAR:-false}
       INVESTOR_TICKET_RANGE: ${INVESTOR_TICKET_RANGE:-false}
       FOREIGN_TLD_SPAIN_MENTION: ${FOREIGN_TLD_SPAIN_MENTION:-false}
+      INVESTOR_CLUB_IS_LEAD: ${INVESTOR_CLUB_IS_LEAD:-false}
       # Investor leads from the comments under sent objects (bot/campaign/leads.py), and dead groups.
       CAMPAIGN_COMMENT_LEADS: ${CAMPAIGN_COMMENT_LEADS:-investors}
       CAMPAIGN_COMMENT_MAX_POSTS: ${CAMPAIGN_COMMENT_MAX_POSTS:-15}

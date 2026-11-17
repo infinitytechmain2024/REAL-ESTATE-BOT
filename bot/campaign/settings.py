@@ -135,6 +135,10 @@ class CampaignRunnerSettings(BaseSettings):
     # Q63: a person who sells a property (spec.investor.user_role selling): the AI check («relevance-v3-sell») and the
     # reach judge take its buyers and property investors, not agents, sellers, business angels or renters. Off: as before.
     investor_seller_role: bool = Field(default=False, validation_alias="INVESTOR_SELLER_ROLE")
+    # Q76, the same variable as bot/web_search/settings.py: a club or community of real-estate investors that meets
+    # regularly is a lead, also by the page of one of its meetups (AI check «…-club», the reach judge's hard criteria).
+    # Off: the prompts as before.
+    investor_club_is_lead: bool = Field(default=False, validation_alias="INVESTOR_CLUB_IS_LEAD")
     # The most one campaign may spend in USD (LLM, scrape API, paid search, listing APIs), summed over every service
     # from the campaign_costs ledger (bot/utils/costs.py). Reached: the web stage stops (budget_cap), the analysis
     # worker and the AI check skip the campaign's findings, the report says so. 0: no limit.
@@ -156,6 +160,7 @@ class CampaignRunnerSettings(BaseSettings):
                                           phrase_places=self.user_phrase_places,
                                           investor_leads=self.investor_lead_source_check,
                                           seller_role=self.investor_seller_role,
+                                          investor_club=self.investor_club_is_lead,
                                           phrase_land_terms=self.offer_reasons_from_review)
         if self.judge == "legacy":
             return legacy
@@ -593,7 +598,7 @@ class CampaignRunnerSettings(BaseSettings):
                            model_queries=self.reach_model_queries,
                            enrich_per_campaign=self.reach_enrich_per_campaign,
                            acquisition_mode=self.acquisition_mode, linkedin_apify=self.linkedin_apify_on(),
-                           seller_role=self.investor_seller_role)
+                           seller_role=self.investor_seller_role, investor_club=self.investor_club_is_lead)
 
     def comment_config(self):  # -> bot.campaign.leads.CommentConfig
         from .leads import CommentConfig

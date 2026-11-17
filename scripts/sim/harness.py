@@ -129,6 +129,7 @@ BASE_ENV: dict[str, str] = {
     "INVESTOR_REPORT_COUNTS_ALL": "true",  # Q60
     "INVESTOR_TICKET_RANGE": "true",  # Q68
     "FOREIGN_TLD_SPAIN_MENTION": "true",  # Q68
+    "INVESTOR_CLUB_IS_LEAD": "true",  # Q76
     "STATUS_HIDE_UNVETTED_SITES": "true",  # Q69
     "TOLERANCE_HITS_AS_SIMILAR": "true",  # Q71
 }
