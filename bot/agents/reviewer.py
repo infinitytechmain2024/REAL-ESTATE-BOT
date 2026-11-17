@@ -409,7 +409,7 @@ def _span(low: Any, high: Any) -> dict[str, float] | None:
 
 def _deviations(campaign: Campaign) -> dict[str, Any]:
     raw = (campaign.spec or {}).get("deviations")
-    return {k: v for k, v in raw.items() if v not in (None, "", [], False) and k != "asked"} if isinstance(raw, dict) else {}
+    return {k: v for k, v in raw.items() if v not in (None, "", [], False) and k not in ("asked", "declined")} if isinstance(raw, dict) else {}
 
 
 def tolerance_pct(campaign: Campaign) -> float:

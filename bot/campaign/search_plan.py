@@ -376,7 +376,7 @@ class OpenRouterSearchPlanner(SearchPlanner):
                         else {"all": list(known)})
         sources = _spec_sources(spec)
         data = {
-            "spec": spec.model_dump(mode="json", exclude={"mode"}),
+            "spec": spec.model_dump(mode="json", exclude={"mode": True, "deviations": {"declined"}}),  # Q75: not approved
             "country": country,
             "place": {"name": plan.location, "names": plan.location_aliases},
             "languages": plan_languages(spec, source_text, country),

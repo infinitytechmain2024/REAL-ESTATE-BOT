@@ -414,7 +414,7 @@ def state_message(mode: str, spec: TaskSpec, dialogue: list[dict[str, str]], mes
     """The user message of one call: the interview state as JSON (shared by every provider)."""
     data: dict[str, Any] = {
         "mode": mode,
-        "spec": spec.model_dump(mode="json", exclude={"mode"}),
+        "spec": spec.model_dump(mode="json", exclude={"mode": True, "deviations": {"declined"}}),  # Q75: intake-only
         "dialogue": bounded_dialogue(dialogue),
         "asking": asking,
         "editing": editing,
