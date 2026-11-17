@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from dataclasses import replace
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
@@ -349,10 +350,12 @@ class ApifyFotocasaSource(_PortalSource):
     _TITLES: ClassVar[dict[str, str]] = {"land": "Terreno", "house": "Vivienda", "apartment": "Vivienda", "commercial": "Local"}
 
     def __init__(self, token: str, *, actor_id: str = "igolaizola/fotocasa-scraper",
-                 default_point_guard: bool = False, agency_ref: bool = False, **kwargs: Any) -> None:
+                 default_point_guard: bool = False, agency_ref: bool = False, comarca: bool = False,
+                 **kwargs: Any) -> None:
         super().__init__(token, actor_id=actor_id, **kwargs)
         self.default_point_guard = default_point_guard  # PORTAL_DEFAULT_POINT_GUARD (Q12)
         self.agency_ref = agency_ref  # DEDUP_DISTRICT_NOT_STREET (Q15)
+        self.comarca = comarca  # PLACE_COMARCA_MEMBERSHIP (Q74)
 
     async def _plan(self, task: QueryTask, amount: int, run_id: str | None
                     ) -> tuple[str, dict[str, Any], tuple[float, float] | None]:
@@ -395,7 +398,7 @@ class ApifyFotocasaSource(_PortalSource):
                       and default_point(_text(location.get("level8Name")), point, description))
         place = [] if unverified else [neighbourhood, municipality, province]
         title = f"{self._TITLES[kind]} en {'venta' if self._deal(task) == 'sale' else 'alquiler'}"
-        return self._listing(
+        listing = self._listing(
             task, url=url, title=f"{title}, {'' if unverified else neighbourhood or municipality}".rstrip(", "),
             price=transaction.get("price"), area=item.get("surface"), rooms=item.get("rooms"),
             address=[_text(item.get("street")), *place],
@@ -403,6 +406,10 @@ class ApifyFotocasaSource(_PortalSource):
             property_type=self._TYPES.get(kind), place_unverified=unverified,
             row_type=_FOTOCASA_TYPES.get(_code(item.get("propertyType"))), row_deal=_row_deal(transaction.get("type")),
             reference=item.get("agencyReference"), rental_term=_fotocasa_rental_term(item.get("rentalType")))
+        # Q74: the row's comarca (``level3Name``, «Vega Baja»; «Valencia, Zona de» is no comarca and tolerance.py
+        # ignores what its table does not know); not at a fallback point (Q12), where the place is the point's
+        comarca = _text(location.get("level3Name"))[:80] if self.comarca and not unverified else ""
+        return replace(listing, comarca=comarca) if comarca else listing
 
 
 _YAENCONTRE_PRICES = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300, 400, 450, 500, 550, 600,

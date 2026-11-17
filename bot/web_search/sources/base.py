@@ -43,6 +43,9 @@ class SourceListing:
     # ``floor``/``hasElevator``); None when the row gives none or without the flag, so the «JSON-LD» line is unchanged.
     floor: int | str | None = None
     lift: bool | None = None
+    # PLACE_COMARCA_MEMBERSHIP (Q74): the row's own comarca (Fotocasa ``level3Name``, «Vega Baja»); None when the row
+    # gives none or without the flag, so the «JSON-LD» line is unchanged.
+    comarca: str | None = None
 
 
 class ListingSource(Protocol):

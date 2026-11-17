@@ -591,7 +591,9 @@ def review_match(rules: Match, review: dict[str, Any], *, hold_mandatory: bool =
       (``HELD_OFFER_QUALITY``, Q55): no exception, the reviewer's fail is outside the tolerance and excludes (a plot
       of 1 500 m² for «от 2000 м²» is not offered with «Показать?» nor sent after «Одобрить»);
     * the reviewer's ``reject`` without a failed criterion (not one concrete offer) -> excluded;
-    * any hard ``unknown`` -> not exact: held as similar, «Не подтверждено: <criteria>»;
+    * any hard ``unknown`` -> not exact: held as similar, «Не подтверждено: <criteria>»; one the rules confirmed from
+      the data (``rules.confirmed``, Q74: the town is in a comarca the task named) is not unknown; the reviewer's
+      ``near`` is still near;
     * ``hold_mandatory`` (H11): a ``must_have:`` criterion among the unknown ones -> ``MANDATORY_UNKNOWN``: the finding
       is held the same way but never offered with the «similar» question;
     * ``near`` -> at least similar; all ``pass`` -> the rules' bucket.
@@ -606,6 +608,10 @@ def review_match(rules: Match, review: dict[str, Any], *, hold_mandatory: bool =
             review = {**review, "overall": "match"}
         fails = [n for n in fails if n not in rules.covers]
     unknown = [str(c.get("name")) for c in criteria if c.get("verdict") == "unknown"]
+    if rules.confirmed and any(n in rules.confirmed for n in unknown):
+        # Q74 (PLACE_COMARCA_MEMBERSHIP): a criterion the rules settled from the data (the town's comarca) is not
+        # unknown. The reviewer's «near» stays near: what it was for (a townhouse, a wish, a development) is not known
+        unknown = [n for n in unknown if n not in rules.confirmed]
     if fails:
         measured = {"price": "budget", "area": "area"}.get(rules.why or "")
         if not strict_fail and rules.bucket == "similar" and measured is not None and set(fails) == {measured}:

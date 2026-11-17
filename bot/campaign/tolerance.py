@@ -57,6 +57,17 @@ Other constraints
   (``location_unknown``), never exact: the portal filed the listing at its fallback point of a district
   (``place_unverified`` in the payload, ``bot/web_search/sources/portals.py`` ``default_point``), so its place is
   unknown. A location naming another city still makes it other.
+* Comarcas (Q74, ``PLACE_COMARCA_MEMBERSHIP``; ``Request.comarcas``): when every district of the task is a comarca
+  of the province of Alicante (``bot/campaign/comarcas.py``: «Вега-Баха», «Vega Baja del Segura», «Baix Segura»,
+  «Marina Alta» ...) and the task's place is one the table covers, the listing's comarca decides the place: the
+  comarcas of the municipality its location / address names (the table), else the payload's ``comarca`` (Fotocasa
+  ``level3Name``) for a town the table does not know. In a named
+  comarca -> the place is confirmed (``Match.confirmed``: the reviewer's «unknown» place no longer holds it); in
+  another one -> other (``location``), as a named other city, unless an approved neighbouring area
+  (``nearby_areas``, «соседние районы: Марина-Баха») is that comarca or names the town -> exact,
+  ``approved_deviation`` «район Марина-Баха (соседний)». A town not in the table, towns of two comarcas, «Alicante»
+  alone (the province's name; «Alicante / Alacant» is the city) or a ``comarca`` the table disagrees with: unchanged.
+  The reviewer's overall «near» stays similar even with the place confirmed (``relevance.review_match``).
 * Auction in a purchase (Q16, ``PORTAL_FACTS_FROM_ROW``; ``Request.auction_guard``) -> similar (``deal_kind``,
   «аукцион, не обычная продажа»), never exact: the portal row's title or description names a «subasta»,
   «puja» or «cesión de remate», not negated (``auction`` in the payload; ``bot/utils/listing_text.py``
@@ -123,7 +134,7 @@ import math
 import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from bot.utils.listing_text import (
@@ -135,7 +146,7 @@ from bot.utils.listing_text import (
 )
 from bot.utils.ticket_range import SYMBOLS, investor_ticket_range_enabled, ticket_range_of
 
-from . import geo
+from . import comarcas, geo
 from .architect import find_places
 
 BUDGET_TOLERANCE = 0.10
@@ -196,6 +207,8 @@ class Request:
     # INVESTOR_TICKET_RANGE (Q68): the task's minimum ticket (``spec.investor.ticket.min``) and its currency
     ticket_min: float | None = None
     ticket_currency: str | None = None
+    # PLACE_COMARCA_MEMBERSHIP (Q74): the comarcas the districts name (all of them are comarcas), else empty
+    comarcas: tuple[str, ...] = ()
 
     @property
     def country_code(self) -> str | None:
@@ -212,6 +225,9 @@ class Match:
     note: str | None = None  # owner-facing Russian reason (e.g. «Не проверено ИИ: ...»), when not from the rules
     # ``approved_deviation``: the reviewer criteria the approved deviation covers (``budget``, ``area``, ``rooms``, ``place``)
     covers: tuple[str, ...] = ()
+    # PLACE_COMARCA_MEMBERSHIP (Q74): the reviewer criteria the rules settled from the data (``place``); the reviewer's
+    # «unknown» on them does not hold the finding (``relevance.review_match``)
+    confirmed: tuple[str, ...] = ()
 
 
 TOLERANCE_WHY = "tolerance"  # Q71: sent at once as similar, inside the deviations the person approved
@@ -416,6 +432,20 @@ def studio_zero_enabled() -> bool:
     return os.environ.get("STUDIO_ZERO_BEDROOMS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def comarca_membership_enabled() -> bool:
+    """PLACE_COMARCA_MEMBERSHIP (default off): a listing's comarca decides a task whose districts are comarcas (Q74)."""
+    return os.environ.get("PLACE_COMARCA_MEMBERSHIP", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _comarcas(districts: tuple[str, ...], location: str | None) -> tuple[str, ...]:
+    """Q74: the comarcas the task's districts name, when every one of them is a comarca of the table and the task's
+    place is one the table covers; () otherwise (a town among the districts keeps the old rule)."""
+    if not districts or not comarca_membership_enabled() or not comarcas.task_area_known(location):
+        return ()
+    found = [comarcas.comarca_of(d) for d in districts]
+    return tuple(dict.fromkeys(f for f in found if f)) if all(found) else ()
+
+
 def _seasonal_excluded(deal: object, kind: str | None, spec: dict[str, Any] | None, text: str | None) -> bool:
     """RENT_SEASONAL_EXCLUDED (Q59): a rent of a home whose words name no term or only a clear long one."""
     return (deal == "rent" and kind in (None, "apartment", "house") and seasonal_excluded_enabled()
@@ -430,6 +460,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
     ``spec``: the TaskSpec as a dict, whose interview answers may name the rent term, read with PORTAL_RENTAL_TERM
     and RENT_DEFAULT_LONG_TERM)."""
     ticket_min, ticket_currency = _ticket_of(spec)
+    districts = tuple(d.strip() for d in str(constraints.get("districts") or "").split(",") if d.strip())
     if vertical == "investors":
         return Request(location=location, country=country, ticket_min=ticket_min, ticket_currency=ticket_currency)
     dev = deviations if isinstance(deviations, dict) else {}
@@ -455,7 +486,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         rooms_delta=dev["rooms_delta"] if isinstance(dev.get("rooms_delta"), int)
         and not isinstance(dev.get("rooms_delta"), bool) and dev["rooms_delta"] > 0 else None,
         nearby=_names(dev.get("nearby_areas")),
-        districts=tuple(d.strip() for d in str(constraints.get("districts") or "").split(",") if d.strip()),
+        districts=districts,
         place_guard=default_point_guard_enabled(),
         auction_guard=facts_from_row_enabled(),
         rental_term=task_rental_term(spec, text) if deal == "rent" and rental_term_enabled() else None,
@@ -464,6 +495,7 @@ def request_for(constraints: dict[str, Any], *, location: str | None = None, ver
         studio_zero=studio_zero_enabled() and not task_names_studio(spec, text),
         ticket_min=ticket_min,
         ticket_currency=ticket_currency,
+        comarcas=_comarcas(districts, location),
     )
 
 
@@ -525,6 +557,7 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
     result = Match("exact")
     notes: list[str] = []
     covers: list[str] = []
+    confirmed: list[str] = []
 
     def accept(match: Match) -> Match:
         """An approved deviation inside the strict request's tolerance is exact, with its note collected."""
@@ -578,6 +611,15 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
             covers.append("place")
         elif places and request.location not in places:
             return worse(result, Match("other", math.inf, "location"))
+    if request.comarcas and "place" not in covers:
+        side, name = _comarca_place(payload, request)
+        if side == "out":
+            return worse(result, Match("other", math.inf, "location"))
+        if side == "nearby":
+            notes.append(f"район {name} (соседний)")
+            covers.append("place")
+        if side in ("in", "nearby"):
+            confirmed.append("place")
     if request.place_guard and payload.get("place_unverified") is True:
         result = worse(result, Match("similar", 0.0, "location_unknown"))  # Q12: the portal's place is a fallback
     if request.auction_guard and request.deal == "sale" and payload.get("auction") is True:
@@ -597,8 +639,28 @@ def classify(payload: dict[str, Any] | None, request: Request, *, vertical: str 
                                                    pct=request.budget_pct)))
     if result.bucket == "exact" and notes:
         return Match("exact", result.distance, "approved_deviation", note="; ".join(notes),
-                     covers=tuple(dict.fromkeys(covers)))
-    return result
+                     covers=tuple(dict.fromkeys(covers)), confirmed=tuple(confirmed))
+    return replace(result, confirmed=tuple(confirmed)) if confirmed else result
+
+
+def _comarca_place(payload: dict[str, Any], request: Request) -> tuple[str, str | None]:
+    """Q74: «in» (a named comarca), «nearby» (an approved neighbouring comarca, its name as the person gave it),
+    «out» (another comarca) or «unknown»: an approved area is a comarca of the listing or a town its place names;
+    the listing's comarcas are those of the town the location / address / district names
+    (``comarcas.comarcas_of_place``), else the payload's ``comarca`` (Fotocasa ``level3Name``) when the table knows
+    that comarca. A ``comarca`` that is not one of the table's comarcas of the town: unknown."""
+    direct = comarcas.comarca_of(payload["comarca"]) if isinstance(payload.get("comarca"), str) else None
+    town = comarcas.comarcas_of_place(payload.get("location"), payload.get("address"), payload.get("district"))
+    if direct and town and direct not in town:
+        return "unknown", None  # the portal and the table disagree on a known town (Sax, a portal's typo): not guessed
+    found = town or frozenset({direct} if direct else ())  # a town of two comarcas (Sax): either one named counts
+    if not found:
+        return "unknown", None
+    if found & set(request.comarcas):
+        return "in", None
+    named = _fold(" ".join(v for v in (payload.get("location"), payload.get("address")) if isinstance(v, str)))
+    near = next((n for n in request.nearby if comarcas.comarca_of(n) in found or _whole_word(n, named)), None)
+    return ("nearby", near) if near else ("out", None)
 
 
 def _seasonal_let(payload: dict[str, Any]) -> bool:

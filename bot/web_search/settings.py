@@ -105,6 +105,9 @@ class WebSearchSettings(BaseSettings):
     # Habitaclia row's ``floor`` (GROUND_FLOOR = 0, FIRST = 1 …) and ``hasElevator``, go to the facts line as ``floor``
     # and ``lift`` (none when the row has none); the analysis and the reviewer see the floor of a «no bajo» task.
     idealista_floor_fact: bool = Field(default=False, validation_alias="IDEALISTA_FLOOR_FACT")
+    # Q74: true = the Fotocasa row's ``level3Name`` (the comarca, «Vega Baja») goes to the facts line as ``comarca``;
+    # campaign/tolerance.py reads it for a task whose districts are comarcas (bot/campaign/settings.py, the same flag).
+    place_comarca_membership: bool = Field(default=False, validation_alias="PLACE_COMARCA_MEMBERSHIP")
     # Q37: true = the Habitaclia actor's ``noResults`` marker row is an empty output, not an «apify_invalid_listing»
     # skip, and the final report shows every portal source that ran (bot/campaign/settings.py, the same flag).
     report_every_portal: bool = Field(default=False, validation_alias="REPORT_EVERY_PORTAL")
@@ -326,7 +329,8 @@ class WebSearchSettings(BaseSettings):
                                              agency_ref=self.portal_agency_ref,
                                              description_full=self.portal_description_full,
                                              rental_term=self.portal_rental_term,
-                                             province_by_code=self.portal_province_by_code))
+                                             province_by_code=self.portal_province_by_code,
+                                             comarca=self.place_comarca_membership))
         if self.apify_yaencontre_enabled:
             from .sources.portals import ApifyYaencontreSource
 
