@@ -230,7 +230,7 @@ async def test_the_intake_flag_off_records_nothing() -> None:
     assert spec.deviations.declined == []
 
 
-# --- review fixes: places named, corrections, narrow place words, a negated studio ----------------------------
+# --- review fixes: places named, corrections, narrow place words ----------------------------
 
 
 def test_a_place_button_named_in_the_answer_is_taken() -> None:
@@ -253,16 +253,16 @@ def test_place_compromise_words(text) -> None:
     assert deviation_kinds(text) == {"place"}
 
 
-@pytest.mark.parametrize("answer", ["студию не надо, бюджет +10 %", "не студия, бюджет +10 %", "без студий, бюджет +10 %"])
-def test_a_negated_studio_is_not_taken(answer) -> None:
-    assert declined_deviations(OPTIONS, answer, _spec({"budget_pct": 10})) == ["studio"]
+@pytest.mark.parametrize("answer", ["не против студии, бюджет +10 %", "студия не проблема, бюджет +10 %"])
+def test_any_mention_of_the_studio_is_taken(answer) -> None:
+    assert declined_deviations(OPTIONS, answer, _spec({"budget_pct": 10})) == []
 
 
 def test_a_studio_in_other_is_approved_in_the_runner(monkeypatch) -> None:
     again = request(monkeypatch, True, {"budget_pct": 10, "other": ["студия тоже подойдёт"], "declined": ["studio"]})
     assert again.declined == ()
     assert classify(STUDIO, again).bucket == "other"  # among the farther variants again
-    kept = request(monkeypatch, True, {"budget_pct": 10, "other": ["студию не надо"], "declined": ["studio"]})
+    kept = request(monkeypatch, True, {"budget_pct": 10, "other": ["бюджет +10 %"], "declined": ["studio"]})
     assert kept.declined == ("studio",)
 
 

@@ -19,7 +19,6 @@ from bot.campaign.spec import (
     ROLE_RU,
     TaskSpec,
     deviation_kinds,
-    taken_kinds,
 )
 from bot.control_plane.details import details, property_type
 from bot.control_plane.interviewer import InterviewTurn
@@ -299,7 +298,7 @@ def still_declined(declined: list[str], answer: str, spec: TaskSpec) -> list[str
 
 def _taken(answer: str, spec: TaskSpec, choices: list[str]) -> set[str]:
     dev = spec.deviations
-    taken = taken_kinds(answer).union(*(taken_kinds(o) for o in dev.other))
+    taken = deviation_kinds(answer).union(*(deviation_kinds(o) for o in dev.other))
     if dev.budget_pct:
         taken.add("budget")
     if dev.area_pct:
@@ -321,7 +320,7 @@ def declined_deviations(choices: list[str], answer: str, spec: TaskSpec) -> list
     (``choices``, one kind each; a choice of two kinds or none is not read) that the answer did not take.
 
     Only when the answer chose something: a compromise recorded in ``spec.deviations`` (``0`` = only exact) or
-    «только точные». Taken: a kind the answer names (not «студию не надо»), one of ``deviations.other``, a place a
+    «только точные». Taken: a kind the answer names (any mention of the studio counts), one of ``deviations.other``, a place a
     place button names after «:» named in the answer or ``other``, or an approved value (``budget_pct``, ``area_pct``,
     ``rooms_delta`` -- the studio too when it reaches 0 rooms --, nearby areas, radius).
     """

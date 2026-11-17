@@ -316,24 +316,11 @@ DEVIATION_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
                          r"друг(?:ой|ие|их|ом)\s+(?:район|город)|nearby|neighbou?r|barrios?\s+cercan",
                          re.IGNORECASE)),
 )
-# «студию не надо», «не студия», «без студий», «no studio»: the studio is not taken
-_STUDIO_NEGATED = re.compile(r"(?:\bне|\bбез|\bno|\bnot|\bsin)\s+(?:\w+\s+)?" + _STUDIO_WORD + "|"
-                             + _STUDIO_WORD + r"\w*\s+(?:не|no|not)\b", re.IGNORECASE)
-
-
 def deviation_kinds(text: str | None) -> set[str]:
     """Q75: the kinds of compromise ``text`` names (``DECLINABLE``)."""
     kinds = {kind for kind, pattern in DEVIATION_KINDS if pattern.search(text or "")}
     if "studio" in kinds:
         kinds.discard("rooms")
-    return kinds
-
-
-def taken_kinds(text: str | None) -> set[str]:
-    """Q75: the kinds an answer or an approved free-text compromise takes: those it names, a negated studio aside."""
-    kinds = deviation_kinds(text)
-    if "studio" in kinds and _STUDIO_NEGATED.search(text or ""):
-        kinds.discard("studio")
     return kinds
 
 

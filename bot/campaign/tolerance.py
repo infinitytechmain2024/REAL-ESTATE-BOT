@@ -156,7 +156,7 @@ from bot.utils.ticket_range import SYMBOLS, investor_ticket_range_enabled, ticke
 
 from . import comarcas, geo
 from .architect import find_places
-from .spec import taken_kinds
+from .spec import deviation_kinds
 
 BUDGET_TOLERANCE = 0.10
 SIMILAR_CEILING = 0.25
@@ -466,13 +466,13 @@ def far_skip_declined_enabled() -> bool:
 def _declined_of(dev: dict[str, Any], rooms: object, delta: int | None, spec: dict[str, Any] | None,
                  text: str | None) -> tuple[str, ...]:
     """Q75: the declined compromises (``deviations.declined``) still not approved (a value, or a free-text compromise
-    in ``deviations.other`` naming the kind, ``spec.taken_kinds``); () without the flag."""
+    in ``deviations.other`` naming the kind, ``spec.deviation_kinds``); () without the flag."""
     raw = dev.get("declined")
     if not far_skip_declined_enabled() or not isinstance(raw, list):
         return ()
     wanted = rooms if isinstance(rooms, int) and not isinstance(rooms, bool) and rooms > 0 else None
     other = dev.get("other") if isinstance(dev.get("other"), list) else []
-    named = set().union(*(taken_kinds(o) for o in other if isinstance(o, str)))
+    named = set().union(*(deviation_kinds(o) for o in other if isinstance(o, str)))
     approved = {"budget": bool(_pct(dev.get("budget_pct"))), "area": bool(_pct(dev.get("area_pct"))),
                 "rooms": bool(delta),
                 "studio": bool(delta and (wanted is None or wanted - delta <= 0)) or task_names_studio(spec, text),
